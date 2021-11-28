@@ -42,6 +42,14 @@ namespace CamusDB.Library.Catalogs
                 database.Schema.Semaphore.Release();
             }
         }
+
+        public TableSchema GetTableSchema(DatabaseDescriptor database, string tableName) // @todo return a snapshot instead of the schema
+        {
+            if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema))
+                return tableSchema;
+
+            throw new CamusDBException("Table doesn't exist");
+        }
     }
 }
 

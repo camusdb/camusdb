@@ -2,9 +2,8 @@
 using CamusDB.Library.Catalogs;
 using CamusDB.Library.CommandsExecutor;
 using CamusDB.Library.Util;
-using CodeExMachina;
 
-var b = new BTree();
+/*var b = new BTree();
 
 b.Put(10, "hello 1");
 b.Put(5, "hello 2");
@@ -16,9 +15,9 @@ b.Put(29, "hello 4");
 foreach (Entry entry in b.Traverse())
 {
     Console.WriteLine("{0} {1}", entry.key, entry.val);
-}
+}*/
 
-/*var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddRazorPages();
@@ -49,4 +48,4 @@ app.UseAuthorization();
 
 app.MapRazorPages();
 
-app.Run();*/
+app.Run();

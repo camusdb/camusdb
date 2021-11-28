@@ -13,7 +13,7 @@ public class Serializator
     public static void Serialize(byte[] buffer, TableSchema tableSchema)
     {
         int pointer = 0;
-        PackInt(buffer, tableSchema.Version, ref pointer);
+        WriteInt(buffer, tableSchema.Version, ref pointer);
     }
 
     public static byte[] Serialize(Dictionary<string, TableSchema> tableSchema)
@@ -45,34 +45,34 @@ public class Serializator
         return deserialized;
     }
 
-    private static bool PackInt(byte[] buffer, int number, ref int pointer)
+    private static bool WriteInt(byte[] buffer, int number, ref int pointer)
     {
         if (number < 0 || number >= 0x7FFF)
         {
-            WriteTypeToBuffer(buffer, Types.TYPE_INTEGER_32, ref pointer);
-            WriteInt32ToBuffer(buffer, number, ref pointer);
+            WriteType(buffer, SerializatorTypes.TypeInteger32, ref pointer);
+            WriteInt32(buffer, number, ref pointer);
             return true;
         }
 
         if (number < 0x10)
         {
             int typedInt = 0;
-            typedInt = (typedInt & 0xf) | (Types.TYPE_INTEGER_4 << 4);
+            typedInt = (typedInt & 0xf) | (SerializatorTypes.TypeInteger4 << 4);
             typedInt = (typedInt & 0xf0) | number;
-            WriteInt8ToBuffer(buffer, typedInt, ref pointer);
+            WriteInt8(buffer, typedInt, ref pointer);
             return true;
         }
 
         if (number < 0x100)
         {
-            WriteTypeToBuffer(buffer, Types.TYPE_INTEGER_8, ref pointer);
-            WriteInt8ToBuffer(buffer, number, ref pointer);
+            WriteType(buffer, SerializatorTypes.TypeInteger8, ref pointer);
+            WriteInt8(buffer, number, ref pointer);
             return true;
         }
 
         if (number < 0x7FFF)
         {
-            WriteTypeToBuffer(buffer, Types.TYPE_INTEGER_16, ref pointer);
+            WriteType(buffer, SerializatorTypes.TypeInteger16, ref pointer);
             WriteInt16ToBuffer(buffer, number, ref pointer);
             return true;
         }
@@ -80,7 +80,7 @@ public class Serializator
         return false;
     }
 
-    public static void WriteTypeToBuffer(byte[] buffer, int type, ref int pointer)
+    public static void WriteType(byte[] buffer, int type, ref int pointer)
     {
         int byteType = 0;
 
@@ -90,7 +90,7 @@ public class Serializator
         }
         else
         {
-            byteType = (byteType & 0xf) | (Types.TYPE_EXTENDED << 4);
+            byteType = (byteType & 0xf) | (SerializatorTypes.TYPE_EXTENDED << 4);
             byteType = (byteType & 0xf0) | (type - 0xf);
         }
 
@@ -98,7 +98,7 @@ public class Serializator
         buffer[pointer++] = (byte)byteType;
     }
 
-    public static void WriteInt8ToBuffer(byte[] buffer, int number, ref int pointer)
+    public static void WriteInt8(byte[] buffer, int number, ref int pointer)
     {
         //CheckBufferOverflow(1);
         buffer[pointer++] = (byte)((number >> 0) & 0xff);
@@ -112,7 +112,7 @@ public class Serializator
         pointer += 2;
     }
 
-    public static void WriteInt32ToBuffer(byte[] buffer, int number, ref int pointer)
+    public static void WriteInt32(byte[] buffer, int number, ref int pointer)
     {
         //CheckBufferOverflow(4);
         buffer[pointer + 0] = (byte)((number >> 0) & 0xff);
@@ -122,7 +122,23 @@ public class Serializator
         pointer += 4;
     }
 
-    public static int UnpackInt32(byte[] buffer, ref int pointer)
+    public static void WriteString(byte[] buffer, string str, ref int pointer)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(str);
+        Buffer.BlockCopy(bytes, 0, buffer, pointer, bytes.Length);
+        pointer += bytes.Length;
+    }
+
+    public static void WriteBool(byte[] buffer, bool value, ref int pointer)
+    {
+        int typedBool = 0;
+        int bool8 = ((value ? 1 : 0) >> 0) & 0xff;
+        typedBool = (typedBool & 0xf) | (SerializatorTypes.TypeBool << 4);
+        typedBool = (typedBool & 0xf0) | bool8;
+        WriteInt8(buffer, typedBool, ref pointer);
+    }
+
+    public static int ReadInt32(byte[] buffer, ref int pointer)
     {
         int number = buffer[pointer++];
         number += (buffer[pointer++] << 8);

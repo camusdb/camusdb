@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using CamusDB.Library.CommandsExecutor;
 using CamusDB.Library.CommandsExecutor.Models;
 using CamusDB.Library.Catalogs.Models;
+using CamusDB.App.Models;
 
 namespace CamusDB.App.Controllers
 {
@@ -22,7 +23,7 @@ namespace CamusDB.App.Controllers
         {
             await commandExecutor.CreateDatabase("test");
 
-            return new JsonResult("[0]");
+            return new JsonResult(new CreateDatabaseResponse("ok"));
         }
 
         [Route("/create-table")]
@@ -63,7 +64,7 @@ namespace CamusDB.App.Controllers
                 },
                 new ColumnValue[]
                 {
-                    new ColumnValue(ColumnType.Id, "aaa"),
+                    new ColumnValue(ColumnType.Id, "1234"),
                     new ColumnValue(ColumnType.String, "some string value"),
                     new ColumnValue(ColumnType.Integer, "15"),
                     new ColumnValue(ColumnType.Bool, "true")

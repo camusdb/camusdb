@@ -24,12 +24,14 @@
     <None Remove="CSharpTest.Net.Collections" />
     <None Remove="Library\Util\" />
     <None Remove="CodeExMachina.BTree" />
+    <None Remove="Library\CommandsExecutor\Controllers\" />
+    <None Remove="App\Models\" />
+    <None Remove="Library\Util\Trees\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="App\" />
     <Folder Include="App\Controllers\" />
     <Folder Include="Library\" />
-    <Folder Include="Library\CommandsParser\" />
     <Folder Include="Library\CommandsExecutor\" />
     <Folder Include="Library\CommandsExecutor\Models\" />
     <Folder Include="Data\" />
@@ -41,6 +43,9 @@
     <Folder Include="Library\Serializer\Models\" />
     <Folder Include="Library\Support\" />
     <Folder Include="Library\Util\" />
+    <Folder Include="Library\CommandsExecutor\Controllers\" />
+    <Folder Include="App\Models\" />
+    <Folder Include="Library\Util\Trees\" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="CodeExMachina.BTree" Version="0.2.0" />
