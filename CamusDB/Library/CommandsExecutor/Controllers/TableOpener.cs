@@ -12,8 +12,12 @@ using CamusDB.Library.CommandsExecutor.Models;
 
 namespace CamusDB.Library.CommandsExecutor.Controllers;
 
-public class TableOpener
+public sealed class TableOpener
 {
+    private const int SystemHeaderOffset = 0;
+
+    private readonly IndexReader indexReader = new();
+
     public async Task<TableDescriptor> Open(DatabaseDescriptor database, CatalogsManager catalogs, string tableName)
     {
         if (database.TableDescriptors.TryGetValue(tableName, out TableDescriptor? tableDescriptor))
@@ -45,11 +49,9 @@ public class TableOpener
     {
         int tableOffset = await GetTablePage(database, tableName);
 
-        byte[] data = await database.TableSpace!.GetDataFromPage(tableOffset);
-        //if (data.Length > 0)
-        //    tableDescriptor.Rows = Serializator.Unserialize<Dictionary<int, int>>(data);
-
-        return new BTree();
+        Console.WriteLine("TableOffset={0}", tableOffset);
+       
+        return await indexReader.Read(database.TableSpace!, tableOffset);
     }
 
     private async Task<int> GetTablePage(DatabaseDescriptor database, string tableName)
@@ -71,7 +73,7 @@ public class TableOpener
             databaseObject.StartOffset = pageOffset;
             objects.Add(tableName, databaseObject);
 
-            await database.SystemSpace!.WritePages(0, Serializator.Serialize(database.SystemSchema.Objects));
+            await database.SystemSpace!.WritePages(SystemHeaderOffset, Serializator.Serialize(database.SystemSchema.Objects));
 
             Console.WriteLine("Added table {0} to system", tableName);
         }

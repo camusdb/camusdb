@@ -15,12 +15,14 @@ using CamusDB.Library.CommandsExecutor.Controllers;
 namespace CamusDB.Library.CommandsExecutor.Controllers;
 
 public sealed class RowInserter
-{     
+{
+    private IndexSaver indexSaver = new();
+
     public async Task<bool> Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
         int rowId = await database.TableSpace!.GetNextRowId();
 
-        int length = 10; // 4 schemaVersion + 4 rowId
+        int length = 10; // 1 type + 4 schemaVersion + 1 type + 4 rowId
 
         foreach (ColumnValue columnValue in ticket.Values)
         {
@@ -82,15 +84,23 @@ public sealed class RowInserter
         }
 
         int dataPage = await database.TableSpace!.WriteDataToFreePage(rowBuffer);
-        Console.WriteLine(dataPage);
 
-        table.Rows.Put(rowId, dataPage);
+        await indexSaver.Save(database.TableSpace, table.Rows, rowId, dataPage);
 
-        foreach (Entry entry in table.Rows.Traverse())
+        /*await table.Rows.Put(rowId, dataPage);
+
+        await table.Rows.Put(100, 203);
+        await table.Rows.Put(101, 204);
+        await table.Rows.Put(102, 205);
+        await table.Rows.Put(103, 206);
+        await table.Rows.Put(104, 207);
+        await table.Rows.Put(105, 208);*/
+
+        foreach (Entry entry in table.Rows.EntriesTraverse())
         {
             Console.WriteLine("Index RowId={0} PageOffset={1}", entry.Key, entry.Value);
         }
-
+        
         return true;
-    }
+    }    
 }

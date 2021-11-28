@@ -1,13 +1,11 @@
 ﻿
-using System;
-using System.Collections.Concurrent;
 using System.IO.MemoryMappedFiles;
 using CamusDB.Library.Serializer;
 using CamusDB.Library.BufferPool.Models;
 
 namespace CamusDB.Library.BufferPool;
 
-public class BufferPoolHandler
+public sealed class BufferPoolHandler
 {
     private const int PageSize = 1024;
 
@@ -58,9 +56,7 @@ public class BufferPoolHandler
 
         int length = Serializator.ReadInt32(memoryPage.Buffer, ref pointer);
         if (length == 0)
-            return Array.Empty<byte>();
-
-        //Console.WriteLine(length);
+            return Array.Empty<byte>();        
 
         byte[] data = new byte[length];
         Buffer.BlockCopy(memoryPage.Buffer, 4, data, 0, length > PageSize ? PageSize : length);
@@ -79,7 +75,7 @@ public class BufferPoolHandler
             MemoryPage memoryPage = await ReadPage(i);
 
             if (i == offset) // fist page
-            {                
+            {
                 Serializator.WriteInt32(memoryPage.Buffer, data.Length, ref pointer); // write length to first 4 bytes 
                 Buffer.BlockCopy(data, 0, memoryPage.Buffer, 4, remaining > PageSize ? PageSize : remaining);
             }
@@ -226,15 +222,46 @@ public class BufferPoolHandler
                 page = new MemoryPage(freeOffset, new byte[PageSize]);
                 pages.Add(freeOffset, page);
             }
-            
-            int pointer = 0;
-            Serializator.WriteInt32(page.Buffer, 4, ref pointer); // data length (4 bytes integer)
 
-            Buffer.BlockCopy(data, 0, page.Buffer, 4, data.Length); 
+            int pointer = 0;
+            Serializator.WriteInt32(page.Buffer, data.Length, ref pointer); // data length (4 bytes integer)
+
+            Buffer.BlockCopy(data, 0, page.Buffer, 4, data.Length);
 
             accessor.WriteArray<byte>(0, page.Buffer, 0, PageSize);
 
+            Console.WriteLine("Wrote {0} bytes to page {1}", data.Length, freeOffset);
+
             return freeOffset;
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    public async Task WriteDataToPage(int offset, byte[] data)
+    {
+        try
+        {
+            await semaphore.WaitAsync();
+
+            using var accessor = memoryFile.CreateViewAccessor(offset * PageSize, PageSize);
+
+            if (!pages.TryGetValue(offset, out MemoryPage? page))
+            {
+                page = new MemoryPage(offset, new byte[PageSize]);
+                pages.Add(offset, page);
+            }
+
+            int pointer = 0;
+            Serializator.WriteInt32(page.Buffer, data.Length, ref pointer); // data length (4 bytes integer)
+
+            Buffer.BlockCopy(data, 0, page.Buffer, 4, data.Length);
+
+            accessor.WriteArray<byte>(0, page.Buffer, 0, PageSize);
+
+            Console.WriteLine("Wrote {0} bytes to page {1}", data.Length, offset);
         }
         finally
         {

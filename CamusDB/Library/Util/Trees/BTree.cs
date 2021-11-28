@@ -5,7 +5,7 @@ using System.Collections.Generic;
 namespace CamusDB.Library.Util.Trees;
 
 // helper B-tree node data type
-public class Node
+public sealed class Node
 {
     public int KeyCount;         // number of children
 
@@ -22,13 +22,13 @@ public class Node
 
 // internal nodes: only use key and next
 // external nodes: only use key and value
-public class Entry
+public sealed class Entry
 {
     public int Key;
 
     public int? Value;
 
-    public Node? Next;     // helper field to iterate over array entries
+    public Node? Next;     // helper field to iterate over array entries    
 
     public Entry(int key, int? value, Node? next)
     {
@@ -44,20 +44,21 @@ public sealed class BTree
     // (must be even and greater than 2)
     public const int MaxChildren = 4;
 
-    private Node root;       // root of the B-tree
+    public Node root;       // root of the B-tree
 
     private int height;      // height of the B-tree
 
     private int n;           // number of key-value pairs in the B-tree
 
-    private SemaphoreSlim writeLock = new(1, 1);
+    public SemaphoreSlim WriteLock { get; } = new(1, 1);
 
     /**
      * Initializes an empty B-tree.
      */
-    public BTree()
+    public BTree(int rootOffset)
     {
         root = new Node(0);
+        root.PageOffset = rootOffset;
     }
 
     /**
@@ -132,13 +133,13 @@ public sealed class BTree
         return null;
     }
 
-    public IEnumerable Traverse()
+    public IEnumerable EntriesTraverse()
     {
-        foreach (Entry entry in InternalTraverse(root, height))
+        foreach (Entry entry in EntriesTraverseInternal(root, height))
             yield return entry;
     }
 
-    private static IEnumerable InternalTraverse(Node? node, int ht)
+    private static IEnumerable EntriesTraverseInternal(Node? node, int ht)
     {
         if (node is null)
             yield break;
@@ -157,34 +158,72 @@ public sealed class BTree
         {
             for (int j = 0; j < node.KeyCount; j++)
             {
-                foreach (Entry entry in InternalTraverse(children[j].Next, ht - 1))
+                foreach (Entry entry in EntriesTraverseInternal(children[j].Next, ht - 1))
                     yield return entry;
             }
         }
     }
 
-    public async Task Put(int key, int value)
+    public IEnumerable NodesTraverse()
     {
-        try
-        {
-            await writeLock.WaitAsync();
+        foreach (Node node in NodesTraverseInternal(root, height))
+            yield return node;
+    }
 
-            //if (key == null) throw new IllegalArgumentException("argument key to put() is null");
-            Node? u = Insert(root, key, value, height);
-            n++;
-            if (u == null) return;
+    private static IEnumerable NodesTraverseInternal(Node? node, int ht)
+    {
+        //Console.WriteLine("ht={0}", ht);
 
-            // need to split root
-            Node newRoot = new Node(2);
-            newRoot.children[0] = new Entry(root.children[0].Key, null, root);
-            newRoot.children[1] = new Entry(u.children[0].Key, null, u);
-            root = newRoot;
-            height++;
-        }
-        finally
+        if (node is null)
+            yield break;
+
+        yield return node;
+
+        if (ht == 0)
+            yield break;
+
+        for (int j = 0; j < node.KeyCount; j++)
         {
-            writeLock.Release();
+            foreach (Node childNode in NodesTraverseInternal(node.children[j].Next, ht - 1))
+                yield return childNode;
         }
+    }
+
+    public IEnumerable NodesReverseTraverse()
+    {
+        foreach (Node node in NodesReverseTraverseInternal(root, height))
+            yield return node;
+    }
+
+    private static IEnumerable NodesReverseTraverseInternal(Node? node, int ht)
+    {
+        Console.WriteLine("ht={0}", ht);
+
+        if (node is null)
+            yield break;        
+
+        for (int j = node.KeyCount; j >= 0; j--)
+        {
+            foreach (Node childNode in NodesReverseTraverseInternal(node.children[j].Next, ht - 1))
+                yield return childNode;
+        }
+
+        yield return node;
+    }
+
+    public void Put(int key, int value)
+    {        
+        //if (key == null) throw new IllegalArgumentException("argument key to put() is null");
+        Node? u = Insert(root, key, value, height);
+        n++;
+        if (u == null) return;
+
+        // need to split root
+        Node newRoot = new Node(2);
+        newRoot.children[0] = new Entry(root.children[0].Key, null, root);
+        newRoot.children[1] = new Entry(u.children[0].Key, null, u);
+        root = newRoot;
+        height++;        
     }
 
     private Node? Insert(Node? node, int key, int? val, int ht)
