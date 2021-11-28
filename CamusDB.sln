@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 25.0.1700.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB", "CamusDB\CamusDB.csproj", "{70EA73AD-810C-4489-92B5-6E78FAFB906B}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{70EA73AD-810C-4489-92B5-6E78FAFB906B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{70EA73AD-810C-4489-92B5-6E78FAFB906B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{70EA73AD-810C-4489-92B5-6E78FAFB906B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{70EA73AD-810C-4489-92B5-6E78FAFB906B}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {3BF4ABD1-5303-48A4-AE60-F49B2E5DE972}
+	EndGlobalSection
+EndGlobal
