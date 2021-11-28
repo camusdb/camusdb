@@ -11,7 +11,7 @@ public sealed class IndexSaver
     {
         try
         {
-            await index.WriteLock.WaitAsync();
+            await index.WriteLock.WaitAsync();            
 
             index.Put(key, value);
 
@@ -21,11 +21,20 @@ public sealed class IndexSaver
                     node.PageOffset = await tablespace.GetNextFreeOffset();
             }
 
+            byte[] treeBuffer = new byte[12]; // height + size + root
+
+            int pointer = 0;
+            Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
+            Serializator.WriteInt32(treeBuffer, index.n, ref pointer);
+            Serializator.WriteInt32(treeBuffer, index.root.PageOffset, ref pointer);
+
+            await tablespace.WriteDataToPage(index.PageOffset, treeBuffer);
+
             foreach (Node node in index.NodesTraverse())
             {
                 byte[] nodeBuffer = new byte[4 + 4 + 4 * 12];
 
-                int pointer = 0;
+                pointer = 0;
                 Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);
                 Serializator.WriteInt32(nodeBuffer, node.PageOffset, ref pointer);
 

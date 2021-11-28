@@ -14,9 +14,9 @@ public sealed class Node
     public Entry[] children = new Entry[BTree.MaxChildren];   // the array of children
 
     // create a node with k children
-    public Node(int k)
+    public Node(int keyCount)
     {
-        KeyCount = k;
+        KeyCount = keyCount;
     }
 }
 
@@ -46,9 +46,11 @@ public sealed class BTree
 
     public Node root;       // root of the B-tree
 
-    private int height;      // height of the B-tree
+    public int height;      // height of the B-tree
 
-    private int n;           // number of key-value pairs in the B-tree
+    public int n;           // number of key-value pairs in the B-tree
+
+    public int PageOffset = -1; // page offset to root node
 
     public SemaphoreSlim WriteLock { get; } = new(1, 1);
 
@@ -58,7 +60,7 @@ public sealed class BTree
     public BTree(int rootOffset)
     {
         root = new Node(0);
-        root.PageOffset = rootOffset;
+        PageOffset = rootOffset;
     }
 
     /**

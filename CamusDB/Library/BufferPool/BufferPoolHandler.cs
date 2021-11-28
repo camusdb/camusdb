@@ -55,6 +55,9 @@ public sealed class BufferPoolHandler
         int pointer = 0;
 
         int length = Serializator.ReadInt32(memoryPage.Buffer, ref pointer);
+
+        Console.WriteLine("Read {0} bytes from page {1}", length, offset);
+
         if (length == 0)
             return Array.Empty<byte>();        
 
