@@ -1,5 +1,4 @@
 ﻿
-using System;
 using CamusDB.Library.Catalogs;
 using CamusDB.Library.BufferPool;
 using CamusDB.Library.Serializer;
@@ -80,14 +79,13 @@ public sealed class DatabaseOpener
         if (data.Length == 0) // tablespace is not initialized
         {
             // write tablespace header
-
             MemoryPage page = await databaseDescriptor.TableSpace.ReadPage(0);
 
             int pointer = 0;
             Serializator.WriteInt32(page.Buffer, 4, ref pointer); // size of data (4 integer)
             Serializator.WriteInt32(page.Buffer, 1, ref pointer); // next page offset
 
-            await databaseDescriptor.TableSpace!.FlushPage(page);
+            databaseDescriptor.TableSpace!.FlushPage(page); // @todo make this atomic
         }
 
         Console.WriteLine("Data tablespaces read");

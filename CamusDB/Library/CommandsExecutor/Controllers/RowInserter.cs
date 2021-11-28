@@ -1,5 +1,6 @@
 ﻿
 using System;
+using System.Diagnostics;
 using CamusDB.Library.Catalogs;
 using CamusDB.Library.Util.Trees;
 using CamusDB.Library.BufferPool;
@@ -16,7 +17,7 @@ namespace CamusDB.Library.CommandsExecutor.Controllers;
 
 public sealed class RowInserter
 {
-    private IndexSaver indexSaver = new();
+    private readonly IndexSaver indexSaver = new();
 
     public async Task<bool> Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
@@ -83,9 +84,16 @@ public sealed class RowInserter
             }
         }
 
+        var timer = new Stopwatch();
+        timer.Start();
+
         int dataPage = await database.TableSpace!.WriteDataToFreePage(rowBuffer);
 
         await indexSaver.Save(database.TableSpace, table.Rows, rowId, dataPage);
+
+        timer.Stop();
+
+        TimeSpan timeTaken = timer.Elapsed;
 
         /*await table.Rows.Put(rowId, dataPage);
 
@@ -96,11 +104,13 @@ public sealed class RowInserter
         await table.Rows.Put(104, 207);
         await table.Rows.Put(105, 208);*/
 
-        foreach (Entry entry in table.Rows.EntriesTraverse())
+        /*foreach (Entry entry in table.Rows.EntriesTraverse())
         {
             Console.WriteLine("Index RowId={0} PageOffset={1}", entry.Key, entry.Value);
-        }
-        
+        }*/
+
+        Console.WriteLine("Row {0} inserted at {1}, Time taken: {2}", rowId, dataPage, timeTaken.ToString(@"m\:ss\.fff"));
+
         return true;
     }    
 }

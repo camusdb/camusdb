@@ -11,14 +11,18 @@ public sealed class IndexSaver
     {
         try
         {
-            await index.WriteLock.WaitAsync();            
+            await index.WriteLock.WaitAsync();
+
+            //Console.WriteLine("---");
 
             index.Put(key, value);
 
             foreach (Node node in index.NodesTraverse())
             {
-                if (node.PageOffset == -1)
+                if (node.PageOffset == -1)                
                     node.PageOffset = await tablespace.GetNextFreeOffset();
+
+                //Console.WriteLine("Will save node at {0}", node.PageOffset);
             }
 
             byte[] treeBuffer = new byte[12]; // height + size + root
@@ -30,23 +34,26 @@ public sealed class IndexSaver
 
             await tablespace.WriteDataToPage(index.PageOffset, treeBuffer);
 
+            //Console.WriteLine("Will save index at {0}", index.PageOffset);
+
             foreach (Node node in index.NodesTraverse())
             {
-                byte[] nodeBuffer = new byte[4 + 4 + 4 * 12];
+                byte[] nodeBuffer = new byte[8 + 12 * node.KeyCount];
 
                 pointer = 0;
                 Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);
                 Serializator.WriteInt32(nodeBuffer, node.PageOffset, ref pointer);
 
-                for (int i = 0; i < 4; i++)
+                for (int i = 0; i < node.KeyCount; i++)
                 {
                     Entry entry = node.children[i];
 
                     if (entry is not null)
                     {
                         Serializator.WriteInt32(nodeBuffer, entry.Key, ref pointer);
-                        Serializator.WriteInt32(nodeBuffer, entry.Value ?? 0, ref pointer);
+                        Serializator.WriteInt32(nodeBuffer, entry.Value ?? 0, ref pointer);                        
                         Serializator.WriteInt32(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : -1, ref pointer);
+                        //Console.WriteLine(pointer);
                     }
                     else
                     {
@@ -58,8 +65,10 @@ public sealed class IndexSaver
 
                 await tablespace.WriteDataToPage(node.PageOffset, nodeBuffer);
 
-                Console.WriteLine("Page={0} Length={1}", node.PageOffset, nodeBuffer.Length);
+                //Console.WriteLine("Page={0} Length={1}", node.PageOffset, nodeBuffer.Length);
             }
+
+            //Console.WriteLine("---");
         }
         finally
         {

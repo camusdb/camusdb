@@ -16,6 +16,7 @@ public sealed class Node
     // create a node with k children
     public Node(int keyCount)
     {
+        //Console.WriteLine("Allocated new node {0}", keyCount);
         KeyCount = keyCount;
     }
 }
@@ -199,7 +200,7 @@ public sealed class BTree
 
     private static IEnumerable NodesReverseTraverseInternal(Node? node, int ht)
     {
-        Console.WriteLine("ht={0}", ht);
+        //Console.WriteLine("ht={0}", ht);
 
         if (node is null)
             yield break;        
@@ -224,7 +225,12 @@ public sealed class BTree
         Node newRoot = new Node(2);
         newRoot.children[0] = new Entry(root.children[0].Key, null, root);
         newRoot.children[1] = new Entry(u.children[0].Key, null, u);
+
         root = newRoot;
+
+        newRoot.PageOffset = root.PageOffset;
+        root.PageOffset = -1;
+
         height++;        
     }
 
@@ -276,12 +282,16 @@ public sealed class BTree
     }
 
     // split node in half
-    private Node Split(Node current)
+    private static Node Split(Node current)
     {
-        Node t = new(MaxChildren / 2);
-        current.KeyCount = MaxChildren / 2;
-        for (int j = 0; j < MaxChildren / 2; j++)
-            t.children[j] = current.children[MaxChildren / 2 + j];
+        int half = MaxChildren / 2;
+
+        Node t = new(half);
+
+        current.KeyCount = half;
+
+        for (int j = 0; j < half; j++)
+            t.children[j] = current.children[half + j];
 
         return t;
     }

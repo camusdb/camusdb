@@ -9,23 +9,36 @@ public sealed class IndexReader
 {
     public async Task<BTree> Read(BufferPoolHandler tablespace, int offset)
     {
+        //Console.WriteLine("***");
+
         BTree index = new(offset);
 
         byte[] data = await tablespace.GetDataFromPage(offset);
         if (data.Length > 0)
         {
-            //Console.WriteLine(data.Length);
-
             int pointer = 0;
 
             index.height = Serializator.ReadInt32(data, ref pointer);
             index.n = Serializator.ReadInt32(data, ref pointer);
-            index.PageOffset = Serializator.ReadInt32(data, ref pointer);
 
-            Node? node = await GetNode(tablespace, index.PageOffset);
-            if (node is not null)
-                index.root = node;
+            int rootPageOffset = Serializator.ReadInt32(data, ref pointer);
+
+            Console.WriteLine("NumberNodes={0} PageOffset={1} RootOffset={2}", index.n, index.PageOffset, rootPageOffset);
+
+            if (rootPageOffset > -1)
+            {
+                Node? node = await GetNode(tablespace, rootPageOffset);
+                if (node is not null)
+                    index.root = node;
+            }
         }
+
+        /*foreach (Entry entry in index.EntriesTraverse())
+        {
+            Console.WriteLine("Index RowId={0} PageOffset={1}", entry.Key, entry.Value);
+        }*/
+
+        //Console.WriteLine("***");
 
         return index;
     }
@@ -42,7 +55,7 @@ public sealed class IndexReader
         node.KeyCount = Serializator.ReadInt32(data, ref pointer);
         node.PageOffset = Serializator.ReadInt32(data, ref pointer);
 
-        Console.WriteLine("KeyCount={0}", node.KeyCount);
+        //Console.WriteLine("KeyCount={0} PageOffset={1}", node.KeyCount, node.PageOffset);
 
         for (int i = 0; i < node.KeyCount; i++)
         {
@@ -52,10 +65,11 @@ public sealed class IndexReader
             entry.Value = Serializator.ReadInt32(data, ref pointer);
 
             int nextPageOffset = Serializator.ReadInt32(data, ref pointer);
-            Console.WriteLine(nextPageOffset);
+            //Console.WriteLine("Children={0} Key={1} Value={2} NextOffset={3}", i, entry.Key, entry.Value, nextPageOffset);
 
-            Console.WriteLine("Key={0} Value={1}", entry.Key, entry.Value);
-
+            if (nextPageOffset > -1)
+                entry.Next = await GetNode(tablespace, nextPageOffset);
+                    
             node.children[i] = entry;
         }
 
