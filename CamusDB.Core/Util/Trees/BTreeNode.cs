@@ -4,6 +4,10 @@ namespace CamusDB.Core.Util.Trees;
 // helper B-tree node data type
 public sealed class BTreeNode
 {
+    public static int CurrentId = -1;
+
+    public int Id;
+
     public int KeyCount;         // number of children
 
     public int PageOffset = -1;       // on-disk offset
@@ -16,6 +20,7 @@ public sealed class BTreeNode
     public BTreeNode(int keyCount)
     {
         //Console.WriteLine("Allocated new node {0}", keyCount);
+        Id = Interlocked.Increment(ref CurrentId);
         KeyCount = keyCount;
     }
 }

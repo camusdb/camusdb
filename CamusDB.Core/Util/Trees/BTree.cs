@@ -6,9 +6,10 @@ namespace CamusDB.Core.Util.Trees;
 
 public sealed class BTree
 {
-    // max children per B-tree node = M-1
-    // (must be even and greater than 2)
-    public const int MaxChildren = 4;
+    // max children per B-tree node = M-1 (must be even and greater than 2)
+    public const int MaxChildren = 8;
+
+    public const int MaxChildrenHalf = MaxChildren / 2;
 
     public BTreeNode root;       // root of the B-tree
 
@@ -181,13 +182,14 @@ public sealed class BTree
 
     public void Put(int key, int value)
     {
-        //if (key == null) throw new IllegalArgumentException("argument key to put() is null");
         BTreeNode? u = Insert(root, key, value, height);
         n++;
         if (u == null) return;
 
         // need to split root
         BTreeNode newRoot = new(2);
+        //Console.WriteLine("Node {0} is now root", newRoot.Id);
+
         newRoot.children[0] = new BTreeEntry(root.children[0].Key, null, root);
         newRoot.children[1] = new BTreeEntry(u.children[0].Key, null, u);
 
@@ -196,6 +198,8 @@ public sealed class BTree
         newRoot.PageOffset = root.PageOffset;
         root.PageOffset = -1;
         root.Dirty = true;
+
+        //Console.WriteLine("Node {0} is now root", root.Id);
 
         height++;
     }
@@ -242,6 +246,8 @@ public sealed class BTree
         node.KeyCount++;
         node.Dirty = true;
 
+        //Console.WriteLine("Node {0} marked as dirty as child added", node.Id);
+
         if (node.KeyCount < MaxChildren)
             return null;
 
@@ -250,16 +256,18 @@ public sealed class BTree
 
     // split node in half
     private static BTreeNode Split(BTreeNode current)
-    {
-        int half = MaxChildren / 2;
+    {        
+        BTreeNode t = new(MaxChildrenHalf);
 
-        BTreeNode t = new(half);
+        //Console.WriteLine("Node {0} marked as dirty because of split", t.Id);
 
-        current.KeyCount = half;
+        current.KeyCount = MaxChildrenHalf;
         current.Dirty = true;
 
-        for (int j = 0; j < half; j++)
-            t.children[j] = current.children[half + j];
+        //Console.WriteLine("Node {0} marked as dirty because of split", current.Id);
+
+        for (int j = 0; j < MaxChildrenHalf; j++)
+            t.children[j] = current.children[MaxChildrenHalf + j];
 
         return t;
     }

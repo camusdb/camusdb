@@ -3,8 +3,10 @@ namespace CamusDB.Core.Catalogs.Models;
 
 public enum ColumnType
 {
-    Id = 0,
-    Integer = 1,
-    String = 2,
-    Bool = 3
+    Null = 0,
+    Id = 1,
+    Integer = 2,
+    String = 3,
+    Bool = 4,
+    Float = 5,
 }

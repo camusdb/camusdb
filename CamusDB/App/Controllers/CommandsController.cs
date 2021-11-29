@@ -1,10 +1,18 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using CamusDB.Core;
 using System.Text.Json;
 using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -13,13 +21,16 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class CommandsController : ControllerBase
 {
-    public readonly CommandExecutor commandExecutor;
+    private readonly CommandExecutor executor;
+
+    private readonly CommandValidator validator;
 
     private readonly JsonSerializerOptions jsonOptions;
 
-    public CommandsController(CommandExecutor commandExecutor)
+    public CommandsController(CommandValidator validator, CommandExecutor executor)
     {
-        this.commandExecutor = commandExecutor;
+        this.executor = executor;
+        this.validator = validator;
 
         this.jsonOptions = new JsonSerializerOptions
         {
@@ -30,7 +41,7 @@ public sealed class CommandsController : ControllerBase
     [Route("/create-db")]
     public async Task<JsonResult> CreateDatabase()
     {
-        await commandExecutor.CreateDatabase("test");
+        await executor.CreateDatabase("test");
 
         return new JsonResult(new CreateDatabaseResponse("ok"));
     }
@@ -54,7 +65,7 @@ public sealed class CommandsController : ControllerBase
 
         try
         {
-            await commandExecutor.CreateTable(ticket);
+            await executor.CreateTable(ticket);
             return new JsonResult(new CreateTableResponse("ok"));
         }
         catch (CamusDBException e)
@@ -73,29 +84,24 @@ public sealed class CommandsController : ControllerBase
     [Route("/insert")]
     public async Task<JsonResult> Insert()
     {
-        using var reader = new StreamReader(Request.Body);
-        var body = await reader.ReadToEndAsync();
-
-        InsertRequest? request = JsonSerializer.Deserialize<InsertRequest>(body, jsonOptions);
-        if (request == null)
-            throw new Exception("Worker Id is required (1)");
-
-        var system = new Random();
-
-        // @todo validate request and create ticket
-
-        InsertTicket ticket = new(
-            database: request.DatabaseName ?? "",
-            name: request.TableName ?? "",
-            columns: request.Columns ?? new string[0],
-            values: request.Values ?? new ColumnValue[0]
-        );
-
-        //Console.WriteLine(ticket.Values.Length);
-
         try
         {
-            await commandExecutor.Insert(ticket);
+            using var reader = new StreamReader(Request.Body);
+            var body = await reader.ReadToEndAsync();
+
+            InsertRequest? request = JsonSerializer.Deserialize<InsertRequest>(body, jsonOptions);
+            if (request == null)
+                throw new Exception("Insert request is not valid");
+
+            InsertTicket ticket = new(
+                database: request.DatabaseName ?? "",
+                name: request.TableName ?? "",
+                values: request.Values ?? new Dictionary<string, ColumnValue>()
+            );
+
+            validator.Validate(ticket);
+
+            await executor.Insert(ticket);
             return new JsonResult(new InsertResponse("ok"));
         }
         catch (CamusDBException e)
@@ -107,20 +113,33 @@ public sealed class CommandsController : ControllerBase
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
             return new JsonResult(new InsertResponse("failed", "CA0000", e.Message));
-        }        
+        }
     }
 
     [Route("/query")]
     public async Task<JsonResult> Query()
     {
-        QueryTicket ticket = new(
-            database: "test",
-            name: "my_table"
-        );
+        try
+        {
+            QueryTicket ticket = new(
+                database: "test",
+                name: "my_table"
+            );
 
-        List<List<ColumnValue>> rows = await commandExecutor.Query(ticket);
+            List<List<ColumnValue>> rows = await executor.Query(ticket);
 
-        return new JsonResult(new QueryResponse("ok", rows));
+            return new JsonResult(new QueryResponse("ok", rows));
+        }
+        catch (CamusDBException e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new InsertResponse("failed", e.Code, e.Message));
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new InsertResponse("failed", "CA0000", e.Message));
+        }
     }
 
     [Route("/query-by-id")]
@@ -132,7 +151,7 @@ public sealed class CommandsController : ControllerBase
             id: 2205016
         );
 
-        List<List<ColumnValue>> rows = await commandExecutor.QueryById(ticket);
+        List<List<ColumnValue>> rows = await executor.QueryById(ticket);
 
         return new JsonResult(new QueryResponse("ok", rows));
     }

@@ -6,4 +6,12 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <None Remove="CommandsValidator\" />
+    <None Remove="CommandsValidator\Validators\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="CommandsValidator\" />
+    <Folder Include="CommandsValidator\Validators\" />
+  </ItemGroup>
 </Project>

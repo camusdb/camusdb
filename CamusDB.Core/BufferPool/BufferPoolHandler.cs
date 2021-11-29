@@ -266,7 +266,7 @@ public sealed class BufferPoolHandler
 
             accessor.WriteArray<byte>(PageSize * offset, page.Buffer, 0, PageSize);
 
-            Console.WriteLine("Wrote {0} bytes to page {1}", data.Length, offset);
+            //Console.WriteLine("Wrote {0} bytes to page {1}", data.Length, offset);
         }
         finally
         {

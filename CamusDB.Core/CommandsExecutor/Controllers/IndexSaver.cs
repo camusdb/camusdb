@@ -60,11 +60,16 @@ public sealed class IndexSaver
 
         //Console.WriteLine("Will save index at {0}", index.PageOffset);
 
+        //@todo update nodes concurrently
+
+        int dirty = 0, noDirty = 0;
+
         foreach (BTreeNode node in index.NodesTraverse())
         {
             if (!node.Dirty)
             {
-                //Console.WriteLine("Node at {0} is not dirty", node.PageOffset);
+                noDirty++;
+                //Console.WriteLine("Node {0} at {1} is not dirty", node.Id, node.PageOffset);
                 continue;
             }
 
@@ -95,8 +100,11 @@ public sealed class IndexSaver
 
             await tablespace.WriteDataToPage(node.PageOffset, nodeBuffer);
 
-            //Console.WriteLine("Page={0} Length={1}", node.PageOffset, nodeBuffer.Length);
+            //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);
+            dirty++;
         }
+
+        //Console.WriteLine("Dirty={0} NoDirty={1}", dirty, noDirty);
     }
 }
 

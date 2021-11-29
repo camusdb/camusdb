@@ -1,4 +1,11 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.Diagnostics;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer;
@@ -14,37 +21,67 @@ public sealed class RowInserter
 {
     private readonly IndexSaver indexSaver = new();
 
-    private int GetPrimaryKey(TableDescriptor table, InsertTicket ticket)
+    private int? GetPrimaryKeyValue(TableDescriptor table, InsertTicket ticket)
     {
-        return int.Parse(ticket.Values[0].Value);
+        List<TableColumnSchema> columns = table.Schema!.Columns!;
+
+        for (int i = 0; i < columns.Count; i++)
+        {
+            TableColumnSchema column = columns[i];
+
+            if (column.Primary)
+                return int.Parse(ticket.Values[column.Name].Value);
+        }
+
+        return null;
+    }
+
+    private int CalculateBufferLength(TableDescriptor table, InsertTicket ticket)
+    {
+        int length = 10; // 1 type + 4 schemaVersion + 1 type + 4 rowId
+
+        for (int i = 0; i < table.Schema!.Columns!.Count; i++)
+        {
+            TableColumnSchema column = table.Schema!.Columns[i];
+
+            if (!ticket.Values.TryGetValue(column.Name, out ColumnValue? columnValue))
+            {
+                length += 1; // null (1 byte)
+                continue;
+            }
+
+            switch (columnValue.Type) // @todo check if value is compatible with column
+            {
+                case ColumnType.Id:
+                    length += 5; // type 1 byte + 4 byte int
+                    break;
+
+                case ColumnType.Integer:
+                    length += 5; // type 1 byte + 4 byte int
+                    break;
+
+                case ColumnType.String:
+                    length += 5 + columnValue.Value.Length; // type 1 byte + 4 byte length + strLength
+                    break;
+
+                case ColumnType.Bool:
+                    length++; // bool (1 byte)
+                    break;
+
+                default:
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.UnknownType,
+                        "Unknown type " + columnValue.Type
+                    );
+            }
+        }
+
+        return length;
     }
 
     private byte[] GetRowBuffer(TableDescriptor table, InsertTicket ticket, int rowId)
     {
-        int length = 10; // 1 type + 4 schemaVersion + 1 type + 4 rowId
-
-        foreach (ColumnValue columnValue in ticket.Values)
-        {
-            switch (columnValue.Type)
-            {
-                case ColumnType.Id:
-                    length += 5;
-                    break;
-
-                case ColumnType.Integer:
-                    length += 5;
-                    break;
-
-                case ColumnType.String:
-                    length += 1 + 4 + columnValue.Value.Length;
-                    break;
-
-                case ColumnType.Bool:
-                    length++;
-                    break;
-            }
-            //length += Get
-        }
+        int length = CalculateBufferLength(table, ticket);
 
         byte[] rowBuffer = new byte[length];
 
@@ -56,19 +93,28 @@ public sealed class RowInserter
         Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
         Serializator.WriteInt32(rowBuffer, rowId, ref pointer); // row Id
 
-        foreach (ColumnValue columnValue in ticket.Values)
+        List<TableColumnSchema> columns = table.Schema!.Columns!;
+
+        for (int i = 0; i < columns.Count; i++)
         {
+            TableColumnSchema column = columns[i];
+
+            if (!ticket.Values.TryGetValue(column.Name, out ColumnValue? columnValue))
+            {
+                Serializator.WriteType(rowBuffer, SerializatorTypes.TypeNull, ref pointer);
+                continue;
+            }
+
             int value;
 
             switch (columnValue.Type)
             {
-                case ColumnType.Id:
-                    value = int.Parse(columnValue.Value);
+                case ColumnType.Id: // @todo use int.TryParse
                     Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
-                    Serializator.WriteInt32(rowBuffer, value, ref pointer);
+                    Serializator.WriteInt32(rowBuffer, int.Parse(columnValue.Value), ref pointer);
                     break;
 
-                case ColumnType.Integer:
+                case ColumnType.Integer: // @todo use int.TryParse
                     value = int.Parse(columnValue.Value);
                     Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
                     Serializator.WriteInt32(rowBuffer, value, ref pointer);
@@ -83,6 +129,12 @@ public sealed class RowInserter
                 case ColumnType.Bool:
                     Serializator.WriteBool(rowBuffer, columnValue.Value == "true", ref pointer);
                     break;
+
+                default:
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.UnknownType,
+                        "Unknown type " + columnValue.Type
+                    );
             }
         }
 
@@ -91,9 +143,15 @@ public sealed class RowInserter
 
     private int CheckPrimaryKeyViolations(TableDescriptor table, BTree pkIndex, InsertTicket ticket)
     {
-        int primaryKeyValue = GetPrimaryKey(table, ticket);
+        int? primaryKeyValue = GetPrimaryKeyValue(table, ticket);
 
-        int? pageOffset = pkIndex.Get(primaryKeyValue);
+        if (primaryKeyValue is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.DuplicatePrimaryKey,
+                "Cannot retrieve primary key for table " + table.Name
+            );
+
+        int? pageOffset = pkIndex.Get(primaryKeyValue.Value);
 
         if (pageOffset is not null)
             throw new CamusDBException(
@@ -101,7 +159,7 @@ public sealed class RowInserter
                 "Duplicate entry for key " + table.Name + " " + primaryKeyValue
             );
 
-        return primaryKeyValue;
+        return primaryKeyValue.Value;
     }
 
     public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
@@ -134,7 +192,7 @@ public sealed class RowInserter
 
         // Insert data to a free page and update indexes
 
-        byte[] rowBuffer = GetRowBuffer(table, ticket, rowId);        
+        byte[] rowBuffer = GetRowBuffer(table, ticket, rowId);
         await tablespace.WriteDataToPage(dataPage, rowBuffer);
 
         await indexSaver.Save(tablespace, table.Rows, rowId, dataPage);

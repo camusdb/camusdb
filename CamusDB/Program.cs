@@ -1,21 +1,15 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.Util;
-
-/*var b = new BTree();
-
-b.Put(10, "hello 1");
-b.Put(5, "hello 2");
-b.Put(18, "hello 3");
-b.Put(29, "hello 4");
-
-//Console.WriteLine(b.Get(18));
-
-foreach (Entry entry in b.Traverse())
-{
-    Console.WriteLine("{0} {1}", entry.key, entry.val);
-}*/
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -23,6 +17,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorPages();
 
 builder.Services.AddSingleton<CommandExecutor>();
+builder.Services.AddSingleton<CommandValidator>();
 builder.Services.AddSingleton<CatalogsManager>();
 
 var app = builder.Build();

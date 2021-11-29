@@ -13,24 +13,24 @@ async function f()
         databaseName: "test",
         tableName: "my_table",
         columns: ["id", "name", "age", "enabled"],
-        values: [
-          {
-            "type": 0, // id
-            "value": "1502",
+        values: {
+          "id": {
+            "type": 1, // id
+            "value": parseInt(Math.random() * 1000000).toString(),
           },
-          {
-            "type": 1, // integer
+          "name": {
+            "type": 2, // integer
             "value": "1234",
           },
-          {
-            "type": 2, // string
+          "age": {
+            "type": 3, // string
             "value": "some string",
           },
-          {
-            "type": 3, // bool
+          "enabled": {
+            "type": 4, // bool
             "value": "false",
           }
-        ]
+        }
     };
 
     const response = await fetch('https://localhost:7141/insert', {
@@ -50,5 +50,6 @@ async function f()
 
 (async () => {
 	//for (let i = 0; i < 100; i++)
-		await Promise.all([f(), f(), f(), f(), f(), f(), f(), f(), f()]);
+		//await Promise.all([f(), f(), f(), f(), f(), f(), f(), f(), f()]);
+    await f();
 })();
