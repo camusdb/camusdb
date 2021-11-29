@@ -1,5 +1,5 @@
 ﻿
-using CamusDB.Library.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.App.Models;
 

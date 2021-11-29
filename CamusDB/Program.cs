@@ -1,7 +1,7 @@
 ﻿
-using CamusDB.Library.Catalogs;
-using CamusDB.Library.CommandsExecutor;
-using CamusDB.Library.Util;
+using CamusDB.Core.Catalogs;
+using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.Util;
 
 /*var b = new BTree();
 

@@ -9,47 +9,21 @@
   <ItemGroup>
     <None Remove="App\" />
     <None Remove="App\Controllers\" />
-    <None Remove="Library\" />
     <None Remove="Library\CommandParser\" />
-    <None Remove="Library\CommandsExecutor\" />
-    <None Remove="Library\CommandsExecutor\Models\" />
     <None Remove="Data\" />
-    <None Remove="Library\BufferPool\" />
-    <None Remove="Library\BufferPool\Models\" />
-    <None Remove="Library\Serializer\" />
-    <None Remove="Library\Catalogs\" />
-    <None Remove="Library\Catalogs\Models\" />
-    <None Remove="Library\Serializer\Models\" />
-    <None Remove="Library\Support\" />
     <None Remove="CSharpTest.Net.Collections" />
-    <None Remove="Library\Util\" />
     <None Remove="CodeExMachina.BTree" />
-    <None Remove="Library\CommandsExecutor\Controllers\" />
     <None Remove="App\Models\" />
-    <None Remove="Library\Util\Trees\" />
-    <None Remove="Library\CommandsExecutor\Models\Tickets\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="App\" />
     <Folder Include="App\Controllers\" />
-    <Folder Include="Library\" />
-    <Folder Include="Library\CommandsExecutor\" />
-    <Folder Include="Library\CommandsExecutor\Models\" />
     <Folder Include="Data\" />
-    <Folder Include="Library\BufferPool\" />
-    <Folder Include="Library\BufferPool\Models\" />
-    <Folder Include="Library\Serializer\" />
-    <Folder Include="Library\Catalogs\" />
-    <Folder Include="Library\Catalogs\Models\" />
-    <Folder Include="Library\Serializer\Models\" />
-    <Folder Include="Library\Support\" />
-    <Folder Include="Library\Util\" />
-    <Folder Include="Library\CommandsExecutor\Controllers\" />
     <Folder Include="App\Models\" />
-    <Folder Include="Library\Util\Trees\" />
-    <Folder Include="Library\CommandsExecutor\Models\Tickets\" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="CodeExMachina.BTree" Version="0.2.0" />
+    <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj">
+      <GlobalPropertiesToRemove></GlobalPropertiesToRemove>
+    </ProjectReference>
   </ItemGroup>
 </Project>

@@ -1,4 +1,6 @@
 CamusDB/bin
 CamusDb/obj
+CamusDB.Core/bin
+CamusDb.Core/obj
 .vs/
 bench/node_modules/
