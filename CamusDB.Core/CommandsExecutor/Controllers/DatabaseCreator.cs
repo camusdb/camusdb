@@ -10,16 +10,18 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 public sealed class DatabaseCreator
 {
+    private const string DataDirectory = "Data";
+
     private const int InitialTableSpaceSize = 1024 * 4096; // 4096 blocks of 1024 size
 
     public async Task Create(string name)
     {
         name = name.ToLowerInvariant(); // @todo validate database name
 
-        if (Directory.Exists("Data/" + name))
+        if (Directory.Exists(DataDirectory + "/" + name))
             throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Database already exists");
 
-        Directory.CreateDirectory("Data/" + name);
+        Directory.CreateDirectory(DataDirectory + "/" + name);
 
         await InitializeDatabaseFiles(name);
     }
@@ -30,9 +32,9 @@ public sealed class DatabaseCreator
 
         await Task.WhenAll(new Task[]
         {
-            File.WriteAllBytesAsync("Data/" + name + "/tablespace0", initialized),
-            File.WriteAllBytesAsync("Data/" + name + "/schema", initialized),
-            File.WriteAllBytesAsync("Data/" + name + "/system", initialized)
+            File.WriteAllBytesAsync(DataDirectory + "/" + name + "/tablespace0", initialized),
+            File.WriteAllBytesAsync(DataDirectory + "/" + name + "/schema", initialized),
+            File.WriteAllBytesAsync(DataDirectory + "/" + name + "/system", initialized)
         });
 
         // @todo catch IO Exceptions

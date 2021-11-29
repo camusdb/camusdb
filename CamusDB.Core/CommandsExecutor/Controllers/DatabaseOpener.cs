@@ -71,7 +71,8 @@ public sealed class DatabaseOpener
 
     private static async Task LoadDatabaseSchema(DatabaseDescriptor databaseDescriptor)
     {
-        byte[] data = await databaseDescriptor.SchemaSpace!.GetDataFromPage(0);
+        ReadOnlyMemory<byte> data = await databaseDescriptor.SchemaSpace!.GetDataFromPage(0);
+
         if (data.Length > 0)
             databaseDescriptor.Schema.Tables = Serializator.Unserialize<Dictionary<string, TableSchema>>(data);
         else
@@ -82,7 +83,7 @@ public sealed class DatabaseOpener
 
     private static async Task LoadDatabaseTableSpace(DatabaseDescriptor databaseDescriptor)
     {
-        byte[] data = await databaseDescriptor.TableSpace!.GetDataFromPage(0);        
+        ReadOnlyMemory<byte> data = await databaseDescriptor.TableSpace!.GetDataFromPage(0);
 
         if (data.Length == 0) // tablespace is not initialized
         {
@@ -92,16 +93,18 @@ public sealed class DatabaseOpener
             int pointer = 0;
             Serializator.WriteInt32(page.Buffer, 4, ref pointer); // size of data (4 integer)
             Serializator.WriteInt32(page.Buffer, 1, ref pointer); // next page offset
+            Serializator.WriteInt32(page.Buffer, 1, ref pointer); // next row id
 
             databaseDescriptor.TableSpace!.FlushPage(page); // @todo make this atomic
-        }
 
-        Console.WriteLine("Data tablespaces read");
+            Console.WriteLine("Data tablespaces initialized");
+        }
     }
 
     private static async Task LoadDatabaseSystemSpace(DatabaseDescriptor database)
     {
-        byte[] data = await database.SystemSpace!.GetDataFromPage(0);
+        ReadOnlyMemory<byte> data = await database.SystemSpace!.GetDataFromPage(0);
+
         if (data.Length > 0)
             database.SystemSchema.Objects = Serializator.Unserialize<Dictionary<string, DatabaseObject>>(data);
         else

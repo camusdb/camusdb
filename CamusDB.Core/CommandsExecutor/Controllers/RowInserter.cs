@@ -101,11 +101,12 @@ public sealed class RowInserter
 
             if (!ticket.Values.TryGetValue(column.Name, out ColumnValue? columnValue))
             {
+                //Console.WriteLine("here?");
                 Serializator.WriteType(rowBuffer, SerializatorTypes.TypeNull, ref pointer);
                 continue;
             }
 
-            int value;
+            //Console.WriteLine("{0} {1}", column.Name, column.Type);
 
             switch (columnValue.Type)
             {
@@ -114,10 +115,9 @@ public sealed class RowInserter
                     Serializator.WriteInt32(rowBuffer, int.Parse(columnValue.Value), ref pointer);
                     break;
 
-                case ColumnType.Integer: // @todo use int.TryParse
-                    value = int.Parse(columnValue.Value);
+                case ColumnType.Integer: // @todo use int.TryParse                    
                     Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
-                    Serializator.WriteInt32(rowBuffer, value, ref pointer);
+                    Serializator.WriteInt32(rowBuffer, int.Parse(columnValue.Value), ref pointer);
                     break;
 
                 case ColumnType.String:
@@ -137,6 +137,15 @@ public sealed class RowInserter
                     );
             }
         }
+
+        /*Console.WriteLine("***");
+
+        for (int i = 0; i < rowBuffer.Length; i++)
+            Console.WriteLine(rowBuffer[i]);
+
+        Console.WriteLine("***");
+
+        Console.WriteLine("Length={0} BUffer={1}", pointer, rowBuffer.Length);*/
 
         return rowBuffer;
     }

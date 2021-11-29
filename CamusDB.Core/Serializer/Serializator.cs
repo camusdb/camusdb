@@ -24,18 +24,27 @@ public sealed class Serializator
     public static byte[] Serialize(Dictionary<string, DatabaseObject> databaseObjects)
     {
         string jsonSerialized = JsonSerializer.Serialize(databaseObjects);
-        return Encoding.UTF8.GetBytes(jsonSerialized);
+        var x = Encoding.UTF8.GetBytes(jsonSerialized);
+        //Console.WriteLine(x.Length);
+        return x;
     }
 
-    public static T Unserialize<T>(byte[] serialized) where T : new()
+    public static T Unserialize<T>(ReadOnlyMemory<byte> buffer) where T : new()
     {
-        string xp = Encoding.UTF8.GetString(serialized);
-        Console.WriteLine(xp);
+        string xp = Encoding.UTF8.GetString(buffer.Span);
+        Console.WriteLine(xp);        
 
-        /*for (int i = 0; i < serialized.Length; i++)
-        {
-            Console.WriteLine(serialized[i]);
-        }*/
+        T? deserialized = JsonSerializer.Deserialize<T>(xp);
+        if (deserialized is null)
+            return new T();
+
+        return deserialized;
+    }
+
+    public static T Unserialize<T>(byte[] buffer) where T : new()
+    {
+        string xp = Encoding.UTF8.GetString(buffer);
+        Console.WriteLine(xp);
 
         T? deserialized = JsonSerializer.Deserialize<T>(xp);
         if (deserialized is null)
@@ -146,6 +155,16 @@ public sealed class Serializator
         return type;
     }
 
+    /*public static int ReadType(ReadOnlyMemory<byte> buffer, ref int pointer)
+    {
+        ReadOnlySpan<byte> span = buffer.Span;
+        int typeByte = span[pointer++];
+        int type = (typeByte & 0xf0) >> 4;
+        if (type == SerializatorTypes.TypeExtended)
+            return (typeByte & 0xf) + 0xf;
+        return type;
+    }*/
+
     public static int ReadInt32(byte[] buffer, ref int pointer)
     {
         int number = buffer[pointer++];
@@ -155,12 +174,13 @@ public sealed class Serializator
         return number;
     }
 
-    public static int ReadInt32(Memory<byte> buffer, ref int pointer)
+    public static int ReadInt32FromMemory(ReadOnlyMemory<byte> buffer, ref int pointer)
     {
-        int number = buffer[pointer++];
-        number += (buffer[pointer++] << 8);
-        number += (buffer[pointer++] << 16);
-        number += (buffer[pointer++] << 24);
+        ReadOnlySpan<byte> span = buffer.Span;
+        int number = span[pointer++];
+        number += (span[pointer++] << 8);
+        number += (span[pointer++] << 16);
+        number += (span[pointer++] << 24);
         return number;
     }
 
@@ -174,9 +194,25 @@ public sealed class Serializator
         return str;
     }
 
+    /*public static string ReadString(ReadOnlyMemory<byte> buffer, int length, ref int pointer)
+    {
+        Console.WriteLine("{0} {1} {2}", buffer.Length, pointer, length);
+
+        ReadOnlySpan<byte> span = buffer.Span.Slice(pointer, length);
+        string str = Encoding.UTF8.GetString(span);
+        pointer += length;
+        return str;
+    }*/
+
     public static bool ReadBool(byte[] buffer, ref int pointer)
     {
         return (buffer[pointer - 1] & 0xf) == 1;
     }
+
+    /*public static bool ReadBool(ReadOnlyMemory<byte> buffer, ref int pointer)
+    {
+        ReadOnlySpan<byte> span = buffer.Span;
+        return (span[pointer - 1] & 0xf) == 1;
+    }*/
 }
 

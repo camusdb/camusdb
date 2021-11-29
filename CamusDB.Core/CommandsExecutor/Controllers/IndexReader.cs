@@ -13,25 +13,25 @@ public sealed class IndexReader
 
         BTree index = new(offset);
 
-        byte[] data = await tablespace.GetDataFromPage(offset);
-        if (data.Length > 0)
+        byte[] data = await tablespace.GetDataFromPageAsBytes(offset);
+        if (data.Length == 0)
+            return index;
+        
+        int pointer = 0;
+
+        index.height = Serializator.ReadInt32(data, ref pointer);
+        index.n = Serializator.ReadInt32(data, ref pointer);
+
+        int rootPageOffset = Serializator.ReadInt32(data, ref pointer);
+
+        //Console.WriteLine("NumberNodes={0} PageOffset={1} RootOffset={2}", index.n, index.PageOffset, rootPageOffset);
+
+        if (rootPageOffset > -1)
         {
-            int pointer = 0;
-
-            index.height = Serializator.ReadInt32(data, ref pointer);
-            index.n = Serializator.ReadInt32(data, ref pointer);
-
-            int rootPageOffset = Serializator.ReadInt32(data, ref pointer);
-
-            Console.WriteLine("NumberNodes={0} PageOffset={1} RootOffset={2}", index.n, index.PageOffset, rootPageOffset);
-
-            if (rootPageOffset > -1)
-            {
-                BTreeNode? node = await GetNode(tablespace, rootPageOffset);
-                if (node is not null)
-                    index.root = node;
-            }
-        }
+            BTreeNode? node = await GetNode(tablespace, rootPageOffset);
+            if (node is not null)
+                index.root = node;
+        }        
 
         /*foreach (Entry entry in index.EntriesTraverse())
         {
@@ -45,7 +45,7 @@ public sealed class IndexReader
 
     private async Task<BTreeNode?> GetNode(BufferPoolHandler tablespace, int offset)
     {
-        Memory<byte> data = await tablespace.GetDataFromPage(offset);
+        byte[] data = await tablespace.GetDataFromPageAsBytes(offset);
         if (data.Length == 0)
             return null;
 

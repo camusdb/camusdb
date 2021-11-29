@@ -24,7 +24,7 @@ public class QueryExecutor
                 continue;
             }
 
-            byte[] data = await tablespace.GetDataFromPage(entry.Value.Value);
+            byte[] data = await tablespace.GetDataFromPageAsBytes(entry.Value.Value);
             if (data.Length == 0)
             {
                 Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
@@ -51,7 +51,7 @@ public class QueryExecutor
             return rows;
         }
 
-        byte[] data = await tablespace.GetDataFromPage(pageOffset.Value);
+        byte[] data = await tablespace.GetDataFromPageAsBytes(pageOffset.Value);
         if (data.Length == 0)
         {
             Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
@@ -67,6 +67,15 @@ public class QueryExecutor
     {
         //catalogs.GetTableSchema(database, tableName);
 
+        /*Console.WriteLine(data.Length);
+
+        Console.WriteLine("***");
+
+        for (int i = 0; i < data.Length; i++)
+            Console.WriteLine(data[i]);
+
+        Console.WriteLine("***");*/
+
         int pointer = 0;
 
         int type = Serializator.ReadType(data, ref pointer);
@@ -75,39 +84,54 @@ public class QueryExecutor
         type = Serializator.ReadType(data, ref pointer);
         int rowId = Serializator.ReadInt32(data, ref pointer);
 
-        List<ColumnValue> columns = new();
+        List<ColumnValue> columnValues = new();
 
-        foreach (TableColumnSchema columnSchema in tableSchema.Columns!)
+        List<TableColumnSchema> columns = tableSchema.Columns!;
+
+        for (int i = 0; i < columns.Count; i++)
         {
             int value;
+            TableColumnSchema column = columns[i];
 
-            switch (columnSchema.Type)
+            //Console.WriteLine("{0} {1}", column.Name, column.Type);
+
+            switch (column.Type)
             {
                 case ColumnType.Id:
+                    int r = pointer;
                     Serializator.ReadType(data, ref pointer);
                     value = Serializator.ReadInt32(data, ref pointer);
-                    columns.Add(new(ColumnType.Id, value.ToString()));
+                    columnValues.Add(new(ColumnType.Id, value.ToString()));
+                    Console.WriteLine(pointer - r);
                     break;
 
                 case ColumnType.Integer:
+                    int rx = pointer;
                     Serializator.ReadType(data, ref pointer);
                     value = Serializator.ReadInt32(data, ref pointer);
-                    columns.Add(new(ColumnType.Integer, value.ToString()));
+                    columnValues.Add(new(ColumnType.Integer, value.ToString()));
+                    Console.WriteLine(pointer - rx);
                     break;
 
                 case ColumnType.String:
-                    Serializator.ReadType(data, ref pointer);
+                    Console.WriteLine("Type={0}", Serializator.ReadType(data, ref pointer));
                     int length = Serializator.ReadInt32(data, ref pointer);
-                    columns.Add(new(ColumnType.String, Serializator.ReadString(data, length, ref pointer)));
+                    columnValues.Add(new(ColumnType.String, Serializator.ReadString(data, length, ref pointer)));
                     break;
 
                 case ColumnType.Bool:
                     Serializator.ReadType(data, ref pointer);
-                    columns.Add(new(ColumnType.String, Serializator.ReadBool(data, ref pointer) ? "true" : "false"));
+                    columnValues.Add(new(ColumnType.String, Serializator.ReadBool(data, ref pointer) ? "true" : "false"));
                     break;
+
+                default:
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.UnknownType,
+                        "Unknown type " + column.Type
+                    );
             }
         }
 
-        return columns;
+        return columnValues;
     }
 }

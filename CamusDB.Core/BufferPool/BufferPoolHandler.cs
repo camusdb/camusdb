@@ -1,4 +1,11 @@
 ﻿
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.IO.MemoryMappedFiles;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.BufferPool.Models;
@@ -93,13 +100,27 @@ public sealed class BufferPoolHandler
         //Console.WriteLine("Read {0} bytes from page {1}", length, offset);
 
         if (length == 0)
+            return Array.Empty<byte>();        
+
+        return memoryPage.Buffer.AsMemory(4, length > PageSize ? PageSize : length);
+    }
+
+    public async Task<byte[]> GetDataFromPageAsBytes(int offset)
+    {
+        BufferPage memoryPage = await ReadPage(offset);
+
+        int pointer = 0;
+
+        int length = Serializator.ReadInt32(memoryPage.Buffer, ref pointer);
+
+        //Console.WriteLine("Read {0} bytes from page {1}", length, offset);
+
+        if (length == 0)
             return Array.Empty<byte>();
 
-        //byte[] data = new byte[length];
-        //Buffer.BlockCopy(memoryPage.Buffer, 4, data, 0, length > PageSize ? PageSize : length);
-        //return data;
-
-        return memoryPage.Buffer.AsMemory(0, length > PageSize ? PageSize : length);
+        byte[] data = new byte[length];
+        Buffer.BlockCopy(memoryPage.Buffer, 4, data, 0, length > PageSize ? PageSize : length);
+        return data;
     }
 
     public async Task WritePages(int offset, byte[] data)
