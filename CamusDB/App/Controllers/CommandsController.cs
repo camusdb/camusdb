@@ -91,7 +91,7 @@ public sealed class CommandsController : ControllerBase
             values: request.Values ?? new ColumnValue[0]
         );
 
-        Console.WriteLine(ticket.Values.Length);
+        //Console.WriteLine(ticket.Values.Length);
 
         try
         {

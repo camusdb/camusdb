@@ -1,11 +1,10 @@
 ﻿
-using System.Collections.Concurrent;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public class DatabaseDescriptor
+public sealed class DatabaseDescriptor
 {
     public string? Name { get; set; }
 

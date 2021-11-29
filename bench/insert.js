@@ -16,18 +16,18 @@ async function f()
         values: [
           {
             "type": 0, // id
-            "value": "1501",
+            "value": "1502",
           },
           {
             "type": 1, // integer
             "value": "1234",
           },
           {
-            "type": 3, // string
+            "type": 2, // string
             "value": "some string",
           },
           {
-            "type": 4, // bool
+            "type": 3, // bool
             "value": "false",
           }
         ]

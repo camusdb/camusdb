@@ -2,11 +2,11 @@
 using System.Diagnostics;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.BufferPool;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -96,14 +96,17 @@ public sealed class RowInserter
         int? pageOffset = pkIndex.Get(primaryKeyValue);
 
         if (pageOffset is not null)
-            throw new CamusDBException(CamusDBErrorCodes.DuplicatePrimaryKey, "PK violation trying to insert key " + primaryKeyValue);
+            throw new CamusDBException(
+                CamusDBErrorCodes.DuplicatePrimaryKey,
+                "Duplicate entry for key " + table.Name + " " + primaryKeyValue
+            );
 
         return primaryKeyValue;
     }
 
     public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
-        int rowId = 0, dataPage = 0, primaryKeyValue = 0;
+        int rowId = 0, dataPage = 0;
 
         var timer = new Stopwatch();
         timer.Start();
@@ -116,9 +119,9 @@ public sealed class RowInserter
         {
             await pkIndex.WriteLock.WaitAsync();
 
-            primaryKeyValue = CheckPrimaryKeyViolations(table, pkIndex, ticket);
+            int primaryKeyValue = CheckPrimaryKeyViolations(table, pkIndex, ticket);
 
-            // create buffer for new record
+            // allocate pages and rowid 
             rowId = await tablespace.GetNextRowId();
             dataPage = await tablespace.GetNextFreeOffset();
 
