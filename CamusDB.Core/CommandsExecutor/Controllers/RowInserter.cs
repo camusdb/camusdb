@@ -6,6 +6,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.BufferPool;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -13,7 +14,12 @@ public sealed class RowInserter
 {
     private readonly IndexSaver indexSaver = new();
 
-    private byte[] GetRowBuffer(TableDescriptor table, InsertTicket ticket, int rowId, ref int primaryKeyValue)
+    private int GetPrimaryKey(TableDescriptor table, InsertTicket ticket)
+    {
+        return int.Parse(ticket.Values[0].Value);
+    }
+
+    private byte[] GetRowBuffer(TableDescriptor table, InsertTicket ticket, int rowId)
     {
         int length = 10; // 1 type + 4 schemaVersion + 1 type + 4 rowId
 
@@ -52,7 +58,7 @@ public sealed class RowInserter
 
         foreach (ColumnValue columnValue in ticket.Values)
         {
-            int value = 0;
+            int value;
 
             switch (columnValue.Type)
             {
@@ -60,7 +66,6 @@ public sealed class RowInserter
                     value = int.Parse(columnValue.Value);
                     Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
                     Serializator.WriteInt32(rowBuffer, value, ref pointer);
-                    primaryKeyValue = value;
                     break;
 
                 case ColumnType.Integer:
@@ -84,32 +89,54 @@ public sealed class RowInserter
         return rowBuffer;
     }
 
-    public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
+    private int CheckPrimaryKeyViolations(TableDescriptor table, BTree pkIndex, InsertTicket ticket)
     {
-        var timer = new Stopwatch();
-        timer.Start();
+        int primaryKeyValue = GetPrimaryKey(table, ticket);
 
-        // check primary key violations
-
-        int rowId = await database.TableSpace!.GetNextRowId();
-
-        int primaryKeyValue = 0;
-
-        byte[] rowBuffer = GetRowBuffer(table, ticket, rowId, ref primaryKeyValue);
-
-        int? pageOffset = table.Indexes["pk"].Get(primaryKeyValue);
+        int? pageOffset = pkIndex.Get(primaryKeyValue);
 
         if (pageOffset is not null)
             throw new CamusDBException(CamusDBErrorCodes.DuplicatePrimaryKey, "PK violation trying to insert key " + primaryKeyValue);
 
+        return primaryKeyValue;
+    }
+
+    public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
+    {
+        int rowId = 0, dataPage = 0, primaryKeyValue = 0;
+
+        var timer = new Stopwatch();
+        timer.Start();
+
+        BufferPoolHandler tablespace = database.TableSpace!;
+
+        BTree pkIndex = table.Indexes["pk"];
+
+        try
+        {
+            await pkIndex.WriteLock.WaitAsync();
+
+            primaryKeyValue = CheckPrimaryKeyViolations(table, pkIndex, ticket);
+
+            // create buffer for new record
+            rowId = await tablespace.GetNextRowId();
+            dataPage = await tablespace.GetNextFreeOffset();
+
+            await indexSaver.NoLockingSave(tablespace, pkIndex, primaryKeyValue, dataPage);
+        }
+        finally
+        {
+            pkIndex.WriteLock.Release();
+        }
+
         // Insert data to a free page and update indexes
 
-        int dataPage = await database.TableSpace!.WriteDataToFreePage(rowBuffer);
+        byte[] rowBuffer = GetRowBuffer(table, ticket, rowId);        
+        await tablespace.WriteDataToPage(dataPage, rowBuffer);
 
-        await indexSaver.Save(database.TableSpace, table.Rows, rowId, dataPage);
+        await indexSaver.Save(tablespace, table.Rows, rowId, dataPage);
 
-        foreach (KeyValuePair<string, BTree> index in table.Indexes)
-            await indexSaver.Save(database.TableSpace, index.Value, primaryKeyValue, dataPage);
+        // @todo update other indexes here
 
         timer.Stop();
 

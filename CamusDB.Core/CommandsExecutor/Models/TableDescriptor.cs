@@ -12,5 +12,7 @@ public sealed class TableDescriptor
 
     public BTree Rows { get; set; } = new(-1);
 
-    public Dictionary<string, BTree> Indexes { get; set; } = new();    
+    public Dictionary<string, BTree> Indexes { get; set; } = new();
+
+    //public SemaphoreSlim WriteLock { get; } = new(1, 1);
 }

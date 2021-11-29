@@ -1,6 +1,8 @@
 
 import fetch from "node-fetch";
 
+let id = 1000;
+
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
 
 async function f()
@@ -10,7 +12,25 @@ async function f()
     let request = {
         databaseName: "test",
         tableName: "my_table",
-        columns: ["id", "name", "age", "enabled"]
+        columns: ["id", "name", "age", "enabled"],
+        values: [
+          {
+            "type": 0, // id
+            "value": "1501",
+          },
+          {
+            "type": 1, // integer
+            "value": "1234",
+          },
+          {
+            "type": 3, // string
+            "value": "some string",
+          },
+          {
+            "type": 4, // bool
+            "value": "false",
+          }
+        ]
     };
 
     const response = await fetch('https://localhost:7141/insert', {

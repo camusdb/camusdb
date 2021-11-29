@@ -88,14 +88,10 @@ public sealed class CommandsController : ControllerBase
             database: request.DatabaseName ?? "",
             name: request.TableName ?? "",
             columns: request.Columns ?? new string[0],
-            new ColumnValue[]
-            {
-                new ColumnValue(ColumnType.Id, system.Next(1000000, 9999999).ToString()),
-                new ColumnValue(ColumnType.String, "some string value"),
-                new ColumnValue(ColumnType.Integer, system.Next(1000000, 9999999).ToString()),
-                new ColumnValue(ColumnType.Bool, "true")
-            }
+            values: request.Values ?? new ColumnValue[0]
         );
+
+        Console.WriteLine(ticket.Values.Length);
 
         try
         {
