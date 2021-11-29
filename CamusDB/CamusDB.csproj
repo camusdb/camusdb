@@ -27,6 +27,7 @@
     <None Remove="Library\CommandsExecutor\Controllers\" />
     <None Remove="App\Models\" />
     <None Remove="Library\Util\Trees\" />
+    <None Remove="Library\CommandsExecutor\Models\Tickets\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="App\" />
@@ -46,6 +47,7 @@
     <Folder Include="Library\CommandsExecutor\Controllers\" />
     <Folder Include="App\Models\" />
     <Folder Include="Library\Util\Trees\" />
+    <Folder Include="Library\CommandsExecutor\Models\Tickets\" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="CodeExMachina.BTree" Version="0.2.0" />

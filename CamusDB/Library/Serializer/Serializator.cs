@@ -8,7 +8,7 @@ using CamusDB.Library.Serializer.Models;
 
 namespace CamusDB.Library.Serializer;
 
-public class Serializator
+public sealed class Serializator
 {
     public static void Serialize(byte[] buffer, TableSchema tableSchema)
     {
@@ -90,7 +90,7 @@ public class Serializator
         }
         else
         {
-            byteType = (byteType & 0xf) | (SerializatorTypes.TYPE_EXTENDED << 4);
+            byteType = (byteType & 0xf) | (SerializatorTypes.TypeExtended << 4);
             byteType = (byteType & 0xf0) | (type - 0xf);
         }
 
@@ -138,6 +138,15 @@ public class Serializator
         WriteInt8(buffer, typedBool, ref pointer);
     }
 
+    public static int ReadType(byte[] buffer, ref int pointer)
+    {
+        int typeByte = buffer[pointer++];
+        int type = (typeByte & 0xf0) >> 4;
+        if (type == SerializatorTypes.TypeExtended)
+            return (typeByte & 0xf) + 0xf;
+        return type;
+    }
+
     public static int ReadInt32(byte[] buffer, ref int pointer)
     {
         int number = buffer[pointer++];
@@ -145,6 +154,21 @@ public class Serializator
         number += (buffer[pointer++] << 16);
         number += (buffer[pointer++] << 24);
         return number;
+    }
+
+    public static string ReadString(byte[] buffer, int length, ref int pointer)
+    {
+        byte[] bytes = new byte[length];
+        Buffer.BlockCopy(buffer, pointer, bytes, 0, length);
+
+        string str = Encoding.UTF8.GetString(bytes);        
+        pointer += length;
+        return str;
+    }
+
+    public static bool ReadBool(byte[] buffer, ref int pointer)
+    {
+        return (buffer[pointer - 1] & 0xf) == 1;
     }
 }
 

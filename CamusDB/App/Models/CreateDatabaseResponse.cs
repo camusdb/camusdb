@@ -1,7 +1,7 @@
 ﻿
 namespace CamusDB.App.Models;
 
-public class CreateDatabaseResponse
+public sealed class CreateDatabaseResponse
 {
     public string Status { get; set; }
 

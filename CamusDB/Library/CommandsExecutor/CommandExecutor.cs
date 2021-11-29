@@ -6,16 +6,17 @@ using CamusDB.Library.Serializer;
 using System.Collections.Generic;
 using System.IO.MemoryMappedFiles;
 using CamusDB.Library.Catalogs.Models;
+using CamusDB.Library.Serializer.Models;
 using CamusDB.Library.BufferPool.Models;
 using CamusDB.Library.CommandsExecutor.Models;
 using CamusDB.Library.CommandsExecutor.Controllers;
-using CamusDB.Library.Serializer.Models;
+using CamusDB.Library.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Library.CommandsExecutor;
 
 public class CommandExecutor
 {
-    private const int InitialTableSpaceSize = 1024 * 4096; // 1024 blocks
+    private const int InitialTableSpaceSize = 1024 * 4096; // 4096 blocks of 1024 size
    
     private CatalogsManager Catalogs { get; set; }
 
@@ -24,6 +25,8 @@ public class CommandExecutor
     private readonly TableOpener tableOpener = new();
 
     private readonly RowInserter rowInserter = new();
+
+    private readonly QueryExecutor queryExecutor = new();
 
     public CommandExecutor(CatalogsManager catalogsManager)
     {
@@ -72,5 +75,15 @@ public class CommandExecutor
         await rowInserter.Insert(database, table, ticket);
 
         return true;
+    }
+
+    public async Task<List<List<ColumnValue>>> Query(QueryTicket ticket)
+    {
+        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
+        //return await Catalogs.CreateTable(descriptor, ticket);
+
+        TableDescriptor table = await tableOpener.Open(database, Catalogs, ticket.TableName);
+
+        return await queryExecutor.Query(database, table, ticket);        
     }
 }
