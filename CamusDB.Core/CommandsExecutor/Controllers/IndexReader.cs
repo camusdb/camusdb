@@ -45,7 +45,7 @@ public sealed class IndexReader
 
     private async Task<BTreeNode?> GetNode(BufferPoolHandler tablespace, int offset)
     {
-        byte[] data = await tablespace.GetDataFromPage(offset);
+        Memory<byte> data = await tablespace.GetDataFromPage(offset);
         if (data.Length == 0)
             return null;
 

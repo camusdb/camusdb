@@ -82,7 +82,7 @@ public sealed class BufferPoolHandler
         return page;
     }
 
-    public async Task<byte[]> GetDataFromPage(int offset)
+    public async Task<ReadOnlyMemory<byte>> GetDataFromPage(int offset)
     {
         BufferPage memoryPage = await ReadPage(offset);
 
@@ -95,9 +95,11 @@ public sealed class BufferPoolHandler
         if (length == 0)
             return Array.Empty<byte>();
 
-        byte[] data = new byte[length];
-        Buffer.BlockCopy(memoryPage.Buffer, 4, data, 0, length > PageSize ? PageSize : length);
-        return data;
+        //byte[] data = new byte[length];
+        //Buffer.BlockCopy(memoryPage.Buffer, 4, data, 0, length > PageSize ? PageSize : length);
+        //return data;
+
+        return memoryPage.Buffer.AsMemory(0, length > PageSize ? PageSize : length);
     }
 
     public async Task WritePages(int offset, byte[] data)

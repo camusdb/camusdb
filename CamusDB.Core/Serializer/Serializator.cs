@@ -155,6 +155,15 @@ public sealed class Serializator
         return number;
     }
 
+    public static int ReadInt32(Memory<byte> buffer, ref int pointer)
+    {
+        int number = buffer[pointer++];
+        number += (buffer[pointer++] << 8);
+        number += (buffer[pointer++] << 16);
+        number += (buffer[pointer++] << 24);
+        return number;
+    }
+
     public static string ReadString(byte[] buffer, int length, ref int pointer)
     {
         byte[] bytes = new byte[length];
