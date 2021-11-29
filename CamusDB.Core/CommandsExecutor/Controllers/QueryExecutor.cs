@@ -1,14 +1,9 @@
 ﻿
-using System.Diagnostics;
-using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.BufferPool.Models;
-using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -47,7 +42,7 @@ public class QueryExecutor
         BufferPoolHandler tablespace = database.TableSpace!;
 
         List<List<ColumnValue>> rows = new();
-        
+
         int? pageOffset = table.Indexes["pk"].Get(ticket.Id);
 
         if (pageOffset is null)
@@ -102,13 +97,13 @@ public class QueryExecutor
 
                 case ColumnType.String:
                     Serializator.ReadType(data, ref pointer);
-                    int length = Serializator.ReadInt32(data, ref pointer);                    
+                    int length = Serializator.ReadInt32(data, ref pointer);
                     columns.Add(new(ColumnType.String, Serializator.ReadString(data, length, ref pointer)));
                     break;
 
                 case ColumnType.Bool:
                     Serializator.ReadType(data, ref pointer);
-                    columns.Add(new(ColumnType.String, Serializator.ReadBool(data, ref pointer) ? "true" : "false"));                    
+                    columns.Add(new(ColumnType.String, Serializator.ReadBool(data, ref pointer) ? "true" : "false"));
                     break;
             }
         }

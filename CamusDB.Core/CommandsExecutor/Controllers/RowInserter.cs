@@ -1,14 +1,10 @@
 ﻿
 using System.Diagnostics;
-using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -52,7 +48,7 @@ public sealed class RowInserter
         Serializator.WriteInt32(rowBuffer, table.Schema!.Version, ref pointer); // schema version
 
         Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
-        Serializator.WriteInt32(rowBuffer, rowId, ref pointer); // row Id        
+        Serializator.WriteInt32(rowBuffer, rowId, ref pointer); // row Id
 
         foreach (ColumnValue columnValue in ticket.Values)
         {
@@ -117,11 +113,11 @@ public sealed class RowInserter
 
         timer.Stop();
 
-        TimeSpan timeTaken = timer.Elapsed;        
+        TimeSpan timeTaken = timer.Elapsed;
 
         /*foreach (KeyValuePair<string, BTree> index in table.Indexes)
         {
-            foreach (BTreeEntry entry in index.Value.EntriesTraverse())            
+            foreach (BTreeEntry entry in index.Value.EntriesTraverse())
                 Console.WriteLine("Index Key={0} PageOffset={1}", entry.Key, entry.Value);
         }*/
 
