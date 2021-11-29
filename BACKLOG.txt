@@ -1,0 +1,20 @@
+- Return modified nodes in BTree.Put to avoid full traversal
+- Support additional types in BTree such as string
+
+- Receive POST parameters for create-db
+- Receive POST parameters for create-table
+- Receive POST parameters for query
+
+- Allow to define multiple unique indexes
+- Implement multi indexes
+- Flush mapped files every x seconds
+- Validate not null fields
+- Load x pages automatically in memory
+- Make columns in insert optional, use schema when ommited
+- Support multiple items per page to avoid storage waste
+
+- Validate insert ticket
+- Validate table names
+- Validate column names
+- Validate database names
+
