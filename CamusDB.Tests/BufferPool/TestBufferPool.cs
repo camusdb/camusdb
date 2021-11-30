@@ -7,7 +7,6 @@ using CamusDB.Core.BufferPool;
 using System.IO.MemoryMappedFiles;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
-using CamusDB.Core.CommandsExecutor.Controllers;
 
 namespace CamusDB.Tests;
 
