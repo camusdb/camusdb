@@ -7,9 +7,7 @@ public sealed class BufferPage
 {
     public int Offset { get; }
 
-    public byte[] Buffer { get; }
-
-    public Guard Initialized { get; } = new();
+    public byte[] Buffer { get; }    
 
     public DateTime LastAccessTime { get; set; }
 

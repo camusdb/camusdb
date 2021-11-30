@@ -98,23 +98,23 @@ public class QueryExecutor
             switch (column.Type)
             {
                 case ColumnType.Id:
-                    int r = pointer;
+                    //int r = pointer;
                     Serializator.ReadType(data, ref pointer);
                     value = Serializator.ReadInt32(data, ref pointer);
                     columnValues.Add(new(ColumnType.Id, value.ToString()));
-                    Console.WriteLine(pointer - r);
+                    //Console.WriteLine(pointer - r);
                     break;
 
                 case ColumnType.Integer:
-                    int rx = pointer;
+                    //int rx = pointer;
                     Serializator.ReadType(data, ref pointer);
                     value = Serializator.ReadInt32(data, ref pointer);
                     columnValues.Add(new(ColumnType.Integer, value.ToString()));
-                    Console.WriteLine(pointer - rx);
+                    //Console.WriteLine(pointer - rx);
                     break;
 
                 case ColumnType.String:
-                    Console.WriteLine("Type={0}", Serializator.ReadType(data, ref pointer));
+                    //Console.WriteLine("Type={0}", Serializator.ReadType(data, ref pointer));
                     int length = Serializator.ReadInt32(data, ref pointer);
                     columnValues.Add(new(ColumnType.String, Serializator.ReadString(data, length, ref pointer)));
                     break;

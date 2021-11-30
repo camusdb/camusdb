@@ -32,7 +32,7 @@ async function f()
           },
           "name": {
             "type": 3, // string
-            "value": "some string",
+            "value": "some string".repeat(512),
           },
           "enabled": {
             "type": 4, // bool

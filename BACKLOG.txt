@@ -5,6 +5,7 @@
 - Receive POST parameters for create-table
 - Receive POST parameters for query
 
+- Validate types from insert ticket against schema
 - Calculate page checksums read/write
 - Allow to define multiple unique indexes
 - Implement multi indexes
