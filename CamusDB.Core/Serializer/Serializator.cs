@@ -81,7 +81,7 @@ public sealed class Serializator
         if (number < 0x7FFF)
         {
             WriteType(buffer, SerializatorTypes.TypeInteger16, ref pointer);
-            WriteInt16ToBuffer(buffer, number, ref pointer);
+            WriteInt16(buffer, number, ref pointer);
             return true;
         }
 
@@ -112,7 +112,7 @@ public sealed class Serializator
         buffer[pointer++] = (byte)((number >> 0) & 0xff);
     }
 
-    public static void WriteInt16ToBuffer(byte[] buffer, int number, ref int pointer)
+    public static void WriteInt16(byte[] buffer, int number, ref int pointer)
     {
         //CheckBufferOverflow(2);
         buffer[pointer + 0] = (byte)((number >> 0) & 0xff);

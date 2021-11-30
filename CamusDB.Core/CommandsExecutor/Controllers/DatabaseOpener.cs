@@ -85,20 +85,16 @@ public sealed class DatabaseOpener
     {
         ReadOnlyMemory<byte> data = await databaseDescriptor.TableSpace!.GetDataFromPage(0);
 
-        if (data.Length == 0) // tablespace is not initialized
-        {
-            // write tablespace header
-            BufferPage page = await databaseDescriptor.TableSpace.ReadPage(0);
+        if (data.Length != 0) // tablespace is initialized?
+            return;
+        
+        // write tablespace header
+        BufferPage page = await databaseDescriptor.TableSpace.ReadPage(0);
 
-            int pointer = 0;
-            Serializator.WriteInt32(page.Buffer, 4, ref pointer); // size of data (4 integer)
-            Serializator.WriteInt32(page.Buffer, 1, ref pointer); // next page offset
-            Serializator.WriteInt32(page.Buffer, 1, ref pointer); // next row id
+        databaseDescriptor.TableSpace.WriteTableSpaceHeader(page);
+        databaseDescriptor.TableSpace!.FlushPage(page); // @todo make this atomic
 
-            databaseDescriptor.TableSpace!.FlushPage(page); // @todo make this atomic
-
-            Console.WriteLine("Data tablespaces initialized");
-        }
+        Console.WriteLine("Data tablespaces initialized");        
     }
 
     private static async Task LoadDatabaseSystemSpace(DatabaseDescriptor database)
