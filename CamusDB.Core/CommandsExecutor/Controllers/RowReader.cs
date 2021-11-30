@@ -77,7 +77,7 @@ public sealed class RowReader
 
                 case ColumnType.Bool:
                     Serializator.ReadType(data, ref pointer);
-                    columnValues.Add(new(ColumnType.String, Serializator.ReadBool(data, ref pointer) ? "true" : "false"));
+                    columnValues.Add(new(ColumnType.Bool, Serializator.ReadBool(data, ref pointer) ? "true" : "false"));
                     break;
 
                 default:

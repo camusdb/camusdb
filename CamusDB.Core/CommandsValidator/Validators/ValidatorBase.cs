@@ -7,7 +7,7 @@ internal abstract class ValidatorBase
     {
         for (int i = 0; i < name.Length; i++)
         {
-            char ch = name[i];            
+            char ch = name[i];
 
             if (ch >= 'a' && ch <= 'z')
                 continue;
@@ -19,7 +19,7 @@ internal abstract class ValidatorBase
                 continue;
 
             if (ch == '_')
-                continue;            
+                continue;
 
             return false;
         }
