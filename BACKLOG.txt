@@ -5,6 +5,7 @@
 - Receive POST parameters for create-table
 - Receive POST parameters for query
 
+- Get consistent reads of pages 
 - Validate types from insert ticket against schema
 - Calculate page checksums read/write
 - Allow to define multiple unique indexes
@@ -14,8 +15,7 @@
 - Load x pages automatically in memory
 - Support multiple items per page to avoid storage waste
 - Implement real objectids
-- Write large objects to multiple pages
-- Read large objects from multiple pages
+- Replace large objects in the same pages used before instead of allocating new ones
 
 - Validate table names
 - Validate column names

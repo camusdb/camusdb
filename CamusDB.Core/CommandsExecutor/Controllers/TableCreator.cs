@@ -66,7 +66,7 @@ public sealed class TableCreator
 
             objects.Add(tableName, databaseObject);
 
-            await database.SystemSpace!.WritePages(SystemHeaderOffset, Serializator.Serialize(database.SystemSchema.Objects));
+            await database.SystemSpace!.WriteDataToPage(SystemHeaderOffset, Serializator.Serialize(database.SystemSchema.Objects));
 
             Console.WriteLine("Added table {0} to system, data table staring at {1}", tableName, pageOffset);
         }

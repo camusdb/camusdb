@@ -26,6 +26,8 @@ public sealed class BufferPoolHandler
 
     public const int LengthOffset = 2 + 4 * 2; // 2 version + 4 checksum + 4 next page + 4 data length
 
+    public const int NextPageOffset = 2 + 4 * 1; // 2 version + 4 checksum + 4 next page + 4 data length
+
     public const int RowIdOffset = 14;
 
     public const int FreePageOffset = 10;
@@ -52,7 +54,7 @@ public sealed class BufferPoolHandler
 
         try
         {
-            await semaphore.WaitAsync();
+            await semaphore.WaitAsync(); // prevent other readers from load the same page
 
             if (pages.TryGetValue(offset, out page))
                 return page;
@@ -76,7 +78,7 @@ public sealed class BufferPoolHandler
 
         try
         {
-            await semaphore.WaitAsync();
+            await semaphore.WaitAsync(); // prevent other readers from load the same page
 
             if (pages.TryGetValue(offset, out page))
                 return page;
@@ -84,7 +86,7 @@ public sealed class BufferPoolHandler
             page = new BufferPage(offset, new byte[PageSize]);
             pages.Add(offset, page);
 
-            await page.Semaphore.WaitAsync();
+            await page.Semaphore.WaitAsync(); // get a consistent read of the page's buffer
 
             accessor.ReadArray<byte>(PageSize * offset, page.Buffer, 0, PageSize);
         }
@@ -97,80 +99,57 @@ public sealed class BufferPoolHandler
         }
 
         return page;
+    }    
+
+    private async Task<int> GetDataLength(int offset)
+    {
+        int length = 0;
+
+        do
+        {
+            BufferPage memoryPage = await ReadPage(offset);
+
+            int pointer = LengthOffset;
+            length += Serializator.ReadInt32(memoryPage.Buffer, ref pointer);
+
+            pointer = NextPageOffset;
+            offset = Serializator.ReadInt32(memoryPage.Buffer, ref pointer);
+
+        } while (offset > 0);
+
+        return length;
     }
 
-    public async Task<ReadOnlyMemory<byte>> GetDataFromPage(int offset)
+    public async Task<byte[]> GetDataFromPage(int offset)
     {
-        BufferPage memoryPage = await ReadPage(offset);
-
-        int pointer = LengthOffset;
-
-        int length = Serializator.ReadInt32(memoryPage.Buffer, ref pointer);
-
-        //Console.WriteLine("Read {0} bytes from page {1}", length, offset);
-
-        if (length == 0)
-            return Array.Empty<byte>();
-
-        return memoryPage.Buffer.AsMemory(DataOffset, length > PageSize ? PageSize : length);
-    }
-
-    public async Task<byte[]> GetDataFromPageAsBytes(int offset)
-    {
-        BufferPage memoryPage = await ReadPage(offset);
-
-        int pointer = LengthOffset;
-
-        int length = Serializator.ReadInt32(memoryPage.Buffer, ref pointer);
-
-        //Console.WriteLine("Read {0} bytes from page {1}", length, offset);
+        int length = await GetDataLength(offset);
 
         if (length == 0)
             return Array.Empty<byte>();
 
         byte[] data = new byte[length];
-        Buffer.BlockCopy(memoryPage.Buffer, DataOffset, data, 0, length > PageSize ? PageSize : length);
-        return data;
-    }
 
-    public async Task WritePages(int offset, byte[] data)
-    {
-        int numberPages = (int)Math.Ceiling(data.Length / ((double)PageSize));
+        int bufferOffset = 0;
 
-        int pointer = 0;
-        int remaining = data.Length;
-
-        for (int i = offset; i < (offset + numberPages); i++)
+        do
         {
-            BufferPage page = await GetPage(i);
+            BufferPage memoryPage = await ReadPage(offset);
 
-            try
-            {
-                await page.Semaphore.WaitAsync();
+            int pointer = LengthOffset;
+            int dataLength = Serializator.ReadInt32(memoryPage.Buffer, ref pointer);
 
-                if (i == offset) // fist page
-                {
-                    pointer = WritePageHeader(page, data.Length, i + 1);
-                    Buffer.BlockCopy(data, 0, page.Buffer, DataOffset, remaining > PageSize ? PageSize : remaining);
-                }
-                else
-                {
-                    Buffer.BlockCopy(data, pointer, page.Buffer, 0, remaining > PageSize ? PageSize : remaining);
-                }
+            pointer = NextPageOffset;
+            offset = Serializator.ReadInt32(memoryPage.Buffer, ref pointer);
 
-                pointer += PageSize;
-                remaining -= PageSize;
+            Buffer.BlockCopy(memoryPage.Buffer, DataOffset, data, bufferOffset, dataLength);
+            bufferOffset += dataLength;
 
-                accessor.WriteArray<byte>(PageSize * page.Offset, page.Buffer, 0, PageSize);
-            }
-            finally
-            {
-                page.Semaphore.Release();
-            }
-        }
+            Console.WriteLine("Read {0} bytes from page {1}", dataLength, offset);
 
-        accessor.Flush();
-    }
+        } while (offset > 0);
+
+        return data;
+    }    
 
     public void FlushPage(BufferPage memoryPage)
     {
@@ -291,36 +270,18 @@ public sealed class BufferPoolHandler
             int length = ((data.Length - startOffset) + DataOffset) < PageSize ? (data.Length - startOffset) : (PageSize - DataOffset);
             int remaining = (data.Length - startOffset) - length;
 
-
-
             if (remaining > 0)
                 nextPage = await GetNextFreeOffset();
 
-            int pointer = WritePageHeader(page, data.Length - startOffset, nextPage);
+            int pointer = WritePageHeader(page, length, nextPage);            
 
-            /*Console.WriteLine("DataLength={0}", data.Length);
-            Console.WriteLine(length);
-            Console.WriteLine(pointer);
-            Console.WriteLine(PageSize);
-            Console.WriteLine(page.Buffer.Length);*/
+            Buffer.BlockCopy(data, startOffset, page.Buffer, pointer, length);
+            accessor.WriteArray<byte>(PageSize * offset, page.Buffer, 0, PageSize);
 
-            if (startOffset > 0)
-            {
-                Console.WriteLine("Another page is required {0} {1} {2}", startOffset, length, remaining);
-            }
-            else
-            {
-                Buffer.BlockCopy(data, 0, page.Buffer, pointer, length);
-                accessor.WriteArray<byte>(PageSize * offset, page.Buffer, 0, PageSize);
-            }
-
-            Console.WriteLine("Wrote {0} bytes to page {1}, remaining {2}, next page {3}", length, offset, remaining, nextPage);
+            Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);
 
             if (nextPage > 0)
-            {
-                Console.WriteLine("Another page is required");
                 await WriteDataToPage(nextPage, data, startOffset + length);
-            }
         }
         finally
         {

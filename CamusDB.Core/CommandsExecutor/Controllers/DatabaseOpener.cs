@@ -71,7 +71,7 @@ public sealed class DatabaseOpener
 
     private static async Task LoadDatabaseSchema(DatabaseDescriptor databaseDescriptor)
     {
-        ReadOnlyMemory<byte> data = await databaseDescriptor.SchemaSpace!.GetDataFromPage(0);
+        byte[] data = await databaseDescriptor.SchemaSpace!.GetDataFromPage(0);
 
         if (data.Length > 0)
             databaseDescriptor.Schema.Tables = Serializator.Unserialize<Dictionary<string, TableSchema>>(data);
@@ -83,7 +83,7 @@ public sealed class DatabaseOpener
 
     private static async Task LoadDatabaseTableSpace(DatabaseDescriptor databaseDescriptor)
     {
-        ReadOnlyMemory<byte> data = await databaseDescriptor.TableSpace!.GetDataFromPage(0);
+        byte[] data = await databaseDescriptor.TableSpace!.GetDataFromPage(0);
 
         if (data.Length != 0) // tablespace is initialized?
             return;
@@ -99,7 +99,7 @@ public sealed class DatabaseOpener
 
     private static async Task LoadDatabaseSystemSpace(DatabaseDescriptor database)
     {
-        ReadOnlyMemory<byte> data = await database.SystemSpace!.GetDataFromPage(0);
+        byte[] data = await database.SystemSpace!.GetDataFromPage(0);
 
         if (data.Length > 0)
             database.SystemSchema.Objects = Serializator.Unserialize<Dictionary<string, DatabaseObject>>(data);

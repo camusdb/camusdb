@@ -27,7 +27,7 @@ public sealed class CatalogsManager
 
             database.Schema.Tables.Add(ticket.Name, tableSchema);
 
-            await database.SchemaSpace!.WritePages(0, Serializator.Serialize(database.Schema.Tables));
+            await database.SchemaSpace!.WriteDataToPage(0, Serializator.Serialize(database.Schema.Tables));
 
             Console.WriteLine("Added table {0}", ticket.Name);
 
