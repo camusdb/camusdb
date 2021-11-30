@@ -16,6 +16,7 @@ Internal Features
  - Parallel processing of database operations using [Task Parallel Library (TPL)](https://docs.microsoft.com/en-us/dotnet/standard/parallel-programming/task-parallel-library-tpl)
  - [Memory-mapped files](https://en.wikipedia.org/wiki/Memory-mapped_file) to avoid double buffering
  - [B+Trees](https://en.wikipedia.org/wiki/B%2B_tree) to organize rows in storage and for unique/multi indexes
+ - Data integrity is checked computing [XXHash](https://cyan4973.github.io/xxHash/) checksums
 
 Requirements
 ------------

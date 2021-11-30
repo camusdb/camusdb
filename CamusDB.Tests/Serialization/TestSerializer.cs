@@ -48,9 +48,12 @@ public class TestSerializer
     }
 
     [Test]
-    public void TestSerializeInt8()
+    //[TestCase(-128)]
+    [TestCase(0)]
+    [TestCase(1)]
+    [TestCase(128)]
+    public void TestSerializeInt8(int writeValue)
     {
-        int writeValue = 2;
         byte[] buffer = new byte[SerializatorTypeSizes.TypeInteger8];
 
         int pointer = 0;
@@ -64,9 +67,13 @@ public class TestSerializer
     }
 
     [Test]
-    public void TestSerializeInt16()
+    [TestCase(-128)]
+    [TestCase(0)]
+    [TestCase(1)]
+    [TestCase(256)]
+    [TestCase(2048)]
+    public void TestSerializeInt16(int writeValue)
     {
-        int writeValue = 200;
         byte[] buffer = new byte[SerializatorTypeSizes.TypeInteger16];
 
         int pointer = 0;
@@ -80,10 +87,14 @@ public class TestSerializer
     }
 
     [Test]
-    public void TestSerializeInt32()
+    [TestCase(-128)]
+    [TestCase(0)]
+    [TestCase(1)]
+    [TestCase(256)]
+    [TestCase(2048)]
+    [TestCase(65512)]
+    public void TestSerializeInt32(int writeValue)
     {
-        int writeValue = 200000;
-
         byte[] buffer = new byte[SerializatorTypeSizes.TypeInteger32];
 
         int pointer = 0;
@@ -93,6 +104,26 @@ public class TestSerializer
         pointer = 0;
         int readValue = Serializator.ReadInt32(buffer, ref pointer);
         Assert.AreEqual(pointer, SerializatorTypeSizes.TypeInteger32);
+        Assert.AreEqual(readValue, writeValue);
+    }
+
+    [Test]    
+    [TestCase(0U)]
+    [TestCase(1U)]
+    [TestCase(256U)]
+    [TestCase(2048U)]
+    [TestCase(65512U)]    
+    public void TestSerializeUInt32(uint writeValue)
+    {
+        byte[] buffer = new byte[SerializatorTypeSizes.TypeUnsignedInteger32];
+
+        int pointer = 0;
+        Serializator.WriteUInt32(buffer, writeValue, ref pointer);
+        Assert.AreEqual(pointer, SerializatorTypeSizes.TypeUnsignedInteger32);
+
+        pointer = 0;
+        uint readValue = Serializator.ReadUInt32(buffer, ref pointer);
+        Assert.AreEqual(pointer, SerializatorTypeSizes.TypeUnsignedInteger32);
         Assert.AreEqual(readValue, writeValue);
     }
 

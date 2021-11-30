@@ -10,6 +10,7 @@ namespace CamusDB.Core
         public const string SystemSpaceCorrupt = "CADB0014";
 
         public const string InvalidInternalOperation = "CADB0099";
+        public const string InvalidPageChecksum = "CADB0098";
 
         public const string InvalidInput = "CADB0200";
         public const string UnknownType = "CADB0201";

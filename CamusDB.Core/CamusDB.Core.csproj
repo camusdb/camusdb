@@ -9,9 +9,11 @@
   <ItemGroup>
     <None Remove="CommandsValidator\" />
     <None Remove="CommandsValidator\Validators\" />
+    <None Remove="Util\Hashes\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="CommandsValidator\" />
     <Folder Include="CommandsValidator\Validators\" />
+    <Folder Include="Util\Hashes\" />
   </ItemGroup>
 </Project>

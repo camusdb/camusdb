@@ -10,9 +10,28 @@ using System.IO.MemoryMappedFiles;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
+using CamusDB.Core.Util.Hashes;
 
 namespace CamusDB.Core.BufferPool;
 
+/*
+ * BufferPoolHandler
+ * 
+ * Organizes a memory-mapped disk file in memory pages. Pages are loaded on demand
+ * and are organized in the following layout:
+ * 
+ * +--------------------+
+ * | version (2 bytes)  |
+ * +--------------------+--------------------+ 
+ * | checksum (4 bytes)                      |
+ * +-----------------------------------------+ 
+ * | next page offset (4 bytes)              |
+ * +-----------------------------------------+ 
+ * | data length (4 bytes)                   |
+ * +-----------------------------------------+
+ * | data                                    |
+ * +-----------------------------------------+
+ */
 public sealed class BufferPoolHandler : IDisposable
 {    
     private readonly MemoryMappedFile memoryFile;
@@ -115,6 +134,7 @@ public sealed class BufferPoolHandler : IDisposable
         byte[] data = new byte[length];
 
         int bufferOffset = 0;
+        uint checksum = 0;
 
         do
         {
@@ -125,6 +145,22 @@ public sealed class BufferPoolHandler : IDisposable
 
             pointer = Config.NextPageOffset;
             offset = Serializator.ReadInt32(memoryPage.Buffer, ref pointer);
+
+            pointer = Config.NextPageOffset;
+            checksum = Serializator.ReadUInt32(memoryPage.Buffer, ref pointer);
+
+            if (checksum > 0) // check checksum only if available
+            {
+                uint dataChecksum = XXHash.Compute(memoryPage.Buffer, Config.DataOffset, dataLength);
+
+                Console.WriteLine("{0} {1} {2}", checksum, dataChecksum, dataLength);
+
+                if (dataChecksum != checksum)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidPageChecksum,
+                        "Page has an invalid data checksum"
+                    );
+            }
 
             Buffer.BlockCopy(memoryPage.Buffer, Config.DataOffset, data, bufferOffset, dataLength);
             bufferOffset += dataLength;
@@ -146,19 +182,19 @@ public sealed class BufferPoolHandler : IDisposable
     {
         int pointer = 0;
         Serializator.WriteInt16(page.Buffer, Config.PageLayoutVersion, ref pointer); // layout version (2 byte integer)
-        Serializator.WriteInt32(page.Buffer, 0, ref pointer); // checksum (4 bytes integer)                
-        Serializator.WriteInt32(page.Buffer, 8, ref pointer); // data length (4 bytes integer)
-        Serializator.WriteInt32(page.Buffer, 1, ref pointer); // first page
-        Serializator.WriteInt32(page.Buffer, 1, ref pointer); // first row id
+        Serializator.WriteUInt32(page.Buffer, 0, ref pointer); // checksum (4 bytes integer)                
+        Serializator.WriteInt32(page.Buffer, 8, ref pointer);  // data length (4 bytes integer)
+        Serializator.WriteInt32(page.Buffer, 1, ref pointer);  // first page
+        Serializator.WriteInt32(page.Buffer, 1, ref pointer);  // first row id
     }
 
-    public int WritePageHeader(BufferPage page, int length, int nextPage)
+    public int WritePageHeader(BufferPage page, int length, int nextPage, uint checksum)
     {
         int pointer = 0;
         Serializator.WriteInt16(page.Buffer, Config.PageLayoutVersion, ref pointer); // layout version (2 byte integer)
-        Serializator.WriteInt32(page.Buffer, 0, ref pointer); // checksum (4 bytes integer)
-        Serializator.WriteInt32(page.Buffer, nextPage, ref pointer); // next page (4 bytes integer)
-        Serializator.WriteInt32(page.Buffer, length, ref pointer); // data length (4 bytes integer)        
+        Serializator.WriteUInt32(page.Buffer, checksum, ref pointer);                       // checksum (4 bytes integer)
+        Serializator.WriteInt32(page.Buffer, nextPage, ref pointer);                 // next page (4 bytes integer)
+        Serializator.WriteInt32(page.Buffer, length, ref pointer);                   // data length (4 bytes integer)        
         return pointer;
     }
 
@@ -251,9 +287,7 @@ public sealed class BufferPoolHandler : IDisposable
 
         try
         {
-            int nextPage = 0;
-
-            // @todo calculate checksum
+            int nextPage = 0;            
 
             await page.Semaphore.WaitAsync();
 
@@ -263,7 +297,11 @@ public sealed class BufferPoolHandler : IDisposable
             if (remaining > 0)
                 nextPage = await GetNextFreeOffset();
 
-            int pointer = WritePageHeader(page, length, nextPage);
+            uint checksum = XXHash.Compute(data, startOffset, length);
+
+            //Console.WriteLine("{0} {1} {2}", checksum, startOffset, length);
+
+            int pointer = WritePageHeader(page, length, nextPage, checksum);
 
             if (nextPage > 0 && nextPage == offset)
                 throw new CamusDBException(
@@ -274,7 +312,7 @@ public sealed class BufferPoolHandler : IDisposable
             Buffer.BlockCopy(data, startOffset, page.Buffer, pointer, length);
             accessor.WriteArray<byte>(Config.PageSize * offset, page.Buffer, 0, Config.PageSize);
 
-            Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);            
+            //Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);            
 
             if (nextPage > 0)
                 await WriteDataToPage(nextPage, data, startOffset + length);

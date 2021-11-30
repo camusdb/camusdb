@@ -23,7 +23,7 @@ public sealed class Serializator
     }
 
     public static byte[] Serialize(Dictionary<string, TableSchema> tableSchema)
-    {            
+    {
         string jsonSerialized = JsonSerializer.Serialize(tableSchema);
         return Encoding.UTF8.GetBytes(jsonSerialized);
     }
@@ -103,19 +103,30 @@ public sealed class Serializator
 
     public static void WriteInt8(byte[] buffer, int number, ref int pointer)
     {
-        //CheckBufferOverflow(1);
+        //CheckBufferOverflow(1);        
         buffer[pointer++] = (byte)((number >> 0) & 0xff);
     }
 
     public static void WriteInt16(byte[] buffer, int number, ref int pointer)
     {
-        //CheckBufferOverflow(2);
-        buffer[pointer + 0] = (byte)((number >> 0) & 0xff);
-        buffer[pointer + 1] = (byte)((number >> 8) & 0xff);
+        short number16 = Convert.ToInt16(number);
+        byte[] byteArray = BitConverter.GetBytes(number16);
+        buffer[pointer + 0] = byteArray[0];
+        buffer[pointer + 1] = byteArray[1];
         pointer += 2;
     }
 
     public static void WriteInt32(byte[] buffer, int number, ref int pointer)
+    {
+        //CheckBufferOverflow(4);
+        buffer[pointer + 0] = (byte)((number >> 0) & 0xff);
+        buffer[pointer + 1] = (byte)((number >> 8) & 0xff);
+        buffer[pointer + 2] = (byte)((number >> 16) & 0xff);
+        buffer[pointer + 3] = (byte)((number >> 24) & 0xff);
+        pointer += 4;
+    }
+
+    public static void WriteUInt32(byte[] buffer, uint number, ref int pointer)
     {
         //CheckBufferOverflow(4);
         buffer[pointer + 0] = (byte)((number >> 0) & 0xff);
@@ -157,8 +168,15 @@ public sealed class Serializator
 
     public static int ReadInt16(byte[] buffer, ref int pointer)
     {
-        int number = buffer[pointer++];
-        number += (buffer[pointer++] << 8);
+        short number = BitConverter.ToInt16(buffer, pointer);
+        pointer += 2;
+        return number;
+    }
+
+    private float ReadFloat(byte[] buffer, ref int pointer)
+    {
+        float number = BitConverter.ToSingle(buffer, pointer);
+        pointer += 4;
         return number;
     }
 
@@ -169,17 +187,26 @@ public sealed class Serializator
         number += (buffer[pointer++] << 16);
         number += (buffer[pointer++] << 24);
         return number;
-    }    
+    }
+
+    public static uint ReadUInt32(byte[] buffer, ref int pointer)
+    {
+        uint number = buffer[pointer++];
+        number += (uint)(buffer[pointer++] << 8);
+        number += (uint)(buffer[pointer++] << 16);
+        number += (uint)(buffer[pointer++] << 24);
+        return number;
+    }
 
     public static string ReadString(byte[] buffer, int length, ref int pointer)
     {
         byte[] bytes = new byte[length];
         Buffer.BlockCopy(buffer, pointer, bytes, 0, length);
 
-        string str = Encoding.UTF8.GetString(bytes);        
+        string str = Encoding.UTF8.GetString(bytes);
         pointer += length;
         return str;
-    }    
+    }
 
     public static bool ReadBool(byte[] buffer, ref int pointer)
     {
