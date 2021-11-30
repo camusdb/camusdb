@@ -46,4 +46,20 @@ public class TestSerializer
             Assert.AreEqual(pointer, 1);
         }
     }
+
+    [Test]
+    public void TestSerializeInt8()
+    {
+        int value = 2;
+        byte[] buffer = new byte[1];
+
+        int pointer = 0;
+        Serializator.WriteInt8(buffer, value, ref pointer);
+        Assert.AreEqual(pointer, 1);
+
+        pointer = 0;
+        int type = Serializator.ReadInt8(buffer, ref pointer);
+        Assert.AreEqual(pointer, 1);
+        Assert.AreEqual(type, value);
+    }
 }
