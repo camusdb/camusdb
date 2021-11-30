@@ -111,4 +111,36 @@ public class TestSerializer
         Assert.AreEqual(pointer, SerializatorTypeSizes.TypeBool);
         Assert.AreEqual(readValue, writeValue);
     }
+
+    [Test]
+    public void TestSerializeString()
+    {
+        string writeValue = "hello";
+        byte[] buffer = Encoding.UTF8.GetBytes(writeValue);
+
+        int pointer = 0;
+        Serializator.WriteString(buffer, writeValue, ref pointer);
+        Assert.AreEqual(pointer, buffer.Length);
+
+        pointer = 0;
+        string readValue = Serializator.ReadString(buffer, buffer.Length, ref pointer);
+        Assert.AreEqual(pointer, buffer.Length);
+        Assert.AreEqual(readValue, writeValue);
+    }
+
+    [Test]
+    public void TestSerializeLargeString()
+    {
+        string writeValue = new string('f', 4096);
+        byte[] buffer = Encoding.UTF8.GetBytes(writeValue);
+
+        int pointer = 0;
+        Serializator.WriteString(buffer, writeValue, ref pointer);
+        Assert.AreEqual(pointer, buffer.Length);
+
+        pointer = 0;
+        string readValue = Serializator.ReadString(buffer, buffer.Length, ref pointer);
+        Assert.AreEqual(pointer, buffer.Length);
+        Assert.AreEqual(readValue, writeValue);
+    }
 }
