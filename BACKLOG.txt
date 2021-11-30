@@ -5,14 +5,16 @@
 - Receive POST parameters for create-table
 - Receive POST parameters for query
 
+- Calculate page checksums read/write
 - Allow to define multiple unique indexes
 - Implement multi indexes
 - Flush mapped files every x seconds
 - Validate not null fields
 - Load x pages automatically in memory
-- Make columns in insert optional, use schema when ommited
 - Support multiple items per page to avoid storage waste
 - Implement real objectids
+- Write large objects to multiple pages
+- Read large objects from multiple pages
 
 - Validate table names
 - Validate column names
