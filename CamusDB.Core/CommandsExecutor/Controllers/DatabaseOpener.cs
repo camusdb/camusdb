@@ -40,6 +40,8 @@ public sealed class DatabaseOpener
 
             databaseDescriptor = new();
 
+            databaseDescriptor.Name = name;
+
             string path = Config.DataDirectory + "/" + name + "/tablespace0";
             var mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
             databaseDescriptor.TableSpace = new BufferPoolHandler(mmf);

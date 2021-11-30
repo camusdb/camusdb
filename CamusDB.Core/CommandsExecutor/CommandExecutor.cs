@@ -44,6 +44,11 @@ public sealed class CommandExecutor
         await databaseCreator.Create(name);
     }
 
+    public async Task<DatabaseDescriptor> OpenDatabase(string database)
+    {
+        return await databaseOpener.Open(database);        
+    }
+
     public async Task Insert(InsertTicket ticket)
     {
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);        

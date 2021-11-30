@@ -20,9 +20,13 @@
   <ItemGroup>
     <None Remove="BufferPool\" />
     <None Remove="CommandExecutor\" />
+    <None Remove="Indexes\" />
+    <None Remove="Fixtures\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="BufferPool\" />
     <Folder Include="CommandsExecutor\" />
+    <Folder Include="Indexes\" />
+    <Folder Include="Fixtures\" />
   </ItemGroup>
 </Project>

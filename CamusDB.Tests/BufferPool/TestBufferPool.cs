@@ -8,7 +8,7 @@ using System.IO.MemoryMappedFiles;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
 
-namespace CamusDB.Tests;
+namespace CamusDB.Tests.BufferPool;
 
 public class TestBufferPool
 {
@@ -61,6 +61,21 @@ public class TestBufferPool
     }
 
     [Test]
+    public async Task TestGetFreePage()
+    {
+        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
+        using BufferPoolHandler bufferPool = new(mmf);
+
+        byte[] data = Encoding.UTF8.GetBytes("some data");
+
+        for (int i = 0; i < 10; i++)
+        {
+            int freeOffset = await bufferPool.GetNextFreeOffset();
+            Assert.AreEqual(i + 1, freeOffset);
+        }
+    }
+
+    [Test]
     public async Task TestWriteSinglePage()
     {
         using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
@@ -96,5 +111,75 @@ public class TestBufferPool
 
         for (int i = 0; i < data.Length; i++)        
             Assert.AreEqual(page.Buffer[Config.DataOffset + i], data[i]);
+    }
+
+    [Test]
+    public async Task TestWriteAndReadSinglePage()
+    {
+        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
+        using BufferPoolHandler bufferPool = new(mmf);
+
+        byte[] data = Encoding.UTF8.GetBytes("some data some data");
+
+        await bufferPool.WriteDataToPage(1, data);
+
+        BufferPage page = await bufferPool.ReadPage(1);
+
+        for (int i = 0; i < data.Length; i++)
+            Assert.AreEqual(page.Buffer[Config.DataOffset + i], data[i]);
+    }
+
+    [Test]
+    public async Task TestWriteAndReadDataFromPage()
+    {
+        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
+        using BufferPoolHandler bufferPool = new(mmf);
+
+        byte[] data = Encoding.UTF8.GetBytes("some data some data");
+
+        await bufferPool.WriteDataToPage(1, data);
+
+        byte[] readData = await bufferPool.GetDataFromPage(1);
+
+        for (int i = 0; i < data.Length; i++)
+            Assert.AreEqual(readData[i], data[i]);
+    }
+
+    [Test]
+    public async Task TestWriteLargeData()
+    {
+        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
+        using BufferPoolHandler bufferPool = new(mmf);
+
+        byte[] data = Encoding.UTF8.GetBytes(new string('s', Config.PageSize));        
+
+        int pageOffset = await bufferPool.WriteDataToFreePage(data);
+
+        byte[] readData = await bufferPool.GetDataFromPage(pageOffset);
+
+        Assert.AreEqual(readData.Length, Config.PageSize);
+        Assert.AreEqual(data.Length, readData.Length);
+
+        for (int i = 0; i < data.Length; i++)
+            Assert.AreEqual(readData[i], data[i]);
+    }
+
+    [Test]
+    public async Task TestMultiplePageLargeData()
+    {
+        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
+        using BufferPoolHandler bufferPool = new(mmf);
+
+        byte[] data = Encoding.UTF8.GetBytes(new string('s', Config.PageSize * 5));
+
+        int pageOffset = await bufferPool.WriteDataToFreePage(data);
+
+        byte[] readData = await bufferPool.GetDataFromPage(pageOffset);
+
+        Assert.AreEqual(readData.Length, Config.PageSize * 5);
+        Assert.AreEqual(data.Length, readData.Length);
+
+        for (int i = 0; i < data.Length; i++)
+            Assert.AreEqual(readData[i], data[i]);
     }
 }

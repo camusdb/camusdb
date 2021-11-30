@@ -254,22 +254,27 @@ public sealed class BufferPoolHandler : IDisposable
             int nextPage = 0;
 
             // @todo calculate checksum
-            // @todo calculate overflow and write to another page
 
             await page.Semaphore.WaitAsync();
 
             int length = ((data.Length - startOffset) + Config.DataOffset) < Config.PageSize ? (data.Length - startOffset) : (Config.PageSize - Config.DataOffset);
-            int remaining = (data.Length - startOffset) - length;
+            int remaining = (data.Length - startOffset) - length;            
 
             if (remaining > 0)
                 nextPage = await GetNextFreeOffset();
 
-            int pointer = WritePageHeader(page, length, nextPage);            
+            int pointer = WritePageHeader(page, length, nextPage);
+
+            if (nextPage > 0 && nextPage == offset)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "Cannot write recursively to the same page"
+                );
 
             Buffer.BlockCopy(data, startOffset, page.Buffer, pointer, length);
             accessor.WriteArray<byte>(Config.PageSize * offset, page.Buffer, 0, Config.PageSize);
 
-            Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);
+            Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);            
 
             if (nextPage > 0)
                 await WriteDataToPage(nextPage, data, startOffset + length);
