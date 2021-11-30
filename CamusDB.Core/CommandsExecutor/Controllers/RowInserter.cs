@@ -157,7 +157,7 @@ public sealed class RowInserter
 
         if (primaryKeyValue is null)
             throw new CamusDBException(
-                CamusDBErrorCodes.DuplicatePrimaryKey,
+                CamusDBErrorCodes.DuplicatePrimaryKeyValue,
                 "Cannot retrieve primary key for table " + table.Name
             );
 
@@ -165,7 +165,7 @@ public sealed class RowInserter
 
         if (pageOffset is not null)
             throw new CamusDBException(
-                CamusDBErrorCodes.DuplicatePrimaryKey,
+                CamusDBErrorCodes.DuplicatePrimaryKeyValue,
                 "Duplicate entry for key " + table.Name + " " + primaryKeyValue
             );
 

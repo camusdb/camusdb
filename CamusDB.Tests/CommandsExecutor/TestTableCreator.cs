@@ -1,6 +1,7 @@
 ﻿
 using System.IO;
 using System.Text;
+using CamusDB.Core;
 using NUnit.Framework;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
@@ -13,7 +14,6 @@ using CamusDB.Core.CommandsExecutor;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -71,14 +71,8 @@ public class TestTableCreator
             new ColumnInfo[] { }
         );
 
-        try
-        {
-            await executor.CreateTable(ticket);
-        }
-        catch (CamusDBException e)
-        {
-            Assert.AreEqual("Table requires at least one column", e.Message);
-        }
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
+        Assert.AreEqual("Table requires at least one column", e!.Message);
     }
 
     [Test]
@@ -99,14 +93,8 @@ public class TestTableCreator
             }
         );
 
-        try
-        {
-            await executor.CreateTable(ticket);
-        }
-        catch (CamusDBException e)
-        {
-            Assert.AreEqual("Database name is required", e.Message);
-        }
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
+        Assert.AreEqual("Database name is required", e!.Message);
     }
 
     [Test]
@@ -127,14 +115,8 @@ public class TestTableCreator
             }
         );
 
-        try
-        {
-            await executor.CreateTable(ticket);
-        }
-        catch (CamusDBException e)
-        {
-            Assert.AreEqual("Table name is required", e.Message);
-        }
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
+        Assert.AreEqual("Table name is required", e!.Message);
     }
 
     [Test]
@@ -155,13 +137,73 @@ public class TestTableCreator
             }
         );
 
-        try
-        {
-            await executor.CreateTable(ticket);
-        }
-        catch (CamusDBException e)
-        {
-            Assert.AreEqual("uplicate column name: id", e.Message);
-        }
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
+        Assert.AreEqual("Duplicate column name: id", e!.Message);
+    }
+
+    [Test]
+    public async Task TestCreateTableDuplicatePrimaryKey()
+    {
+        CommandValidator validator = new();
+        CatalogsManager catalogsManager = new();
+        CommandExecutor executor = new(validator, catalogsManager);
+
+        await executor.CreateDatabase("test");
+
+        CreateTableTicket ticket = new(
+            database: "test",
+            name: "my_table",
+            new ColumnInfo[] {
+                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("name", ColumnType.String, primary: true),
+            }
+        );
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
+        Assert.AreEqual("Multiple primary key defined", e!.Message);
+    }
+
+    [Test]
+    public async Task TestCreateTableInvalidTableName()
+    {
+        CommandValidator validator = new();
+        CatalogsManager catalogsManager = new();
+        CommandExecutor executor = new(validator, catalogsManager);
+
+        await executor.CreateDatabase("test");
+
+        CreateTableTicket ticket = new(
+            database: "test",
+            name: new string('a', 300),
+            new ColumnInfo[] {
+                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("name", ColumnType.String),
+            }
+        );
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
+        Assert.AreEqual("Table name is too long", e!.Message);
+    }
+
+    [Test]
+    public async Task TestCreateTableInvalidTableNameCharacters()
+    {
+        CommandValidator validator = new();
+        CatalogsManager catalogsManager = new();
+        CommandExecutor executor = new(validator, catalogsManager);
+
+        await executor.CreateDatabase("test");
+
+        CreateTableTicket ticket = new(
+            database: "test",
+            name: "my_täble",
+            new ColumnInfo[] {
+                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("name", ColumnType.String),
+            }
+        );
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));        
+        Assert.AreEqual("Table name has invalid characters", e!.Message);
     }
 }

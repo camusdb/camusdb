@@ -13,8 +13,10 @@ namespace CamusDB.Core
 
         public const string InvalidInput = "CADB0200";
         public const string UnknownType = "CADB0201";
+        public const string DuplicatePrimaryKey = "CADB0202";
+        public const string DuplicateColumn = "CADB0203";
 
-        public const string DuplicatePrimaryKey = "CADB0300";        
+        public const string DuplicatePrimaryKeyValue = "CADB0300";
     }
 }
 

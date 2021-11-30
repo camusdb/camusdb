@@ -11,7 +11,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsValidator.Validators;
 
-internal sealed class InsertValidator
+internal sealed class InsertValidator : ValidatorBase
 {
     public void Validate(InsertTicket ticket)
     {
