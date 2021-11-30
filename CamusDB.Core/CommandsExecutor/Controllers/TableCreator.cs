@@ -8,18 +8,19 @@
 
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public sealed class TableCreator
+internal sealed class TableCreator
 {   
     private CatalogsManager Catalogs { get; set; }
 
     public TableCreator(CatalogsManager catalogsManager)
     {
-        Catalogs = catalogsManager;
+        Catalogs = catalogsManager;        
     }
 
     public async Task<bool> Create(DatabaseDescriptor database, CreateTableTicket ticket)
@@ -37,7 +38,7 @@ public sealed class TableCreator
         {
             var objects = database.SystemSchema.Objects;
 
-            string tableName = ticket.Name;
+            string tableName = ticket.TableName;
 
             await database.SystemSchema.Semaphore.WaitAsync();
             

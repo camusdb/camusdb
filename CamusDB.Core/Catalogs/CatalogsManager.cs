@@ -21,22 +21,22 @@ public sealed class CatalogsManager
         {
             await database.Schema.Semaphore.WaitAsync();
 
-            if (database.Schema.Tables.ContainsKey(ticket.Name))
+            if (database.Schema.Tables.ContainsKey(ticket.TableName))
                 throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, "Table already exists");
 
             TableSchema tableSchema = new();
             tableSchema.Version = 0;
-            tableSchema.Name = ticket.Name;
+            tableSchema.Name = ticket.TableName;
             tableSchema.Columns = new();
 
             foreach (ColumnInfo column in ticket.Columns)                
                 tableSchema.Columns.Add(new TableColumnSchema(column.Name, column.Type, column.Primary, column.NotNull));
 
-            database.Schema.Tables.Add(ticket.Name, tableSchema);
+            database.Schema.Tables.Add(ticket.TableName, tableSchema);
 
             await database.SchemaSpace!.WriteDataToPage(CamusDBConfig.SchemaHeaderPage, Serializator.Serialize(database.Schema.Tables));
 
-            Console.WriteLine("Added table {0}", ticket.Name);
+            Console.WriteLine("Added table {0}", ticket.TableName);
 
             return true;
         }

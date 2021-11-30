@@ -2,13 +2,14 @@
 using System.IO;
 using System.Text;
 using NUnit.Framework;
+using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
 using CamusDB.Core.BufferPool;
 using System.IO.MemoryMappedFiles;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
-using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Tests.CommandsExecutor;
@@ -31,8 +32,9 @@ public class TestDatabaseOpener
     [Test]
     public async Task TestOpenDatabase()
     {
+        CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(catalogsManager);
+        CommandExecutor executor = new(validator, catalogsManager);
 
         await executor.CreateDatabase("test");
 

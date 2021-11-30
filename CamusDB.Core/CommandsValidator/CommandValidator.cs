@@ -14,6 +14,12 @@ namespace CamusDB.Core.CommandsValidator;
 
 public sealed class CommandValidator
 {
+    public void Validate(CreateTableTicket ticket)
+    {
+        CreateTableValidator validator = new();
+        validator.Validate(ticket);
+    }
+
     public void Validate(InsertTicket ticket)
     {
         InsertValidator validator = new();

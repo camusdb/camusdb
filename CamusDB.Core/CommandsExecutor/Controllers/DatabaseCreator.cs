@@ -7,12 +7,13 @@
 */
 
 using CamusDB.Core.BufferPool;
+using CamusDB.Core.CommandsValidator;
 using Config = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 public sealed class DatabaseCreator
-{   
+{
     public async Task Create(string name)
     {
         name = name.ToLowerInvariant(); // @todo validate database name

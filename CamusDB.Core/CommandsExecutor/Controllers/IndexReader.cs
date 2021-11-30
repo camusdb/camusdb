@@ -1,11 +1,18 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public sealed class IndexReader
+internal sealed class IndexReader
 {
     public async Task<BTree> Read(BufferPoolHandler tablespace, int offset)
     {

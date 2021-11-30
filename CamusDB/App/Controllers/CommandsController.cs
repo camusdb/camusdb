@@ -12,7 +12,6 @@ using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
-using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -21,16 +20,13 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class CommandsController : ControllerBase
 {
-    private readonly CommandExecutor executor;
-
-    private readonly CommandValidator validator;
+    private readonly CommandExecutor executor;    
 
     private readonly JsonSerializerOptions jsonOptions;
 
-    public CommandsController(CommandValidator validator, CommandExecutor executor)
+    public CommandsController(CommandExecutor executor)
     {
-        this.executor = executor;
-        this.validator = validator;
+        this.executor = executor;        
 
         this.jsonOptions = new JsonSerializerOptions
         {
@@ -97,9 +93,7 @@ public sealed class CommandsController : ControllerBase
                 database: request.DatabaseName ?? "",
                 name: request.TableName ?? "",
                 values: request.Values ?? new Dictionary<string, ColumnValue>()
-            );
-
-            validator.Validate(ticket);
+            );            
 
             await executor.Insert(ticket);
             return new JsonResult(new InsertResponse("ok"));

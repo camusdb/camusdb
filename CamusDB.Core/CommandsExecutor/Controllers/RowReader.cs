@@ -10,13 +10,14 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 public sealed class RowReader
-{   
+{
     public List<ColumnValue> Unserialize(TableSchema tableSchema, byte[] data)
     {
         //catalogs.GetTableSchema(database, tableName);

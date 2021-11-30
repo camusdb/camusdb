@@ -12,6 +12,7 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Serializer.Models;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -19,7 +20,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 public sealed class RowInserter
 {
-    private readonly IndexSaver indexSaver = new();
+    private readonly IndexSaver indexSaver = new();    
 
     private int? GetPrimaryKeyValue(TableDescriptor table, InsertTicket ticket)
     {

@@ -8,19 +8,20 @@
 
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public sealed class TableOpener
+internal sealed class TableOpener
 {
-    private readonly IndexReader indexReader = new();
+    private readonly IndexReader indexReader = new();    
 
     private CatalogsManager Catalogs { get; set; }
 
-    public TableOpener(CatalogsManager catalogs)
+    public TableOpener(CatalogsManager catalogsManager)
     {
-        Catalogs = catalogs;
+        Catalogs = catalogsManager;        
     }
 
     public async ValueTask<TableDescriptor> Open(DatabaseDescriptor database, string tableName)

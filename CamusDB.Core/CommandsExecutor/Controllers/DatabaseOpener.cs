@@ -12,16 +12,17 @@ using CamusDB.Core.Serializer;
 using System.IO.MemoryMappedFiles;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.BufferPool.Models;
+using CamusDB.Core.CommandsValidator;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public sealed class DatabaseOpener
+internal sealed class DatabaseOpener
 {
     private readonly SemaphoreSlim descriptorsSemaphore = new(1, 1);
 
-    private readonly Dictionary<string, DatabaseDescriptor> databaseDescriptors = new();
+    private readonly Dictionary<string, DatabaseDescriptor> databaseDescriptors = new();    
 
     public async ValueTask<DatabaseDescriptor> Open(string name)
     {

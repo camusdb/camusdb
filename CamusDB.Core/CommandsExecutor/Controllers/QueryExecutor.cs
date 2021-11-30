@@ -10,14 +10,22 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public sealed class QueryExecutor
+internal sealed class QueryExecutor
 {
-    public RowReader rowReader = new();
+    private RowReader rowReader = new();
+
+    private readonly CommandValidator validator;
+
+    public QueryExecutor(CommandValidator validator)
+    {
+        this.validator = validator;
+    }
 
     public async Task<List<List<ColumnValue>>> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
@@ -70,7 +78,5 @@ public sealed class QueryExecutor
         rows.Add(rowReader.Unserialize(table.Schema!, data));
 
         return rows;
-    }
-
-    
+    }    
 }

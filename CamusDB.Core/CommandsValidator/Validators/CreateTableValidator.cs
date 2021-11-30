@@ -11,9 +11,9 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsValidator.Validators;
 
-internal sealed class InsertValidator
+internal sealed class CreateTableValidator
 {
-    public void Validate(InsertTicket ticket)
+    public void Validate(CreateTableTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))
             throw new CamusDBException(
@@ -27,10 +27,23 @@ internal sealed class InsertValidator
                 "Table name is required"
             );
 
-        if (ticket.Values is null)
+        if (ticket.Columns.Length == 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "Values are required"
+                "Table requires at least one column"
             );
+
+        HashSet<string> existingColumns = new();
+
+        for (int i = 0; i < ticket.Columns.Length; i++)
+        {
+            ColumnInfo columnInfo = ticket.Columns[i];
+
+            if (!existingColumns.Add(columnInfo.Name.ToLowerInvariant()))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Duplicate column name: " + columnInfo.Name
+                );
+        }
     }
 }

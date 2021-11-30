@@ -5,7 +5,7 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public sealed class IndexSaver
+internal sealed class IndexSaver
 {
     public async Task Save(BufferPoolHandler tablespace, BTree index, int key, int value)
     {

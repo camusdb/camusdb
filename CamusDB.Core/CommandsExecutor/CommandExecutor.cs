@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -15,27 +16,37 @@ namespace CamusDB.Core.CommandsExecutor;
 
 public sealed class CommandExecutor
 {
-    private readonly DatabaseOpener databaseOpener = new();
+    private readonly DatabaseOpener databaseOpener;
 
-    private readonly DatabaseCreator databaseCreator = new();
+    private readonly DatabaseCreator databaseCreator;
 
     private readonly TableOpener tableOpener;
 
     private readonly TableCreator tableCreator;
 
-    private readonly RowInserter rowInserter = new();
+    private readonly RowInserter rowInserter;
 
-    private readonly QueryExecutor queryExecutor = new();
+    private readonly QueryExecutor queryExecutor;
 
-    public CommandExecutor(CatalogsManager catalogsManager)
+    private readonly CommandValidator validator;
+
+    public CommandExecutor(CommandValidator validator, CatalogsManager catalogs)
     {
-        tableCreator = new(catalogsManager);
-        tableOpener = new(catalogsManager);
+        this.validator = validator;
+
+        databaseOpener = new();
+        databaseCreator = new();
+        tableOpener = new(catalogs);
+        tableCreator = new(catalogs);
+        rowInserter = new();
+        queryExecutor = new(validator);
     }
 
     public async Task<bool> CreateTable(CreateTableTicket ticket)
     {
-        DatabaseDescriptor descriptor = await databaseOpener.Open(ticket.Database);
+        validator.Validate(ticket);
+
+        DatabaseDescriptor descriptor = await databaseOpener.Open(ticket.DatabaseName);
         return await tableCreator.Create(descriptor, ticket);
     }
 
@@ -51,6 +62,8 @@ public sealed class CommandExecutor
 
     public async Task Insert(InsertTicket ticket)
     {
+        validator.Validate(ticket);
+
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);        
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
