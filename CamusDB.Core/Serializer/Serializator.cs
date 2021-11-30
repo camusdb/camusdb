@@ -150,6 +150,18 @@ public sealed class Serializator
         return type;
     }
 
+    public static int ReadInt8(byte[] buffer, ref int pointer)
+    {
+        return buffer[pointer++];
+    }
+
+    public static int ReadInt16(byte[] buffer, ref int pointer)
+    {
+        int number = buffer[pointer++];
+        number += (buffer[pointer++] << 8);
+        return number;
+    }
+
     public static int ReadInt32(byte[] buffer, ref int pointer)
     {
         int number = buffer[pointer++];
