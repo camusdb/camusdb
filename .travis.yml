@@ -9,7 +9,7 @@ git:
   depth: 2
 
 script:
-  - travis_retry echo "OK"
+  - (cd CamusDB.Tests && dotnet test)
 
 cache:
   apt: true

@@ -31,16 +31,22 @@ public class TestDatabaseCreator
     public async Task TestCreateDatabase()
     {
         CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(catalogsManager);        
+        CommandExecutor executor = new(catalogsManager);
 
         await executor.CreateDatabase("test");
 
         string path = Config.DataDirectory + "/test";
 
         Assert.IsTrue(Directory.Exists(path));
-        Assert.IsTrue(File.Exists(path + "/tablespace0"));
-        Assert.IsTrue(File.Exists(path + "/schema"));
-        Assert.IsTrue(File.Exists(path + "/system"));
+
+        string[] tablespaces = new string[] { "tablespace0", "schema", "system" };
+        for (int i = 0; i < tablespaces.Length; i++)
+        {
+            Assert.IsTrue(File.Exists(path + "/" + tablespaces[i]));
+
+            FileInfo fi = new(path + "/" + tablespaces[i]);
+            Assert.AreEqual(fi.Length, Config.InitialTableSpaceSize);
+        }                       
     }
 }
 
