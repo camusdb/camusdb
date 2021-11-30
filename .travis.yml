@@ -1,0 +1,18 @@
+language: csharp
+mono: none
+dotnet: 6.0
+
+dist: focal
+sudo: false
+
+git:
+  depth: 2
+
+script:
+  - travis_retry echo "OK"
+
+cache:
+  apt: true
+  timeout: 691200
+  directories:
+    - .nuget/packages

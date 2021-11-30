@@ -2,5 +2,7 @@ CamusDB/bin
 CamusDb/obj
 CamusDB.Core/bin
 CamusDb.Core/obj
+CamusDB.Tests/bin
+CamusDb.Tests/obj
 .vs/
 bench/node_modules/

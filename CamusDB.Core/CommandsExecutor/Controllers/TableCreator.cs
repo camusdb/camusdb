@@ -14,9 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 public sealed class TableCreator
-{
-    private const int SystemHeaderOffset = 0;
-
+{   
     private CatalogsManager Catalogs { get; set; }
 
     public TableCreator(CatalogsManager catalogsManager)
@@ -66,7 +64,10 @@ public sealed class TableCreator
 
             objects.Add(tableName, databaseObject);
 
-            await database.SystemSpace!.WriteDataToPage(SystemHeaderOffset, Serializator.Serialize(database.SystemSchema.Objects));
+            await database.SystemSpace!.WriteDataToPage(
+                CamusDBConfig.SystemHeaderPage,
+                Serializator.Serialize(database.SystemSchema.Objects)
+            );
 
             Console.WriteLine("Added table {0} to system, data table staring at {1}", tableName, pageOffset);
         }

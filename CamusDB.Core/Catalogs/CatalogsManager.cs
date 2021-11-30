@@ -1,4 +1,11 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -27,7 +34,7 @@ public sealed class CatalogsManager
 
             database.Schema.Tables.Add(ticket.Name, tableSchema);
 
-            await database.SchemaSpace!.WriteDataToPage(0, Serializator.Serialize(database.Schema.Tables));
+            await database.SchemaSpace!.WriteDataToPage(CamusDBConfig.SchemaHeaderPage, Serializator.Serialize(database.Schema.Tables));
 
             Console.WriteLine("Added table {0}", ticket.Name);
 
