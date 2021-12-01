@@ -16,5 +16,5 @@ public sealed class DatabaseObject
 
     public int StartOffset { get; set; }
 
-    public Dictionary<string, int>? Indexes { get; set; }
+    public Dictionary<string, DatabaseIndexObject>? Indexes { get; set; }
 }

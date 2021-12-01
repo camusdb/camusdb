@@ -11,6 +11,7 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.BufferPool;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -38,11 +39,14 @@ internal sealed class TableCreator
         {
             var objects = database.SystemSchema.Objects;
 
+            BufferPoolHandler tablespace = database.TableSpace!;
+            BufferPoolHandler systemTablespace = database.SystemSpace!;
+
             string tableName = ticket.TableName;
 
             await database.SystemSchema.Semaphore.WaitAsync();
             
-            int pageOffset = await database.TableSpace!.GetNextFreeOffset();
+            int pageOffset = await tablespace.GetNextFreeOffset();
 
             DatabaseObject databaseObject = new();
             databaseObject.Type = DatabaseObjectType.Table;
@@ -55,17 +59,34 @@ internal sealed class TableCreator
             {
                 if (column.Primary)
                 {
-                    int indexPageOffset = await database.TableSpace!.GetNextFreeOffset();
+                    int indexPageOffset = await tablespace.GetNextFreeOffset();
 
                     Console.WriteLine("Primary key for {0} added to system, staring at {1}", tableName, indexPageOffset);
 
-                    databaseObject.Indexes.Add("pk", indexPageOffset);
+                    databaseObject.Indexes.Add(
+                        CamusDBConfig.PrimaryKeyInternalName,
+                        new DatabaseIndexObject(IndexType.Unique, indexPageOffset)
+                    );
+                    continue;
+                }
+
+                if (column.Index != IndexType.None)
+                {
+                    int indexPageOffset = await tablespace.GetNextFreeOffset();
+
+                    Console.WriteLine("Index {0}/{1} key for {2} added to system, staring at {3}", column.Name, column.Index, tableName, indexPageOffset);
+
+                    databaseObject.Indexes.Add(
+                        column.Name,
+                        new DatabaseIndexObject(column.Index, indexPageOffset)
+                    );
+                    continue;
                 }
             }
 
             objects.Add(tableName, databaseObject);
 
-            await database.SystemSpace!.WriteDataToPage(
+            await systemTablespace.WriteDataToPage(
                 CamusDBConfig.SystemHeaderPage,
                 Serializator.Serialize(database.SystemSchema.Objects)
             );

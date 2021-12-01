@@ -1,18 +1,16 @@
 ﻿
 /**
- * This file is part of CamusDB  
+ * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Catalogs;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using System.IO.MemoryMappedFiles;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.BufferPool.Models;
-using CamusDB.Core.CommandsValidator;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 
@@ -22,7 +20,7 @@ internal sealed class DatabaseOpener
 {
     private readonly SemaphoreSlim descriptorsSemaphore = new(1, 1);
 
-    private readonly Dictionary<string, DatabaseDescriptor> databaseDescriptors = new();    
+    private readonly Dictionary<string, DatabaseDescriptor> databaseDescriptors = new();
 
     public async ValueTask<DatabaseDescriptor> Open(string name)
     {
@@ -91,14 +89,14 @@ internal sealed class DatabaseOpener
 
         if (data.Length != 0) // tablespace is initialized?
             return;
-        
+
         // write tablespace header
         BufferPage page = await databaseDescriptor.TableSpace.ReadPage(Config.TableSpaceHeaderPage);
 
         databaseDescriptor.TableSpace.WriteTableSpaceHeader(page);
         databaseDescriptor.TableSpace!.FlushPage(page); // @todo make this atomic
 
-        Console.WriteLine("Data tablespaces initialized");        
+        Console.WriteLine("Data tablespaces initialized");
     }
 
     private static async Task LoadDatabaseSystemSpace(DatabaseDescriptor database)

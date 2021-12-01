@@ -18,14 +18,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class QueryExecutor
 {
-    private RowReader rowReader = new();
-
-    private readonly CommandValidator validator;
-
-    public QueryExecutor(CommandValidator validator)
-    {
-        this.validator = validator;
-    }
+    private readonly RowDeserializer rowReader = new();    
 
     public async Task<List<List<ColumnValue>>> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
@@ -48,7 +41,7 @@ internal sealed class QueryExecutor
                 continue;
             }
 
-            rows.Add(rowReader.Unserialize(table.Schema!, data));
+            rows.Add(rowReader.Deserialize(table.Schema!, data));
         }
 
         return rows;
@@ -60,7 +53,7 @@ internal sealed class QueryExecutor
 
         List<List<ColumnValue>> rows = new();
 
-        int? pageOffset = table.Indexes["pk"].Get(ticket.Id);
+        int? pageOffset = table.Indexes[CamusDBConfig.PrimaryKeyInternalName].Rows.Get(ticket.Id);
 
         if (pageOffset is null)
         {
@@ -75,7 +68,7 @@ internal sealed class QueryExecutor
             return rows;
         }
 
-        rows.Add(rowReader.Unserialize(table.Schema!, data));
+        rows.Add(rowReader.Deserialize(table.Schema!, data));
 
         return rows;
     }    

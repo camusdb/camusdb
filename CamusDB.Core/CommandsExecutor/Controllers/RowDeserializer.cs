@@ -1,24 +1,20 @@
 ﻿
 /**
- * This file is part of CamusDB  
+ * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Trees;
-using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public sealed class RowReader
+public sealed class RowDeserializer
 {
-    public List<ColumnValue> Unserialize(TableSchema tableSchema, byte[] data)
+    public List<ColumnValue> Deserialize(TableSchema tableSchema, byte[] data)
     {
         //catalogs.GetTableSchema(database, tableName);
 

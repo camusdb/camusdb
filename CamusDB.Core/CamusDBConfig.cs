@@ -42,6 +42,8 @@ public static class CamusDBConfig
 
     public const int SystemHeaderPage = 1;
 
+    public const string PrimaryKeyInternalName = "~pk";
+
     #endregion
 
     #region system schema

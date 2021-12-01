@@ -16,15 +16,27 @@ public sealed class ColumnInfo
 
     public ColumnType Type { get; }
 
-    public bool Primary { get; }
+    public bool Primary { get; }    
 
     public bool NotNull { get; }
 
-    public ColumnInfo(string name, ColumnType type, bool primary = false, bool notNull = false)
+    public IndexType Index { get; }
+
+    public ColumnValue? Default { get; }
+
+    public ColumnInfo(
+        string name,
+        ColumnType type,
+        bool primary = false,
+        bool notNull = false,
+        IndexType index = IndexType.None,
+        ColumnValue? defaultValue = null)
     {
         Name = name;
         Type = type;
         Primary = primary;
         NotNull = notNull;
+        Index = index;
+        Default = defaultValue;
     }
 }

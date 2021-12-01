@@ -29,14 +29,21 @@ public sealed class CatalogsManager
             tableSchema.Name = ticket.TableName;
             tableSchema.Columns = new();
 
-            foreach (ColumnInfo column in ticket.Columns)                
-                tableSchema.Columns.Add(new TableColumnSchema(column.Name, column.Type, column.Primary, column.NotNull));
+            foreach (ColumnInfo column in ticket.Columns)
+                tableSchema.Columns.Add(
+                    new TableColumnSchema(
+                        column.Name,
+                        column.Type,
+                        column.Primary,
+                        column.NotNull
+                    )
+                );
 
             database.Schema.Tables.Add(ticket.TableName, tableSchema);
 
             await database.SchemaSpace!.WriteDataToPage(CamusDBConfig.SchemaHeaderPage, Serializator.Serialize(database.Schema.Tables));
 
-            Console.WriteLine("Added table {0}", ticket.TableName);
+            Console.WriteLine("Added table {0} to schema", ticket.TableName);
 
             return true;
         }

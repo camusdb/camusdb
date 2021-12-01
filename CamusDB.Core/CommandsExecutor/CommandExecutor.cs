@@ -39,7 +39,7 @@ public sealed class CommandExecutor
         tableOpener = new(catalogs);
         tableCreator = new(catalogs);
         rowInserter = new();
-        queryExecutor = new(validator);
+        queryExecutor = new();
     }
 
     public async Task<bool> CreateTable(CreateTableTicket ticket)

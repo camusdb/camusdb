@@ -1,6 +1,8 @@
 - Return modified nodes in BTree.Put to avoid full traversal
 - Support additional types in BTree such as string
 - Implement multi indexes
+- Read indexes in parallel
+- Block table to read indexes
 
 - Receive POST parameters for query
 

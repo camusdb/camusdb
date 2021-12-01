@@ -8,7 +8,6 @@
 
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Catalogs.Models;
 
@@ -16,13 +15,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class TableOpener
 {
-    private readonly IndexReader indexReader = new();    
+    private readonly IndexReader indexReader = new();
 
     private CatalogsManager Catalogs { get; set; }
 
     public TableOpener(CatalogsManager catalogsManager)
     {
-        Catalogs = catalogsManager;        
+        Catalogs = catalogsManager;
     }
 
     public async ValueTask<TableDescriptor> Open(DatabaseDescriptor database, string tableName)
@@ -32,7 +31,7 @@ internal sealed class TableOpener
 
         try
         {
-            await database.DescriptorsSemaphore.WaitAsync();
+            await database.DescriptorsSemaphore.WaitAsync(); // @todo block per table
 
             if (database.TableDescriptors.TryGetValue(tableName, out tableDescriptor))
                 return tableDescriptor;
@@ -49,8 +48,15 @@ internal sealed class TableOpener
 
             if (systemObject.Indexes is not null)
             {
-                foreach (KeyValuePair<string, int> index in systemObject.Indexes)
-                    tableDescriptor.Indexes.Add(index.Key, await GetIndexTree(database, index.Value));
+                foreach (KeyValuePair<string, DatabaseIndexObject> index in systemObject.Indexes)
+                {
+                    BTree rows = await GetIndexTree(database, index.Value.StartOffset);
+
+                    tableDescriptor.Indexes.Add(
+                        index.Key,
+                        new TableIndexSchema(index.Value.Type, rows)
+                    );
+                }
             }
 
             database.TableDescriptors.Add(tableName, tableDescriptor);
