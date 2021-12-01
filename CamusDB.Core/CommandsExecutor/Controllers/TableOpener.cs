@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.BufferPool;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -36,13 +37,15 @@ internal sealed class TableOpener
             if (database.TableDescriptors.TryGetValue(tableName, out tableDescriptor))
                 return tableDescriptor;
 
+            BufferPoolHandler tablespace = database.TableSpace!;
+
             TableSchema tableSchema = Catalogs.GetTableSchema(database, tableName);
             DatabaseObject systemObject = GetSystemObject(database, tableName);
 
             tableDescriptor = new();
             tableDescriptor.Name = tableName;
             tableDescriptor.Schema = tableSchema;
-            tableDescriptor.Rows = await GetIndexTree(database, systemObject.StartOffset);
+            tableDescriptor.Rows = await indexReader.ReadUnique(tablespace, systemObject.StartOffset);
 
             // @todo read indexes in parallel
 
@@ -50,12 +53,34 @@ internal sealed class TableOpener
             {
                 foreach (KeyValuePair<string, DatabaseIndexObject> index in systemObject.Indexes)
                 {
-                    BTree rows = await GetIndexTree(database, index.Value.StartOffset);
+                    switch (index.Value.Type)
+                    {
+                        case IndexType.Unique:
+                            {
+                                BTree rows = await indexReader.ReadUnique(tablespace, index.Value.StartOffset);
 
-                    tableDescriptor.Indexes.Add(
-                        index.Key,
-                        new TableIndexSchema(index.Value.Type, rows)
-                    );
+                                tableDescriptor.Indexes.Add(
+                                    index.Key,
+                                    new TableIndexSchema(index.Value.Type, rows)
+                                );
+                            }
+                            break;
+
+                        case IndexType.Multi:
+                            {
+                                BTreeMulti rows = await indexReader.ReadMulti(tablespace, index.Value.StartOffset);
+
+                                tableDescriptor.Indexes.Add(
+                                    index.Key,
+                                    new TableIndexSchema(index.Value.Type, rows)
+                                );
+
+                                continue;
+                            }
+
+                        default:
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot load invalid type of index");
+                    }
                 }
             }
 
@@ -67,11 +92,6 @@ internal sealed class TableOpener
         }
 
         return tableDescriptor;
-    }
-
-    private Task<BTree> GetIndexTree(DatabaseDescriptor database, int offset)
-    {
-        return indexReader.Read(database.TableSpace!, offset);
     }
 
     private static DatabaseObject GetSystemObject(DatabaseDescriptor database, string tableName)

@@ -5,8 +5,8 @@ using System.Collections.Generic;
 namespace CamusDB.Core.Util.Trees;
 
 /**
- *  BTreeMulti is a tree of B+Trees 
- *  Unique values point to other trees where the rowids are unique values
+ *  BTreeMulti is a tree of B+Trees used for multi keys
+ *  Unique values across the index point to other trees where the rowids are unique values
  */
 public sealed class BTreeMulti
 {
@@ -135,7 +135,7 @@ public sealed class BTreeMulti
         }
     }
 
-    public IEnumerable NodesTraverse()
+    public IEnumerable<BTreeMultiNode> NodesTraverse()
     {
         foreach (BTreeMultiNode node in NodesTraverseInternal(root, height))
             yield return node;

@@ -53,7 +53,7 @@ internal sealed class QueryExecutor
 
         List<List<ColumnValue>> rows = new();
 
-        int? pageOffset = table.Indexes[CamusDBConfig.PrimaryKeyInternalName].Rows.Get(ticket.Id);
+        int? pageOffset = table.Indexes[CamusDBConfig.PrimaryKeyInternalName].UniqueRows!.Get(ticket.Id);
 
         if (pageOffset is null)
         {

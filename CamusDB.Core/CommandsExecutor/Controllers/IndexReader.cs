@@ -14,7 +14,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class IndexReader
 {
-    public async Task<BTree> Read(BufferPoolHandler tablespace, int offset)
+    public async Task<BTree> ReadUnique(BufferPoolHandler tablespace, int offset)
     {
         //Console.WriteLine("***");
 
@@ -35,7 +35,7 @@ internal sealed class IndexReader
 
         if (rootPageOffset > -1)
         {
-            BTreeNode? node = await GetNode(tablespace, rootPageOffset);
+            BTreeNode? node = await GetUniqueNode(tablespace, rootPageOffset);
             if (node is not null)
                 index.root = node;
         }        
@@ -50,7 +50,43 @@ internal sealed class IndexReader
         return index;
     }
 
-    private async Task<BTreeNode?> GetNode(BufferPoolHandler tablespace, int offset)
+    public async Task<BTreeMulti> ReadMulti(BufferPoolHandler tablespace, int offset)
+    {
+        //Console.WriteLine("***");
+
+        BTreeMulti index = new(offset);
+
+        byte[] data = await tablespace.GetDataFromPage(offset);
+        if (data.Length == 0)
+            return index;
+
+        int pointer = 0;
+
+        index.height = Serializator.ReadInt32(data, ref pointer);
+        index.n = Serializator.ReadInt32(data, ref pointer);
+
+        int rootPageOffset = Serializator.ReadInt32(data, ref pointer);
+
+        //Console.WriteLine("NumberNodes={0} PageOffset={1} RootOffset={2}", index.n, index.PageOffset, rootPageOffset);
+
+        if (rootPageOffset > -1)
+        {
+            BTreeMultiNode? node = await GetMultiNode(tablespace, rootPageOffset);
+            if (node is not null)
+                index.root = node;
+        }
+
+        /*foreach (Entry entry in index.EntriesTraverse())
+        {
+            Console.WriteLine("Index RowId={0} PageOffset={1}", entry.Key, entry.Value);
+        }*/
+
+        //Console.WriteLine("***");
+
+        return index;
+    }
+
+    private async Task<BTreeNode?> GetUniqueNode(BufferPoolHandler tablespace, int offset)
     {
         byte[] data = await tablespace.GetDataFromPage(offset);
         if (data.Length == 0)
@@ -71,14 +107,49 @@ internal sealed class IndexReader
             BTreeEntry entry = new(0, null, null);
 
             entry.Key = Serializator.ReadInt32(data, ref pointer);
-            entry.Value = Serializator.ReadInt32(data, ref pointer);
+            entry.Value = null; // Serializator.ReadInt32(data, ref pointer);
 
             int nextPageOffset = Serializator.ReadInt32(data, ref pointer);
             //Console.WriteLine("Children={0} Key={1} Value={2} NextOffset={3}", i, entry.Key, entry.Value, nextPageOffset);
 
             if (nextPageOffset > -1)
-                entry.Next = await GetNode(tablespace, nextPageOffset);
+                entry.Next = await GetUniqueNode(tablespace, nextPageOffset);
                     
+            node.children[i] = entry;
+        }
+
+        return node;
+    }
+
+    private async Task<BTreeMultiNode?> GetMultiNode(BufferPoolHandler tablespace, int offset)
+    {
+        byte[] data = await tablespace.GetDataFromPage(offset);
+        if (data.Length == 0)
+            return null;
+
+        BTreeMultiNode node = new(-1);
+
+        node.Dirty = false; // read nodes from disk must be not persisted
+
+        int pointer = 0;
+        node.KeyCount = Serializator.ReadInt32(data, ref pointer);
+        node.PageOffset = Serializator.ReadInt32(data, ref pointer);
+
+        //Console.WriteLine("KeyCount={0} PageOffset={1}", node.KeyCount, node.PageOffset);
+
+        for (int i = 0; i < node.KeyCount; i++)
+        {
+            BTreeMultiEntry entry = new(0, null);
+
+            entry.Key = Serializator.ReadInt32(data, ref pointer);
+            entry.Value = null; // Serializator.ReadInt32(data, ref pointer);
+
+            int nextPageOffset = Serializator.ReadInt32(data, ref pointer);
+            //Console.WriteLine("Children={0} Key={1} Value={2} NextOffset={3}", i, entry.Key, entry.Value, nextPageOffset);
+
+            if (nextPageOffset > -1)
+                entry.Next = await GetMultiNode(tablespace, nextPageOffset);
+
             node.children[i] = entry;
         }
 

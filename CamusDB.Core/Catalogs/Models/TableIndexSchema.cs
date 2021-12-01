@@ -15,11 +15,19 @@ public sealed class TableIndexSchema
 {
     public IndexType Type { get; }
 
-    public BTree Rows { get; }
+    public BTree? UniqueRows { get; }
+
+    public BTreeMulti? MultiRows { get; }
 
     public TableIndexSchema(IndexType type, BTree rows)
     {
         Type = type;
-        Rows = rows;
+        UniqueRows = rows;
+    }
+
+    public TableIndexSchema(IndexType type, BTreeMulti rows)
+    {
+        Type = type;
+        MultiRows = rows;
     }
 }

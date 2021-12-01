@@ -68,7 +68,13 @@ public sealed class RowInserter
             if (index.Value.Type != IndexType.Unique)
                 continue;
 
-            BTree uniqueIndex = index.Value.Rows;
+            if (index.Value.UniqueRows is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A multi index tree wasn't found"
+                );
+
+            BTree uniqueIndex = index.Value.UniqueRows;
 
             try
             {
@@ -94,7 +100,7 @@ public sealed class RowInserter
         return context;
     }
 
-    private async Task UpdateMultKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, InsertRowContext context)
+    private async Task UpdateMultiKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, InsertRowContext context)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
@@ -103,22 +109,19 @@ public sealed class RowInserter
             if (index.Value.Type != IndexType.Multi)
                 continue;
 
-            BTree multiIndex = index.Value.Rows;
+            if (index.Value.MultiRows is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A multi index tree wasn't found"
+                );
 
-            try
-            {
-                await multiIndex.WriteLock.WaitAsync();
+            BTreeMulti multiIndex = index.Value.MultiRows;
+            
+            //int multiKeyValue = CheckUniqueKeyViolations(table, multiIndex, ticket);
 
-                //int multiKeyValue = CheckUniqueKeyViolations(table, multiIndex, ticket);
+            int multiKeyValue = 0; // get multi key value
 
-                int multiKeyValue = 0; // get multi key value
-
-                await indexSaver.NoLockingSave(tablespace, multiIndex, multiKeyValue, context.DataPageOffset);
-            }
-            finally
-            {
-                multiIndex.WriteLock.Release();
-            }
+            await indexSaver.Save(tablespace, multiIndex, multiKeyValue, context.DataPageOffset);            
         }
     }
 
@@ -139,7 +142,7 @@ public sealed class RowInserter
 
         await indexSaver.Save(tablespace, table.Rows, context.RowId, context.DataPageOffset);
 
-        await UpdateMultKeys(database, table, ticket, context);
+        await UpdateMultiKeys(database, table, ticket, context);
 
         timer.Stop();
 

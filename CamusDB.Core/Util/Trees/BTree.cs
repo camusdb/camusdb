@@ -102,13 +102,13 @@ public sealed class BTree
         return null;
     }
 
-    public IEnumerable EntriesTraverse()
+    public IEnumerable<BTreeEntry> EntriesTraverse()
     {
         foreach (BTreeEntry entry in EntriesTraverseInternal(root, height))
             yield return entry;
     }
 
-    private static IEnumerable EntriesTraverseInternal(BTreeNode? node, int ht)
+    private static IEnumerable<BTreeEntry> EntriesTraverseInternal(BTreeNode? node, int ht)
     {
         if (node is null)
             yield break;
@@ -133,13 +133,13 @@ public sealed class BTree
         }
     }
 
-    public IEnumerable NodesTraverse()
+    public IEnumerable<BTreeNode> NodesTraverse()
     {
         foreach (BTreeNode node in NodesTraverseInternal(root, height))
             yield return node;
     }
 
-    private static IEnumerable NodesTraverseInternal(BTreeNode? node, int ht)
+    private static IEnumerable<BTreeNode> NodesTraverseInternal(BTreeNode? node, int ht)
     {
         //Console.WriteLine("ht={0}", ht);
 
@@ -158,7 +158,7 @@ public sealed class BTree
         }
     }
 
-    public IEnumerable NodesReverseTraverse()
+    public IEnumerable<BTreeNode> NodesReverseTraverse()
     {
         foreach (BTreeNode node in NodesReverseTraverseInternal(root, height))
             yield return node;
