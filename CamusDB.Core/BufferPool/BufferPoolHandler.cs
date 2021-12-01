@@ -312,14 +312,14 @@ public sealed class BufferPoolHandler : IDisposable
 
             uint checksum = XXHash.Compute(bdata, 0, length);
 
-            Console.WriteLine("{0} {1} {2}", checksum, startOffset, length);
+            /*Console.WriteLine("{0} {1} {2}", checksum, startOffset, length);
 
             Console.WriteLine("***");
 
             for (int i = startOffset; i < length; i++)
                 Console.WriteLine(data[i]);
 
-            Console.WriteLine("***");
+            Console.WriteLine("***");*/
 
             int pointer = WritePageHeader(page, length, nextPage, checksum);
 

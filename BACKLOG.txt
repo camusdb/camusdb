@@ -6,7 +6,6 @@
 - Receive POST parameters for query
 
 - Get consistent reads of pages 
-- Validate types from insert ticket against schema
 - Allow to define multiple unique indexes
 - Implement multi indexes
 - Flush mapped files every x seconds

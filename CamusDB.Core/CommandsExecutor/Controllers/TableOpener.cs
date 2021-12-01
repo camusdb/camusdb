@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -36,11 +37,12 @@ internal sealed class TableOpener
             if (database.TableDescriptors.TryGetValue(tableName, out tableDescriptor))
                 return tableDescriptor;
 
+            TableSchema tableSchema = Catalogs.GetTableSchema(database, tableName);
             DatabaseObject systemObject = GetSystemObject(database, tableName);
 
             tableDescriptor = new();
             tableDescriptor.Name = tableName;
-            tableDescriptor.Schema = Catalogs.GetTableSchema(database, tableName);
+            tableDescriptor.Schema = tableSchema;
             tableDescriptor.Rows = await GetIndexTree(database, systemObject.StartOffset);
 
             // @todo read indexes in parallel

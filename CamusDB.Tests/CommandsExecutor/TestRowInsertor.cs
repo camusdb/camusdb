@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -55,6 +56,69 @@ public class TestRowInsertor
         await executor.CreateTable(ticket);
 
         return executor;
+    }
+
+    [Test]
+    public async Task TestInvalidTypeAssigned()
+    {
+        var executor = await SetupDatabase();
+
+        InsertTicket ticket = new(
+            database: "test",
+            name: "my_table",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "name", new ColumnValue(ColumnType.String, "some name") },
+                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+            }
+        );        
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
+        Assert.AreEqual("Type Integer cannot be assigned to id (Id)", e!.Message);
+    }
+
+    [Test]
+    public async Task TestInvalidDatabase()
+    {
+        var executor = await SetupDatabase();
+
+        InsertTicket ticket = new(
+            database: "another_test",
+            name: "my_table",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "name", new ColumnValue(ColumnType.String, "some name") },
+                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+            }
+        );
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
+        Assert.AreEqual("Database doesn't exist", e!.Message);
+    }
+
+    [Test]
+    public async Task TestInvalidTable()
+    {
+        var executor = await SetupDatabase();
+
+        InsertTicket ticket = new(
+            database: "test",
+            name: "my_other_table",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "name", new ColumnValue(ColumnType.String, "some name") },
+                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+            }
+        );
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
+        Assert.AreEqual("Table doesn't exist", e!.Message);
     }
 
     [Test]

@@ -51,6 +51,12 @@ public sealed class RowInserter
                 continue;
             }
 
+            if (column.Type != columnValue.Type)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.UnknownType,
+                    "Type " + columnValue.Type + " cannot be assigned to " + column.Name + " (" + column.Type + ")"
+                );
+
             switch (columnValue.Type) // @todo check if value is compatible with column
             {
                 case ColumnType.Id:
