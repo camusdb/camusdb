@@ -30,6 +30,8 @@ public static class CamusDBConfig
 
     public const int NextPageOffset = 2 + 4 * 1; // 2 version + 4 checksum + 4 next page + 4 data length
 
+    public const int ChecksumOffset = 2 + 4 * 0; // 2 version + 4 checksum + 4 next page + 4 data length
+
     public const int RowIdOffset = 14;
 
     public const int FreePageOffset = 10;

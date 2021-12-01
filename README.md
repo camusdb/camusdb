@@ -1,6 +1,6 @@
 CamusDB
 =======
-CamusDB is a multi-platform lightweight NoSQL/strict schema database server written in C# and .NET 6.
+CamusDB is a modern multi-platform lightweight NoSQL/strict schema database server written in C# and .NET 6. 
 
 [![Build Status](https://app.travis-ci.com/camusdb/camusdb.svg?branch=main)](https://app.travis-ci.com/camusdb/camusdb)
 
@@ -10,6 +10,7 @@ Features
 --------
  - Single server database (multi-node is planned)
  - Supports communication via a HTTP endpoint (websockets will be supported as well)
+ - It can be embedded into a .NET project to avoid communication overhead
 
 Internal Features
 -----------------

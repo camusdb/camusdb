@@ -80,6 +80,7 @@ public static class XXHash
 
 	private static uint CalcSubHash(uint value, byte[] buf, int index)
 	{
+		Console.WriteLine("={0}", buf[index]);
 		uint read_value = BitConverter.ToUInt32(buf, index);
 		value += read_value * PRIME32_2;
 		value = RotateLeft(value, 13);

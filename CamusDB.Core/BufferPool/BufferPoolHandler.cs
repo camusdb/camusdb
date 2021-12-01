@@ -33,7 +33,7 @@ namespace CamusDB.Core.BufferPool;
  * +-----------------------------------------+
  */
 public sealed class BufferPoolHandler : IDisposable
-{    
+{
     private readonly MemoryMappedFile memoryFile;
 
     private readonly MemoryMappedViewAccessor accessor;
@@ -103,7 +103,7 @@ public sealed class BufferPoolHandler : IDisposable
         }
 
         return page;
-    }    
+    }
 
     private async Task<int> GetDataLength(int offset)
     {
@@ -146,14 +146,24 @@ public sealed class BufferPoolHandler : IDisposable
             pointer = Config.NextPageOffset;
             offset = Serializator.ReadInt32(memoryPage.Buffer, ref pointer);
 
-            pointer = Config.NextPageOffset;
+            pointer = Config.ChecksumOffset;
             checksum = Serializator.ReadUInt32(memoryPage.Buffer, ref pointer);
-
+           
             if (checksum > 0) // check checksum only if available
             {
-                uint dataChecksum = XXHash.Compute(memoryPage.Buffer, Config.DataOffset, dataLength);
+                byte[] bdata = new byte[dataLength]; // @todo avoid this allocation
+                Buffer.BlockCopy(memoryPage.Buffer, Config.DataOffset, bdata, 0, dataLength);
 
-                Console.WriteLine("{0} {1} {2}", checksum, dataChecksum, dataLength);
+                uint dataChecksum = XXHash.Compute(bdata, 0, dataLength);
+
+                /*Console.WriteLine("{0} {1} {2}", checksum, dataChecksum, dataLength);
+
+                Console.WriteLine("***");
+
+                for (int i = 0; i < bdata.Length; i++)
+                    Console.WriteLine(memoryPage.Buffer[i]);
+
+                Console.WriteLine("***");*/
 
                 if (dataChecksum != checksum)
                     throw new CamusDBException(
@@ -170,7 +180,7 @@ public sealed class BufferPoolHandler : IDisposable
         } while (offset > 0);
 
         return data;
-    }    
+    }
 
     public void FlushPage(BufferPage memoryPage)
     {
@@ -287,19 +297,29 @@ public sealed class BufferPoolHandler : IDisposable
 
         try
         {
-            int nextPage = 0;            
+            int nextPage = 0;
 
             await page.Semaphore.WaitAsync();
 
             int length = ((data.Length - startOffset) + Config.DataOffset) < Config.PageSize ? (data.Length - startOffset) : (Config.PageSize - Config.DataOffset);
-            int remaining = (data.Length - startOffset) - length;            
+            int remaining = (data.Length - startOffset) - length;
 
             if (remaining > 0)
                 nextPage = await GetNextFreeOffset();
 
-            uint checksum = XXHash.Compute(data, startOffset, length);
+            byte[] bdata = new byte[length];
+            Buffer.BlockCopy(data, startOffset, bdata, 0, length);
 
-            //Console.WriteLine("{0} {1} {2}", checksum, startOffset, length);
+            uint checksum = XXHash.Compute(bdata, 0, length);
+
+            Console.WriteLine("{0} {1} {2}", checksum, startOffset, length);
+
+            Console.WriteLine("***");
+
+            for (int i = startOffset; i < length; i++)
+                Console.WriteLine(data[i]);
+
+            Console.WriteLine("***");
 
             int pointer = WritePageHeader(page, length, nextPage, checksum);
 
@@ -312,7 +332,7 @@ public sealed class BufferPoolHandler : IDisposable
             Buffer.BlockCopy(data, startOffset, page.Buffer, pointer, length);
             accessor.WriteArray<byte>(Config.PageSize * offset, page.Buffer, 0, Config.PageSize);
 
-            //Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);            
+            Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);            
 
             if (nextPage > 0)
                 await WriteDataToPage(nextPage, data, startOffset + length);

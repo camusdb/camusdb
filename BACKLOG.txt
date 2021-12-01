@@ -7,7 +7,6 @@
 
 - Get consistent reads of pages 
 - Validate types from insert ticket against schema
-- Calculate page checksums read/write
 - Allow to define multiple unique indexes
 - Implement multi indexes
 - Flush mapped files every x seconds
