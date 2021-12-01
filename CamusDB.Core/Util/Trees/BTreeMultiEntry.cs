@@ -9,15 +9,13 @@ public sealed class BTreeMultiEntry
 
     public int NumberValues = 0;
 
-    public int[] Values = new int[8];
+    public BTree? Value;
 
-    public BTreeMultiNode? Next;     // helper field to iterate over array entries    
+    public BTreeMultiNode? Next;     // helper field to iterate over array entries
 
-    public BTreeMultiEntry(int key, int? value, BTreeMultiNode? next)
+    public BTreeMultiEntry(int key, BTreeMultiNode? next)
     {
-        Key = key;
-        if (value is not null)
-            Values[NumberValues++] = value.Value;
+        Key = key;        
         Next = next;
     }
 }

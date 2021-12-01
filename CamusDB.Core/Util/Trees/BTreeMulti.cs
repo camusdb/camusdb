@@ -4,6 +4,10 @@ using System.Collections.Generic;
 
 namespace CamusDB.Core.Util.Trees;
 
+/**
+ *  BTreeMulti is a tree of B+Trees 
+ *  Unique values point to other trees where the rowids are unique values
+ */
 public sealed class BTreeMulti
 {
     // max children per B-tree node = M-1 (must be even and greater than 2)
@@ -65,12 +69,12 @@ public sealed class BTreeMulti
      * @return the value associated with the given key if the key is in the symbol table
      *         and {@code null} if the key is not in the symbol table
      */
-    public int[]? Get(int key)
+    public BTree? Get(int key)
     {
         return Search(root, key, height);
     }
 
-    private int[]? Search(BTreeMultiNode? node, int key, int ht)
+    private BTree? Search(BTreeMultiNode? node, int key, int ht)
     {
         if (node is null)
             return null;
@@ -83,7 +87,7 @@ public sealed class BTreeMulti
             for (int j = 0; j < node.KeyCount; j++)
             {
                 if (Eq(key, children[j].Key))
-                    return children[j].Values;
+                    return children[j].Value;
             }
         }
 
@@ -188,8 +192,8 @@ public sealed class BTreeMulti
         BTreeMultiNode newRoot = new(2);
         //Console.WriteLine("Node {0} is now root", newRoot.Id);
 
-        newRoot.children[0] = new BTreeMultiEntry(root.children[0].Key, null, root);
-        newRoot.children[1] = new BTreeMultiEntry(u.children[0].Key, null, u);
+        newRoot.children[0] = new BTreeMultiEntry(root.children[0].Key, root);
+        newRoot.children[1] = new BTreeMultiEntry(u.children[0].Key, u);
 
         root = newRoot;
 
@@ -205,20 +209,35 @@ public sealed class BTreeMulti
     private BTreeMultiNode? Insert(BTreeMultiNode? node, int key, int? val, int ht)
     {
         if (node is null)
-            throw new ArgumentException("h cannot be null");
+            throw new ArgumentException("node cannot be null");
 
         int j;
-        BTreeMultiEntry t = new(key, val, null);
+        BTreeMultiEntry? newEntry = null;
+        BTreeMultiEntry[] children = node.children;        
 
-        // external node
+        // external node at height 0
         if (ht == 0)
         {
             for (j = 0; j < node.KeyCount; j++)
             {
-                if (Eq(key, node.children[j].Key))
-                    break;
+                BTreeMultiEntry child = children[j];
 
-                if (Less(key, node.children[j].Key))
+                if (!Eq(key, child.Key)) // same key found
+                    continue;
+
+                if (val is null)
+                    throw new ArgumentException("val cannot be null");
+
+                //FindChildToInsert(node, key, val.Value);
+
+                child.Value!.Put(val.Value, key);
+
+                return null;
+            }
+
+            for (j = 0; j < node.KeyCount; j++)
+            {
+                if (Less(key, children[j].Key))
                     break;
             }
         }
@@ -228,15 +247,15 @@ public sealed class BTreeMulti
         {
             for (j = 0; j < node.KeyCount; j++)
             {
-                if ((j + 1 == node.KeyCount) || Less(key, node.children[j + 1].Key))
+                if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    BTreeMultiNode? u = Insert(node.children[j++].Next, key, val, ht - 1);
+                    BTreeMultiNode? u = Insert(children[j++].Next, key, val, ht - 1);
 
                     if (u == null)
                         return null;
 
-                    t.Key = u.children[0].Key;
-                    t.Next = u;
+                    newEntry = new(u.children[0].Key, u);
+                    newEntry.Value = new BTree(0);
                     break;
                 }
             }
@@ -245,7 +264,18 @@ public sealed class BTreeMulti
         for (int i = node.KeyCount; i > j; i--)
             node.children[i] = node.children[i - 1];
 
-        node.children[j] = t;
+        if (val is null)
+            throw new ArgumentException("val cannot be null");
+
+        if (newEntry is null)
+        {
+            newEntry = new(key, null);
+            newEntry.Value = new BTree(0);
+        }
+
+        newEntry.Value!.Put(val.Value, key);
+
+        node.children[j] = newEntry;
         node.KeyCount++;
         node.Dirty = true;
 

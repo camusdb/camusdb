@@ -10,6 +10,7 @@ using System.IO.MemoryMappedFiles;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.CommandsValidator;
 using Config = CamusDB.Core.CamusDBConfig;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -35,7 +36,11 @@ public class TestDatabaseCreator
         CatalogsManager catalogsManager = new();
         CommandExecutor executor = new(validator, catalogsManager);
 
-        await executor.CreateDatabase("test");
+        CreateDatabaseTicket databaseTicket = new(
+            name: "test"
+        );
+
+        await executor.CreateDatabase(databaseTicket);
 
         string path = Config.DataDirectory + "/test";
 

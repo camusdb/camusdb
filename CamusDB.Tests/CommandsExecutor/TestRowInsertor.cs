@@ -1,6 +1,7 @@
 ﻿
 using System.IO;
 using System.Text;
+using CamusDB.Core;
 using NUnit.Framework;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
@@ -14,7 +15,6 @@ using CamusDB.Core.CommandsExecutor;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -39,9 +39,13 @@ public class TestRowInsertor
         CatalogsManager catalogsManager = new();
         CommandExecutor executor = new(validator, catalogsManager);
 
-        await executor.CreateDatabase("test");
+        CreateDatabaseTicket databaseTicket = new(
+            name: "test"
+        );
 
-        CreateTableTicket ticket = new(
+        await executor.CreateDatabase(databaseTicket);
+
+        CreateTableTicket tableTicket = new(
             database: "test",
             name: "my_table",
             new ColumnInfo[]
@@ -53,7 +57,7 @@ public class TestRowInsertor
             }
         );
 
-        await executor.CreateTable(ticket);
+        await executor.CreateTable(tableTicket);
 
         return executor;
     }

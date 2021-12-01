@@ -7,10 +7,11 @@ using System.Threading.Tasks;
 using CamusDB.Core.BufferPool;
 using System.IO.MemoryMappedFiles;
 using CamusDB.Core.BufferPool.Models;
-using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
+using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -36,7 +37,11 @@ public class TestDatabaseOpener
         CatalogsManager catalogsManager = new();
         CommandExecutor executor = new(validator, catalogsManager);
 
-        await executor.CreateDatabase("test");
+        CreateDatabaseTicket databaseTicket = new(
+            name: "test"
+        );
+
+        await executor.CreateDatabase(databaseTicket);
 
         DatabaseDescriptor database = await executor.OpenDatabase("test");
 

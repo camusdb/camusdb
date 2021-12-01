@@ -32,14 +32,25 @@ public class TestTableCreator
         }
     }
 
-    [Test]
-    public async Task TestCreateTable()
+    private async Task<CommandExecutor> SetupDatabase()
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
         CommandExecutor executor = new(validator, catalogsManager);
 
-        await executor.CreateDatabase("test");
+        CreateDatabaseTicket databaseTicket = new(
+            name: "test"
+        );
+
+        await executor.CreateDatabase(databaseTicket);
+
+        return executor;
+    }
+
+    [Test]
+    public async Task TestCreateTable()
+    {
+        CommandExecutor executor = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: "test",
@@ -59,11 +70,7 @@ public class TestTableCreator
     [Test]
     public async Task TestCreateTableNoColumns()
     {
-        CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
-
-        await executor.CreateDatabase("test");
+        CommandExecutor executor = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: "test",
@@ -78,11 +85,7 @@ public class TestTableCreator
     [Test]
     public async Task TestCreateTableNoDatabase()
     {
-        CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
-
-        await executor.CreateDatabase("test");
+        CommandExecutor executor = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: "",
@@ -100,11 +103,7 @@ public class TestTableCreator
     [Test]
     public async Task TestCreateTableNoTableName()
     {
-        CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
-
-        await executor.CreateDatabase("test");
+        CommandExecutor executor = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: "test",
@@ -122,11 +121,7 @@ public class TestTableCreator
     [Test]
     public async Task TestCreateTableDuplicateColumn()
     {
-        CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
-
-        await executor.CreateDatabase("test");
+        CommandExecutor executor = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: "test",
@@ -144,11 +139,7 @@ public class TestTableCreator
     [Test]
     public async Task TestCreateTableDuplicatePrimaryKey()
     {
-        CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
-
-        await executor.CreateDatabase("test");
+        CommandExecutor executor = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: "test",
@@ -166,11 +157,7 @@ public class TestTableCreator
     [Test]
     public async Task TestCreateTableInvalidTableName()
     {
-        CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
-
-        await executor.CreateDatabase("test");
+        CommandExecutor executor = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: "test",
@@ -188,11 +175,7 @@ public class TestTableCreator
     [Test]
     public async Task TestCreateTableInvalidTableNameCharacters()
     {
-        CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
-
-        await executor.CreateDatabase("test");
+        CommandExecutor executor = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: "test",
