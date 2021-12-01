@@ -34,6 +34,7 @@ public sealed class CommandsController : ControllerBase
         };
     }
 
+    [HttpPost]
     [Route("/create-db")]
     public async Task<JsonResult> CreateDatabase()
     {
@@ -66,6 +67,65 @@ public sealed class CommandsController : ControllerBase
         }
     }
 
+    private ColumnType GetColumnType(string? name)
+    {
+        if (string.IsNullOrEmpty(name))
+            throw new Exception("Invalid type");
+
+        if (name == "int")
+            return ColumnType.Integer;
+
+        if (name == "string")
+            return ColumnType.String;
+
+        if (name == "bool")
+            return ColumnType.Bool;
+
+        if (name == "id")
+            return ColumnType.Id;
+
+        throw new Exception("Unknown type " + name);
+    }
+
+    private IndexType GetIndexType(string? type)
+    {
+        if (string.IsNullOrEmpty(type))
+            return IndexType.None;
+
+        if (type == "unique")
+            return IndexType.Unique;
+
+        if (type == "multi")
+            return IndexType.Multi;
+        
+        throw new Exception("Unknown index type " + type);
+    }
+
+    private ColumnInfo[] GetColumnInfos(CreateTableColumn[]? columns)
+    {
+        if (columns is null)
+            return Array.Empty<ColumnInfo>();
+
+        ColumnInfo[] columnInfos = new ColumnInfo[columns.Length];
+
+        int i = 0;
+
+        foreach (CreateTableColumn column in columns)
+        {
+            columnInfos[i++] = new ColumnInfo(
+                name: column.Name ?? "",
+                type: GetColumnType(column.Type),
+                primary: column.Primary,
+                notNull: false,
+                index: GetIndexType(column.Index),
+                defaultValue: null                
+            );
+        }
+
+        return columnInfos;
+    }
+
+    [HttpPost]
     [Route("/create-table")]
     public async Task<JsonResult> CreateTable()
     {        
@@ -81,7 +141,7 @@ public sealed class CommandsController : ControllerBase
             CreateTableTicket ticket = new(
                 database: request.DatabaseName ?? "",
                 name: request.TableName ?? "",
-                columns: request.Columns ?? Array.Empty<ColumnInfo>()
+                columns: GetColumnInfos(request.Columns)
             );
 
             await executor.CreateTable(ticket);

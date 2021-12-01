@@ -23,7 +23,7 @@ public class TestRowInsertor
     [SetUp]
     public void Setup()
     {
-        string path = Config.DataDirectory + "/test";
+        string path = Config.DataDirectory + "/factory";
         if (Directory.Exists(path))
         {
             File.Delete(path + "/tablespace0");
@@ -40,19 +40,26 @@ public class TestRowInsertor
         CommandExecutor executor = new(validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
-            name: "test"
+            name: "factory"
         );
 
-        await executor.CreateDatabase(databaseTicket);
+        await executor.CreateDatabase(databaseTicket);        
+
+        return executor;
+    }
+
+    private async Task<CommandExecutor> SetupBasicTable()
+    {
+        var executor = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("age", ColumnType.Integer),
+                new ColumnInfo("year", ColumnType.Integer),
                 new ColumnInfo("enabled", ColumnType.Bool)
             }
         );
@@ -60,21 +67,21 @@ public class TestRowInsertor
         await executor.CreateTable(tableTicket);
 
         return executor;
-    }
+    }    
 
     [Test]
     public async Task TestInvalidTypeAssigned()
     {
-        var executor = await SetupDatabase();
+        var executor = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Integer, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
             }
         );        
@@ -86,16 +93,16 @@ public class TestRowInsertor
     [Test]
     public async Task TestInvalidDatabase()
     {
-        var executor = await SetupDatabase();
+        var executor = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: "another_test",
-            name: "my_table",
+            database: "another_factory",
+            name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Integer, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
             }
         );
@@ -107,16 +114,16 @@ public class TestRowInsertor
     [Test]
     public async Task TestInvalidTable()
     {
-        var executor = await SetupDatabase();
+        var executor = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: "test",
-            name: "my_other_table",
+            database: "factory",
+            name: "unknown_table",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Integer, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
             }
         );
@@ -128,16 +135,16 @@ public class TestRowInsertor
     [Test]
     public async Task TestBasicInsert()
     {
-        var executor = await SetupDatabase();
+        var executor = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
             }
         );
@@ -148,16 +155,16 @@ public class TestRowInsertor
     [Test]
     public async Task TestTwoInserts()
     {
-        var executor = await SetupDatabase();
+        var executor = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
         );
@@ -165,13 +172,13 @@ public class TestRowInsertor
         await executor.Insert(ticket);
 
         ticket = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "2") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "true") },
             }
         );
@@ -182,28 +189,28 @@ public class TestRowInsertor
     [Test]
     public async Task TestTwoInsertsParallel()
     {
-        var executor = await SetupDatabase();
+        var executor = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
         );        
 
         InsertTicket ticket2 = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "2") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "true") },
             }
         );
@@ -218,16 +225,16 @@ public class TestRowInsertor
     [Test]
     public async Task TestCheckSuccessfulInsert()
     {
-        var executor = await SetupDatabase();
+        var executor = await SetupBasicTable();
 
         InsertTicket insertTicket = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
         );
@@ -235,8 +242,8 @@ public class TestRowInsertor
         await executor.Insert(insertTicket);
 
         QueryByIdTicket queryTicket = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             id: 1
         );
 
@@ -257,28 +264,28 @@ public class TestRowInsertor
     [Test]
     public async Task TestSuccessfulTwoParallelInserts()
     {
-        var executor = await SetupDatabase();
+        var executor = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name 1") },
-                { "age", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
         );
 
         InsertTicket ticket2 = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "2") },
                 { "name", new ColumnValue(ColumnType.String, "some name 2") },
-                { "age", new ColumnValue(ColumnType.Integer, "4567") },
+                { "year", new ColumnValue(ColumnType.Integer, "4567") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "true") },
             }
         );
@@ -290,8 +297,8 @@ public class TestRowInsertor
         });
 
         QueryByIdTicket queryTicket = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             id: 2
         );
 
@@ -312,8 +319,8 @@ public class TestRowInsertor
         Assert.AreEqual(row[3].Value, "true");
 
         QueryByIdTicket queryTicket2 = new(
-            database: "test",
-            name: "my_table",
+            database: "factory",
+            name: "robots",
             id: 1
         );
 

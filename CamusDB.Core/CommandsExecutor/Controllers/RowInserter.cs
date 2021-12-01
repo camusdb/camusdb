@@ -148,11 +148,14 @@ public sealed class RowInserter
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        /*foreach (KeyValuePair<string, BTree> index in table.Indexes)
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
-            foreach (BTreeEntry entry in index.Value.EntriesTraverse())
-                Console.WriteLine("Index Key={0} PageOffset={1}", entry.Key, entry.Value);
-        }*/
+            if (index.Value.MultiRows is not null)
+            {
+                foreach (BTreeMultiEntry entry in index.Value.MultiRows.EntriesTraverse())
+                    Console.WriteLine("Index Key={0} PageOffset={1}", entry.Key, entry.Value!.Size());
+            }
+        }
 
         Console.WriteLine("Row {0} inserted at {1}, Time taken: {2}", context.RowId, context.DataPageOffset, timeTaken.ToString(@"m\:ss\.fff"));
     }

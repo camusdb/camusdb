@@ -59,6 +59,12 @@ internal sealed class CreateTableValidator : ValidatorBase
                     "Column name has invalid characters"
                 );
 
+            if (IsReservedName(columnInfo.Name))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Reserved column name: " + columnInfo.Name
+                );
+
             if (!existingColumns.Add(columnInfo.Name.ToLowerInvariant()))
                 throw new CamusDBException(
                     CamusDBErrorCodes.DuplicateColumn,
@@ -76,5 +82,11 @@ internal sealed class CreateTableValidator : ValidatorBase
                 primaryKey = columnInfo;
             }
         }
+
+        if (primaryKey is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "A primary key column is mandatory in the table"
+            );
     }
 }

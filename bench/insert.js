@@ -26,7 +26,7 @@ async function f()
             "type": 1, // id
             "value": parseInt(Math.random() * 1000000).toString(),
           },
-          "age": {
+          "code": {
             "type": 2, // integer
             "value": "1234",
           },

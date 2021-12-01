@@ -16,17 +16,17 @@ namespace CamusDB.Core.BufferPool;
 
 /*
  * BufferPoolHandler
- * 
+ *
  * Organizes a memory-mapped disk file in memory pages. Pages are loaded on demand
  * and are organized in the following layout:
- * 
+ *
  * +--------------------+
  * | version (2 bytes)  |
- * +--------------------+--------------------+ 
+ * +--------------------+--------------------+
  * | checksum (4 bytes)                      |
- * +-----------------------------------------+ 
+ * +-----------------------------------------+
  * | next page offset (4 bytes)              |
- * +-----------------------------------------+ 
+ * +-----------------------------------------+
  * | data length (4 bytes)                   |
  * +-----------------------------------------+
  * | data                                    |
@@ -53,6 +53,12 @@ public sealed class BufferPoolHandler : IDisposable
     // Load a page without reading its contents
     public async ValueTask<BufferPage> GetPage(int offset)
     {
+        if (offset < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidPageOffset,
+                "Invalid page offset"
+            );
+
         if (pages.TryGetValue(offset, out BufferPage? page))
             return page;
 
@@ -77,6 +83,12 @@ public sealed class BufferPoolHandler : IDisposable
     // Load a page reading its contents
     public async ValueTask<BufferPage> ReadPage(int offset)
     {
+        if (offset < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidPageOffset,
+                "Invalid page offset"
+            );
+
         if (pages.TryGetValue(offset, out BufferPage? page))
             return page;
 
@@ -126,6 +138,12 @@ public sealed class BufferPoolHandler : IDisposable
 
     public async Task<byte[]> GetDataFromPage(int offset)
     {
+        if (offset < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidPageOffset,
+                "Invalid page offset"
+            );
+
         int length = await GetDataLength(offset);
 
         if (length == 0)
@@ -148,7 +166,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             pointer = Config.ChecksumOffset;
             checksum = Serializator.ReadUInt32(memoryPage.Buffer, ref pointer);
-           
+
             if (checksum > 0) // check checksum only if available
             {
                 byte[] bdata = new byte[dataLength]; // @todo avoid this allocation
@@ -192,7 +210,7 @@ public sealed class BufferPoolHandler : IDisposable
     {
         int pointer = 0;
         Serializator.WriteInt16(page.Buffer, Config.PageLayoutVersion, ref pointer); // layout version (2 byte integer)
-        Serializator.WriteUInt32(page.Buffer, 0, ref pointer); // checksum (4 bytes integer)                
+        Serializator.WriteUInt32(page.Buffer, 0, ref pointer); // checksum (4 bytes integer)
         Serializator.WriteInt32(page.Buffer, 8, ref pointer);  // data length (4 bytes integer)
         Serializator.WriteInt32(page.Buffer, 1, ref pointer);  // first page
         Serializator.WriteInt32(page.Buffer, 1, ref pointer);  // first row id
@@ -204,7 +222,7 @@ public sealed class BufferPoolHandler : IDisposable
         Serializator.WriteInt16(page.Buffer, Config.PageLayoutVersion, ref pointer); // layout version (2 byte integer)
         Serializator.WriteUInt32(page.Buffer, checksum, ref pointer);                       // checksum (4 bytes integer)
         Serializator.WriteInt32(page.Buffer, nextPage, ref pointer);                 // next page (4 bytes integer)
-        Serializator.WriteInt32(page.Buffer, length, ref pointer);                   // data length (4 bytes integer)        
+        Serializator.WriteInt32(page.Buffer, length, ref pointer);                   // data length (4 bytes integer)
         return pointer;
     }
 
@@ -220,7 +238,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             int length = Serializator.ReadInt32(page.Buffer, ref pointer);
 
-            if (length == 0) // tablespace is not initialized ?            
+            if (length == 0) // tablespace is not initialized ?
                 WriteTableSpaceHeader(page);
             else
             {
@@ -255,7 +273,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             int length = Serializator.ReadInt32(page.Buffer, ref pointer);
 
-            if (length == 0) // tablespace is not initialized ?            
+            if (length == 0) // tablespace is not initialized ?
                 WriteTableSpaceHeader(page);
             else
             {
@@ -287,6 +305,12 @@ public sealed class BufferPoolHandler : IDisposable
 
     public async Task WriteDataToPage(int offset, byte[] data, int startOffset = 0)
     {
+        if (offset < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidPageOffset,
+                "Invalid page offset"
+            );
+
         if (offset == Config.TableSpaceHeaderPage)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
@@ -332,7 +356,7 @@ public sealed class BufferPoolHandler : IDisposable
             Buffer.BlockCopy(data, startOffset, page.Buffer, pointer, length);
             accessor.WriteArray<byte>(Config.PageSize * offset, page.Buffer, 0, Config.PageSize);
 
-            Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);            
+            Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);
 
             if (nextPage > 0)
                 await WriteDataToPage(nextPage, data, startOffset + length);

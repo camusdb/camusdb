@@ -104,13 +104,13 @@ public sealed class BTreeMulti
         return null;
     }
 
-    public IEnumerable EntriesTraverse()
+    public IEnumerable<BTreeMultiEntry> EntriesTraverse()
     {
-        foreach (BTreeEntry entry in EntriesTraverseInternal(root, height))
+        foreach (BTreeMultiEntry entry in EntriesTraverseInternal(root, height))
             yield return entry;
     }
 
-    private static IEnumerable EntriesTraverseInternal(BTreeMultiNode? node, int ht)
+    private static IEnumerable<BTreeMultiEntry> EntriesTraverseInternal(BTreeMultiNode? node, int ht)
     {
         if (node is null)
             yield break;
@@ -129,7 +129,7 @@ public sealed class BTreeMulti
         {
             for (int j = 0; j < node.KeyCount; j++)
             {
-                foreach (BTreeEntry entry in EntriesTraverseInternal(children[j].Next, ht - 1))
+                foreach (BTreeMultiEntry entry in EntriesTraverseInternal(children[j].Next, ht - 1))
                     yield return entry;
             }
         }
@@ -255,7 +255,7 @@ public sealed class BTreeMulti
                         return null;
 
                     newEntry = new(u.children[0].Key, u);
-                    newEntry.Value = new BTree(0);
+                    newEntry.Value = new BTree(-1);
                     break;
                 }
             }
@@ -270,7 +270,7 @@ public sealed class BTreeMulti
         if (newEntry is null)
         {
             newEntry = new(key, null);
-            newEntry.Value = new BTree(0);
+            newEntry.Value = new BTree(-1);
         }
 
         newEntry.Value!.Put(val.Value, key);

@@ -6,6 +6,7 @@
 
 - Receive POST parameters for query
 
+- Dont allow null type columns in create table
 - Get consistent reads of pages 
 - Allow to define multiple unique indexes
 - Flush mapped files every x seconds

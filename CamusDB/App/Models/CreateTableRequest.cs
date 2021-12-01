@@ -16,5 +16,5 @@ public sealed class CreateTableRequest
 
     public string? TableName { get; set; }
 
-    public ColumnInfo[]? Columns { get; set; }
+    public CreateTableColumn[]? Columns { get; set; }
 }

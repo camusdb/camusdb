@@ -18,12 +18,15 @@ public sealed class TableColumnSchema
 
     public bool NotNull { get; }
 
-    public TableColumnSchema(string name, ColumnType type, bool primary, bool notNull)
+    public IndexType Index { get; }
+
+    public TableColumnSchema(string name, ColumnType type, bool primary, bool notNull, IndexType index)
     {
         Name = name;
         Type = type;
         Primary = primary;
         NotNull = notNull;
+        Index = index;
     }
 }
 

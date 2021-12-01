@@ -8,10 +8,11 @@
 
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.BufferPool;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.BufferPool;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -26,14 +27,14 @@ internal sealed class TableCreator
 
     public async Task<bool> Create(DatabaseDescriptor database, CreateTableTicket ticket)
     {
-        await Catalogs.CreateTable(database, ticket);
+        TableSchema tableSchema = await Catalogs.CreateTable(database, ticket);
 
-        await SetInitialTablePages(database, ticket);
+        await SetInitialTablePages(database, tableSchema);
 
         return true;
     }
 
-    private async Task SetInitialTablePages(DatabaseDescriptor database, CreateTableTicket ticket)
+    private async Task SetInitialTablePages(DatabaseDescriptor database, TableSchema tableSchema)
     {
         try
         {
@@ -42,7 +43,7 @@ internal sealed class TableCreator
             BufferPoolHandler tablespace = database.TableSpace!;
             BufferPoolHandler systemTablespace = database.SystemSpace!;
 
-            string tableName = ticket.TableName;
+            string tableName = tableSchema.Name!;
 
             await database.SystemSchema.Semaphore.WaitAsync();
             
@@ -55,7 +56,7 @@ internal sealed class TableCreator
 
             databaseObject.Indexes = new();
 
-            foreach (ColumnInfo column in ticket.Columns)
+            foreach (TableColumnSchema column in tableSchema.Columns!)
             {
                 if (column.Primary)
                 {

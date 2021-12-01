@@ -15,7 +15,7 @@ namespace CamusDB.Core.Catalogs;
 
 public sealed class CatalogsManager
 {
-    public async Task<bool> CreateTable(DatabaseDescriptor database, CreateTableTicket ticket)
+    public async Task<TableSchema> CreateTable(DatabaseDescriptor database, CreateTableTicket ticket)
     {
         try
         {
@@ -27,17 +27,21 @@ public sealed class CatalogsManager
             TableSchema tableSchema = new();
             tableSchema.Version = 0;
             tableSchema.Name = ticket.TableName;
+
             tableSchema.Columns = new();
 
             foreach (ColumnInfo column in ticket.Columns)
+            {
                 tableSchema.Columns.Add(
                     new TableColumnSchema(
                         column.Name,
                         column.Type,
                         column.Primary,
-                        column.NotNull
+                        column.NotNull,
+                        column.Index
                     )
                 );
+            }            
 
             database.Schema.Tables.Add(ticket.TableName, tableSchema);
 
@@ -45,7 +49,7 @@ public sealed class CatalogsManager
 
             Console.WriteLine("Added table {0} to schema", ticket.TableName);
 
-            return true;
+            return tableSchema;
         }
         finally
         {

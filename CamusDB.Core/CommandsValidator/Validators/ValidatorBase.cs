@@ -26,5 +26,10 @@ internal abstract class ValidatorBase
 
         return true;
     }
+
+    protected bool IsReservedName(string name)
+    {
+        return name == "_id";            
+    }
 }
 

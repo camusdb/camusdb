@@ -10,5 +10,5 @@ namespace CamusDB.App.Models;
 
 public sealed class CreateDatabaseRequest
 {
-    public string? DatabaseName { get; set; }    
+    public string? DatabaseName { get; set; }
 }

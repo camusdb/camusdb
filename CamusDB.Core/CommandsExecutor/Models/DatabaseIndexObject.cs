@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
+
 namespace CamusDB.Core.CommandsExecutor.Models;
 
 public sealed class DatabaseIndexObject
