@@ -9,14 +9,15 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.CommandsValidator;
 using Config = CamusDB.Core.CamusDBConfig;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public sealed class DatabaseCreator
+internal sealed class DatabaseCreator
 {
-    public async Task Create(string name)
+    public async Task Create(CreateDatabaseTicket ticket)
     {
-        name = name.ToLowerInvariant(); // @todo validate database name
+        string name = ticket.DatabaseName;
 
         if (Directory.Exists(Config.DataDirectory + "/" + name))
             throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Database already exists");

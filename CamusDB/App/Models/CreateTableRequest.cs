@@ -10,11 +10,11 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.App.Models;
 
-public sealed class InsertRequest
+public sealed class CreateTableRequest
 {
     public string? DatabaseName { get; set; }
 
     public string? TableName { get; set; }
 
-    public Dictionary<string, ColumnValue>? Values { get; set; }
+    public ColumnInfo[]? Columns { get; set; }
 }

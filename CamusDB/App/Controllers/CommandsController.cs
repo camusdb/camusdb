@@ -20,13 +20,13 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class CommandsController : ControllerBase
 {
-    private readonly CommandExecutor executor;    
+    private readonly CommandExecutor executor;
 
     private readonly JsonSerializerOptions jsonOptions;
 
     public CommandsController(CommandExecutor executor)
     {
-        this.executor = executor;        
+        this.executor = executor;
 
         this.jsonOptions = new JsonSerializerOptions
         {
@@ -37,30 +37,53 @@ public sealed class CommandsController : ControllerBase
     [Route("/create-db")]
     public async Task<JsonResult> CreateDatabase()
     {
-        await executor.CreateDatabase("test");
+        try
+        {
+            using var reader = new StreamReader(Request.Body);
+            var body = await reader.ReadToEndAsync();
 
-        return new JsonResult(new CreateDatabaseResponse("ok"));
+            CreateDatabaseRequest? request = JsonSerializer.Deserialize<CreateDatabaseRequest>(body, jsonOptions);
+            if (request == null)
+                throw new Exception("CreateDatabase request is not valid");
+
+            CreateDatabaseTicket ticket = new(
+                name: request.DatabaseName ?? ""
+            );
+
+            await executor.CreateDatabase(ticket);
+
+            return new JsonResult(new CreateDatabaseResponse("ok"));
+        }
+        catch (CamusDBException e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new CreateDatabaseResponse("failed", e.Code, e.Message));
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new CreateDatabaseResponse("failed", "CA0000", e.Message));
+        }
     }
 
     [Route("/create-table")]
     public async Task<JsonResult> CreateTable()
-    {
-        //var system = new Random();
-
-        CreateTableTicket ticket = new(
-            database: "test",
-            name: "my_table",
-            new ColumnInfo[]
-            {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("age", ColumnType.Integer),
-                new ColumnInfo("enabled", ColumnType.Bool)
-            }
-        );
-
+    {        
         try
         {
+            using var reader = new StreamReader(Request.Body);
+            var body = await reader.ReadToEndAsync();
+
+            CreateTableRequest? request = JsonSerializer.Deserialize<CreateTableRequest>(body, jsonOptions);
+            if (request == null)
+                throw new Exception("CreateTable request is not valid");
+
+            CreateTableTicket ticket = new(
+                database: request.DatabaseName ?? "",
+                name: request.TableName ?? "",
+                columns: request.Columns ?? Array.Empty<ColumnInfo>()
+            );
+
             await executor.CreateTable(ticket);
             return new JsonResult(new CreateTableResponse("ok"));
         }
@@ -93,7 +116,7 @@ public sealed class CommandsController : ControllerBase
                 database: request.DatabaseName ?? "",
                 name: request.TableName ?? "",
                 values: request.Values ?? new Dictionary<string, ColumnValue>()
-            );            
+            );
 
             await executor.Insert(ticket);
             return new JsonResult(new InsertResponse("ok"));

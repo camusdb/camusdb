@@ -50,9 +50,11 @@ public sealed class CommandExecutor
         return await tableCreator.Create(descriptor, ticket);
     }
 
-    public async Task CreateDatabase(string name)
+    public async Task CreateDatabase(CreateDatabaseTicket ticket)
     {
-        await databaseCreator.Create(name);
+        validator.Validate(ticket);
+
+        await databaseCreator.Create(ticket);
     }
 
     public async Task<DatabaseDescriptor> OpenDatabase(string database)

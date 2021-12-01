@@ -12,8 +12,19 @@ public sealed class CreateDatabaseResponse
 {
     public string Status { get; set; }
 
+    public string? Code { get; set; }
+
+    public string? Message { get; set; }
+
     public CreateDatabaseResponse(string status)
     {
         Status = status;
+    }
+
+    public CreateDatabaseResponse(string status, string code, string message)
+    {
+        Status = status;
+        Code = code;
+        Message = message;
     }
 }
