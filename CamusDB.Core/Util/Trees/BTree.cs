@@ -11,6 +11,10 @@ public sealed class BTree
 
     public const int MaxChildrenHalf = MaxChildren / 2;
 
+    public static int CurrentId = -1;
+
+    public int Id;    
+
     public BTreeNode root;       // root of the B-tree
 
     public int height;      // height of the B-tree
@@ -26,8 +30,11 @@ public sealed class BTree
      */
     public BTree(int rootOffset)
     {
-        root = new BTreeNode(0);
+        root = new BTreeNode(0);        
         PageOffset = rootOffset;
+        Id = Interlocked.Increment(ref CurrentId);
+
+        //Console.WriteLine("Tree={0}", Id);        
     }
 
     /**
@@ -182,6 +189,8 @@ public sealed class BTree
 
     public void Put(int key, int value)
     {
+        //Console.WriteLine("Put {0} {1}\nStackTrace: '{2}'", key, value, Environment.StackTrace);
+
         BTreeNode? u = Insert(root, key, value, height);
         n++;
         if (u == null) return;
@@ -207,17 +216,23 @@ public sealed class BTree
     private BTreeNode? Insert(BTreeNode? node, int key, int? val, int ht)
     {
         if (node is null)
-            throw new ArgumentException("h cannot be null");
+            throw new ArgumentException("node cannot be null");
 
         int j;
-        BTreeEntry t = new(key, val, null);
+        BTreeEntry newEntry = new(key, val, null);
+        BTreeEntry[] children = node.children;
 
         // external node
         if (ht == 0)
         {
             for (j = 0; j < node.KeyCount; j++)
-                if (Less(key, node.children[j].Key))
+            {
+                if (Eq(key, children[j].Key))
+                    throw new Exception("Keys must be unique");
+
+                if (Less(key, children[j].Key))
                     break;
+            }
         }
 
         // internal node
@@ -225,15 +240,15 @@ public sealed class BTree
         {
             for (j = 0; j < node.KeyCount; j++)
             {
-                if ((j + 1 == node.KeyCount) || Less(key, node.children[j + 1].Key))
+                if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    BTreeNode? u = Insert(node.children[j++].Next, key, val, ht - 1);
+                    BTreeNode? u = Insert(children[j++].Next, key, val, ht - 1);
 
                     if (u == null)
                         return null;
 
-                    t.Key = u.children[0].Key;
-                    t.Next = u;
+                    newEntry.Key = u.children[0].Key;
+                    newEntry.Next = u;
                     break;
                 }
             }
@@ -242,7 +257,7 @@ public sealed class BTree
         for (int i = node.KeyCount; i > j; i--)
             node.children[i] = node.children[i - 1];
 
-        node.children[j] = t;
+        node.children[j] = newEntry;
         node.KeyCount++;
         node.Dirty = true;
 
@@ -257,7 +272,7 @@ public sealed class BTree
     // split node in half
     private static BTreeNode Split(BTreeNode current)
     {        
-        BTreeNode t = new(MaxChildrenHalf);
+        BTreeNode newNode = new(MaxChildrenHalf);
 
         //Console.WriteLine("Node {0} marked as dirty because of split", t.Id);
 
@@ -267,9 +282,9 @@ public sealed class BTree
         //Console.WriteLine("Node {0} marked as dirty because of split", current.Id);
 
         for (int j = 0; j < MaxChildrenHalf; j++)
-            t.children[j] = current.children[MaxChildrenHalf + j];
+            newNode.children[j] = current.children[MaxChildrenHalf + j];
 
-        return t;
+        return newNode;
     }
 
     // comparison functions - make Comparable instead of Key to avoid casts

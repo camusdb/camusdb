@@ -14,13 +14,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class IndexSaver
 {
-    public async Task Save(BufferPoolHandler tablespace, BTree index, int key, int value)
+    public async Task Save(BufferPoolHandler tablespace, BTree index, int key, int value, bool insert = true)
     {
         try
         {
             await index.WriteLock.WaitAsync();
 
-            await SaveUniqueInternal(tablespace, index, key, value);
+            await SaveUniqueInternal(tablespace, index, key, value, insert);
         }
         finally
         {
@@ -42,9 +42,9 @@ internal sealed class IndexSaver
         }
     }
 
-    public async Task NoLockingSave(BufferPoolHandler tablespace, BTree index, int key, int value)
+    public async Task NoLockingSave(BufferPoolHandler tablespace, BTree index, int key, int value, bool insert = true)
     {
-        await SaveUniqueInternal(tablespace, index, key, value);
+        await SaveUniqueInternal(tablespace, index, key, value, insert);
     }
 
     public async Task NoLockingSave(BufferPoolHandler tablespace, BTreeMulti index, int key, int value)
@@ -52,9 +52,10 @@ internal sealed class IndexSaver
         await SaveMultiInternal(tablespace, index, key, value);
     }
 
-    private static async Task SaveUniqueInternal(BufferPoolHandler tablespace, BTree index, int key, int value)
+    private static async Task SaveUniqueInternal(BufferPoolHandler tablespace, BTree index, int key, int value, bool insert)
     {
-        index.Put(key, value);
+        if (insert)
+            index.Put(key, value);
 
         foreach (BTreeNode node in index.NodesTraverse())
         {
@@ -192,10 +193,12 @@ internal sealed class IndexSaver
                     );
                 }
 
+                Console.WriteLine("Read Tree={0} PageOffset={1}", subTree.Id, subTree.PageOffset);
+
                 if (subTree.PageOffset == -1)
                     subTree.PageOffset = await tablespace.GetNextFreeOffset();
 
-                await Save(tablespace, subTree, value, 0);
+                await Save(tablespace, subTree, value, 0, false);
 
                 Serializator.WriteInt32(nodeBuffer, entry.Key, ref pointer);
                 Serializator.WriteInt32(nodeBuffer, subTree.PageOffset, ref pointer);
