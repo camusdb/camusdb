@@ -33,13 +33,13 @@ internal sealed class QueryExecutor
         return await QueryUsingUniqueIndex(database, table, table.Rows);
     }
 
-    private async Task<List<List<ColumnValue>>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree index)
+    private async Task<List<List<ColumnValue>>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<int> index)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
         List<List<ColumnValue>> rows = new();
 
-        foreach (BTreeEntry entry in index.EntriesTraverse())
+        foreach (BTreeEntry<int> entry in index.EntriesTraverse())
         {
             if (entry.Value is null)
             {
@@ -70,7 +70,7 @@ internal sealed class QueryExecutor
         {
             //Console.WriteLine("MultiTree={0} Key={0} PageOffset={1}", index.Id, entry.Key, entry.Value!.Size());
 
-            foreach (BTreeEntry subEntry in entry.Value!.EntriesTraverse())
+            foreach (BTreeEntry<int> subEntry in entry.Value!.EntriesTraverse())
             {
                 //Console.WriteLine(" > Index Key={0} PageOffset={1}", subEntry.Key, subEntry.Value);
 

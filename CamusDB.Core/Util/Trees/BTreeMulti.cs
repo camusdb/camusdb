@@ -74,7 +74,7 @@ public sealed class BTreeMulti
      * @return the value associated with the given key if the key is in the symbol table
      *         and {@code null} if the key is not in the symbol table
      */
-    public BTree? Get(int key)
+    public BTree<int>? Get(int key)
     {
         return Search(root, key, height);
     }
@@ -88,16 +88,16 @@ public sealed class BTreeMulti
      */
     public IEnumerable<int> GetAll(int key)
     {
-        BTree? subTree = Search(root, key, height);
+        BTree<int>? subTree = Search(root, key, height);
 
         if (subTree is null)
             yield break;
 
-        foreach (BTreeEntry subTreeEntry in subTree.EntriesTraverse())
+        foreach (BTreeEntry<int> subTreeEntry in subTree.EntriesTraverse())
             yield return subTreeEntry.Key;
     }
 
-    private BTree? Search(BTreeMultiNode? node, int key, int ht)
+    private BTree<int>? Search(BTreeMultiNode? node, int key, int ht)
     {
         if (node is null)
             return null;
@@ -164,7 +164,7 @@ public sealed class BTreeMulti
             yield return node;
     }
 
-    private static IEnumerable NodesTraverseInternal(BTreeMultiNode? node, int ht)
+    private static IEnumerable<BTreeMultiNode> NodesTraverseInternal(BTreeMultiNode? node, int ht)
     {
         //Console.WriteLine("ht={0}", ht);
 
@@ -183,13 +183,13 @@ public sealed class BTreeMulti
         }
     }
 
-    public IEnumerable NodesReverseTraverse()
+    public IEnumerable<BTreeNode<int>> NodesReverseTraverse()
     {
-        foreach (BTreeMultiNode node in NodesReverseTraverseInternal(root, height))
+        foreach (BTreeNode<int> node in NodesReverseTraverseInternal(root, height))
             yield return node;
     }
 
-    private static IEnumerable NodesReverseTraverseInternal(BTreeMultiNode? node, int ht)
+    private static IEnumerable<BTreeNode<int>> NodesReverseTraverseInternal(BTreeMultiNode? node, int ht)
     {
         //Console.WriteLine("ht={0}", ht);
 
@@ -198,11 +198,11 @@ public sealed class BTreeMulti
 
         for (int j = node.KeyCount; j >= 0; j--)
         {
-            foreach (BTreeNode childNode in NodesReverseTraverseInternal(node.children[j].Next, ht - 1))
+            foreach (BTreeNode<int> childNode in NodesReverseTraverseInternal(node.children[j].Next, ht - 1))
                 yield return childNode;
         }
 
-        yield return node;
+        //yield return node;
     }
 
     public void Put(int key, int value)
@@ -280,7 +280,7 @@ public sealed class BTreeMulti
                         return null;
 
                     newEntry = new(u.children[0].Key, u);
-                    newEntry.Value = new BTree(-1);
+                    newEntry.Value = new BTree<int>(-1);
                     break;
                 }
             }
@@ -295,7 +295,7 @@ public sealed class BTreeMulti
         if (newEntry is null)
         {
             newEntry = new(key, null);
-            newEntry.Value = new BTree(-1);
+            newEntry.Value = new BTree<int>(-1);
         }
 
         newEntry.Value!.Put(val.Value, key);

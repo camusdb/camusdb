@@ -57,7 +57,7 @@ internal sealed class TableOpener
                     {
                         case IndexType.Unique:
                             {
-                                BTree rows = await indexReader.ReadUnique(tablespace, index.Value.StartOffset);
+                                BTree<int> rows = await indexReader.ReadUnique(tablespace, index.Value.StartOffset);
 
                                 tableDescriptor.Indexes.Add(
                                     index.Key,

@@ -17,11 +17,11 @@ public sealed class TableIndexSchema
 
     public IndexType Type { get; }
 
-    public BTree? UniqueRows { get; }
+    public BTree<int>? UniqueRows { get; }
 
     public BTreeMulti? MultiRows { get; }
 
-    public TableIndexSchema(string column, IndexType type, BTree rows)
+    public TableIndexSchema(string column, IndexType type, BTree<int> rows)
     {
         Column = column;
         Type = type;

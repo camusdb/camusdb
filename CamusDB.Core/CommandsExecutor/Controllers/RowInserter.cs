@@ -66,7 +66,7 @@ public sealed class RowInserter
         return null;
     }
 
-    private static int CheckUniqueKeyViolations(TableDescriptor table, BTree uniqueIndex, InsertTicket ticket, string name)
+    private static int CheckUniqueKeyViolations(TableDescriptor table, BTree<int> uniqueIndex, InsertTicket ticket, string name)
     {
         int? uniqueValue = GetRowValue(table, ticket, name);
 
@@ -104,7 +104,7 @@ public sealed class RowInserter
                     "A multi index tree wasn't found"
                 );
 
-            BTree uniqueIndex = index.Value.UniqueRows;
+            BTree<int> uniqueIndex = index.Value.UniqueRows;
 
             try
             {
@@ -151,7 +151,7 @@ public sealed class RowInserter
             if (multiKeyValue is null)
                 continue;
 
-            Console.WriteLine(multiKeyValue.Value);
+            //Console.WriteLine(multiKeyValue.Value);
 
             await indexSaver.Save(tablespace, multiIndex, multiKeyValue.Value, context.DataPageOffset);            
         }

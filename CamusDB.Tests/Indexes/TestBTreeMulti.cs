@@ -62,7 +62,7 @@ public class TestBTreeMulti
 
         tree.Put(5, 100);
 
-        BTree? values = tree.Get(5);
+        BTree<int>? values = tree.Get(5);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
@@ -76,7 +76,7 @@ public class TestBTreeMulti
 
         tree.Put(5, 100);
 
-        BTree? values = tree.Get(11);
+        BTree<int>? values = tree.Get(11);
 
         Assert.Null(values);
     }
@@ -93,7 +93,7 @@ public class TestBTreeMulti
         tree.Put(8, 103);
         tree.Put(9, 104);
 
-        BTree? values = tree.Get(5);
+        BTree<int>? values = tree.Get(5);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
@@ -148,7 +148,7 @@ public class TestBTreeMulti
         tree.Put(5, 106);
         tree.Put(5, 107);
 
-        BTree? values = tree.Get(5);
+        BTree<int>? values = tree.Get(5);
 
         Assert.NotNull(values);
         Assert.AreEqual(values!.Size(), 7);        

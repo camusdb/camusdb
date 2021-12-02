@@ -14,11 +14,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class IndexReader
 {
-    public async Task<BTree> ReadUnique(BufferPoolHandler tablespace, int offset)
+    public async Task<BTree<int>> ReadUnique(BufferPoolHandler tablespace, int offset)
     {
         //Console.WriteLine("***");
 
-        BTree index = new(offset);
+        BTree<int> index = new(offset);
 
         byte[] data = await tablespace.GetDataFromPage(offset);
         if (data.Length == 0)
@@ -35,7 +35,7 @@ internal sealed class IndexReader
 
         if (rootPageOffset > -1)
         {
-            BTreeNode? node = await GetUniqueNode(tablespace, rootPageOffset);
+            BTreeNode<int>? node = await GetUniqueNode(tablespace, rootPageOffset);
             if (node is not null)
                 index.root = node;
         }        
@@ -86,13 +86,13 @@ internal sealed class IndexReader
         return index;
     }
 
-    private async Task<BTreeNode?> GetUniqueNode(BufferPoolHandler tablespace, int offset)
+    private async Task<BTreeNode<int>?> GetUniqueNode(BufferPoolHandler tablespace, int offset)
     {
         byte[] data = await tablespace.GetDataFromPage(offset);
         if (data.Length == 0)
             return null;
 
-        BTreeNode node = new(-1);
+        BTreeNode<int> node = new(-1);
 
         node.Dirty = false; // read nodes from disk must be not persisted
 
@@ -104,7 +104,7 @@ internal sealed class IndexReader
 
         for (int i = 0; i < node.KeyCount; i++)
         {
-            BTreeEntry entry = new(0, null, null);
+            BTreeEntry<int> entry = new(0, null, null);
 
             entry.Key = Serializator.ReadInt32(data, ref pointer);
             entry.Value = Serializator.ReadInt32(data, ref pointer);

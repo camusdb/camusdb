@@ -14,7 +14,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class IndexSaver
 {
-    public async Task Save(BufferPoolHandler tablespace, BTree index, int key, int value, bool insert = true)
+    public async Task Save(BufferPoolHandler tablespace, BTree<int> index, int key, int value, bool insert = true)
     {
         try
         {
@@ -42,7 +42,7 @@ internal sealed class IndexSaver
         }
     }
 
-    public async Task NoLockingSave(BufferPoolHandler tablespace, BTree index, int key, int value, bool insert = true)
+    public async Task NoLockingSave(BufferPoolHandler tablespace, BTree<int> index, int key, int value, bool insert = true)
     {
         await SaveUniqueInternal(tablespace, index, key, value, insert);
     }
@@ -52,12 +52,12 @@ internal sealed class IndexSaver
         await SaveMultiInternal(tablespace, index, key, value);
     }
 
-    private static async Task SaveUniqueInternal(BufferPoolHandler tablespace, BTree index, int key, int value, bool insert)
+    private static async Task SaveUniqueInternal(BufferPoolHandler tablespace, BTree<int> index, int key, int value, bool insert)
     {
         if (insert)
             index.Put(key, value);
 
-        foreach (BTreeNode node in index.NodesTraverse())
+        foreach (BTreeNode<int> node in index.NodesTraverse())
         {
             if (node.PageOffset == -1)
             {
@@ -83,7 +83,7 @@ internal sealed class IndexSaver
 
         int dirty = 0, noDirty = 0;
 
-        foreach (BTreeNode node in index.NodesTraverse())
+        foreach (BTreeNode<int> node in index.NodesTraverse())
         {
             if (!node.Dirty)
             {
@@ -100,7 +100,7 @@ internal sealed class IndexSaver
 
             for (int i = 0; i < node.KeyCount; i++)
             {
-                BTreeEntry entry = node.children[i];
+                BTreeEntry<int> entry = node.children[i];
 
                 if (entry is not null)
                 {
@@ -183,7 +183,7 @@ internal sealed class IndexSaver
                     continue;
                 }
 
-                BTree? subTree = entry.Value;
+                BTree<int>? subTree = entry.Value;
 
                 if (subTree is null)
                 {

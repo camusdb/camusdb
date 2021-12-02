@@ -13,7 +13,7 @@ public class TestBTree
     [Test]
     public void TestBasicInsert()
     {
-        BTree tree = new(0);
+        BTree<int> tree = new(0);
 
         tree.Put(5, 100);
 
@@ -24,7 +24,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertNoSplit()
     {
-        BTree tree = new(0);
+        BTree<int> tree = new(0);
 
         tree.Put(4, 100);
         tree.Put(5, 100);
@@ -40,7 +40,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertSplit()
     {
-        BTree tree = new(0);
+        BTree<int> tree = new(0);
 
         tree.Put(0, 100);
         tree.Put(1, 100);
@@ -58,7 +58,7 @@ public class TestBTree
     [Test]
     public void TestBasicGet()
     {
-        BTree tree = new(0);
+        BTree<int> tree = new(0);
 
         tree.Put(5, 100);
 
@@ -72,7 +72,7 @@ public class TestBTree
     [Test]
     public void TestBasicNullGet()
     {
-        BTree tree = new(0);
+        BTree<int> tree = new(0);
 
         tree.Put(5, 100);
 
@@ -84,7 +84,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertGet()
     {
-        BTree tree = new(0);
+        BTree<int> tree = new(0);
 
         tree.Put(4, 100);
         tree.Put(5, 100);

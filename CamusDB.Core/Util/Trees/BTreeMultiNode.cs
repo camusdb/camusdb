@@ -14,7 +14,7 @@ public sealed class BTreeMultiNode
 
     public bool Dirty = true; // whether the node must be persisted
 
-    public BTreeMultiEntry[] children = new BTreeMultiEntry[BTree.MaxChildren];   // the array of children
+    public BTreeMultiEntry[] children = new BTreeMultiEntry[BTree<int>.MaxChildren];   // the array of children
 
     // create a node with k children
     public BTreeMultiNode(int keyCount)

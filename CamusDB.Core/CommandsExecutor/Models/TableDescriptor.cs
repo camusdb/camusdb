@@ -17,7 +17,7 @@ public sealed class TableDescriptor
 
     public TableSchema? Schema { get; set; }
 
-    public BTree Rows { get; set; } = new(-1);
+    public BTree<int> Rows { get; set; } = new(-1);
 
     public Dictionary<string, TableIndexSchema> Indexes { get; set; } = new();
 

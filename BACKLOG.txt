@@ -1,6 +1,5 @@
 - Return modified nodes in BTree.Put to avoid full traversal
 - Support additional types in BTree such as string
-- Implement multi indexes
 - Read indexes in parallel
 - Block table to read indexes
 
@@ -15,8 +14,3 @@
 - Support multiple items per page to avoid storage waste
 - Implement real objectids
 - Replace large objects in the same pages used before instead of allocating new ones
-
-- Validate table names
-- Validate column names
-- Validate database names
-

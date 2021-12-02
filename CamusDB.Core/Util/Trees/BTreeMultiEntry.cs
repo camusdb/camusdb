@@ -9,7 +9,7 @@ public sealed class BTreeMultiEntry
 
     public int NumberValues = 0;
 
-    public BTree? Value;
+    public BTree<int>? Value;
 
     public BTreeMultiNode? Next;     // helper field to iterate over array entries
 
