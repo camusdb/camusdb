@@ -74,6 +74,24 @@ public sealed class BTreeMulti
         return Search(root, key, height);
     }
 
+    /**
+     * Returns the value associated with the given key.
+     *
+     * @param  key the key
+     * @return the value associated with the given key if the key is in the symbol table
+     *         and {@code null} if the key is not in the symbol table
+     */
+    public IEnumerable<int> GetAll(int key)
+    {
+        BTree? subTree = Search(root, key, height);
+
+        if (subTree is null)
+            yield break;
+
+        foreach (BTreeEntry subTreeEntry in subTree.EntriesTraverse())
+            yield return subTreeEntry.Key;
+    }
+
     private BTree? Search(BTreeMultiNode? node, int key, int ht)
     {
         if (node is null)

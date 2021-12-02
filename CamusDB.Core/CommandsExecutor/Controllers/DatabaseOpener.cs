@@ -18,20 +18,16 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class DatabaseOpener
 {
-    private readonly SemaphoreSlim descriptorsSemaphore = new(1, 1);
-
-    private readonly Dictionary<string, DatabaseDescriptor> databaseDescriptors = new();
-
     public async ValueTask<DatabaseDescriptor> Open(string name)
     {
-        if (databaseDescriptors.TryGetValue(name, out DatabaseDescriptor? databaseDescriptor))
+        if (DatabaseDescriptors.Descriptors.TryGetValue(name, out DatabaseDescriptor? databaseDescriptor))
             return databaseDescriptor;
 
         try
         {
-            await descriptorsSemaphore.WaitAsync();
+            await DatabaseDescriptors.Semaphore.WaitAsync();
 
-            if (databaseDescriptors.TryGetValue(name, out databaseDescriptor))
+            if (DatabaseDescriptors.Descriptors.TryGetValue(name, out databaseDescriptor))
                 return databaseDescriptor;
 
             if (!Directory.Exists(Config.DataDirectory + "/" + name))
@@ -61,11 +57,11 @@ internal sealed class DatabaseOpener
 
             Console.WriteLine("Database {0} opened", name);
 
-            databaseDescriptors.Add(name, databaseDescriptor);
+            DatabaseDescriptors.Descriptors.Add(name, databaseDescriptor);
         }
         finally
         {
-            descriptorsSemaphore.Release();
+            DatabaseDescriptors.Semaphore.Release();
         }
 
         return databaseDescriptor;

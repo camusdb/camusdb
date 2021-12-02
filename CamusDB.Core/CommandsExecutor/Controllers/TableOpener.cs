@@ -61,7 +61,7 @@ internal sealed class TableOpener
 
                                 tableDescriptor.Indexes.Add(
                                     index.Key,
-                                    new TableIndexSchema(index.Value.Type, rows)
+                                    new TableIndexSchema(index.Value.Column, index.Value.Type, rows)
                                 );
                             }
                             break;
@@ -72,7 +72,7 @@ internal sealed class TableOpener
 
                                 tableDescriptor.Indexes.Add(
                                     index.Key,
-                                    new TableIndexSchema(index.Value.Type, rows)
+                                    new TableIndexSchema(index.Value.Column, index.Value.Type, rows)
                                 );
 
                                 continue;

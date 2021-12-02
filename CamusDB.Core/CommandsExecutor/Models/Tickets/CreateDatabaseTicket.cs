@@ -17,4 +17,3 @@ public sealed class CreateDatabaseTicket
         DatabaseName = name;
     }
 }
-

@@ -11,13 +11,16 @@ using CamusDB.Core.Catalogs.Models;
 namespace CamusDB.Core.CommandsExecutor.Models;
 
 public sealed class DatabaseIndexObject
-{   
+{
+    public string Column { get; }
+
     public IndexType Type { get; }
 
     public int StartOffset { get; }
 
-    public DatabaseIndexObject(IndexType type, int startOffset)
+    public DatabaseIndexObject(string column, IndexType type, int startOffset)
     {
+        Column = column;
         Type = type;
         StartOffset = startOffset;
     }

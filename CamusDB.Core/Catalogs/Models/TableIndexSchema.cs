@@ -13,20 +13,24 @@ namespace CamusDB.Core.Catalogs.Models;
 
 public sealed class TableIndexSchema
 {
+    public string Column { get; }
+
     public IndexType Type { get; }
 
     public BTree? UniqueRows { get; }
 
     public BTreeMulti? MultiRows { get; }
 
-    public TableIndexSchema(IndexType type, BTree rows)
+    public TableIndexSchema(string column, IndexType type, BTree rows)
     {
+        Column = column;
         Type = type;
         UniqueRows = rows;
     }
 
-    public TableIndexSchema(IndexType type, BTreeMulti rows)
+    public TableIndexSchema(string column, IndexType type, BTreeMulti rows)
     {
+        Column = column;
         Type = type;
         MultiRows = rows;
     }

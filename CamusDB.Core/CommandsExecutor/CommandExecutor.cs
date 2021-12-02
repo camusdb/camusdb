@@ -20,6 +20,8 @@ public sealed class CommandExecutor
 
     private readonly DatabaseCreator databaseCreator;
 
+    private readonly DatabaseCloser databaseCloser;
+
     private readonly TableOpener tableOpener;
 
     private readonly TableCreator tableCreator;
@@ -36,19 +38,14 @@ public sealed class CommandExecutor
 
         databaseOpener = new();
         databaseCreator = new();
+        databaseCloser = new();
         tableOpener = new(catalogs);
         tableCreator = new(catalogs);
         rowInserter = new();
         queryExecutor = new();
     }
 
-    public async Task<bool> CreateTable(CreateTableTicket ticket)
-    {
-        validator.Validate(ticket);
-
-        DatabaseDescriptor descriptor = await databaseOpener.Open(ticket.DatabaseName);
-        return await tableCreator.Create(descriptor, ticket);
-    }
+    #region database
 
     public async Task CreateDatabase(CreateDatabaseTicket ticket)
     {
@@ -59,8 +56,31 @@ public sealed class CommandExecutor
 
     public async Task<DatabaseDescriptor> OpenDatabase(string database)
     {
-        return await databaseOpener.Open(database);        
+        return await databaseOpener.Open(database);
     }
+
+    public async Task CloseDatabase(CloseDatabaseTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        await databaseCloser.Close(ticket.DatabaseName);
+    }
+
+    #endregion
+
+    #region DDL
+
+    public async Task<bool> CreateTable(CreateTableTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        DatabaseDescriptor descriptor = await databaseOpener.Open(ticket.DatabaseName);
+        return await tableCreator.Create(descriptor, ticket);
+    }
+
+    #endregion
+
+    #region DML
 
     public async Task Insert(InsertTicket ticket)
     {
@@ -90,4 +110,6 @@ public sealed class CommandExecutor
 
         return await queryExecutor.QueryById(database, table, ticket);
     }
+
+    #endregion
 }

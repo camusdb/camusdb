@@ -66,7 +66,7 @@ internal sealed class TableCreator
 
                     databaseObject.Indexes.Add(
                         CamusDBConfig.PrimaryKeyInternalName,
-                        new DatabaseIndexObject(IndexType.Unique, indexPageOffset)
+                        new DatabaseIndexObject(column.Name, IndexType.Unique, indexPageOffset)
                     );
                     continue;
                 }
@@ -79,7 +79,7 @@ internal sealed class TableCreator
 
                     databaseObject.Indexes.Add(
                         column.Name,
-                        new DatabaseIndexObject(column.Index, indexPageOffset)
+                        new DatabaseIndexObject(column.Name, column.Index, indexPageOffset)
                     );
                     continue;
                 }

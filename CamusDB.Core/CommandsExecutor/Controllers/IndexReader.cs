@@ -107,7 +107,7 @@ internal sealed class IndexReader
             BTreeEntry entry = new(0, null, null);
 
             entry.Key = Serializator.ReadInt32(data, ref pointer);
-            entry.Value = null; // Serializator.ReadInt32(data, ref pointer);
+            entry.Value = Serializator.ReadInt32(data, ref pointer);
 
             int nextPageOffset = Serializator.ReadInt32(data, ref pointer);
             //Console.WriteLine("Children={0} Key={1} Value={2} NextOffset={3}", i, entry.Key, entry.Value, nextPageOffset);
@@ -142,7 +142,10 @@ internal sealed class IndexReader
             BTreeMultiEntry entry = new(0, null);
 
             entry.Key = Serializator.ReadInt32(data, ref pointer);
-            entry.Value = null; // Serializator.ReadInt32(data, ref pointer);
+
+            int subTreeOffset = Serializator.ReadInt32(data, ref pointer);
+            Console.WriteLine(subTreeOffset);
+            entry.Value = null; 
 
             int nextPageOffset = Serializator.ReadInt32(data, ref pointer);
             //Console.WriteLine("Children={0} Key={1} Value={2} NextOffset={3}", i, entry.Key, entry.Value, nextPageOffset);

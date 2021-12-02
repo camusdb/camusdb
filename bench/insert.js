@@ -28,11 +28,11 @@ async function f()
           },
           "code": {
             "type": 2, // integer
-            "value": "1234",
+            "value": "1235",
           },
           "name": {
             "type": 3, // string
-            "value": "some string".repeat(512),
+            "value": "some string", //
           },
           "enabled": {
             "type": 4, // bool

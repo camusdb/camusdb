@@ -20,12 +20,18 @@ internal sealed class CreateDatabaseValidator : ValidatorBase
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 "Database name is required"
-            );        
+            );
+
+        if (ticket.DatabaseName.Length > 255)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Database name is too long"
+            );
 
         if (!HasValidCharacters(ticket.DatabaseName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 "Database name has invalid characters"
-            );        
+            );
     }
 }

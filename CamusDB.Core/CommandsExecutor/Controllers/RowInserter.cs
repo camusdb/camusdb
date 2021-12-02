@@ -21,7 +21,7 @@ public sealed class RowInserter
 
     private readonly RowSerializer rowSerializer = new();
 
-    private int? GetUniqueKeyValue(TableDescriptor table, InsertTicket ticket)
+    private static int? GetRowValue(TableDescriptor table, InsertTicket ticket, string name)
     {
         List<TableColumnSchema> columns = table.Schema!.Columns!;
 
@@ -29,16 +29,16 @@ public sealed class RowInserter
         {
             TableColumnSchema column = columns[i];
 
-            if (column.Primary) // @todo use parse.Try
-                return int.Parse(ticket.Values[column.Name].Value);
+            if (column.Name == name)
+                return int.Parse(ticket.Values[column.Name].Value);                
         }
 
         return null;
     }
 
-    private int CheckUniqueKeyViolations(TableDescriptor table, BTree uniqueIndex, InsertTicket ticket)
+    private static int CheckUniqueKeyViolations(TableDescriptor table, BTree uniqueIndex, InsertTicket ticket, string name)
     {
-        int? uniqueValue = GetUniqueKeyValue(table, ticket);
+        int? uniqueValue = GetRowValue(table, ticket, name);
 
         if (uniqueValue is null)
             throw new CamusDBException(
@@ -80,7 +80,7 @@ public sealed class RowInserter
             {
                 await uniqueIndex.WriteLock.WaitAsync();
 
-                int uniqueKeyValue = CheckUniqueKeyViolations(table, uniqueIndex, ticket);
+                int uniqueKeyValue = CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
 
                 // allocate pages and rowid when needed
                 if (context.RowId == -1)
@@ -116,12 +116,12 @@ public sealed class RowInserter
                 );
 
             BTreeMulti multiIndex = index.Value.MultiRows;
-            
-            //int multiKeyValue = CheckUniqueKeyViolations(table, multiIndex, ticket);
 
-            int multiKeyValue = 0; // get multi key value
+            int? multiKeyValue = GetRowValue(table, ticket, index.Value.Column);
+            if (multiKeyValue is null)
+                continue;
 
-            await indexSaver.Save(tablespace, multiIndex, multiKeyValue, context.DataPageOffset);            
+            await indexSaver.Save(tablespace, multiIndex, multiKeyValue.Value, context.DataPageOffset);            
         }
     }
 
@@ -148,7 +148,7 @@ public sealed class RowInserter
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        /*foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
             if (index.Value.MultiRows is not null)
             {
@@ -162,7 +162,7 @@ public sealed class RowInserter
                     }
                 }
             }
-        }
+        }*/
 
         Console.WriteLine("Row {0} inserted at {1}, Time taken: {2}", context.RowId, context.DataPageOffset, timeTaken.ToString(@"m\:ss\.fff"));
     }

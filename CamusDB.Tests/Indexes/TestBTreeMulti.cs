@@ -151,14 +151,7 @@ public class TestBTreeMulti
         BTree? values = tree.Get(5);
 
         Assert.NotNull(values);
-        Assert.AreEqual(values!.Size(), 7);
-        /*Assert.AreEqual(values[0], 100);
-        Assert.AreEqual(values[1], 101);
-        Assert.AreEqual(values[2], 103);
-        Assert.AreEqual(values[3], 104);
-        Assert.AreEqual(values[4], 105);
-        Assert.AreEqual(values[5], 106);
-        Assert.AreEqual(values[6], 107);*/
+        Assert.AreEqual(values!.Size(), 7);        
     }
 
     [Test]
@@ -179,6 +172,55 @@ public class TestBTreeMulti
 
         Assert.AreEqual(tree.Size(), 10);
         Assert.AreEqual(tree.Height(), 0);
+    }
+
+    [Test]
+    public void TestMultiSameKeyInsertTraverse()
+    {
+        BTreeMulti tree = new(0);
+
+        tree.Put(5, 100);
+        tree.Put(5, 101);
+        tree.Put(5, 102);
+        tree.Put(5, 103);
+        tree.Put(5, 104);
+        tree.Put(5, 105);
+        tree.Put(5, 106);
+        tree.Put(5, 107);
+        tree.Put(5, 108);
+        tree.Put(5, 109);
+
+        int index = 0;
+
+        foreach (int value in tree.GetAll(5))
+        {
+            Assert.AreEqual(100 + index, value);
+            index++;
+        }
+
+        Assert.AreEqual(10, index);
+    }
+
+    [Test]
+    public void TestMultiTwoKeysTraverse()
+    {
+        BTreeMulti tree = new(0);
+
+        for (int i = 0; i < 10; i++)
+            tree.Put(5, 100 + i);
+
+        for (int i = 0; i < 10; i++)
+            tree.Put(7, 100 + i);        
+
+        int index = 0;
+
+        foreach (int value in tree.GetAll(5))
+        {
+            Assert.AreEqual(100 + index, value);
+            index++;
+        }
+
+        Assert.AreEqual(10, index);
     }
 }
 
