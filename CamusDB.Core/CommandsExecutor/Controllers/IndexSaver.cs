@@ -187,18 +187,25 @@ internal sealed class IndexSaver
 
                 if (subTree is null)
                 {
-                    throw new CamusDBException(
+                    /*throw new CamusDBException(
                         CamusDBErrorCodes.InvalidInternalOperation,
-                        "Internal multi index valus is null"
-                    );
+                        "Internal multi index value is null"
+                    );*/
+
+                    Serializator.WriteInt32(nodeBuffer, entry.Key, ref pointer);
+                    Serializator.WriteInt32(nodeBuffer, -1, ref pointer);
+                    Serializator.WriteInt32(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : -1, ref pointer);
+                    continue;
                 }
 
-                Console.WriteLine("Read Tree={0} PageOffset={1}", subTree.Id, subTree.PageOffset);
+                //Console.WriteLine("Read Tree={0} PageOffset={1}", subTree.Id, subTree.PageOffset);
 
                 if (subTree.PageOffset == -1)
                     subTree.PageOffset = await tablespace.GetNextFreeOffset();
 
                 await Save(tablespace, subTree, value, 0, false);
+
+                //Console.WriteLine("Write Tree={0} PageOffset={1}", subTree.Id, subTree.PageOffset);
 
                 Serializator.WriteInt32(nodeBuffer, entry.Key, ref pointer);
                 Serializator.WriteInt32(nodeBuffer, subTree.PageOffset, ref pointer);

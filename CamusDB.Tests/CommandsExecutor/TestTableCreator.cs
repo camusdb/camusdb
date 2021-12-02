@@ -1,14 +1,10 @@
 ﻿
 using System.IO;
-using System.Text;
 using CamusDB.Core;
 using NUnit.Framework;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
-using CamusDB.Core.BufferPool;
-using System.IO.MemoryMappedFiles;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using Config = CamusDB.Core.CamusDBConfig;
@@ -194,7 +190,7 @@ public class TestTableCreator
             }
         );
 
-        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));        
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
         Assert.AreEqual("Table name has invalid characters", e!.Message);
     }
 

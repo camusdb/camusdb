@@ -1,14 +1,10 @@
 ﻿
 using System.IO;
-using System.Text;
 using CamusDB.Core;
 using NUnit.Framework;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
-using CamusDB.Core.BufferPool;
 using System.Collections.Generic;
-using System.IO.MemoryMappedFiles;
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
@@ -43,7 +39,7 @@ public class TestRowInsertor
             name: "factory"
         );
 
-        await executor.CreateDatabase(databaseTicket);        
+        await executor.CreateDatabase(databaseTicket);
 
         return executor;
     }
@@ -67,7 +63,7 @@ public class TestRowInsertor
         await executor.CreateTable(tableTicket);
 
         return executor;
-    }    
+    }
 
     [Test]
     [NonParallelizable]
@@ -85,7 +81,7 @@ public class TestRowInsertor
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
             }
-        );        
+        );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
         Assert.AreEqual("Type Integer cannot be assigned to id (Id)", e!.Message);
@@ -229,7 +225,7 @@ public class TestRowInsertor
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
-        );        
+        );
 
         InsertTicket ticket2 = new(
             database: "factory",
@@ -340,7 +336,7 @@ public class TestRowInsertor
         Assert.AreEqual(row[0].Value, "2");
 
         Assert.AreEqual(row[1].Type, ColumnType.String);
-        Assert.AreEqual(row[1].Value, "some name 2");        
+        Assert.AreEqual(row[1].Value, "some name 2");
 
         Assert.AreEqual(row[2].Type, ColumnType.Integer);
         Assert.AreEqual(row[2].Value, "4567");
@@ -369,5 +365,96 @@ public class TestRowInsertor
 
         Assert.AreEqual(row[3].Type, ColumnType.Bool);
         Assert.AreEqual(row[3].Value, "false");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCheckSuccessfulMultiInsert()
+    {
+        var executor = await SetupBasicTable();
+
+        for (int i = 0; i < 50; i++)
+        {
+            InsertTicket insertTicket = new(
+                database: "factory",
+                name: "robots",
+                values: new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, i.ToString()) },
+                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
+                    { "year", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, "false") },
+                }
+            );
+
+            await executor.Insert(insertTicket);
+        }
+
+        for (int i = 0; i < 50; i++)
+        {
+            QueryByIdTicket queryTicket = new(
+                database: "factory",
+                name: "robots",
+                id: i
+            );
+
+            List<List<ColumnValue>> result = await executor.QueryById(queryTicket);
+
+            List<ColumnValue> row = result[0];
+
+            Assert.AreEqual(row[0].Type, ColumnType.Id);
+            Assert.AreEqual(row[0].Value, i.ToString());
+
+            Assert.AreEqual(row[1].Type, ColumnType.String);
+            Assert.AreEqual(row[1].Value, "some name " + i);
+
+            Assert.AreEqual(row[2].Type, ColumnType.Integer);
+            Assert.AreEqual(row[2].Value, (i * 1000).ToString());
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCheckSuccessfulMultiInsertWithQuery()
+    {
+        var executor = await SetupBasicTable();
+
+        for (int i = 0; i < 50; i++)
+        {
+            InsertTicket insertTicket = new(
+                database: "factory",
+                name: "robots",
+                values: new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, i.ToString()) },
+                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
+                    { "year", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, "false") },
+                }
+            );
+
+            await executor.Insert(insertTicket);
+        }
+
+        QueryTicket queryTicket = new(
+            database: "factory",
+            name: "robots"
+        );
+
+        List<List<ColumnValue>> result = await executor.Query(queryTicket);
+
+        for (int i = 0; i < 50; i++)
+        {
+            List<ColumnValue> row = result[i];
+
+            Assert.AreEqual(row[0].Type, ColumnType.Id);
+            Assert.AreEqual(row[0].Value, i.ToString());
+
+            Assert.AreEqual(row[1].Type, ColumnType.String);
+            Assert.AreEqual(row[1].Value, "some name " + i);
+
+            Assert.AreEqual(row[2].Type, ColumnType.Integer);
+            Assert.AreEqual(row[2].Value, (i * 1000).ToString());
+        }
     }
 }

@@ -18,15 +18,28 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class QueryExecutor
 {
-    private readonly RowDeserializer rowReader = new();    
+    private readonly RowDeserializer rowReader = new();
 
     public async Task<List<List<ColumnValue>>> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    {
+        if (string.IsNullOrEmpty(ticket.IndexName))
+            return await QueryUsingTableIndex(database, table, ticket);
+
+        return await QueryUsingIndex(database, table, ticket);
+    }
+
+    private async Task<List<List<ColumnValue>>> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    {
+        return await QueryUsingUniqueIndex(database, table, table.Rows);
+    }
+
+    private async Task<List<List<ColumnValue>>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree index)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
         List<List<ColumnValue>> rows = new();
 
-        foreach (BTreeEntry entry in table.Rows.EntriesTraverse())
+        foreach (BTreeEntry entry in index.EntriesTraverse())
         {
             if (entry.Value is null)
             {
@@ -45,6 +58,56 @@ internal sealed class QueryExecutor
         }
 
         return rows;
+    }
+
+    private async Task<List<List<ColumnValue>>> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti index)
+    {
+        BufferPoolHandler tablespace = database.TableSpace!;
+
+        List<List<ColumnValue>> rows = new();
+
+        foreach (BTreeMultiEntry entry in index.EntriesTraverse())
+        {
+            //Console.WriteLine("MultiTree={0} Key={0} PageOffset={1}", index.Id, entry.Key, entry.Value!.Size());
+
+            foreach (BTreeEntry subEntry in entry.Value!.EntriesTraverse())
+            {
+                //Console.WriteLine(" > Index Key={0} PageOffset={1}", subEntry.Key, subEntry.Value);
+
+                if (subEntry.Value is null)
+                {
+                    Console.WriteLine("Index RowId={0} has no page offset value", subEntry.Key);
+                    continue;
+                }
+
+                byte[] data = await tablespace.GetDataFromPage(subEntry.Key);
+                if (data.Length == 0)
+                {
+                    Console.WriteLine("Index RowId={0} has an empty page data", subEntry.Key);
+                    continue;
+                }
+
+                rows.Add(rowReader.Deserialize(table.Schema!, data));
+            }
+        }
+
+        return rows;
+    }
+
+    private async Task<List<List<ColumnValue>>> QueryUsingIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    {        
+        if (!table.Indexes.TryGetValue(ticket.IndexName!, out TableIndexSchema? index))
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.UnknownKey,
+                "Key '" + ticket.IndexName! + "' doesn't exist in table '" + table.Name + "'"
+            );
+        }
+
+        if (index.Type == IndexType.Unique)
+            return await QueryUsingUniqueIndex(database, table, index.UniqueRows!);
+
+        return await QueryUsingMultiIndex(database, table, index.MultiRows!);
     }
 
     public async Task<List<List<ColumnValue>>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
@@ -71,5 +134,5 @@ internal sealed class QueryExecutor
         rows.Add(rowReader.Deserialize(table.Schema!, data));
 
         return rows;
-    }    
+    }
 }

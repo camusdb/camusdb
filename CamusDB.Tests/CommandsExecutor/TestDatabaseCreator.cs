@@ -1,13 +1,9 @@
 ﻿
 using System.IO;
-using System.Text;
 using NUnit.Framework;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
-using CamusDB.Core.BufferPool;
 using CamusDB.Core.CommandsExecutor;
-using System.IO.MemoryMappedFiles;
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.CommandsValidator;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -54,7 +50,7 @@ public class TestDatabaseCreator
 
             FileInfo fi = new(path + "/" + tablespaces[i]);
             Assert.AreEqual(fi.Length, Config.InitialTableSpaceSize);
-        }                       
+        }
     }
 }
 

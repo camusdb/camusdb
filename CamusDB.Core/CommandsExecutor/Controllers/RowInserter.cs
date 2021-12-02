@@ -151,6 +151,8 @@ public sealed class RowInserter
             if (multiKeyValue is null)
                 continue;
 
+            Console.WriteLine(multiKeyValue.Value);
+
             await indexSaver.Save(tablespace, multiIndex, multiKeyValue.Value, context.DataPageOffset);            
         }
     }

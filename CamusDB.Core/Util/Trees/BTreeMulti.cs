@@ -15,7 +15,11 @@ public sealed class BTreeMulti
 
     public const int MaxChildrenHalf = MaxChildren / 2;
 
+    public static int CurrentId = -1;
+
     public BTreeMultiNode root;       // root of the B-tree
+
+    public int Id;
 
     public int height;      // height of the B-tree
 
@@ -32,6 +36,7 @@ public sealed class BTreeMulti
     {
         root = new BTreeMultiNode(0);
         PageOffset = rootOffset;
+        Id = Interlocked.Increment(ref CurrentId);
     }
 
     /**
@@ -202,6 +207,8 @@ public sealed class BTreeMulti
 
     public void Put(int key, int value)
     {
+        //Console.WriteLine("Inserting in multitree {0} {1} {2}", Id, key, value);
+
         BTreeMultiNode? u = Insert(root, key, value, height);
         n++;
         if (u == null) return;

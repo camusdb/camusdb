@@ -1,16 +1,6 @@
 
 import fetch from "node-fetch";
 
-let id = 1000;
-
-/*Null = 0,
-    Id = 1,
-    Integer = 2,
-    String = 3,
-    Bool = 4,
-    Float = 5,
-*/
-
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
 
 async function f()

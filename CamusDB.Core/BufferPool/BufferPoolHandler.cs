@@ -193,7 +193,7 @@ public sealed class BufferPoolHandler : IDisposable
             Buffer.BlockCopy(memoryPage.Buffer, Config.DataOffset, data, bufferOffset, dataLength);
             bufferOffset += dataLength;
 
-            Console.WriteLine("Read {0} bytes from page {1}", dataLength, offset);
+            //Console.WriteLine("Read {0} bytes from page {1}", dataLength, offset);
 
         } while (offset > 0);
 
@@ -356,7 +356,7 @@ public sealed class BufferPoolHandler : IDisposable
             Buffer.BlockCopy(data, startOffset, page.Buffer, pointer, length);
             accessor.WriteArray<byte>(Config.PageSize * offset, page.Buffer, 0, Config.PageSize);
 
-            Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);
+            //Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);
 
             if (nextPage > 0)
                 await WriteDataToPage(nextPage, data, startOffset + length);

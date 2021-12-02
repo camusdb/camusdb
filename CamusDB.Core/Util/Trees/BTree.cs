@@ -13,7 +13,7 @@ public sealed class BTree
 
     public static int CurrentId = -1;
 
-    public int Id;    
+    public int Id;
 
     public BTreeNode root;       // root of the B-tree
 
@@ -30,7 +30,7 @@ public sealed class BTree
      */
     public BTree(int rootOffset)
     {
-        root = new BTreeNode(0);        
+        root = new BTreeNode(0);
         PageOffset = rootOffset;
         Id = Interlocked.Increment(ref CurrentId);
 
@@ -271,7 +271,7 @@ public sealed class BTree
 
     // split node in half
     private static BTreeNode Split(BTreeNode current)
-    {        
+    {
         BTreeNode newNode = new(MaxChildrenHalf);
 
         //Console.WriteLine("Node {0} marked as dirty because of split", t.Id);

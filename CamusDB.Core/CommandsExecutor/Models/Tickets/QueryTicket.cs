@@ -14,9 +14,12 @@ public sealed class QueryTicket
 
     public string TableName { get; }
 
-    public QueryTicket(string database, string name)
+    public string? IndexName { get; }
+
+    public QueryTicket(string database, string name, string? index = null)
     {
         DatabaseName = database;
         TableName = name;
+        IndexName = index;
     }
 }

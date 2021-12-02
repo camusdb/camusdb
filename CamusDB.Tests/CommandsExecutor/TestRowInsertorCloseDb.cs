@@ -1,14 +1,9 @@
 ﻿
 using System.IO;
-using System.Text;
-using CamusDB.Core;
 using NUnit.Framework;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
-using CamusDB.Core.BufferPool;
 using System.Collections.Generic;
-using System.IO.MemoryMappedFiles;
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
@@ -99,7 +94,7 @@ public class TestRowInsertorCloseDb
             name: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },                
+                { "id", new ColumnValue(ColumnType.Id, "1") },
                 { "usersId", new ColumnValue(ColumnType.Id, "1234") },
                 { "amount", new ColumnValue(ColumnType.Integer, "50") },
             }

@@ -32,7 +32,7 @@ public class TestRowMultiInsertor
             Directory.Delete(path);
         }
     }
-    
+
     private async Task<CommandExecutor> SetupDatabase()
     {
         CommandValidator validator = new();
@@ -47,7 +47,7 @@ public class TestRowMultiInsertor
 
         return executor;
     }
-    
+
     private async Task<CommandExecutor> SetupMultiIndexTable()
     {
         var executor = await SetupDatabase();
@@ -58,7 +58,7 @@ public class TestRowMultiInsertor
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
-                new ColumnInfo("usersId", ColumnType.Id, notNull: true, index: IndexType.Multi),
+                new ColumnInfo("robots_id", ColumnType.Id, notNull: true, index: IndexType.Multi),
                 new ColumnInfo("amount", ColumnType.Integer)
             }
         );
@@ -81,11 +81,105 @@ public class TestRowMultiInsertor
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "1") },
-                { "usersId", new ColumnValue(ColumnType.Id, "5") },
+                { "robots_id", new ColumnValue(ColumnType.Id, "5") },
                 { "amount", new ColumnValue(ColumnType.Integer, "100") }
             }
-        );        
+        );
 
         await executor.Insert(ticket);
+    }
+
+    [Test]
+    [Order(2)]
+    [NonParallelizable]
+    public async Task TestCheckSuccessfulMultiInsertWithQueryIndex()
+    {
+        var executor = await SetupMultiIndexTable();
+
+        for (int i = 0; i < 10; i++)
+        {
+            InsertTicket insertTicket = new(
+                database: "factory",
+                name: "user_robots",
+                values: new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, i.ToString()) },
+                    { "robots_id", new ColumnValue(ColumnType.Id, (i * 100).ToString()) },
+                    { "amount", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) }
+                }
+            );
+
+            await executor.Insert(insertTicket);
+        }
+
+        QueryTicket queryTicket = new(
+            database: "factory",
+            name: "user_robots",
+            index: "robots_id"
+        );
+
+        List<List<ColumnValue>> result = await executor.Query(queryTicket);
+
+        for (int i = 0; i < 10; i++)
+        {
+            List<ColumnValue> row = result[i];
+            Assert.AreEqual(3, row.Count);
+
+            Assert.AreEqual(row[0].Type, ColumnType.Id);
+            Assert.AreEqual(row[0].Value, i.ToString());
+
+            Assert.AreEqual(row[1].Type, ColumnType.Id);
+            Assert.AreEqual(row[1].Value, (i * 100).ToString());
+
+            Assert.AreEqual(row[2].Type, ColumnType.Integer);
+            Assert.AreEqual(row[2].Value, (i * 1000).ToString());
+        }
+    }
+
+    [Test]
+    [Order(3)]
+    [NonParallelizable]
+    public async Task TestSameKeyMultiInsertWithQueryIndex()
+    {
+        var executor = await SetupMultiIndexTable();
+
+        for (int i = 0; i < 10; i++)
+        {
+            InsertTicket insertTicket = new(
+                database: "factory",
+                name: "user_robots",
+                values: new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, i.ToString()) },
+                    { "robots_id", new ColumnValue(ColumnType.Id, "100") },
+                    { "amount", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) }
+                }
+            );
+
+            await executor.Insert(insertTicket);
+        }
+
+        QueryTicket queryTicket = new(
+            database: "factory",
+            name: "user_robots",
+            index: "robots_id"
+        );
+
+        List<List<ColumnValue>> result = await executor.Query(queryTicket);
+
+        for (int i = 0; i < 10; i++)
+        {
+            List<ColumnValue> row = result[i];
+            Assert.AreEqual(3, row.Count);
+
+            Assert.AreEqual(row[0].Type, ColumnType.Id);
+            Assert.AreEqual(row[0].Value, i.ToString());
+
+            Assert.AreEqual(row[1].Type, ColumnType.Id);
+            Assert.AreEqual(row[1].Value, "100");
+
+            Assert.AreEqual(row[2].Type, ColumnType.Integer);
+            Assert.AreEqual(row[2].Value, (i * 1000).ToString());
+        }
     }
 }

@@ -14,7 +14,7 @@ public static class CamusDBErrorCodes
     public const string TableDoesntExist = "CADB0011";
     public const string DatabaseAlreadyExists = "CADB0012";
     public const string TableAlreadyExists = "CADB0013";
-    public const string SystemSpaceCorrupt = "CADB0014";
+    public const string SystemSpaceCorrupt = "CADB0014";    
 
     public const string InvalidPageOffset = "CADB00297";
 
@@ -26,6 +26,7 @@ public static class CamusDBErrorCodes
     public const string DuplicatePrimaryKey = "CADB0202";
     public const string DuplicateColumn = "CADB0203";
     public const string UnknownColumn = "CADB0204";
+    public const string UnknownKey = "CADB0205";
 
     public const string DuplicatePrimaryKeyValue = "CADB0300";
 }
