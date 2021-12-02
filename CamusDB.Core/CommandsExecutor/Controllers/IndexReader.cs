@@ -144,14 +144,14 @@ internal sealed class IndexReader
             entry.Key = Serializator.ReadInt32(data, ref pointer);
 
             int subTreeOffset = Serializator.ReadInt32(data, ref pointer);
-            Console.WriteLine(subTreeOffset);
-            entry.Value = null; 
+            if (subTreeOffset > 0)
+                entry.Value = await ReadUnique(tablespace, subTreeOffset);
 
-            int nextPageOffset = Serializator.ReadInt32(data, ref pointer);
-            //Console.WriteLine("Children={0} Key={1} Value={2} NextOffset={3}", i, entry.Key, entry.Value, nextPageOffset);
-
+            int nextPageOffset = Serializator.ReadInt32(data, ref pointer);            
             if (nextPageOffset > -1)
                 entry.Next = await GetMultiNode(tablespace, nextPageOffset);
+
+            //Console.WriteLine("Children={0} Key={1} Value={2} NextOffset={3}", i, entry.Key, entry.Value, nextPageOffset);
 
             node.children[i] = entry;
         }

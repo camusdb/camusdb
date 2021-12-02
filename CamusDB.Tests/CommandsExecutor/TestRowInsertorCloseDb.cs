@@ -18,7 +18,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestRowMultiInsertorCloseDb
+public class TestRowInsertorCloseDb
 {
     [SetUp]
     public void Setup()
@@ -99,10 +99,9 @@ public class TestRowMultiInsertorCloseDb
             name: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+                { "id", new ColumnValue(ColumnType.Id, "1") },                
+                { "usersId", new ColumnValue(ColumnType.Id, "1234") },
+                { "amount", new ColumnValue(ColumnType.Integer, "50") },
             }
         );
 
@@ -112,9 +111,8 @@ public class TestRowMultiInsertorCloseDb
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "2") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+                { "usersId", new ColumnValue(ColumnType.Id, "1234") },
+                { "amount", new ColumnValue(ColumnType.Integer, "50") },
             }
         );
 
@@ -137,10 +135,10 @@ public class TestRowMultiInsertorCloseDb
         Assert.AreEqual(row[0].Type, ColumnType.Id);
         Assert.AreEqual(row[0].Value, "2");
 
-        /*Assert.AreEqual(row[1].Type, ColumnType.String);
-        Assert.AreEqual(row[1].Value, "some name 2");
+        Assert.AreEqual(row[1].Type, ColumnType.Id);
+        Assert.AreEqual(row[1].Value, "1234");
 
-        Assert.AreEqual(row[2].Type, ColumnType.Integer);
+        /*Assert.AreEqual(row[2].Type, ColumnType.Integer);
         Assert.AreEqual(row[2].Value, "4567");
 
         Assert.AreEqual(row[3].Type, ColumnType.Bool);
