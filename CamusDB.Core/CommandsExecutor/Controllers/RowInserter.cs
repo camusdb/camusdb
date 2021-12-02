@@ -47,7 +47,7 @@ public sealed class RowInserter
         }
     }
 
-    private static int? GetRowValue(TableDescriptor table, InsertTicket ticket, string name)
+    private static ColumnValue? GetRowValue(TableDescriptor table, InsertTicket ticket, string name)
     {
         List<TableColumnSchema> columns = table.Schema!.Columns!;
 
@@ -58,7 +58,7 @@ public sealed class RowInserter
             if (column.Name == name)
             {
                 if (ticket.Values.TryGetValue(column.Name, out ColumnValue? value))
-                    return int.Parse(value.Value);
+                    return value;
                 break;
             }
         }
@@ -66,9 +66,9 @@ public sealed class RowInserter
         return null;
     }
 
-    private static int CheckUniqueKeyViolations(TableDescriptor table, BTree<int> uniqueIndex, InsertTicket ticket, string name)
+    private static ColumnValue CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue> uniqueIndex, InsertTicket ticket, string name)
     {
-        int? uniqueValue = GetRowValue(table, ticket, name);
+        ColumnValue? uniqueValue = GetRowValue(table, ticket, name);
 
         if (uniqueValue is null)
             throw new CamusDBException(
@@ -76,7 +76,7 @@ public sealed class RowInserter
                 "Cannot retrieve unique key for table " + table.Name
             );
 
-        int? pageOffset = uniqueIndex.Get(uniqueValue.Value);
+        int? pageOffset = uniqueIndex.Get(uniqueValue);
 
         if (pageOffset is not null)
             throw new CamusDBException(
@@ -84,7 +84,7 @@ public sealed class RowInserter
                 "Duplicate entry for key " + table.Name + " " + uniqueValue
             );
 
-        return uniqueValue.Value;
+        return uniqueValue;
     }
 
     private async Task<InsertRowContext> CheckAndUpdateUniqueKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
@@ -104,13 +104,13 @@ public sealed class RowInserter
                     "A multi index tree wasn't found"
                 );
 
-            BTree<int> uniqueIndex = index.Value.UniqueRows;
+            BTree<ColumnValue> uniqueIndex = index.Value.UniqueRows;
 
             try
             {
                 await uniqueIndex.WriteLock.WaitAsync();
 
-                int uniqueKeyValue = CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
+                ColumnValue uniqueKeyValue = CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
 
                 // allocate pages and rowid when needed
                 if (context.RowId == -1)
@@ -145,15 +145,15 @@ public sealed class RowInserter
                     "A multi index tree wasn't found"
                 );
 
-            BTreeMulti multiIndex = index.Value.MultiRows;
+            BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
 
-            int? multiKeyValue = GetRowValue(table, ticket, index.Value.Column);
+            ColumnValue? multiKeyValue = GetRowValue(table, ticket, index.Value.Column);
             if (multiKeyValue is null)
                 continue;
 
             //Console.WriteLine(multiKeyValue.Value);
 
-            await indexSaver.Save(tablespace, multiIndex, multiKeyValue.Value, context.DataPageOffset);            
+            await indexSaver.Save(tablespace, multiIndex, multiKeyValue, context.DataPageOffset);            
         }
     }
 

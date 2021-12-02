@@ -1,19 +1,26 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 namespace CamusDB.Core.Util.Trees;
 
 // internal nodes: only use key and next
 // external nodes: only use key and value
-public sealed class BTreeMultiEntry
+public sealed class BTreeMultiEntry<T> where T : IComparable<T>
 {
-    public int Key;
+    public T Key;
 
     public int NumberValues = 0;
 
     public BTree<int>? Value;
 
-    public BTreeMultiNode? Next;     // helper field to iterate over array entries
+    public BTreeMultiNode<T>? Next;     // helper field to iterate over array entries
 
-    public BTreeMultiEntry(int key, BTreeMultiNode? next)
+    public BTreeMultiEntry(T key, BTreeMultiNode<T>? next)
     {
         Key = key;        
         Next = next;

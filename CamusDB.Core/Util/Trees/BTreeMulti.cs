@@ -1,4 +1,11 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.Collections;
 using System.Collections.Generic;
 
@@ -8,7 +15,7 @@ namespace CamusDB.Core.Util.Trees;
  *  BTreeMulti is a tree of B+Trees used for multi keys
  *  Unique values across the index point to other trees where the rowids are unique values
  */
-public sealed class BTreeMulti
+public sealed class BTreeMulti<T> where T : IComparable<T>
 {
     // max children per B-tree node = M-1 (must be even and greater than 2)
     public const int MaxChildren = 8;
@@ -17,7 +24,7 @@ public sealed class BTreeMulti
 
     public static int CurrentId = -1;
 
-    public BTreeMultiNode root;       // root of the B-tree
+    public BTreeMultiNode<T> root;       // root of the B-tree
 
     public int Id;
 
@@ -34,7 +41,7 @@ public sealed class BTreeMulti
      */
     public BTreeMulti(int rootOffset)
     {
-        root = new BTreeMultiNode(0);
+        root = new BTreeMultiNode<T>(0);
         PageOffset = rootOffset;
         Id = Interlocked.Increment(ref CurrentId);
     }
@@ -74,7 +81,7 @@ public sealed class BTreeMulti
      * @return the value associated with the given key if the key is in the symbol table
      *         and {@code null} if the key is not in the symbol table
      */
-    public BTree<int>? Get(int key)
+    public BTree<int>? Get(T key)
     {
         return Search(root, key, height);
     }
@@ -86,7 +93,7 @@ public sealed class BTreeMulti
      * @return the value associated with the given key if the key is in the symbol table
      *         and {@code null} if the key is not in the symbol table
      */
-    public IEnumerable<int> GetAll(int key)
+    public IEnumerable<int> GetAll(T key)
     {
         BTree<int>? subTree = Search(root, key, height);
 
@@ -97,12 +104,12 @@ public sealed class BTreeMulti
             yield return subTreeEntry.Key;
     }
 
-    private BTree<int>? Search(BTreeMultiNode? node, int key, int ht)
+    private BTree<int>? Search(BTreeMultiNode<T>? node, T key, int ht)
     {
         if (node is null)
             return null;
 
-        BTreeMultiEntry[] children = node.children;
+        BTreeMultiEntry<T>[] children = node.children;
 
         // external node
         if (ht == 0)
@@ -127,18 +134,18 @@ public sealed class BTreeMulti
         return null;
     }
 
-    public IEnumerable<BTreeMultiEntry> EntriesTraverse()
+    public IEnumerable<BTreeMultiEntry<T>> EntriesTraverse()
     {
-        foreach (BTreeMultiEntry entry in EntriesTraverseInternal(root, height))
+        foreach (BTreeMultiEntry<T> entry in EntriesTraverseInternal(root, height))
             yield return entry;
     }
 
-    private static IEnumerable<BTreeMultiEntry> EntriesTraverseInternal(BTreeMultiNode? node, int ht)
+    private static IEnumerable<BTreeMultiEntry<T>> EntriesTraverseInternal(BTreeMultiNode<T>? node, int ht)
     {
         if (node is null)
             yield break;
 
-        BTreeMultiEntry[] children = node.children;
+        BTreeMultiEntry<T>[] children = node.children;
 
         // external node
         if (ht == 0)
@@ -152,19 +159,19 @@ public sealed class BTreeMulti
         {
             for (int j = 0; j < node.KeyCount; j++)
             {
-                foreach (BTreeMultiEntry entry in EntriesTraverseInternal(children[j].Next, ht - 1))
+                foreach (BTreeMultiEntry<T> entry in EntriesTraverseInternal(children[j].Next, ht - 1))
                     yield return entry;
             }
         }
     }
 
-    public IEnumerable<BTreeMultiNode> NodesTraverse()
+    public IEnumerable<BTreeMultiNode<T>> NodesTraverse()
     {
-        foreach (BTreeMultiNode node in NodesTraverseInternal(root, height))
+        foreach (BTreeMultiNode<T> node in NodesTraverseInternal(root, height))
             yield return node;
     }
 
-    private static IEnumerable<BTreeMultiNode> NodesTraverseInternal(BTreeMultiNode? node, int ht)
+    private static IEnumerable<BTreeMultiNode<T>> NodesTraverseInternal(BTreeMultiNode<T>? node, int ht)
     {
         //Console.WriteLine("ht={0}", ht);
 
@@ -178,7 +185,7 @@ public sealed class BTreeMulti
 
         for (int j = 0; j < node.KeyCount; j++)
         {
-            foreach (BTreeMultiNode childNode in NodesTraverseInternal(node.children[j].Next, ht - 1))
+            foreach (BTreeMultiNode<T> childNode in NodesTraverseInternal(node.children[j].Next, ht - 1))
                 yield return childNode;
         }
     }
@@ -189,7 +196,7 @@ public sealed class BTreeMulti
             yield return node;
     }
 
-    private static IEnumerable<BTreeNode<int>> NodesReverseTraverseInternal(BTreeMultiNode? node, int ht)
+    private static IEnumerable<BTreeNode<int>> NodesReverseTraverseInternal(BTreeMultiNode<T>? node, int ht)
     {
         //Console.WriteLine("ht={0}", ht);
 
@@ -205,20 +212,20 @@ public sealed class BTreeMulti
         //yield return node;
     }
 
-    public void Put(int key, int value)
+    public void Put(T key, int value)
     {
         //Console.WriteLine("Inserting in multitree {0} {1} {2}", Id, key, value);
 
-        BTreeMultiNode? u = Insert(root, key, value, height);
+        BTreeMultiNode<T>? u = Insert(root, key, value, height);
         n++;
         if (u == null) return;
 
         // need to split root
-        BTreeMultiNode newRoot = new(2);
+        BTreeMultiNode<T> newRoot = new(2);
         //Console.WriteLine("Node {0} is now root", newRoot.Id);
 
-        newRoot.children[0] = new BTreeMultiEntry(root.children[0].Key, root);
-        newRoot.children[1] = new BTreeMultiEntry(u.children[0].Key, u);
+        newRoot.children[0] = new BTreeMultiEntry<T>(root.children[0].Key, root);
+        newRoot.children[1] = new BTreeMultiEntry<T>(u.children[0].Key, u);
 
         root = newRoot;
 
@@ -231,31 +238,29 @@ public sealed class BTreeMulti
         height++;
     }
 
-    private BTreeMultiNode? Insert(BTreeMultiNode? node, int key, int? val, int ht)
+    private BTreeMultiNode<T>? Insert(BTreeMultiNode<T>? node, T key, int val, int ht)
     {
         if (node is null)
             throw new ArgumentException("node cannot be null");
 
         int j;
-        BTreeMultiEntry? newEntry = null;
-        BTreeMultiEntry[] children = node.children;        
+        BTreeMultiEntry<T>? newEntry = null;
+        BTreeMultiEntry<T>[] children = node.children;
 
         // external node at height 0
         if (ht == 0)
         {
             for (j = 0; j < node.KeyCount; j++)
             {
-                BTreeMultiEntry child = children[j];
+                BTreeMultiEntry<T> child = children[j];
 
                 if (!Eq(key, child.Key)) // same key found
                     continue;
 
-                if (val is null)
-                    throw new ArgumentException("val cannot be null");
+                //if (val is null)
+                //    throw new ArgumentException("val cannot be null");
 
-                //FindChildToInsert(node, key, val.Value);
-
-                child.Value!.Put(val.Value, key);
+                child.Value!.Put(val, 0);
 
                 return null;
             }
@@ -274,7 +279,7 @@ public sealed class BTreeMulti
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    BTreeMultiNode? u = Insert(children[j++].Next, key, val, ht - 1);
+                    BTreeMultiNode<T>? u = Insert(children[j++].Next, key, val, ht - 1);
 
                     if (u == null)
                         return null;
@@ -289,8 +294,8 @@ public sealed class BTreeMulti
         for (int i = node.KeyCount; i > j; i--)
             node.children[i] = node.children[i - 1];
 
-        if (val is null)
-            throw new ArgumentException("val cannot be null");
+        //if (val is null)
+        //throw new ArgumentException("val cannot be null");
 
         if (newEntry is null)
         {
@@ -298,7 +303,7 @@ public sealed class BTreeMulti
             newEntry.Value = new BTree<int>(-1);
         }
 
-        newEntry.Value!.Put(val.Value, key);
+        newEntry.Value!.Put(val, 0);
 
         node.children[j] = newEntry;
         node.KeyCount++;
@@ -313,9 +318,9 @@ public sealed class BTreeMulti
     }
 
     // split node in half
-    private static BTreeMultiNode Split(BTreeMultiNode current)
+    private static BTreeMultiNode<T> Split(BTreeMultiNode<T> current)
     {
-        BTreeMultiNode t = new(MaxChildrenHalf);
+        BTreeMultiNode<T> t = new(MaxChildrenHalf);
 
         //Console.WriteLine("Node {0} marked as dirty because of split", t.Id);
 
@@ -331,14 +336,13 @@ public sealed class BTreeMulti
     }
 
     // comparison functions - make Comparable instead of Key to avoid casts
-    private static bool Less(int k1, int k2)
+    private static bool Less(T k1, T k2)
     {
-        //return k1.compareTo(k2) < 0;
-        return k1 < k2;
+        return k1!.CompareTo(k2) < 0;
     }
 
-    private static bool Eq(int k1, int k2)
+    private static bool Eq(T k1, T k2)
     {
-        return k1 == k2;
+        return k1.CompareTo(k2) == 0;
     }
 }

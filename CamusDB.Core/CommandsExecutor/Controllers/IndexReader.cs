@@ -9,6 +9,9 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Serializer.Models;
+using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -50,11 +53,11 @@ internal sealed class IndexReader
         return index;
     }
 
-    public async Task<BTreeMulti> ReadMulti(BufferPoolHandler tablespace, int offset)
+    public async Task<BTreeMulti<ColumnValue>> ReadMulti(BufferPoolHandler tablespace, int offset)
     {
         //Console.WriteLine("***");
 
-        BTreeMulti index = new(offset);
+        BTreeMulti<ColumnValue> index = new(offset);
 
         byte[] data = await tablespace.GetDataFromPage(offset);
         if (data.Length == 0)
@@ -71,7 +74,7 @@ internal sealed class IndexReader
 
         if (rootPageOffset > -1)
         {
-            BTreeMultiNode? node = await GetMultiNode(tablespace, rootPageOffset);
+            BTreeMultiNode<ColumnValue>? node = await GetMultiNode(tablespace, rootPageOffset);
             if (node is not null)
                 index.root = node;
         }
@@ -121,13 +124,13 @@ internal sealed class IndexReader
         return node;
     }
 
-    private async Task<BTreeMultiNode?> GetMultiNode(BufferPoolHandler tablespace, int offset)
+    private async Task<BTreeMultiNode<ColumnValue>?> GetMultiNode(BufferPoolHandler tablespace, int offset)
     {
         byte[] data = await tablespace.GetDataFromPage(offset);
         if (data.Length == 0)
             return null;
 
-        BTreeMultiNode node = new(-1);
+        BTreeMultiNode<ColumnValue> node = new(-1);
 
         node.Dirty = false; // read nodes from disk must be not persisted
 
@@ -139,9 +142,16 @@ internal sealed class IndexReader
 
         for (int i = 0; i < node.KeyCount; i++)
         {
-            BTreeMultiEntry entry = new(0, null);
+            ColumnValue key = new(ColumnType.Id, );
 
-            entry.Key = Serializator.ReadInt32(data, ref pointer);
+            //int type = Serializator.ReadType(data, ref pointer);
+            //if (type == SerializatorTypes.TypeInteger32)
+
+            //Serializator.ReadInt32(data, ref pointer);
+
+            BTreeMultiEntry<ColumnValue> entry = new(0, null);
+            
+            //entry.Key =
 
             int subTreeOffset = Serializator.ReadInt32(data, ref pointer);
             if (subTreeOffset > 0)

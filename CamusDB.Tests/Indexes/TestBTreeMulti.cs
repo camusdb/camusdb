@@ -13,7 +13,7 @@ public class TestBTreeMulti
     [Test]
     public void TestBasicInsert()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         tree.Put(5, 100);
 
@@ -24,7 +24,7 @@ public class TestBTreeMulti
     [Test]
     public void TestMultiInsertNoSplit()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         tree.Put(4, 100);
         tree.Put(5, 100);
@@ -40,7 +40,7 @@ public class TestBTreeMulti
     [Test]
     public void TestMultiInsertSplit()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         tree.Put(0, 100);
         tree.Put(1, 100);
@@ -58,7 +58,7 @@ public class TestBTreeMulti
     [Test]
     public void TestBasicGet()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         tree.Put(5, 100);
 
@@ -72,7 +72,7 @@ public class TestBTreeMulti
     [Test]
     public void TestBasicNullGet()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         tree.Put(5, 100);
 
@@ -84,7 +84,7 @@ public class TestBTreeMulti
     [Test]
     public void TestMultiInsertGet()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         tree.Put(4, 100);
         tree.Put(5, 100);
@@ -109,7 +109,7 @@ public class TestBTreeMulti
     [Test]
     public void TestBasicSameKeyInsert()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         tree.Put(5, 100);
         tree.Put(5, 101);
@@ -121,7 +121,7 @@ public class TestBTreeMulti
     [Test]
     public void TestMultiSameKeyInsert()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         tree.Put(5, 100);
         tree.Put(5, 101);
@@ -138,7 +138,7 @@ public class TestBTreeMulti
     [Test]
     public void TestSameKeyInsertBasicGet()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         tree.Put(5, 100);
         tree.Put(5, 101);
@@ -157,7 +157,7 @@ public class TestBTreeMulti
     [Test]
     public void TestMultiSameKeyInsertSplit()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         tree.Put(5, 100);
         tree.Put(5, 101);
@@ -177,7 +177,7 @@ public class TestBTreeMulti
     [Test]
     public void TestMultiSameKeyInsertTraverse()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         tree.Put(5, 100);
         tree.Put(5, 101);
@@ -204,7 +204,7 @@ public class TestBTreeMulti
     [Test]
     public void TestMultiTwoKeysTraverse()
     {
-        BTreeMulti tree = new(0);
+        BTreeMulti<int> tree = new(0);
 
         for (int i = 0; i < 10; i++)
             tree.Put(5, 100 + i);

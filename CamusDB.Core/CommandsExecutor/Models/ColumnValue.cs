@@ -10,7 +10,7 @@ using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public sealed class ColumnValue
+public sealed class ColumnValue : IComparable<ColumnValue>
 {
     public ColumnType Type { get; }
 
@@ -20,5 +20,23 @@ public sealed class ColumnValue
     {
         Type = type;
         Value = value;
+    }
+
+    public int CompareTo(ColumnValue? other)
+    {
+        if (other is null)
+            throw new ArgumentException("Object is not a ColumnValue");
+
+        if (Type != other.Type)
+            throw new ArgumentException("Comparing incompatible ColumnValue");
+
+        if (Type == ColumnType.Id || Type == ColumnType.Integer)
+        {
+            int value1 = int.Parse(Value);
+            int value2 = int.Parse(other.Value);
+            return value1.CompareTo(value2);
+        }
+
+        return Value.CompareTo(other.Value);
     }
 }

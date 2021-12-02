@@ -1,8 +1,15 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 namespace CamusDB.Core.Util.Trees;
 
 // helper B-tree node data type
-public sealed class BTreeMultiNode
+public sealed class BTreeMultiNode<T> where T : IComparable<T>
 {
     public static int CurrentId = -1;
 
@@ -14,7 +21,7 @@ public sealed class BTreeMultiNode
 
     public bool Dirty = true; // whether the node must be persisted
 
-    public BTreeMultiEntry[] children = new BTreeMultiEntry[BTree<int>.MaxChildren];   // the array of children
+    public BTreeMultiEntry<T>[] children = new BTreeMultiEntry<T>[BTree<int>.MaxChildren];   // the array of children
 
     // create a node with k children
     public BTreeMultiNode(int keyCount)
