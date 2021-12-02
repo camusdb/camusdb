@@ -22,6 +22,8 @@ public sealed class CommandExecutor
 
     private readonly DatabaseCloser databaseCloser;
 
+    private readonly DatabaseDescriptors databaseDescriptors;
+
     private readonly TableOpener tableOpener;
 
     private readonly TableCreator tableCreator;
@@ -30,15 +32,16 @@ public sealed class CommandExecutor
 
     private readonly QueryExecutor queryExecutor;
 
-    private readonly CommandValidator validator;
+    private readonly CommandValidator validator;    
 
     public CommandExecutor(CommandValidator validator, CatalogsManager catalogs)
     {
         this.validator = validator;
 
-        databaseOpener = new();
+        databaseDescriptors = new();
+        databaseOpener = new(databaseDescriptors);        
+        databaseCloser = new(databaseDescriptors);
         databaseCreator = new();
-        databaseCloser = new();
         tableOpener = new(catalogs);
         tableCreator = new(catalogs);
         rowInserter = new();

@@ -29,16 +29,18 @@ internal sealed class DatabaseCreator
     {
         byte[] initialized = new byte[Config.InitialTableSpaceSize];
 
+        string absolutePath = Directory.GetCurrentDirectory();
+
         await Task.WhenAll(new Task[]
         {
-            File.WriteAllBytesAsync(Config.DataDirectory + "/" + name + "/tablespace0", initialized),
-            File.WriteAllBytesAsync(Config.DataDirectory + "/" + name + "/schema", initialized),
-            File.WriteAllBytesAsync(Config.DataDirectory + "/" + name + "/system", initialized)
+            File.WriteAllBytesAsync(absolutePath + "/" + Config.DataDirectory + "/" + name + "/tablespace0", initialized),
+            File.WriteAllBytesAsync(absolutePath + "/" + Config.DataDirectory + "/" + name + "/schema", initialized),
+            File.WriteAllBytesAsync(absolutePath + "/" + Config.DataDirectory + "/" + name + "/system", initialized)
         });
 
         // @todo catch IO Exceptions
         // @todo verify tablespaces were created sucessfully
 
-        Console.WriteLine("Database tablespaces created");
+        Console.WriteLine("Database {0} tablespaces created at {1}", name, absolutePath + "/" + Config.DataDirectory + "/" + name);
     }
 }

@@ -32,7 +32,7 @@ public class TestRowMultiInsertor
             Directory.Delete(path);
         }
     }
-
+    
     private async Task<CommandExecutor> SetupDatabase()
     {
         CommandValidator validator = new();
@@ -47,7 +47,7 @@ public class TestRowMultiInsertor
 
         return executor;
     }
-
+    
     private async Task<CommandExecutor> SetupMultiIndexTable()
     {
         var executor = await SetupDatabase();
@@ -69,6 +69,8 @@ public class TestRowMultiInsertor
     }
 
     [Test]
+    [Order(1)]
+    [NonParallelizable]
     public async Task TestBasicInsert()
     {
         var executor = await SetupMultiIndexTable();
@@ -79,11 +81,10 @@ public class TestRowMultiInsertor
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "1") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+                { "usersId", new ColumnValue(ColumnType.Id, "5") },
+                { "amount", new ColumnValue(ColumnType.Integer, "100") }
             }
-        );
+        );        
 
         await executor.Insert(ticket);
     }

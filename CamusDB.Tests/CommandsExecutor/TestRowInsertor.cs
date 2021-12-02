@@ -70,6 +70,7 @@ public class TestRowInsertor
     }    
 
     [Test]
+    [NonParallelizable]
     public async Task TestInvalidTypeAssigned()
     {
         var executor = await SetupBasicTable();
@@ -91,6 +92,7 @@ public class TestRowInsertor
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestInvalidDatabase()
     {
         var executor = await SetupBasicTable();
@@ -112,6 +114,7 @@ public class TestRowInsertor
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestInvalidTable()
     {
         var executor = await SetupBasicTable();
@@ -129,10 +132,33 @@ public class TestRowInsertor
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
-        Assert.AreEqual("Table doesn't exist", e!.Message);
+        Assert.AreEqual("Table 'unknown_table' doesn't exist", e!.Message);
     }
 
     [Test]
+    [NonParallelizable]
+    public async Task TestInsertUnknownColum()
+    {
+        var executor = await SetupBasicTable();
+
+        InsertTicket ticket = new(
+            database: "factory",
+            name: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "name", new ColumnValue(ColumnType.String, "some name") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "unknownColumn", new ColumnValue(ColumnType.Bool, "1234") },
+            }
+        );
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
+        Assert.AreEqual("Unknown column 'unknownColumn' in column list", e!.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestBasicInsert()
     {
         var executor = await SetupBasicTable();
@@ -153,6 +179,7 @@ public class TestRowInsertor
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestTwoInserts()
     {
         var executor = await SetupBasicTable();
@@ -187,6 +214,7 @@ public class TestRowInsertor
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestTwoInsertsParallel()
     {
         var executor = await SetupBasicTable();
@@ -223,6 +251,7 @@ public class TestRowInsertor
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestCheckSuccessfulInsert()
     {
         var executor = await SetupBasicTable();
@@ -262,6 +291,7 @@ public class TestRowInsertor
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestSuccessfulTwoParallelInserts()
     {
         var executor = await SetupBasicTable();

@@ -31,6 +31,7 @@ public class TestDatabaseOpener
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestOpenDatabase()
     {
         CommandValidator validator = new();

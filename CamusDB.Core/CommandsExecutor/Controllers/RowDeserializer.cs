@@ -9,6 +9,7 @@
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Serializer.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -49,18 +50,35 @@ public sealed class RowDeserializer
             switch (column.Type)
             {
                 case ColumnType.Id:
-                    //int r = pointer;
-                    Serializator.ReadType(data, ref pointer);
-                    value = Serializator.ReadInt32(data, ref pointer);
-                    columnValues.Add(new(ColumnType.Id, value.ToString()));
-                    //Console.WriteLine(pointer - r);
+                    {
+                        int columnType = Serializator.ReadType(data, ref pointer);
+                        if (columnType == SerializatorTypes.TypeInteger32)
+                        {
+                            value = Serializator.ReadInt32(data, ref pointer);
+                            columnValues.Add(new(ColumnType.Id, value.ToString()));
+                        }
+                        else
+                        {
+                            if (columnType != SerializatorTypes.TypeNull)
+                                throw new Exception(columnType.ToString());
+                        }                        
+                    }
                     break;
 
                 case ColumnType.Integer:
-                    //int rx = pointer;
-                    Serializator.ReadType(data, ref pointer);
-                    value = Serializator.ReadInt32(data, ref pointer);
-                    columnValues.Add(new(ColumnType.Integer, value.ToString()));
+                    {
+                        int columnType = Serializator.ReadType(data, ref pointer);
+                        if (columnType == SerializatorTypes.TypeInteger32)
+                        {
+                            value = Serializator.ReadInt32(data, ref pointer);
+                            columnValues.Add(new(ColumnType.Integer, value.ToString()));
+                        }
+                        else
+                        {
+                            if (columnType != SerializatorTypes.TypeNull)
+                                throw new Exception(columnType.ToString());
+                        }
+                    }
                     //Console.WriteLine(pointer - rx);
                     break;
 

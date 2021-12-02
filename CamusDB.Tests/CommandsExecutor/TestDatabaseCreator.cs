@@ -30,6 +30,7 @@ public class TestDatabaseCreator
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestCreateDatabase()
     {
         CommandValidator validator = new();

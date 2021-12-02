@@ -10,9 +10,9 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public static class DatabaseDescriptors
+public class DatabaseDescriptors
 {
-    public static readonly SemaphoreSlim Semaphore = new(1, 1);
+    public readonly SemaphoreSlim Semaphore = new(1, 1);
 
-    public static readonly Dictionary<string, DatabaseDescriptor> Descriptors = new();
+    public readonly Dictionary<string, DatabaseDescriptor> Descriptors = new();
 }

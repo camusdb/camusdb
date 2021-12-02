@@ -18,14 +18,21 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class DatabaseCloser
 {
+    private readonly DatabaseDescriptors databaseDescriptors;
+
+    public DatabaseCloser(DatabaseDescriptors databaseDescriptors)
+    {
+        this.databaseDescriptors = databaseDescriptors;
+    }
+
     public async ValueTask Close(string name)
     {
-        if (!DatabaseDescriptors.Descriptors.TryGetValue(name, out DatabaseDescriptor? databaseDescriptor))
+        if (!databaseDescriptors.Descriptors.TryGetValue(name, out DatabaseDescriptor? databaseDescriptor))
             return;
 
         try
         {
-            await DatabaseDescriptors.Semaphore.WaitAsync();
+            await databaseDescriptors.Semaphore.WaitAsync();
 
             if (databaseDescriptor.TableSpace is not null)
                 databaseDescriptor.TableSpace.Dispose();
@@ -36,13 +43,13 @@ internal sealed class DatabaseCloser
             if (databaseDescriptor.SystemSpace is not null)
                 databaseDescriptor.SystemSpace.Dispose();
 
-            DatabaseDescriptors.Descriptors.Remove(name);                                
+            databaseDescriptors.Descriptors.Remove(name);                                
 
             Console.WriteLine("Database {0} closed", name);            
         }
         finally
         {
-            DatabaseDescriptors.Semaphore.Release();
+            databaseDescriptors.Semaphore.Release();
         }
     }
 }

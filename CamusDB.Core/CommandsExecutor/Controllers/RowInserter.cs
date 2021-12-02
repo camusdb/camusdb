@@ -21,6 +21,32 @@ public sealed class RowInserter
 
     private readonly RowSerializer rowSerializer = new();
 
+    private static void Validate(TableDescriptor table, InsertTicket ticket) // @todo optimize this
+    {
+        List<TableColumnSchema> columns = table.Schema!.Columns!;
+
+        foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.Values)
+        {
+            bool hasColumn = false;
+
+            for (int i = 0; i < columns.Count; i++)
+            {
+                TableColumnSchema column = columns[i];
+                if (column.Name == columnValue.Key)
+                {
+                    hasColumn = true;
+                    break;
+                }
+            }
+
+            if (!hasColumn)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.UnknownColumn,
+                    "Unknown column '" + columnValue.Key + "' in column list"
+                );
+        }
+    }
+
     private static int? GetRowValue(TableDescriptor table, InsertTicket ticket, string name)
     {
         List<TableColumnSchema> columns = table.Schema!.Columns!;
@@ -30,7 +56,11 @@ public sealed class RowInserter
             TableColumnSchema column = columns[i];
 
             if (column.Name == name)
-                return int.Parse(ticket.Values[column.Name].Value);                
+            {
+                if (ticket.Values.TryGetValue(column.Name, out ColumnValue? value))
+                    return int.Parse(value.Value);
+                break;
+            }
         }
 
         return null;
@@ -127,6 +157,8 @@ public sealed class RowInserter
 
     public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
+        Validate(table, ticket);
+
         Stopwatch timer = new();
         timer.Start();
 
