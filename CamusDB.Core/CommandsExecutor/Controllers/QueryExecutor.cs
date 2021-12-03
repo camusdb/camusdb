@@ -30,16 +30,11 @@ internal sealed class QueryExecutor
 
     private async Task<List<List<ColumnValue>>> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
-        return await QueryUsingUniqueIndex(database, table, table.Rows);
-    }
-
-    private async Task<List<List<ColumnValue>>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<int> index)
-    {
         BufferPoolHandler tablespace = database.TableSpace!;
 
         List<List<ColumnValue>> rows = new();
 
-        foreach (BTreeEntry<int> entry in index.EntriesTraverse())
+        foreach (BTreeEntry<int> entry in table.Rows.EntriesTraverse())
         {
             if (entry.Value is null)
             {
@@ -60,13 +55,40 @@ internal sealed class QueryExecutor
         return rows;
     }
 
-    private async Task<List<List<ColumnValue>>> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti index)
+    private async Task<List<List<ColumnValue>>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue> index)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
         List<List<ColumnValue>> rows = new();
 
-        foreach (BTreeMultiEntry entry in index.EntriesTraverse())
+        foreach (BTreeEntry<ColumnValue> entry in index.EntriesTraverse())
+        {
+            if (entry.Value is null)
+            {
+                Console.WriteLine("Index RowId={0} has no page offset value", entry.Key);
+                continue;
+            }
+
+            byte[] data = await tablespace.GetDataFromPage(entry.Value.Value);
+            if (data.Length == 0)
+            {
+                Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
+                continue;
+            }
+
+            rows.Add(rowReader.Deserialize(table.Schema!, data));
+        }
+
+        return rows;
+    }
+
+    private async Task<List<List<ColumnValue>>> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
+    {
+        BufferPoolHandler tablespace = database.TableSpace!;
+
+        List<List<ColumnValue>> rows = new();
+
+        foreach (BTreeMultiEntry<ColumnValue> entry in index.EntriesTraverse())
         {
             //Console.WriteLine("MultiTree={0} Key={0} PageOffset={1}", index.Id, entry.Key, entry.Value!.Size());
 
@@ -116,7 +138,7 @@ internal sealed class QueryExecutor
 
         List<List<ColumnValue>> rows = new();
 
-        int? pageOffset = table.Indexes[CamusDBConfig.PrimaryKeyInternalName].UniqueRows!.Get(ticket.Id);
+        int? pageOffset = table.Indexes[CamusDBConfig.PrimaryKeyInternalName].UniqueRows!.Get(new ColumnValue(ColumnType.Id, ticket.Id.ToString()));
 
         if (pageOffset is null)
         {

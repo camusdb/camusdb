@@ -45,7 +45,7 @@ internal sealed class TableOpener
             tableDescriptor = new();
             tableDescriptor.Name = tableName;
             tableDescriptor.Schema = tableSchema;
-            tableDescriptor.Rows = await indexReader.ReadUnique(tablespace, systemObject.StartOffset);
+            tableDescriptor.Rows = await indexReader.ReadOffsets(tablespace, systemObject.StartOffset);
 
             // @todo read indexes in parallel
 
@@ -57,7 +57,7 @@ internal sealed class TableOpener
                     {
                         case IndexType.Unique:
                             {
-                                BTree<int> rows = await indexReader.ReadUnique(tablespace, index.Value.StartOffset);
+                                BTree<ColumnValue> rows = await indexReader.ReadUnique(tablespace, index.Value.StartOffset);
 
                                 tableDescriptor.Indexes.Add(
                                     index.Key,
@@ -68,7 +68,7 @@ internal sealed class TableOpener
 
                         case IndexType.Multi:
                             {
-                                BTreeMulti rows = await indexReader.ReadMulti(tablespace, index.Value.StartOffset);
+                                BTreeMulti<ColumnValue> rows = await indexReader.ReadMulti(tablespace, index.Value.StartOffset);
 
                                 tableDescriptor.Indexes.Add(
                                     index.Key,

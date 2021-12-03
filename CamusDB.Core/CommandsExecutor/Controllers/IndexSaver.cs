@@ -142,6 +142,75 @@ internal sealed class IndexSaver
         //Console.WriteLine("Dirty={0} NoDirty={1}", dirty, noDirty);
     }
 
+    private static int GetKeySize(ColumnValue columnValue)
+    {
+        return columnValue.Type switch
+        {
+            ColumnType.Id or ColumnType.Integer => 6,
+            ColumnType.String => 2 + 4 + columnValue.Value.Length,
+            _ => throw new Exception("Can't use this type as index"),
+        };
+    }
+
+    private static int GetKeySizes(BTreeNode<ColumnValue> node)
+    {
+        int length = 0;
+
+        for (int i = 0; i < node.KeyCount; i++)
+        {
+            BTreeEntry<ColumnValue> entry = node.children[i];
+
+            if (entry is null)
+                length += 10; // type (2 byte) + 4 byte + 4 byte
+            else
+                length += 8 + GetKeySize(entry.Key);
+        }
+
+        return length;
+    }
+
+    private static int GetKeySizes(BTreeMultiNode<ColumnValue> node)
+    {
+        int length = 0;
+
+        for (int i = 0; i < node.KeyCount; i++)
+        {
+            BTreeMultiEntry<ColumnValue> entry = node.children[i];
+
+            if (entry is null)
+                length += 10; // type (2 byte) + 4 byte + 4 byte
+            else
+                length += 8 + GetKeySize(entry.Key);
+        }
+
+        return length;
+    }
+
+    private static void SerializeKey(byte[] nodeBuffer, ColumnValue columnValue, ref int pointer)
+    {
+        switch (columnValue.Type)
+        {
+            case ColumnType.Id:
+                Serializator.WriteInt16(nodeBuffer, (int) ColumnType.Id, ref pointer);
+                Serializator.WriteInt32(nodeBuffer, int.Parse(columnValue.Value), ref pointer);
+                break;
+
+            case ColumnType.Integer:
+                Serializator.WriteInt16(nodeBuffer, (int)ColumnType.Integer, ref pointer);
+                Serializator.WriteInt32(nodeBuffer, int.Parse(columnValue.Value), ref pointer);
+                break;
+
+            case ColumnType.String:
+                Serializator.WriteInt16(nodeBuffer, (int)ColumnType.String, ref pointer);
+                Serializator.WriteInt32(nodeBuffer, columnValue.Value.Length, ref pointer);
+                Serializator.WriteString(nodeBuffer, columnValue.Value, ref pointer);
+                break;
+
+            default:
+                throw new Exception("Can't use this type as index");
+        }
+    }
+
     private static async Task SaveUniqueInternal(BufferPoolHandler tablespace, BTree<ColumnValue> index, ColumnValue key, int value, bool insert)
     {
         if (insert)
@@ -182,7 +251,11 @@ internal sealed class IndexSaver
                 continue;
             }
 
-            byte[] nodeBuffer = new byte[8 + 12 * node.KeyCount];
+
+            int keySizes = GetKeySizes(node);
+            Console.WriteLine("{0}", keySizes);
+
+            byte[] nodeBuffer = new byte[8 + keySizes];
 
             pointer = 0;
             Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);
@@ -194,14 +267,15 @@ internal sealed class IndexSaver
 
                 if (entry is not null)
                 {
-                    Serializator.WriteInt32(nodeBuffer, entry.Key, ref pointer);
+                    //Serializator.WriteInt32(nodeBuffer, entry.Key, ref pointer);
+                    SerializeKey(nodeBuffer, entry.Key, ref pointer);
                     Serializator.WriteInt32(nodeBuffer, entry.Value ?? 0, ref pointer);
                     Serializator.WriteInt32(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : -1, ref pointer);
                     //Console.WriteLine(pointer);
                 }
                 else
                 {
-                    Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
+                    Serializator.WriteInt8(nodeBuffer, 0, ref pointer);
                     Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
                     Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
                 }
@@ -257,7 +331,7 @@ internal sealed class IndexSaver
                 continue;
             }
 
-            byte[] nodeBuffer = new byte[8 + 12 * node.KeyCount]; // 8 node entries + 12 int (4 byte) * nodeKeyCount
+            byte[] nodeBuffer = new byte[8 + GetKeySizes(node)]; // 8 node entries + 12 int (4 byte) * nodeKeyCount
 
             pointer = 0;
             Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);
@@ -279,12 +353,7 @@ internal sealed class IndexSaver
 
                 if (subTree is null)
                 {
-                    /*throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInternalOperation,
-                        "Internal multi index value is null"
-                    );*/
-
-                    Serializator.WriteInt32(nodeBuffer, entry.Key, ref pointer);
+                    SerializeKey(nodeBuffer, entry.Key, ref pointer);
                     Serializator.WriteInt32(nodeBuffer, -1, ref pointer);
                     Serializator.WriteInt32(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : -1, ref pointer);
                     continue;
@@ -299,7 +368,8 @@ internal sealed class IndexSaver
 
                 //Console.WriteLine("Write Tree={0} PageOffset={1}", subTree.Id, subTree.PageOffset);
 
-                Serializator.WriteInt32(nodeBuffer, entry.Key, ref pointer);
+                //Serializator.WriteInt32(nodeBuffer, entry.Key, ref pointer);
+                SerializeKey(nodeBuffer, entry.Key, ref pointer);
                 Serializator.WriteInt32(nodeBuffer, subTree.PageOffset, ref pointer);
                 Serializator.WriteInt32(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : -1, ref pointer);
             }
