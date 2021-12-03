@@ -10,15 +10,15 @@ namespace CamusDB.Core.Util.Trees;
 
 // internal nodes: only use key and next
 // external nodes: only use key and value
-public sealed class BTreeEntry<T>
+public sealed class BTreeEntry<TKey, TValue>
 {
-    public T Key;
+    public TKey Key;
 
-    public int? Value;
+    public TValue? Value;
 
-    public BTreeNode<T>? Next;     // helper field to iterate over array entries    
+    public BTreeNode<TKey, TValue>? Next;     // helper field to iterate over array entries    
 
-    public BTreeEntry(T key, int? value, BTreeNode<T>? next)
+    public BTreeEntry(TKey key, TValue? value, BTreeNode<TKey, TValue>? next)
     {
         this.Key = key;
         this.Value = value;

@@ -23,7 +23,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task Save(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, int value)
+    public async Task Save(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
     {
         try
         {
@@ -37,15 +37,13 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         }
     }
 
-    public async Task NoLockingSave(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, int value)
+    public async Task NoLockingSave(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
     {
         await SaveInternal(tablespace, index, key, value);
     }
 
-    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, int value)
+    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
     {
-        ColumnValue columnValue = new(ColumnType.Integer, value.ToString());
-
         index.Put(key, value);
 
         foreach (BTreeMultiNode<ColumnValue> node in index.NodesTraverse())
@@ -55,11 +53,9 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                 node.Dirty = true;
                 node.PageOffset = await tablespace.GetNextFreeOffset();
             }
-
-            //Console.WriteLine("Will save node at {0}", node.PageOffset);
         }
 
-        byte[] treeBuffer = new byte[12]; // height + size + root
+        byte[] treeBuffer = new byte[12]; // height(4 byte) + size(4 byte) + root(4 byte)
 
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
@@ -83,6 +79,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                 continue;
             }
 
+            // @todo number entries must not be harcoded
             byte[] nodeBuffer = new byte[8 + GetKeySizes(node)]; // 8 node entries + 12 int (4 byte) * nodeKeyCount
 
             pointer = 0;
@@ -101,7 +98,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                     continue;
                 }
 
-                BTree<int>? subTree = entry.Value;
+                BTree<int, int?>? subTree = entry.Value;
 
                 if (subTree is null)
                 {
@@ -116,7 +113,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                 if (subTree.PageOffset == -1)
                     subTree.PageOffset = await tablespace.GetNextFreeOffset();
 
-                await indexSaver.Save(tablespace, subTree, value, 0, false);
+                await indexSaver.Save(tablespace, subTree, value.SlotOne, value.SlotTwo, false);
 
                 //Console.WriteLine("Write Tree={0} PageOffset={1}", subTree.Id, subTree.PageOffset);
 

@@ -8,7 +8,7 @@
 
 namespace CamusDB.Core.Util.Trees;
 
-public class BTreeInsertDeltas<T>
+public class BTreeInsertDeltas<TKey, TValue>
 {
-    public readonly List<BTreeNode<T>> Deltas = new();    
+    public readonly List<BTreeNode<TKey, TValue>> Deltas = new();    
 }

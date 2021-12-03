@@ -13,7 +13,7 @@ public class TestBTree
     [Test]
     public void TestBasicInsert()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(5, 100);
 
@@ -24,7 +24,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertNoSplit()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(4, 100);
         tree.Put(5, 100);
@@ -40,7 +40,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertSplit()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(0, 100);
         tree.Put(1, 100);
@@ -58,7 +58,7 @@ public class TestBTree
     [Test]
     public void TestBasicGet()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(5, 100);
 
@@ -72,7 +72,7 @@ public class TestBTree
     [Test]
     public void TestBasicNullGet()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(5, 100);
 
@@ -84,7 +84,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertGet()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(4, 100);
         tree.Put(5, 100);
@@ -109,9 +109,9 @@ public class TestBTree
     [Test]
     public void TestMultiInsertDeltas()
     {
-        BTreeInsertDeltas<int> deltas;
+        BTreeInsertDeltas<int, int?> deltas;
 
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         deltas = tree.Put(4, 100);
         Assert.AreEqual(1, deltas.Deltas.Count);
@@ -144,7 +144,7 @@ public class TestBTree
     [Test]
     public void TestBasicRemove()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(5, 100);
         Assert.IsTrue(tree.Remove(5));
@@ -156,7 +156,7 @@ public class TestBTree
     [Test]
     public void TestRemoveUnknownKey()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(5, 100);
         Assert.IsFalse(tree.Remove(10));
@@ -168,7 +168,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertRemove()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(4, 100);
         tree.Put(5, 100);
@@ -186,7 +186,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertRemoveCheck()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(4, 100);
         tree.Put(5, 100);
@@ -207,7 +207,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertSplitRemoveCheck()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(4, 100);
         tree.Put(5, 100);
@@ -233,7 +233,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertSplitRemoveCheck2()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         tree.Put(4, 100);
         tree.Put(5, 100);
@@ -262,7 +262,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertSplitRemoveCheck3()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         for (int i = 0; i < 50; i++)        
             tree.Put(i, 100 + i);        
@@ -292,7 +292,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertSplitRemoveCheck4()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         for (int i = 0; i < 64; i++)
             tree.Put(i, 100 + i);
@@ -321,7 +321,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertSplitRemoveCheck5()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         for (int i = 0; i < 49; i++)
             tree.Put(i, 100 + i);
@@ -350,7 +350,7 @@ public class TestBTree
     [Test]
     public void TestMultiInsertSplitRemoveCheckEmpty()
     {
-        BTree<int> tree = new(0);
+        BTree<int, int?> tree = new(0);
 
         for (int i = 0; i < 64; i++)
             tree.Put(i, 100 + i);

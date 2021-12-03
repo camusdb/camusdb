@@ -40,9 +40,9 @@ internal sealed class RowDeleter
             );
         }
 
-        ColumnValue columnId = new ColumnValue(ColumnType.Id, ticket.Id.ToString());
+        ColumnValue columnId = new(ColumnType.Id, ticket.Id.ToString());
 
-        int? pageOffset = index.UniqueRows.Get(columnId);
+        BTreeTuple? pageOffset = index.UniqueRows.Get(columnId);
 
         if (pageOffset is null)
         {
@@ -50,7 +50,7 @@ internal sealed class RowDeleter
             return;
         }        
 
-        Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, pageOffset.Value);
+        Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, pageOffset.SlotTwo);
 
         index.UniqueRows.Remove(columnId);
 
@@ -58,6 +58,6 @@ internal sealed class RowDeleter
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        Console.WriteLine("Row {0} deleted from {1}, Time taken: {2}", ticket.Id, pageOffset.Value, timeTaken.ToString(@"m\:ss\.fff"));
+        Console.WriteLine("Row {0} deleted from {1}, Time taken: {2}", ticket.Id, pageOffset.SlotTwo, timeTaken.ToString(@"m\:ss\.fff"));
     }
 }

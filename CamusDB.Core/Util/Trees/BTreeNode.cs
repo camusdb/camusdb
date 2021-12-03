@@ -9,13 +9,13 @@
 namespace CamusDB.Core.Util.Trees;
 
 // helper B-tree node data type
-public sealed class BTreeNode<T>
+public sealed class BTreeNode<TKey, TValue>
 {
     public const int MaxChildren = 8;
 
     public const int MaxChildrenHalf = MaxChildren / 2;
 
-    public static int CurrentId = -1;
+    private static int CurrentId = -1;
 
     public int Id;
 
@@ -25,7 +25,7 @@ public sealed class BTreeNode<T>
 
     public bool Dirty = true; // whether the node must be persisted
 
-    public BTreeEntry<T>[] children = new BTreeEntry<T>[MaxChildren];   // the array of children
+    public BTreeEntry<TKey, TValue>[] children = new BTreeEntry<TKey, TValue>[MaxChildren];   // the array of children
 
     // create a node with k children
     public BTreeNode(int keyCount)

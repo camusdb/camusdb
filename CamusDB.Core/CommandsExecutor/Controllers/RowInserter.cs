@@ -66,7 +66,7 @@ internal sealed class RowInserter
         return null;
     }
 
-    private static ColumnValue CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue> uniqueIndex, InsertTicket ticket, string name)
+    private static ColumnValue CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue, BTreeTuple?> uniqueIndex, InsertTicket ticket, string name)
     {
         ColumnValue? uniqueValue = GetRowValue(table, ticket, name);
 
@@ -76,9 +76,9 @@ internal sealed class RowInserter
                 "Cannot retrieve unique key for table " + table.Name
             );
 
-        int? pageOffset = uniqueIndex.Get(uniqueValue);
+        BTreeTuple? rowTuple = uniqueIndex.Get(uniqueValue);
 
-        if (pageOffset is not null)
+        if (rowTuple is not null)
             throw new CamusDBException(
                 CamusDBErrorCodes.DuplicatePrimaryKeyValue,
                 "Duplicate entry for key " + table.Name + " " + uniqueValue
@@ -87,9 +87,9 @@ internal sealed class RowInserter
         return uniqueValue;
     }
 
-    private async Task<RowTuple> CheckAndUpdateUniqueKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
+    private async Task<BTreeTuple> CheckAndUpdateUniqueKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
-        RowTuple rowTuple = new(-1, -1);
+        BTreeTuple rowTuple = new(-1, -1);
 
         BufferPoolHandler tablespace = database.TableSpace!;
 
@@ -104,7 +104,7 @@ internal sealed class RowInserter
                     "A multi index tree wasn't found"
                 );
 
-            BTree<ColumnValue> uniqueIndex = index.Value.UniqueRows;
+            BTree<ColumnValue, BTreeTuple?> uniqueIndex = index.Value.UniqueRows;
 
             try
             {
@@ -113,11 +113,11 @@ internal sealed class RowInserter
                 ColumnValue uniqueKeyValue = CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
 
                 // allocate pages and rowid when needed
-                if (rowTuple.RowId == -1)
-                    rowTuple.RowId = await tablespace.GetNextRowId();
+                if (rowTuple.SlotOne == -1)
+                    rowTuple.SlotOne = await tablespace.GetNextRowId();
 
-                if (rowTuple.DataPageOffset == -1)
-                    rowTuple.DataPageOffset = await tablespace.GetNextFreeOffset();
+                if (rowTuple.SlotTwo == -1)
+                    rowTuple.SlotTwo = await tablespace.GetNextFreeOffset();
 
                 await indexSaver.NoLockingSave(tablespace, uniqueIndex, uniqueKeyValue, rowTuple);
             }
@@ -130,7 +130,7 @@ internal sealed class RowInserter
         return rowTuple;
     }
 
-    private async Task UpdateMultiKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, RowTuple rowTuple)
+    private async Task UpdateMultiKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, BTreeTuple rowTuple)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
@@ -164,15 +164,15 @@ internal sealed class RowInserter
 
         BufferPoolHandler tablespace = database.TableSpace!;
 
-        RowTuple rowTuple = await CheckAndUpdateUniqueKeys(database, table, ticket);
+        BTreeTuple rowTuple = await CheckAndUpdateUniqueKeys(database, table, ticket);
         
-        byte[] rowBuffer = rowSerializer.Serialize(table, ticket, rowTuple.RowId);
+        byte[] rowBuffer = rowSerializer.Serialize(table, ticket, rowTuple.SlotOne);
 
         // Insert data to the page offset
-        await tablespace.WriteDataToPage(rowTuple.DataPageOffset, rowBuffer);
+        await tablespace.WriteDataToPage(rowTuple.SlotTwo, rowBuffer);
 
         // Main table index stores rowid pointing to page offeset
-        await indexSaver.Save(tablespace, table.Rows, rowTuple.RowId, rowTuple.DataPageOffset);
+        await indexSaver.Save(tablespace, table.Rows, rowTuple.SlotOne, rowTuple.SlotTwo);
 
         await UpdateMultiKeys(database, table, ticket, rowTuple);
 
@@ -196,6 +196,6 @@ internal sealed class RowInserter
             }
         }*/
 
-        Console.WriteLine("Row {0} inserted at {1}, Time taken: {2}", rowTuple.RowId, rowTuple.DataPageOffset, timeTaken.ToString(@"m\:ss\.fff"));
+        Console.WriteLine("Row {0} inserted at {1}, Time taken: {2}", rowTuple.SlotOne, rowTuple.SlotTwo, timeTaken.ToString(@"m\:ss\.fff"));
     }
 }

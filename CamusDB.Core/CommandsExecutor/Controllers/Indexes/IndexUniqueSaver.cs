@@ -23,7 +23,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task Save(BufferPoolHandler tablespace, BTree<ColumnValue> index, ColumnValue key, int value, bool insert = true)
+    public async Task Save(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert = true)
     {
         try
         {
@@ -37,17 +37,17 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         }
     }
 
-    public async Task NoLockingSave(BufferPoolHandler tablespace, BTree<ColumnValue> index, ColumnValue key, int value, bool insert = true)
+    public async Task NoLockingSave(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert = true)
     {
         await SaveInternal(tablespace, index, key, value, insert);
     }
 
-    private static async Task SaveInternal(BufferPoolHandler tablespace, BTree<ColumnValue> index, ColumnValue key, int value, bool insert)
+    private static async Task SaveInternal(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert)
     {
         if (insert)
             index.Put(key, value);
 
-        foreach (BTreeNode<ColumnValue> node in index.NodesTraverse())
+        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in index.NodesTraverse())
         {
             if (node.PageOffset == -1)
             {
@@ -58,11 +58,11 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
             //Console.WriteLine("Will save node at {0}", node.PageOffset);
         }
 
-        byte[] treeBuffer = new byte[12]; // height + size + root
+        byte[] treeBuffer = new byte[12]; // height(4 byte) + size(4 byte) + root(4 byte)
 
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
-        Serializator.WriteInt32(treeBuffer, index.n, ref pointer);
+        Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.root.PageOffset, ref pointer);
 
         await tablespace.WriteDataToPage(index.PageOffset, treeBuffer);
@@ -73,7 +73,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
         int dirty = 0, noDirty = 0;
 
-        foreach (BTreeNode<ColumnValue> node in index.NodesTraverse())
+        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in index.NodesTraverse())
         {
             if (!node.Dirty)
             {
@@ -82,9 +82,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 continue;
             }
 
-            //Console.WriteLine("{0}", keySizes);
-
-            byte[] nodeBuffer = new byte[8 + GetKeySizes(node)];
+            byte[] nodeBuffer = new byte[8 + GetKeySizes(node)]; // keyCount(4 byte) + pageOffset(4 byte)
 
             pointer = 0;
             Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);
@@ -92,19 +90,18 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
             for (int i = 0; i < node.KeyCount; i++)
             {
-                BTreeEntry<ColumnValue> entry = node.children[i];
+                BTreeEntry<ColumnValue, BTreeTuple?> entry = node.children[i];
 
                 if (entry is not null)
                 {
-                    //Serializator.WriteInt32(nodeBuffer, entry.Key, ref pointer);
                     SerializeKey(nodeBuffer, entry.Key, ref pointer);
-                    Serializator.WriteInt32(nodeBuffer, entry.Value ?? 0, ref pointer);
+                    SerializeTuple(nodeBuffer, entry.Value, ref pointer);
                     Serializator.WriteInt32(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : -1, ref pointer);
-                    //Console.WriteLine(pointer);
                 }
                 else
                 {
                     Serializator.WriteInt8(nodeBuffer, 0, ref pointer);
+                    Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
                     Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
                     Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
                 }

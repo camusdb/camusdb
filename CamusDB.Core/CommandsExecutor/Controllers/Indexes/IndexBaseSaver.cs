@@ -26,16 +26,16 @@ public abstract class IndexBaseSaver
         };
     }
 
-    protected static int GetKeySizes(BTreeNode<ColumnValue> node)
+    protected static int GetKeySizes(BTreeNode<ColumnValue, BTreeTuple?> node)
     {
         int length = 0;
 
         for (int i = 0; i < node.KeyCount; i++)
         {
-            BTreeEntry<ColumnValue> entry = node.children[i];
+            BTreeEntry<ColumnValue, BTreeTuple?> entry = node.children[i];
 
             if (entry is null)
-                length += 10; // type (2 byte) + 4 byte + 4 byte
+                length += 14; // type(2 byte) + tuple(4 byte + 4 byte) + nextPage(4 byte)
             else
                 length += 8 + GetKeySize(entry.Key);
         }
@@ -54,7 +54,7 @@ public abstract class IndexBaseSaver
             if (entry is null)
                 length += 10; // type (2 byte) + 4 byte + 4 byte
             else
-                length += 8 + GetKeySize(entry.Key);
+                length += 12 + GetKeySize(entry.Key);
         }
 
         return length;
@@ -82,6 +82,20 @@ public abstract class IndexBaseSaver
 
             default:
                 throw new Exception("Can't use this type as index");
+        }
+    }
+
+    protected static void SerializeTuple(byte[] nodeBuffer, BTreeTuple? rowTuple, ref int pointer)
+    {
+        if (rowTuple is not null)
+        {
+            Serializator.WriteInt32(nodeBuffer, rowTuple.SlotOne, ref pointer);
+            Serializator.WriteInt32(nodeBuffer, rowTuple.SlotTwo, ref pointer);
+        }
+        else
+        {
+            Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
+            Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
         }
     }
 }

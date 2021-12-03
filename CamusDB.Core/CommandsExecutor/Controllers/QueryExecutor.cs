@@ -34,7 +34,7 @@ internal sealed class QueryExecutor
 
         List<List<ColumnValue>> rows = new();
 
-        foreach (BTreeEntry<int> entry in table.Rows.EntriesTraverse())
+        foreach (BTreeEntry<int, int?> entry in table.Rows.EntriesTraverse())
         {
             if (entry.Value is null)
             {
@@ -55,13 +55,13 @@ internal sealed class QueryExecutor
         return rows;
     }
 
-    private async Task<List<List<ColumnValue>>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue> index)
+    private async Task<List<List<ColumnValue>>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue,BTreeTuple?> index)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
         List<List<ColumnValue>> rows = new();
 
-        foreach (BTreeEntry<ColumnValue> entry in index.EntriesTraverse())
+        foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse())
         {
             if (entry.Value is null)
             {
@@ -69,7 +69,7 @@ internal sealed class QueryExecutor
                 continue;
             }
 
-            byte[] data = await tablespace.GetDataFromPage(entry.Value.Value);
+            byte[] data = await tablespace.GetDataFromPage(entry.Value.SlotOne);
             if (data.Length == 0)
             {
                 Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
@@ -92,7 +92,7 @@ internal sealed class QueryExecutor
         {
             //Console.WriteLine("MultiTree={0} Key={0} PageOffset={1}", index.Id, entry.Key, entry.Value!.Size());
 
-            foreach (BTreeEntry<int> subEntry in entry.Value!.EntriesTraverse())
+            foreach (BTreeEntry<int, int?> subEntry in entry.Value!.EntriesTraverse())
             {
                 //Console.WriteLine(" > Index Key={0} PageOffset={1}", subEntry.Key, subEntry.Value);
 
@@ -138,7 +138,25 @@ internal sealed class QueryExecutor
 
         List<List<ColumnValue>> rows = new();
 
-        int? pageOffset = table.Indexes[CamusDBConfig.PrimaryKeyInternalName].UniqueRows!.Get(new ColumnValue(ColumnType.Id, ticket.Id.ToString()));
+        if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Table doesn't have a primary key index"
+            );
+        }
+
+        if (index.UniqueRows is null)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Table doesn't have a primary key index"
+            );
+        }
+
+        ColumnValue columnId = new ColumnValue(ColumnType.Id, ticket.Id.ToString());
+
+        BTreeTuple? pageOffset = index.UniqueRows.Get(columnId);
 
         if (pageOffset is null)
         {
@@ -146,7 +164,7 @@ internal sealed class QueryExecutor
             return rows;
         }
 
-        byte[] data = await tablespace.GetDataFromPage(pageOffset.Value);
+        byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo);
         if (data.Length == 0)
         {
             Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);

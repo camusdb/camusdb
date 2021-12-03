@@ -23,7 +23,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task Save(BufferPoolHandler tablespace, BTree<int> index, int key, int value, bool insert = true)
+    public async Task Save(BufferPoolHandler tablespace, BTree<int, int?> index, int key, int value, bool insert = true)
     {
         try
         {
@@ -37,12 +37,12 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         }
     }
 
-    private static async Task SaveInternal(BufferPoolHandler tablespace, BTree<int> index, int key, int value, bool insert)
+    private static async Task SaveInternal(BufferPoolHandler tablespace, BTree<int, int?> index, int key, int value, bool insert)
     {
         if (insert)
             index.Put(key, value);
 
-        foreach (BTreeNode<int> node in index.NodesTraverse())
+        foreach (BTreeNode<int, int?> node in index.NodesTraverse())
         {
             if (node.PageOffset == -1)
             {
@@ -57,7 +57,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
-        Serializator.WriteInt32(treeBuffer, index.n, ref pointer);
+        Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.root.PageOffset, ref pointer);
 
         await tablespace.WriteDataToPage(index.PageOffset, treeBuffer);
@@ -68,7 +68,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
         int dirty = 0, noDirty = 0;
 
-        foreach (BTreeNode<int> node in index.NodesTraverse())
+        foreach (BTreeNode<int, int?> node in index.NodesTraverse())
         {
             if (!node.Dirty)
             {
@@ -85,7 +85,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
             for (int i = 0; i < node.KeyCount; i++)
             {
-                BTreeEntry<int> entry = node.children[i];
+                BTreeEntry<int, int?> entry = node.children[i];
 
                 if (entry is not null)
                 {

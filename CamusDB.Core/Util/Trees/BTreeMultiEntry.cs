@@ -16,7 +16,7 @@ public sealed class BTreeMultiEntry<T> where T : IComparable<T>
 
     public int NumberValues = 0;
 
-    public BTree<int>? Value;
+    public BTree<int, int?>? Value;
 
     public BTreeMultiNode<T>? Next;     // helper field to iterate over array entries
 

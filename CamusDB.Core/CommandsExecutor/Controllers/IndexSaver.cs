@@ -30,27 +30,27 @@ internal sealed class IndexSaver
         indexUniqueOffsetSaver = new(this);
     }
 
-    public async Task Save(BufferPoolHandler tablespace, BTree<int> index, int key, int value, bool insert = true)
+    public async Task Save(BufferPoolHandler tablespace, BTree<int, int?> index, int key, int value, bool insert = true)
     {
         await indexUniqueOffsetSaver.Save(tablespace, index, key, value, insert);
     }    
 
-    public async Task Save(BufferPoolHandler tablespace, BTree<ColumnValue> index, ColumnValue key, int value, bool insert = true)
+    public async Task Save(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert = true)
     {
         await indexUniqueSaver.Save(tablespace, index, key, value, insert);
     }
 
-    public async Task Save(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, int value)
+    public async Task Save(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
     {
         await indexMultiSaver.Save(tablespace, index, key, value);
     }
 
-    public async Task NoLockingSave(BufferPoolHandler tablespace, BTree<ColumnValue> index, ColumnValue key, int value, bool insert = true)
+    public async Task NoLockingSave(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert = true)
     {
         await indexUniqueSaver.NoLockingSave(tablespace, index, key, value);
     }
 
-    public async Task NoLockingSave(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, int value)
+    public async Task NoLockingSave(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
     {
         await indexMultiSaver.NoLockingSave(tablespace, index, key, value);        
     }
