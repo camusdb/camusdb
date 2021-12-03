@@ -15,7 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public sealed class RowInserter
+internal sealed class RowInserter
 {
     private readonly IndexSaver indexSaver = new();
 
@@ -87,9 +87,9 @@ public sealed class RowInserter
         return uniqueValue;
     }
 
-    private async Task<InsertRowContext> CheckAndUpdateUniqueKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
+    private async Task<RowTuple> CheckAndUpdateUniqueKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
-        InsertRowContext context = new(-1, -1);
+        RowTuple rowTuple = new(-1, -1);
 
         BufferPoolHandler tablespace = database.TableSpace!;
 
@@ -113,13 +113,13 @@ public sealed class RowInserter
                 ColumnValue uniqueKeyValue = CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
 
                 // allocate pages and rowid when needed
-                if (context.RowId == -1)
-                    context.RowId = await tablespace.GetNextRowId();
+                if (rowTuple.RowId == -1)
+                    rowTuple.RowId = await tablespace.GetNextRowId();
 
-                if (context.DataPageOffset == -1)
-                    context.DataPageOffset = await tablespace.GetNextFreeOffset();
+                if (rowTuple.DataPageOffset == -1)
+                    rowTuple.DataPageOffset = await tablespace.GetNextFreeOffset();
 
-                await indexSaver.NoLockingSave(tablespace, uniqueIndex, uniqueKeyValue, context.DataPageOffset);
+                await indexSaver.NoLockingSave(tablespace, uniqueIndex, uniqueKeyValue, rowTuple);
             }
             finally
             {
@@ -127,10 +127,10 @@ public sealed class RowInserter
             }
         }
 
-        return context;
+        return rowTuple;
     }
 
-    private async Task UpdateMultiKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, InsertRowContext context)
+    private async Task UpdateMultiKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, RowTuple rowTuple)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
@@ -151,9 +151,7 @@ public sealed class RowInserter
             if (multiKeyValue is null)
                 continue;
 
-            //Console.WriteLine(multiKeyValue.Value);
-
-            await indexSaver.Save(tablespace, multiIndex, multiKeyValue, context.DataPageOffset);            
+            await indexSaver.Save(tablespace, multiIndex, multiKeyValue, rowTuple);
         }
     }
 
@@ -166,17 +164,17 @@ public sealed class RowInserter
 
         BufferPoolHandler tablespace = database.TableSpace!;
 
-        InsertRowContext context = await CheckAndUpdateUniqueKeys(database, table, ticket);
+        RowTuple rowTuple = await CheckAndUpdateUniqueKeys(database, table, ticket);
+        
+        byte[] rowBuffer = rowSerializer.Serialize(table, ticket, rowTuple.RowId);
 
-        // Insert data to a free page and update indexes
+        // Insert data to the page offset
+        await tablespace.WriteDataToPage(rowTuple.DataPageOffset, rowBuffer);
 
-        byte[] rowBuffer = rowSerializer.Serialize(table, ticket, context.RowId);
+        // Main table index stores rowid pointing to page offeset
+        await indexSaver.Save(tablespace, table.Rows, rowTuple.RowId, rowTuple.DataPageOffset);
 
-        await tablespace.WriteDataToPage(context.DataPageOffset, rowBuffer);
-
-        await indexSaver.Save(tablespace, table.Rows, context.RowId, context.DataPageOffset);
-
-        await UpdateMultiKeys(database, table, ticket, context);
+        await UpdateMultiKeys(database, table, ticket, rowTuple);
 
         timer.Stop();
 
@@ -198,6 +196,6 @@ public sealed class RowInserter
             }
         }*/
 
-        Console.WriteLine("Row {0} inserted at {1}, Time taken: {2}", context.RowId, context.DataPageOffset, timeTaken.ToString(@"m\:ss\.fff"));
+        Console.WriteLine("Row {0} inserted at {1}, Time taken: {2}", rowTuple.RowId, rowTuple.DataPageOffset, timeTaken.ToString(@"m\:ss\.fff"));
     }
 }

@@ -10,7 +10,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public class DatabaseDescriptors
+internal class DatabaseDescriptors
 {
     public readonly SemaphoreSlim Semaphore = new(1, 1);
 

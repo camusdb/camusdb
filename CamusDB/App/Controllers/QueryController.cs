@@ -41,27 +41,48 @@ public sealed class QueryController : CommandsController
         catch (CamusDBException e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
-            return new JsonResult(new InsertResponse("failed", e.Code, e.Message));
+            return new JsonResult(new QueryResponse("failed", e.Code, e.Message));
         }
         catch (Exception e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
-            return new JsonResult(new InsertResponse("failed", "CA0000", e.Message));
+            return new JsonResult(new QueryResponse("failed", "CA0000", e.Message));
         }
     }
 
+    [HttpPost]
     [Route("/query-by-id")]
     public async Task<JsonResult> QueryById()
     {
-        QueryByIdTicket ticket = new(
-            database: "test",
-            name: "my_table",
-            id: 2205016
-        );
+        try
+        {
+            using var reader = new StreamReader(Request.Body);
+            var body = await reader.ReadToEndAsync();
 
-        List<List<ColumnValue>> rows = await executor.QueryById(ticket);
+            QueryByIdRequest? request = JsonSerializer.Deserialize<QueryByIdRequest>(body, jsonOptions);
+            if (request == null)
+                throw new Exception("QueryById request is not valid");
 
-        return new JsonResult(new QueryResponse("ok", rows));
+            QueryByIdTicket ticket = new(
+                database: request.DatabaseName ?? "",
+                name: request.TableName ?? "",
+                id: request.Id
+            );
+
+            List<List<ColumnValue>> rows = await executor.QueryById(ticket);
+
+            return new JsonResult(new QueryResponse("ok", rows));
+        }
+        catch (CamusDBException e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new QueryResponse("failed", e.Code, e.Message));
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new QueryResponse("failed", "CA0000", e.Message));
+        }
     }
 }
 

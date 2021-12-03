@@ -319,6 +319,35 @@ public class TestBTree
     }
 
     [Test]
+    public void TestMultiInsertSplitRemoveCheck5()
+    {
+        BTree<int> tree = new(0);
+
+        for (int i = 0; i < 49; i++)
+            tree.Put(i, 100 + i);
+
+        Assert.AreEqual(49, tree.Size());
+        Assert.AreEqual(2, tree.Height());
+
+        for (int i = 7; i < 49; i += 7)
+            Assert.IsTrue(tree.Remove(i));
+
+        Assert.AreEqual(43, tree.Size());
+        Assert.AreEqual(2, tree.Height());
+
+        int count = 0;
+
+        for (int i = 0; i < 49; i++)
+        {
+            int? search = tree.Get(i);
+            if (search is not null)
+                count++;
+        }
+
+        Assert.AreEqual(43, count);
+    }
+
+    [Test]
     public void TestMultiInsertSplitRemoveCheckEmpty()
     {
         BTree<int> tree = new(0);

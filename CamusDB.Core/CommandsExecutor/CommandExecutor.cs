@@ -30,9 +30,11 @@ public sealed class CommandExecutor
 
     private readonly RowInserter rowInserter;
 
+    private readonly RowDeleter rowDeleter;
+
     private readonly QueryExecutor queryExecutor;
 
-    private readonly CommandValidator validator;    
+    private readonly CommandValidator validator;
 
     public CommandExecutor(CommandValidator validator, CatalogsManager catalogs)
     {
@@ -45,6 +47,7 @@ public sealed class CommandExecutor
         tableOpener = new(catalogs);
         tableCreator = new(catalogs);
         rowInserter = new();
+        rowDeleter = new();
         queryExecutor = new();
     }
 
@@ -94,6 +97,17 @@ public sealed class CommandExecutor
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
         await rowInserter.Insert(database, table, ticket);
+    }
+
+    public async Task DeleteById(DeleteByIdTicket ticket)
+    {
+        //validator.Validate(ticket);
+
+        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
+
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+
+        await rowDeleter.DeleteById(database, table, ticket);
     }
 
     public async Task<List<List<ColumnValue>>> Query(QueryTicket ticket)

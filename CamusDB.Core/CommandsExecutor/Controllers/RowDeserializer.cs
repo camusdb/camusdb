@@ -13,7 +13,7 @@ using CamusDB.Core.Serializer.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public sealed class RowDeserializer
+internal sealed class RowDeserializer
 {
     public List<ColumnValue> Deserialize(TableSchema tableSchema, byte[] data)
     {

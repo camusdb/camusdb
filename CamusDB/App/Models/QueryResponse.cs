@@ -16,9 +16,21 @@ public sealed class QueryResponse
 
     public List<List<ColumnValue>> Rows { get; set; }
 
+    public string? Code { get; set; }
+
+    public string? Message { get; set; }
+
     public QueryResponse(string status, List<List<ColumnValue>> rows)
     {
         Status = status;
         Rows = rows;
+    }
+
+    public QueryResponse(string status, string code, string message)
+    {
+        Status = status;
+        Rows = new();
+        Code = code;
+        Message = message;
     }
 }
