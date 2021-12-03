@@ -79,12 +79,56 @@ public class TestRowInsertor
                 { "id", new ColumnValue(ColumnType.Integer, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "False") },
             }
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
         Assert.AreEqual("Type Integer cannot be assigned to id (Id)", e!.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestInvalidIntegerType()
+    {
+        var executor = await SetupBasicTable();
+
+        InsertTicket ticket = new(
+            database: "factory",
+            name: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "name", new ColumnValue(ColumnType.String, "some name") },
+                { "year", new ColumnValue(ColumnType.Integer, "invalid int value") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+            }
+        );
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
+        Assert.AreEqual("Invalid numeric integer format for field 'year'", e!.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestInvalidBoolType()
+    {
+        var executor = await SetupBasicTable();
+
+        InsertTicket ticket = new(
+            database: "factory",
+            name: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "name", new ColumnValue(ColumnType.String, "some name") },
+                { "year", new ColumnValue(ColumnType.Integer, "1000") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+            }
+        );
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
+        Assert.AreEqual("Invalid bool value for field 'enabled'", e!.Message);
     }
 
     [Test]
@@ -101,7 +145,7 @@ public class TestRowInsertor
                 { "id", new ColumnValue(ColumnType.Integer, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "FALSE") },
             }
         );
 
@@ -123,7 +167,7 @@ public class TestRowInsertor
                 { "id", new ColumnValue(ColumnType.Integer, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "true") },
             }
         );
 
@@ -145,7 +189,7 @@ public class TestRowInsertor
                 { "id", new ColumnValue(ColumnType.Integer, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "unknownColumn", new ColumnValue(ColumnType.Bool, "1234") },
+                { "unknownColumn", new ColumnValue(ColumnType.Bool, "TRUE") },
             }
         );
 
@@ -167,7 +211,7 @@ public class TestRowInsertor
                 { "id", new ColumnValue(ColumnType.Id, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
         );
 

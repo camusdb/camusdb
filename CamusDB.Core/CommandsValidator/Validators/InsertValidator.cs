@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -32,5 +33,29 @@ internal sealed class InsertValidator : ValidatorBase
                 CamusDBErrorCodes.InvalidInput,
                 "Values are required"
             );
+
+        foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.Values)
+        {
+            switch (columnValue.Value.Type)
+            {
+                case ColumnType.Id:
+                case ColumnType.Integer:
+                    if (!int.TryParse(columnValue.Value.Value, out int _))
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidInput,
+                            "Invalid numeric integer format for field '" + columnValue.Key + "'"
+                        );
+                    break;
+
+                case ColumnType.Bool:
+                    string boolValue = columnValue.Value.Value.ToLowerInvariant();
+                    if (boolValue != "true" && boolValue != "false")
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidInput,
+                            "Invalid bool value for field '" + columnValue.Key + "'"
+                        );
+                    break;
+            }
+        }
     }
 }
