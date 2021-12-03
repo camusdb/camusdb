@@ -317,6 +317,12 @@ public sealed class BufferPoolHandler : IDisposable
                 "Cannot write to tablespace header page"
             );
 
+        if (startOffset < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidPageOffset,
+                "Start offset can't be negative"
+            );
+
         BufferPage page = await GetPage(offset);
 
         try

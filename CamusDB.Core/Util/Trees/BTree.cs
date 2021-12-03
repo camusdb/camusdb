@@ -303,6 +303,66 @@ public sealed class BTree<T> where T : IComparable<T>
         return newNode;
     }
 
+    /**
+     * Returns the entry associated with the given key.
+     *
+     * @param  key the key
+     */
+    public bool Remove(T key)
+    {
+        bool found = Delete(root, key, height);
+
+        if (found)
+            n--;
+
+        return found;
+    }
+
+    private bool Delete(BTreeNode<T>? node, T key, int ht)
+    {
+        if (node is null)
+            return false;
+
+        BTreeEntry<T>[] children = node.children;
+
+        // external node
+        if (ht == 0)
+        {
+            int position = -1;
+
+            for (int j = 0; j < node.KeyCount; j++)
+            {
+                if (Eq(key, children[j].Key))
+                {
+                    position = j;
+                    break;
+                }
+            }
+
+            if (position == -1)
+                return false;
+
+            for (int j = position; j < node.KeyCount; j++)
+                node.children[j] = node.children[j + 1];
+
+            node.KeyCount--;
+            node.Dirty = true;
+            return true;
+        }
+
+        // internal node
+        else
+        {
+            for (int j = 0; j < node.KeyCount; j++)
+            {
+                if (j + 1 == node.KeyCount || Less(key, children[j + 1].Key))
+                    return Delete(children[j].Next, key, ht - 1);
+            }
+        }
+
+        return false;
+    }
+
     // comparison functions - make Comparable instead of Key to avoid casts
     private static bool Less(T k1, T k2)
     {

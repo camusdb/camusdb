@@ -6,30 +6,10 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Util;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
-using CamusDB.Core.Util;
-
-/*byte[] d = new byte[] { 10, 20, 30, 40 };
-
-ReadOnlyMemory<byte> p = d.AsMemory().Slice(0, 2);
-
-ReadOnlySpan<byte> s = p.Span;
-
-Console.WriteLine(s[0]);
-Console.WriteLine(s[1]);
-
-d[0] = 200;
-d[1] = 100;
-
-Console.WriteLine(s[0]);
-Console.WriteLine(s[1]);
-
-s = p.Span;
-
-Console.WriteLine(s[0]);
-Console.WriteLine(s[1]);*/
 
 var builder = WebApplication.CreateBuilder(args);
 
