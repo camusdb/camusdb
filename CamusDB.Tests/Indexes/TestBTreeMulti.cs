@@ -222,5 +222,29 @@ public class TestBTreeMulti
 
         Assert.AreEqual(10, index);
     }
+
+    [Test]
+    public void TestMultiInsertString()
+    {
+        BTreeMulti<string> tree = new(0);
+
+        for (int i = 0; i < 10; i++)
+            tree.Put("aaa", 100 + i);
+        
+        Assert.AreEqual(tree.Size(), 10);
+        Assert.AreEqual(tree.Height(), 0);
+    }
+
+    [Test]
+    public void TestMultiInsertStringSplit()
+    {
+        BTreeMulti<string> tree = new(0);
+
+        for (int i = 0; i < 10; i++)
+            tree.Put("aaa" + i, 100);
+
+        Assert.AreEqual(tree.Size(), 10);
+        Assert.AreEqual(tree.Height(), 1);
+    }
 }
 

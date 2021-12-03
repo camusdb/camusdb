@@ -192,16 +192,21 @@ public sealed class BTree<T> where T : IComparable<T>
         yield return node;
     }
 
-    public void Put(T key, int value)
+    public BTreeInsertDeltas<T> Put(T key, int value)
     {
+        BTreeInsertDeltas<T> deltas = new();
+
         //Console.WriteLine("Put {0} {1}\nStackTrace: '{2}'", key, value, Environment.StackTrace);
 
-        BTreeNode<T>? u = Insert(root, key, value, height);
+        BTreeNode<T>? u = Insert(root, key, value, height, deltas);
         n++;
-        if (u == null) return;
+
+        if (u == null)
+            return deltas;
 
         // need to split root
         BTreeNode<T> newRoot = new(2);
+        deltas.Deltas.Add(newRoot);
         //Console.WriteLine("Node {0} is now root", newRoot.Id);
 
         newRoot.children[0] = new BTreeEntry<T>(root.children[0].Key, null, root);
@@ -212,13 +217,16 @@ public sealed class BTree<T> where T : IComparable<T>
         newRoot.PageOffset = root.PageOffset;
         root.PageOffset = -1;
         root.Dirty = true;
+        deltas.Deltas.Add(newRoot);
 
         //Console.WriteLine("Node {0} is now root", root.Id);
 
         height++;
+
+        return deltas;
     }
 
-    private BTreeNode<T>? Insert(BTreeNode<T>? node, T key, int? val, int ht)
+    private BTreeNode<T>? Insert(BTreeNode<T>? node, T key, int? val, int ht, BTreeInsertDeltas<T> deltas)
     {
         if (node is null)
             throw new ArgumentException("node cannot be null");
@@ -247,7 +255,7 @@ public sealed class BTree<T> where T : IComparable<T>
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    BTreeNode<T>? u = Insert(children[j++].Next, key, val, ht - 1);
+                    BTreeNode<T>? u = Insert(children[j++].Next, key, val, ht - 1, deltas);
 
                     if (u == null)
                         return null;
@@ -265,24 +273,27 @@ public sealed class BTree<T> where T : IComparable<T>
         node.children[j] = newEntry;
         node.KeyCount++;
         node.Dirty = true;
+        deltas.Deltas.Add(node);
 
         //Console.WriteLine("Node {0} marked as dirty as child added", node.Id);
 
         if (node.KeyCount < MaxChildren)
             return null;
 
-        return Split(node);
+        return Split(node, deltas);
     }
 
     // split node in half
-    private static BTreeNode<T> Split(BTreeNode<T> current)
+    private static BTreeNode<T> Split(BTreeNode<T> current, BTreeInsertDeltas<T> deltas)
     {
         BTreeNode<T> newNode = new(MaxChildrenHalf);
+        deltas.Deltas.Add(newNode);
 
         //Console.WriteLine("Node {0} marked as dirty because of split", t.Id);
 
         current.KeyCount = MaxChildrenHalf;
         current.Dirty = true;
+        deltas.Deltas.Add(current);
 
         //Console.WriteLine("Node {0} marked as dirty because of split", current.Id);
 

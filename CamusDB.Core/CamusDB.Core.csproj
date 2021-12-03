@@ -10,10 +10,12 @@
     <None Remove="CommandsValidator\" />
     <None Remove="CommandsValidator\Validators\" />
     <None Remove="Util\Hashes\" />
+    <None Remove="CommandsExecutor\Controllers\Indexes\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="CommandsValidator\" />
     <Folder Include="CommandsValidator\Validators\" />
     <Folder Include="Util\Hashes\" />
+    <Folder Include="CommandsExecutor\Controllers\Indexes\" />
   </ItemGroup>
 </Project>

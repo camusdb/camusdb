@@ -105,5 +105,40 @@ public class TestBTree
         //Assert.AreEqual(values!.Length, 8);
         //Assert.AreEqual(values[0], 102);
     }
+
+    [Test]
+    public void TestMultiInsertDeltas()
+    {
+        BTreeInsertDeltas<int> deltas;
+
+        BTree<int> tree = new(0);
+
+        deltas = tree.Put(4, 100);
+        Assert.AreEqual(1, deltas.Deltas.Count);
+
+        deltas = tree.Put(5, 100);
+        Assert.AreEqual(1, deltas.Deltas.Count);
+
+        deltas = tree.Put(6, 101);
+        Assert.AreEqual(1, deltas.Deltas.Count);
+
+        deltas = tree.Put(7, 102);
+        Assert.AreEqual(1, deltas.Deltas.Count);
+
+        deltas = tree.Put(8, 103);
+        Assert.AreEqual(1, deltas.Deltas.Count);
+
+        deltas = tree.Put(9, 104);
+        Assert.AreEqual(1, deltas.Deltas.Count);
+
+        deltas = tree.Put(10, 105);
+        Assert.AreEqual(1, deltas.Deltas.Count);
+
+        deltas = tree.Put(11, 105);
+        Assert.AreEqual(5, deltas.Deltas.Count);
+
+        Assert.AreEqual(tree.Size(), 8);
+        Assert.AreEqual(tree.Height(), 1);
+    }
 }
 
