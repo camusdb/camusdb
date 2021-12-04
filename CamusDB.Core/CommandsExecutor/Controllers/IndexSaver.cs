@@ -57,5 +57,10 @@ internal sealed class IndexSaver
     {
         await indexUniqueSaver.Remove(tablespace, index, key);
     }
+
+    public async Task Remove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
+    {
+        await indexMultiSaver.Remove(tablespace, index, key);
+    }
 }
 

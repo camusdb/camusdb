@@ -373,6 +373,39 @@ public sealed class BufferPoolHandler : IDisposable
         }
     }
 
+    public async Task CleanPage(int offset, int startOffset = 0)
+    {
+        if (offset < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidPageOffset,
+                "Invalid page offset"
+            );
+
+        if (offset == Config.TableSpaceHeaderPage)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Cannot write to tablespace header page"
+            );
+
+        if (startOffset < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidPageOffset,
+                "Start offset can't be negative"
+            );
+
+        BufferPage page = await GetPage(offset);
+
+        try
+        {
+            await page.Semaphore.WaitAsync();                                  
+            int pointer = WritePageHeader(page, 0, 0, 0);
+        }
+        finally
+        {
+            page.Semaphore.Release();
+        }
+    }
+
     public void Clear()
     {
         pages.Clear();

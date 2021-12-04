@@ -21,32 +21,19 @@ internal sealed class RowDeleter
 
     private readonly RowDeserializer rowDeserializer = new();
 
-    private static ColumnValue? GetColumnValue(TableDescriptor table, Dictionary<string, ColumnValue> columnValues, string name)
+    private static ColumnValue? GetColumnValue(Dictionary<string, ColumnValue> columnValues, string name)
     {
-        List<TableColumnSchema> columns = table.Schema!.Columns!;
-
-        for (int i = 0; i < columns.Count; i++)
-        {
-            TableColumnSchema column = columns[i];
-
-            if (column.Name == name)
-            {
-                /*foreach (ColumnValue columnValue in columnValues)
-                {
-                    if (columnValue.
-                }
-                if (ticket.Values.TryGetValue(column.Name, out ColumnValue? value))
-                    return value;
-                break;*/
-            }
-        }
+        if (columnValues.TryGetValue(name, out ColumnValue? columnValue))
+            return columnValue;
 
         return null;
     }
 
     private async Task DeleteUniqueIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        BufferPoolHandler tablespace = database.TableSpace!;
+
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
         {
             if (index.Value.Type != IndexType.Unique)
                 continue;
@@ -54,12 +41,41 @@ internal sealed class RowDeleter
             if (index.Value.UniqueRows is null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
-                    "A multi index tree wasn't found"
+                    "A unique index tree wasn't found"
                 );
+
+            ColumnValue? columnValue = GetColumnValue(columnValues, index.Value.Column);
+            if (columnValue is null) // @todo check what to to here
+                continue;
 
             BTree<ColumnValue, BTreeTuple?> uniqueIndex = index.Value.UniqueRows;
 
-            //await indexSaver.Remove();
+            await indexSaver.Remove(tablespace, uniqueIndex, columnValue);
+        }
+    }
+
+    private async Task DeleteMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
+    {
+        BufferPoolHandler tablespace = database.TableSpace!;
+
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
+        {
+            if (index.Value.Type != IndexType.Multi)
+                continue;
+
+            if (index.Value.MultiRows is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A multi index tree wasn't found"
+                );
+
+            ColumnValue? columnValue = GetColumnValue(columnValues, index.Value.Column);
+            if (columnValue is null) // @todo check what to to here
+                continue;
+
+            BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
+
+            await indexSaver.Remove(tablespace, multiIndex, columnValue);
         }
     }
 
@@ -68,7 +84,7 @@ internal sealed class RowDeleter
         Stopwatch timer = new();
         timer.Start();
 
-        BufferPoolHandler tablespace = database.TableSpace!;        
+        BufferPoolHandler tablespace = database.TableSpace!;
 
         if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
         {
@@ -107,11 +123,15 @@ internal sealed class RowDeleter
 
         Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, pageOffset.SlotTwo);
 
+        // @make all of this atomic
+
         await DeleteUniqueIndexes(database, table, columnValues);
 
-        index.UniqueRows.Remove(columnId);
+        await DeleteMultiIndexes(database, table, columnValues);
 
         table.Rows.Remove(pageOffset.SlotOne);
+
+        await tablespace.CleanPage(pageOffset.SlotTwo);
 
         timer.Stop();
 

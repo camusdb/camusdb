@@ -1,6 +1,8 @@
-- Return modified nodes in BTree.Put to avoid full traversal
+- Return modified nodes in BTree.Put to avoid full traversal on insert/update/delete ops
 - Read indexes in parallel
 - Block table to read indexes
+- Destroy internal subtrees in multi index after delete
+- Version b+trees on disk
 
 - Receive POST parameters for query
 

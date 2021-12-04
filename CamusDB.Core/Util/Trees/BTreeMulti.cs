@@ -12,10 +12,11 @@ using System.Collections.Generic;
 namespace CamusDB.Core.Util.Trees;
 
 /**
- *  BTreeMulti is a tree of B+Trees used for multi keys
- *  Unique values across the index point to other trees where the rowids are unique values
+ *  B+Tree Multi is a tree of B+Trees used for multi keys
+ *  Unique values across the index point to other trees where the rowids are unique values 
+ *  pointing to page offsets
  */
-public sealed class BTreeMulti<T> where T : IComparable<T>
+public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 {
     // max children per B-tree node = M-1 (must be even and greater than 2)
     public const int MaxChildren = 8;
@@ -24,13 +25,15 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
 
     private static int CurrentId = -1;
 
-    public BTreeMultiNode<T> root;       // root of the B-tree
+    public BTreeMultiNode<TKey> root;       // root of the B-tree
 
     public int Id;
 
     public int height;      // height of the B-tree
 
-    public int n;           // number of key-value pairs in the B-tree
+    public int size;           // number of key-value pairs in the B-tree
+
+    public int denseSize;           // number of key-value pairs in the B-tree
 
     public int PageOffset = -1; // page offset to root node
 
@@ -41,7 +44,7 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
      */
     public BTreeMulti(int rootOffset)
     {
-        root = new BTreeMultiNode<T>(0);
+        root = new BTreeMultiNode<TKey>(0);
         PageOffset = rootOffset;
         Id = Interlocked.Increment(ref CurrentId);
     }
@@ -56,12 +59,19 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
     }
 
     /**
-     * Returns the number of key-value pairs in this symbol table.
-     * @return the number of key-value pairs in this symbol table
+     * Returns the number of key-value pairs in this symbol table without the subtrees     
      */
     public int Size()
     {
-        return n;
+        return size;
+    }
+
+    /**
+     * Returns the number of key-value pairs in this symbol table including the subtrees     
+     */
+    public int DenseSize()
+    {
+        return denseSize;
     }
 
     /**
@@ -81,7 +91,7 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
      * @return the value associated with the given key if the key is in the symbol table
      *         and {@code null} if the key is not in the symbol table
      */
-    public BTree<int, int?>? Get(T key)
+    public BTree<int, int?>? Get(TKey key)
     {
         return Search(root, key, height);
     }
@@ -93,7 +103,7 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
      * @return the value associated with the given key if the key is in the symbol table
      *         and {@code null} if the key is not in the symbol table
      */
-    public IEnumerable<int> GetAll(T key)
+    public IEnumerable<int> GetAll(TKey key)
     {
         BTree<int, int?>? subTree = Search(root, key, height);
 
@@ -104,12 +114,12 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
             yield return subTreeEntry.Key;
     }
 
-    private BTree<int, int?>? Search(BTreeMultiNode<T>? node, T key, int ht)
+    private BTree<int, int?>? Search(BTreeMultiNode<TKey>? node, TKey key, int ht)
     {
         if (node is null)
             return null;
 
-        BTreeMultiEntry<T>[] children = node.children;
+        BTreeMultiEntry<TKey>[] children = node.children;
 
         // external node
         if (ht == 0)
@@ -134,18 +144,18 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
         return null;
     }
 
-    public IEnumerable<BTreeMultiEntry<T>> EntriesTraverse()
+    public IEnumerable<BTreeMultiEntry<TKey>> EntriesTraverse()
     {
-        foreach (BTreeMultiEntry<T> entry in EntriesTraverseInternal(root, height))
+        foreach (BTreeMultiEntry<TKey> entry in EntriesTraverseInternal(root, height))
             yield return entry;
     }
 
-    private static IEnumerable<BTreeMultiEntry<T>> EntriesTraverseInternal(BTreeMultiNode<T>? node, int ht)
+    private static IEnumerable<BTreeMultiEntry<TKey>> EntriesTraverseInternal(BTreeMultiNode<TKey>? node, int ht)
     {
         if (node is null)
             yield break;
 
-        BTreeMultiEntry<T>[] children = node.children;
+        BTreeMultiEntry<TKey>[] children = node.children;
 
         // external node
         if (ht == 0)
@@ -159,19 +169,19 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
         {
             for (int j = 0; j < node.KeyCount; j++)
             {
-                foreach (BTreeMultiEntry<T> entry in EntriesTraverseInternal(children[j].Next, ht - 1))
+                foreach (BTreeMultiEntry<TKey> entry in EntriesTraverseInternal(children[j].Next, ht - 1))
                     yield return entry;
             }
         }
     }
 
-    public IEnumerable<BTreeMultiNode<T>> NodesTraverse()
+    public IEnumerable<BTreeMultiNode<TKey>> NodesTraverse()
     {
-        foreach (BTreeMultiNode<T> node in NodesTraverseInternal(root, height))
+        foreach (BTreeMultiNode<TKey> node in NodesTraverseInternal(root, height))
             yield return node;
     }
 
-    private static IEnumerable<BTreeMultiNode<T>> NodesTraverseInternal(BTreeMultiNode<T>? node, int ht)
+    private static IEnumerable<BTreeMultiNode<TKey>> NodesTraverseInternal(BTreeMultiNode<TKey>? node, int ht)
     {
         //Console.WriteLine("ht={0}", ht);
 
@@ -185,7 +195,7 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
 
         for (int j = 0; j < node.KeyCount; j++)
         {
-            foreach (BTreeMultiNode<T> childNode in NodesTraverseInternal(node.children[j].Next, ht - 1))
+            foreach (BTreeMultiNode<TKey> childNode in NodesTraverseInternal(node.children[j].Next, ht - 1))
                 yield return childNode;
         }
     }
@@ -196,7 +206,7 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
             yield return node;
     }
 
-    private static IEnumerable<BTreeNode<int, int?>> NodesReverseTraverseInternal(BTreeMultiNode<T>? node, int ht)
+    private static IEnumerable<BTreeNode<int, int?>> NodesReverseTraverseInternal(BTreeMultiNode<TKey>? node, int ht)
     {
         //Console.WriteLine("ht={0}", ht);
 
@@ -210,25 +220,25 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
         }
     }
 
-    public void Put(T key, int value)
+    public void Put(TKey key, int value)
     {
         Put(key, new BTreeTuple(value, 0));
     }
 
-    public void Put(T key, BTreeTuple value)
+    public void Put(TKey key, BTreeTuple value)
     {
         //Console.WriteLine("Inserting in multitree {0} {1} {2}", Id, key, value);
 
-        BTreeMultiNode<T>? u = Insert(root, key, value, height);
-        n++;
+        BTreeMultiNode<TKey>? u = Insert(root, key, value, height);
+        denseSize++;
         if (u == null) return;
 
         // need to split root
-        BTreeMultiNode<T> newRoot = new(2);
+        BTreeMultiNode<TKey> newRoot = new(2);
         //Console.WriteLine("Node {0} is now root", newRoot.Id);
 
-        newRoot.children[0] = new BTreeMultiEntry<T>(root.children[0].Key, root);
-        newRoot.children[1] = new BTreeMultiEntry<T>(u.children[0].Key, u);
+        newRoot.children[0] = new BTreeMultiEntry<TKey>(root.children[0].Key, root);
+        newRoot.children[1] = new BTreeMultiEntry<TKey>(u.children[0].Key, u);
 
         root = newRoot;
 
@@ -241,21 +251,21 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
         height++;
     }
 
-    private BTreeMultiNode<T>? Insert(BTreeMultiNode<T>? node, T key, BTreeTuple val, int ht)
+    private BTreeMultiNode<TKey>? Insert(BTreeMultiNode<TKey>? node, TKey key, BTreeTuple val, int ht)
     {
         if (node is null)
             throw new ArgumentException("node cannot be null");
 
         int j;
-        BTreeMultiEntry<T>? newEntry = null;
-        BTreeMultiEntry<T>[] children = node.children;
+        BTreeMultiEntry<TKey>? newEntry = null;
+        BTreeMultiEntry<TKey>[] children = node.children;
 
         // external node at height 0
         if (ht == 0)
         {
             for (j = 0; j < node.KeyCount; j++)
             {
-                BTreeMultiEntry<T> child = children[j];
+                BTreeMultiEntry<TKey> child = children[j];
 
                 if (!Eq(key, child.Key)) // same key found
                     continue;
@@ -281,17 +291,17 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    BTreeMultiNode<T>? u = Insert(children[j++].Next, key, val, ht - 1);
+                    BTreeMultiNode<TKey>? u = Insert(children[j++].Next, key, val, ht - 1);
 
                     if (u == null)
                         return null;
 
                     newEntry = new(u.children[0].Key, u);
-                    newEntry.Value = new BTree<int, int?>(-1);
+                    newEntry.Value = new BTree<int, int?>(-1);                    
                     break;
                 }
             }
-        }
+        }        
 
         for (int i = node.KeyCount; i > j; i--)
             node.children[i] = node.children[i - 1];
@@ -303,6 +313,7 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
         {
             newEntry = new(key, null);
             newEntry.Value = new BTree<int, int?>(-1);
+            size++;
         }
 
         newEntry.Value!.Put(val.SlotOne, val.SlotTwo);
@@ -320,9 +331,9 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
     }
 
     // split node in half
-    private static BTreeMultiNode<T> Split(BTreeMultiNode<T> current)
+    private static BTreeMultiNode<TKey> Split(BTreeMultiNode<TKey> current)
     {
-        BTreeMultiNode<T> t = new(MaxChildrenHalf);
+        BTreeMultiNode<TKey> t = new(MaxChildrenHalf);
 
         //Console.WriteLine("Node {0} marked as dirty because of split", t.Id);
 
@@ -337,13 +348,79 @@ public sealed class BTreeMulti<T> where T : IComparable<T>
         return t;
     }
 
+    /**
+     * Returns the entry associated with the given key.
+     *
+     * @param  key the key
+     */
+    public bool Remove(TKey key)
+    {
+        bool found = Delete(root, key, height);
+
+        if (found)
+            size--;
+
+        return found;
+    }
+
+    private bool Delete(BTreeMultiNode<TKey>? node, TKey key, int ht)
+    {
+        if (node is null)
+            return false;
+
+        BTreeMultiEntry<TKey>[] children = node.children;
+
+        // external node
+        if (ht == 0)
+        {
+            int position = -1;
+
+            for (int j = 0; j < node.KeyCount; j++)
+            {
+                if (Eq(key, children[j].Key))
+                {
+                    position = j;
+                    break;
+                }
+            }
+
+            if (position == -1)
+                return false;
+
+            BTree<int, int?>? subTree = children[position].Value;
+            if (subTree is not null)
+                denseSize -= subTree.size;
+
+            children[position].Value = null;
+
+            for (int j = position; j < node.KeyCount; j++)
+                node.children[j] = node.children[j + 1];
+
+            node.KeyCount--;
+            node.Dirty = true;
+            return true;
+        }
+
+        // internal node
+        else
+        {
+            for (int j = 0; j < node.KeyCount; j++)
+            {
+                if (j + 1 == node.KeyCount || Less(key, children[j + 1].Key))
+                    return Delete(children[j].Next, key, ht - 1);
+            }
+        }
+
+        return false;
+    }
+
     // comparison functions - make Comparable instead of Key to avoid casts
-    private static bool Less(T k1, T k2)
+    private static bool Less(TKey k1, TKey k2)
     {
         return k1!.CompareTo(k2) < 0;
     }
 
-    private static bool Eq(T k1, T k2)
+    private static bool Eq(TKey k1, TKey k2)
     {
         return k1.CompareTo(k2) == 0;
     }

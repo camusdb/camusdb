@@ -11,6 +11,9 @@ using System.Collections.Generic;
 
 namespace CamusDB.Core.Util.Trees;
 
+/**
+ *  B+Tree structure than can be stored on disk
+ */ 
 public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 {
     // max children per B-tree node = M-1 (must be even and greater than 2)
@@ -18,7 +21,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     public const int MaxChildrenHalf = MaxChildren / 2;
 
-    public static int CurrentId = -1;
+    private static int CurrentId = -1;
 
     public int Id;
 

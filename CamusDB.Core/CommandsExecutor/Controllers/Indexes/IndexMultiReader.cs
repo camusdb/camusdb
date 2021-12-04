@@ -35,7 +35,8 @@ internal sealed class IndexMultiReader : IndexBaseReader
         int pointer = 0;
 
         index.height = Serializator.ReadInt32(data, ref pointer);
-        index.n = Serializator.ReadInt32(data, ref pointer);
+        index.size = Serializator.ReadInt32(data, ref pointer);
+        index.denseSize = Serializator.ReadInt32(data, ref pointer);
 
         int rootPageOffset = Serializator.ReadInt32(data, ref pointer);
 
