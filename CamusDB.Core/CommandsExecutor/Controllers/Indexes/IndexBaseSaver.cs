@@ -37,7 +37,7 @@ public abstract class IndexBaseSaver
             if (entry is null)
                 length += 14; // type(2 byte) + tuple(4 byte + 4 byte) + nextPage(4 byte)
             else
-                length += 8 + GetKeySize(entry.Key);
+                length += 12 + GetKeySize(entry.Key);
         }
 
         return length;

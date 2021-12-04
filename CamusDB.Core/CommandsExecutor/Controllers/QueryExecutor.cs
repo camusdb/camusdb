@@ -154,7 +154,7 @@ internal sealed class QueryExecutor
             );
         }
 
-        ColumnValue columnId = new ColumnValue(ColumnType.Id, ticket.Id.ToString());
+        ColumnValue columnId = new(ColumnType.Id, ticket.Id.ToString());
 
         BTreeTuple? pageOffset = index.UniqueRows.Get(columnId);
 
@@ -170,6 +170,8 @@ internal sealed class QueryExecutor
             Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
             return rows;
         }
+
+        Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
 
         rows.Add(rowReader.Deserialize(table.Schema!, data));
 
