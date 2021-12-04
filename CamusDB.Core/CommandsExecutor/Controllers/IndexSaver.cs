@@ -7,9 +7,7 @@
  */
 
 using CamusDB.Core.BufferPool;
-using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -33,7 +31,7 @@ internal sealed class IndexSaver
     public async Task Save(BufferPoolHandler tablespace, BTree<int, int?> index, int key, int value, bool insert = true)
     {
         await indexUniqueOffsetSaver.Save(tablespace, index, key, value, insert);
-    }    
+    }
 
     public async Task Save(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert = true)
     {
@@ -52,7 +50,12 @@ internal sealed class IndexSaver
 
     public async Task NoLockingSave(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
     {
-        await indexMultiSaver.NoLockingSave(tablespace, index, key, value);        
+        await indexMultiSaver.NoLockingSave(tablespace, index, key, value);
+    }
+
+    public async Task Remove(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key)
+    {
+        await indexUniqueSaver.Remove(tablespace, index, key);
     }
 }
 

@@ -14,13 +14,13 @@ public sealed class QueryResponse
 {
     public string Status { get; set; }
 
-    public List<List<ColumnValue>> Rows { get; set; }
+    public List<Dictionary<string, ColumnValue>> Rows { get; set; }
 
     public string? Code { get; set; }
 
     public string? Message { get; set; }
 
-    public QueryResponse(string status, List<List<ColumnValue>> rows)
+    public QueryResponse(string status, List<Dictionary<string, ColumnValue>> rows)
     {
         Status = status;
         Rows = rows;

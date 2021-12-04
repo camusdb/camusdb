@@ -1,6 +1,6 @@
 ﻿
 /**
- * This file is part of CamusDB  
+ * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
@@ -8,9 +8,7 @@
 
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
-using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -18,9 +16,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class QueryExecutor
 {
-    private readonly RowDeserializer rowReader = new();
+    private readonly RowDeserializer rowDeserializer = new();
 
-    public async Task<List<List<ColumnValue>>> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    public async Task<List<Dictionary<string, ColumnValue>>> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
         if (string.IsNullOrEmpty(ticket.IndexName))
             return await QueryUsingTableIndex(database, table, ticket);
@@ -28,11 +26,11 @@ internal sealed class QueryExecutor
         return await QueryUsingIndex(database, table, ticket);
     }
 
-    private async Task<List<List<ColumnValue>>> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    private async Task<List<Dictionary<string, ColumnValue>>> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
-        List<List<ColumnValue>> rows = new();
+        List<Dictionary<string, ColumnValue>> rows = new();
 
         foreach (BTreeEntry<int, int?> entry in table.Rows.EntriesTraverse())
         {
@@ -49,17 +47,17 @@ internal sealed class QueryExecutor
                 continue;
             }
 
-            rows.Add(rowReader.Deserialize(table.Schema!, data));
+            rows.Add(rowDeserializer.Deserialize(table.Schema!, data));
         }
 
         return rows;
     }
 
-    private async Task<List<List<ColumnValue>>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue,BTreeTuple?> index)
+    private async Task<List<Dictionary<string, ColumnValue>>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue,BTreeTuple?> index)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
-        List<List<ColumnValue>> rows = new();
+        List<Dictionary<string, ColumnValue>> rows = new();
 
         foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse())
         {
@@ -76,17 +74,17 @@ internal sealed class QueryExecutor
                 continue;
             }
 
-            rows.Add(rowReader.Deserialize(table.Schema!, data));
+            rows.Add(rowDeserializer.Deserialize(table.Schema!, data));
         }
 
         return rows;
     }
 
-    private async Task<List<List<ColumnValue>>> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
+    private async Task<List<Dictionary<string, ColumnValue>>> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
-        List<List<ColumnValue>> rows = new();
+        List<Dictionary<string, ColumnValue>> rows = new();
 
         foreach (BTreeMultiEntry<ColumnValue> entry in index.EntriesTraverse())
         {
@@ -109,15 +107,15 @@ internal sealed class QueryExecutor
                     continue;
                 }
 
-                rows.Add(rowReader.Deserialize(table.Schema!, data));
+                rows.Add(rowDeserializer.Deserialize(table.Schema!, data));
             }
         }
 
         return rows;
     }
 
-    private async Task<List<List<ColumnValue>>> QueryUsingIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
-    {        
+    private async Task<List<Dictionary<string, ColumnValue>>> QueryUsingIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    {
         if (!table.Indexes.TryGetValue(ticket.IndexName!, out TableIndexSchema? index))
         {
             throw new CamusDBException(
@@ -132,11 +130,11 @@ internal sealed class QueryExecutor
         return await QueryUsingMultiIndex(database, table, index.MultiRows!);
     }
 
-    public async Task<List<List<ColumnValue>>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
+    public async Task<List<Dictionary<string, ColumnValue>>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
-        List<List<ColumnValue>> rows = new();
+        List<Dictionary<string, ColumnValue>> rows = new();
 
         if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
         {
@@ -173,7 +171,7 @@ internal sealed class QueryExecutor
 
         Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
 
-        rows.Add(rowReader.Deserialize(table.Schema!, data));
+        rows.Add(rowDeserializer.Deserialize(table.Schema!, data));
 
         return rows;
     }

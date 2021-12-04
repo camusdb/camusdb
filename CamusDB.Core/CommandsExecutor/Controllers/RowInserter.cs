@@ -47,7 +47,7 @@ internal sealed class RowInserter
         }
     }
 
-    private static ColumnValue? GetRowValue(TableDescriptor table, InsertTicket ticket, string name)
+    private static ColumnValue? GetColumnValue(TableDescriptor table, InsertTicket ticket, string name)
     {
         List<TableColumnSchema> columns = table.Schema!.Columns!;
 
@@ -68,7 +68,7 @@ internal sealed class RowInserter
 
     private static ColumnValue CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue, BTreeTuple?> uniqueIndex, InsertTicket ticket, string name)
     {
-        ColumnValue? uniqueValue = GetRowValue(table, ticket, name);
+        ColumnValue? uniqueValue = GetColumnValue(table, ticket, name);
 
         if (uniqueValue is null)
             throw new CamusDBException(
@@ -147,7 +147,7 @@ internal sealed class RowInserter
 
             BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
 
-            ColumnValue? multiKeyValue = GetRowValue(table, ticket, index.Value.Column);
+            ColumnValue? multiKeyValue = GetColumnValue(table, ticket, index.Value.Column);
             if (multiKeyValue is null)
                 continue;
 

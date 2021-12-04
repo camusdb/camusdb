@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;

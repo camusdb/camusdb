@@ -34,7 +34,7 @@ public sealed class QueryController : CommandsController
                 name: "my_table"
             );
 
-            List<List<ColumnValue>> rows = await executor.Query(ticket);
+            List<Dictionary<string, ColumnValue>> rows = await executor.Query(ticket);
 
             return new JsonResult(new QueryResponse("ok", rows));
         }
@@ -69,7 +69,7 @@ public sealed class QueryController : CommandsController
                 id: request.Id
             );
 
-            List<List<ColumnValue>> rows = await executor.QueryById(ticket);
+            List<Dictionary<string, ColumnValue>> rows = await executor.QueryById(ticket);
 
             return new JsonResult(new QueryResponse("ok", rows));
         }

@@ -118,21 +118,21 @@ public class TestRowMultiInsertor
             index: "robots_id"
         );
 
-        List<List<ColumnValue>> result = await executor.Query(queryTicket);
+        List<Dictionary<string, ColumnValue>> result = await executor.Query(queryTicket);
 
         for (int i = 0; i < 10; i++)
         {
-            List<ColumnValue> row = result[i];
+            Dictionary<string, ColumnValue> row = result[i];
             Assert.AreEqual(3, row.Count);
 
-            Assert.AreEqual(row[0].Type, ColumnType.Id);
-            Assert.AreEqual(row[0].Value, i.ToString());
+            Assert.AreEqual(row["id"].Type, ColumnType.Id);
+            Assert.AreEqual(row["id"].Value, i.ToString());
 
-            Assert.AreEqual(row[1].Type, ColumnType.Id);
-            Assert.AreEqual(row[1].Value, (i * 100).ToString());
+            Assert.AreEqual(row["robots_id"].Type, ColumnType.Id);
+            Assert.AreEqual(row["robots_id"].Value, (i * 100).ToString());
 
-            Assert.AreEqual(row[2].Type, ColumnType.Integer);
-            Assert.AreEqual(row[2].Value, (i * 1000).ToString());
+            Assert.AreEqual(row["amount"].Type, ColumnType.Integer);
+            Assert.AreEqual(row["amount"].Value, (i * 1000).ToString());
         }
     }
 
@@ -165,21 +165,21 @@ public class TestRowMultiInsertor
             index: "robots_id"
         );
 
-        List<List<ColumnValue>> result = await executor.Query(queryTicket);
+        List<Dictionary<string, ColumnValue>> result = await executor.Query(queryTicket);
 
         for (int i = 0; i < 10; i++)
         {
-            List<ColumnValue> row = result[i];
+            Dictionary<string, ColumnValue> row = result[i];
             Assert.AreEqual(3, row.Count);
 
-            Assert.AreEqual(row[0].Type, ColumnType.Id);
-            Assert.AreEqual(row[0].Value, i.ToString());
+            Assert.AreEqual(row["id"].Type, ColumnType.Id);
+            Assert.AreEqual(row["id"].Value, i.ToString());
 
-            Assert.AreEqual(row[1].Type, ColumnType.Id);
-            Assert.AreEqual(row[1].Value, "100");
+            Assert.AreEqual(row["robots_id"].Type, ColumnType.Id);
+            Assert.AreEqual(row["robots_id"].Value, "100");
 
-            Assert.AreEqual(row[2].Type, ColumnType.Integer);
-            Assert.AreEqual(row[2].Value, (i * 1000).ToString());
+            Assert.AreEqual(row["amount"].Type, ColumnType.Integer);
+            Assert.AreEqual(row["amount"].Value, (i * 1000).ToString());
         }
     }
 }

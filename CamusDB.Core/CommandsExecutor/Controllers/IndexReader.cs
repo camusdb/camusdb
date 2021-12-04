@@ -1,16 +1,13 @@
 ﻿
 /**
- * This file is part of CamusDB  
+ * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
  */
 
 using CamusDB.Core.BufferPool;
-using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -45,12 +42,4 @@ internal sealed class IndexReader
     {
         return await indexMultiReader.ReadMulti(tablespace, offset);
     }
-
-    
-
-    
-
-    
-
-    
 }

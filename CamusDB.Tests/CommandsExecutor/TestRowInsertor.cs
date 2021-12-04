@@ -316,18 +316,18 @@ public class TestRowInsertor
             id: 1
         );
 
-        List<List<ColumnValue>> result = await executor.QueryById(queryTicket);
+        List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
 
-        List<ColumnValue> row = result[0];
+        Dictionary<string, ColumnValue> row = result[0];
 
-        Assert.AreEqual(row[0].Type, ColumnType.Id);
-        Assert.AreEqual(row[0].Value, "1");
+        Assert.AreEqual(row["id"].Type, ColumnType.Id);
+        Assert.AreEqual(row["id"].Value, "1");
 
-        Assert.AreEqual(row[1].Type, ColumnType.String);
-        Assert.AreEqual(row[1].Value, "some name");
+        Assert.AreEqual(row["name"].Type, ColumnType.String);
+        Assert.AreEqual(row["name"].Value, "some name");
 
-        Assert.AreEqual(row[2].Type, ColumnType.Integer);
-        Assert.AreEqual(row[2].Value, "1234");
+        Assert.AreEqual(row["year"].Type, ColumnType.Integer);
+        Assert.AreEqual(row["year"].Value, "1234");
     }
 
     [Test]
@@ -372,21 +372,21 @@ public class TestRowInsertor
             id: 2
         );
 
-        List<List<ColumnValue>> result = await executor.QueryById(queryTicket);
+        List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
 
-        List<ColumnValue> row = result[0];
+        Dictionary<string, ColumnValue> row = result[0];
 
-        Assert.AreEqual(row[0].Type, ColumnType.Id);
-        Assert.AreEqual(row[0].Value, "2");
+        Assert.AreEqual(row["id"].Type, ColumnType.Id);
+        Assert.AreEqual(row["id"].Value, "2");
 
-        Assert.AreEqual(row[1].Type, ColumnType.String);
-        Assert.AreEqual(row[1].Value, "some name 2");
+        Assert.AreEqual(row["name"].Type, ColumnType.String);
+        Assert.AreEqual(row["name"].Value, "some name 2");
 
-        Assert.AreEqual(row[2].Type, ColumnType.Integer);
-        Assert.AreEqual(row[2].Value, "4567");
+        Assert.AreEqual(row["year"].Type, ColumnType.Integer);
+        Assert.AreEqual(row["year"].Value, "4567");
 
-        Assert.AreEqual(row[3].Type, ColumnType.Bool);
-        Assert.AreEqual(row[3].Value, "true");
+        Assert.AreEqual(row["enabled"].Type, ColumnType.Bool);
+        Assert.AreEqual(row["enabled"].Value, "true");
 
         QueryByIdTicket queryTicket2 = new(
             database: "factory",
@@ -398,17 +398,17 @@ public class TestRowInsertor
 
         row = result[0];
 
-        Assert.AreEqual(row[0].Type, ColumnType.Id);
-        Assert.AreEqual(row[0].Value, "1");
+        Assert.AreEqual(row["id"].Type, ColumnType.Id);
+        Assert.AreEqual(row["id"].Value, "1");
 
-        Assert.AreEqual(row[1].Type, ColumnType.String);
-        Assert.AreEqual(row[1].Value, "some name 1");
+        Assert.AreEqual(row["name"].Type, ColumnType.String);
+        Assert.AreEqual(row["name"].Value, "some name 1");
 
-        Assert.AreEqual(row[2].Type, ColumnType.Integer);
-        Assert.AreEqual(row[2].Value, "1234");
+        Assert.AreEqual(row["year"].Type, ColumnType.Integer);
+        Assert.AreEqual(row["year"].Value, "1234");
 
-        Assert.AreEqual(row[3].Type, ColumnType.Bool);
-        Assert.AreEqual(row[3].Value, "false");
+        Assert.AreEqual(row["enabled"].Type, ColumnType.Bool);
+        Assert.AreEqual(row["enabled"].Value, "false");
     }
 
     [Test]
@@ -442,18 +442,18 @@ public class TestRowInsertor
                 id: i
             );
 
-            List<List<ColumnValue>> result = await executor.QueryById(queryTicket);
+            List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
 
-            List<ColumnValue> row = result[0];
+            Dictionary<string, ColumnValue> row = result[0];
 
-            Assert.AreEqual(row[0].Type, ColumnType.Id);
-            Assert.AreEqual(row[0].Value, i.ToString());
+            Assert.AreEqual(row["id"].Type, ColumnType.Id);
+            Assert.AreEqual(row["id"].Value, i.ToString());
 
-            Assert.AreEqual(row[1].Type, ColumnType.String);
-            Assert.AreEqual(row[1].Value, "some name " + i);
+            Assert.AreEqual(row["name"].Type, ColumnType.String);
+            Assert.AreEqual(row["name"].Value, "some name " + i);
 
-            Assert.AreEqual(row[2].Type, ColumnType.Integer);
-            Assert.AreEqual(row[2].Value, (i * 1000).ToString());
+            Assert.AreEqual(row["year"].Type, ColumnType.Integer);
+            Assert.AreEqual(row["year"].Value, (i * 1000).ToString());
         }
     }
 
@@ -485,20 +485,20 @@ public class TestRowInsertor
             name: "robots"
         );
 
-        List<List<ColumnValue>> result = await executor.Query(queryTicket);
+        List<Dictionary<string, ColumnValue>> result = await executor.Query(queryTicket);
 
         for (int i = 0; i < 50; i++)
         {
-            List<ColumnValue> row = result[i];
+            Dictionary<string, ColumnValue> row = result[i];
 
-            Assert.AreEqual(row[0].Type, ColumnType.Id);
-            Assert.AreEqual(row[0].Value, i.ToString());
+            Assert.AreEqual(row["id"].Type, ColumnType.Id);
+            Assert.AreEqual(row["id"].Value, i.ToString());
 
-            Assert.AreEqual(row[1].Type, ColumnType.String);
-            Assert.AreEqual(row[1].Value, "some name " + i);
+            Assert.AreEqual(row["name"].Type, ColumnType.String);
+            Assert.AreEqual(row["name"].Value, "some name " + i);
 
-            Assert.AreEqual(row[2].Type, ColumnType.Integer);
-            Assert.AreEqual(row[2].Value, (i * 1000).ToString());
+            Assert.AreEqual(row["year"].Type, ColumnType.Integer);
+            Assert.AreEqual(row["year"].Value, (i * 1000).ToString());
         }
     }
 }

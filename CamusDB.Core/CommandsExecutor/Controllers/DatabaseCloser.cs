@@ -6,12 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.BufferPool;
-using CamusDB.Core.Serializer;
-using System.IO.MemoryMappedFiles;
-using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.BufferPool.Models;
-using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -43,9 +37,9 @@ internal sealed class DatabaseCloser
             if (databaseDescriptor.SystemSpace is not null)
                 databaseDescriptor.SystemSpace.Dispose();
 
-            databaseDescriptors.Descriptors.Remove(name);                                
+            databaseDescriptors.Descriptors.Remove(name);
 
-            Console.WriteLine("Database {0} closed", name);            
+            Console.WriteLine("Database {0} closed", name);
         }
         finally
         {

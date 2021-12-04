@@ -10,19 +10,18 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class TableCreator
-{   
+{
     private CatalogsManager Catalogs { get; set; }
 
     public TableCreator(CatalogsManager catalogsManager)
     {
-        Catalogs = catalogsManager;        
+        Catalogs = catalogsManager;
     }
 
     public async Task<bool> Create(DatabaseDescriptor database, CreateTableTicket ticket)
@@ -46,7 +45,7 @@ internal sealed class TableCreator
             string tableName = tableSchema.Name!;
 
             await database.SystemSchema.Semaphore.WaitAsync();
-            
+
             int pageOffset = await tablespace.GetNextFreeOffset();
 
             DatabaseObject databaseObject = new();

@@ -9,8 +9,6 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 

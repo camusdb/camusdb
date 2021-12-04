@@ -9,7 +9,6 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
@@ -42,11 +41,36 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         await SaveInternal(tablespace, index, key, value, insert);
     }
 
+    public async Task Remove(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key)
+    {
+        try
+        {
+            await index.WriteLock.WaitAsync();
+
+            await RemoveInternal(tablespace, index, key);
+        }
+        finally
+        {
+            index.WriteLock.Release();
+        }
+    }
+
     private static async Task SaveInternal(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert)
     {
         if (insert)
             index.Put(key, value);
 
+        await Persist(tablespace, index);
+    }
+
+    private static async Task RemoveInternal(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key)
+    {        
+        index.Remove(key);
+        await Persist(tablespace, index);
+    }
+
+    private static async Task Persist(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index)
+    {
         foreach (BTreeNode<ColumnValue, BTreeTuple?> node in index.NodesTraverse())
         {
             if (node.PageOffset == -1)

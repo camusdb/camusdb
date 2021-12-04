@@ -9,7 +9,6 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
@@ -78,12 +77,12 @@ internal sealed class IndexUniqueReader : IndexBaseReader
         for (int i = 0; i < node.KeyCount; i++)
         {
             ColumnValue key = UnserializeKey(data, ref pointer);
-            BTreeTuple? tuple = UnserializeTuple(data, ref pointer); 
+            BTreeTuple? tuple = UnserializeTuple(data, ref pointer);
 
             BTreeEntry<ColumnValue, BTreeTuple?> entry = new(key, tuple, null);
 
             //entry.Key = Serializator.ReadInt32(data, ref pointer);
-            //entry.Value = 
+            //entry.Value =
 
             int nextPageOffset = Serializator.ReadInt32(data, ref pointer);
             //Console.WriteLine("Children={0} Key={1} Value={2} NextOffset={3}", i, entry.Key, entry.Value, nextPageOffset);

@@ -110,7 +110,7 @@ public sealed class CommandExecutor
         await rowDeleter.DeleteById(database, table, ticket);
     }
 
-    public async Task<List<List<ColumnValue>>> Query(QueryTicket ticket)
+    public async Task<List<Dictionary<string, ColumnValue>>> Query(QueryTicket ticket)
     {
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);        
 
@@ -119,7 +119,7 @@ public sealed class CommandExecutor
         return await queryExecutor.Query(database, table, ticket);
     }
 
-    public async Task<List<List<ColumnValue>>> QueryById(QueryByIdTicket ticket)
+    public async Task<List<Dictionary<string, ColumnValue>>> QueryById(QueryByIdTicket ticket)
     {
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
 

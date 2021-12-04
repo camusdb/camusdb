@@ -15,7 +15,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class RowDeserializer
 {
-    public List<ColumnValue> Deserialize(TableSchema tableSchema, byte[] data)
+    public Dictionary<string, ColumnValue> Deserialize(TableSchema tableSchema, byte[] data)
     {
         //catalogs.GetTableSchema(database, tableName);
 
@@ -30,13 +30,13 @@ internal sealed class RowDeserializer
 
         int pointer = 0;
 
-        int type = Serializator.ReadType(data, ref pointer);
-        int schema = Serializator.ReadInt32(data, ref pointer);
+        Serializator.ReadType(data, ref pointer); // type 
+        Serializator.ReadInt32(data, ref pointer); // schema
 
-        type = Serializator.ReadType(data, ref pointer);
-        int rowId = Serializator.ReadInt32(data, ref pointer);
+        Serializator.ReadType(data, ref pointer); // type
+        Serializator.ReadInt32(data, ref pointer); // row id
 
-        List<ColumnValue> columnValues = new();
+        Dictionary<string, ColumnValue> columnValues = new();
 
         List<TableColumnSchema> columns = tableSchema.Columns!;
 
@@ -55,7 +55,7 @@ internal sealed class RowDeserializer
                         if (columnType == SerializatorTypes.TypeInteger32)
                         {
                             value = Serializator.ReadInt32(data, ref pointer);
-                            columnValues.Add(new(ColumnType.Id, value.ToString()));
+                            columnValues.Add(column.Name, new(ColumnType.Id, value.ToString()));
                         }
                         else
                         {
@@ -71,7 +71,7 @@ internal sealed class RowDeserializer
                         if (columnType == SerializatorTypes.TypeInteger32)
                         {
                             value = Serializator.ReadInt32(data, ref pointer);
-                            columnValues.Add(new(ColumnType.Integer, value.ToString()));
+                            columnValues.Add(column.Name, new(ColumnType.Integer, value.ToString()));
                         }
                         else
                         {
@@ -86,12 +86,12 @@ internal sealed class RowDeserializer
                     Serializator.ReadType(data, ref pointer);
                     int length = Serializator.ReadInt32(data, ref pointer);
                     //Console.WriteLine("Length={0}", length);
-                    columnValues.Add(new(ColumnType.String, Serializator.ReadString(data, length, ref pointer)));
+                    columnValues.Add(column.Name, new(ColumnType.String, Serializator.ReadString(data, length, ref pointer)));
                     break;
 
                 case ColumnType.Bool:
                     Serializator.ReadType(data, ref pointer);
-                    columnValues.Add(new(ColumnType.Bool, Serializator.ReadBool(data, ref pointer) ? "true" : "false"));
+                    columnValues.Add(column.Name, new(ColumnType.Bool, Serializator.ReadBool(data, ref pointer) ? "true" : "false"));
                     break;
 
                 default:
