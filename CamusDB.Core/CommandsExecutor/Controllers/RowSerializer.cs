@@ -69,6 +69,8 @@ internal sealed class RowSerializer
     {
         int length = CalculateBufferLength(table, ticket);
 
+        //throw new Exception(length.ToString());
+
         byte[] rowBuffer = new byte[length];
 
         int pointer = 0;

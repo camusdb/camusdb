@@ -28,6 +28,8 @@ internal sealed class RowDeserializer
 
         Console.WriteLine("***");*/
 
+        //throw new Exception(data);
+
         int pointer = 0;
 
         Serializator.ReadType(data, ref pointer); // type 

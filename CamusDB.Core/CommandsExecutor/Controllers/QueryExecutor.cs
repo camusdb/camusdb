@@ -100,7 +100,7 @@ internal sealed class QueryExecutor
                     continue;
                 }
 
-                byte[] data = await tablespace.GetDataFromPage(subEntry.Key);
+                byte[] data = await tablespace.GetDataFromPage(subEntry.Value.Value);
                 if (data.Length == 0)
                 {
                     Console.WriteLine("Index RowId={0} has an empty page data", subEntry.Key);
