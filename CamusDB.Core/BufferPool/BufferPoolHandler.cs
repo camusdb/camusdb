@@ -6,11 +6,11 @@
  * file that was distributed with this source code.
  */
 
-using System.IO.MemoryMappedFiles;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Util.Hashes;
+using System.IO.MemoryMappedFiles;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
-using CamusDB.Core.Util.Hashes;
 
 namespace CamusDB.Core.BufferPool;
 
@@ -373,7 +373,7 @@ public sealed class BufferPoolHandler : IDisposable
         }
     }
 
-    public async Task CleanPage(int offset, int startOffset = 0)
+    public async Task CleanPage(int offset)
     {
         if (offset < 0)
             throw new CamusDBException(
@@ -387,23 +387,27 @@ public sealed class BufferPoolHandler : IDisposable
                 "Cannot write to tablespace header page"
             );
 
-        if (startOffset < 0)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidPageOffset,
-                "Start offset can't be negative"
-            );
-
-        BufferPage page = await GetPage(offset);
-
-        try
+        do
         {
-            await page.Semaphore.WaitAsync();                                  
-            int pointer = WritePageHeader(page, 0, 0, 0);
-        }
-        finally
-        {
-            page.Semaphore.Release();
-        }
+            BufferPage page = await ReadPage(offset);
+
+            try
+            {
+                await page.Semaphore.WaitAsync();
+
+                int pointer = Config.NextPageOffset;
+                offset = Serializator.ReadInt32(page.Buffer, ref pointer);
+
+                WritePageHeader(page, 0, 0, 0); // clear header keep page's content
+
+                accessor.WriteArray<byte>(Config.PageSize * offset, page.Buffer, 0, Config.PageSize);
+            }
+            finally
+            {
+                page.Semaphore.Release();
+            }
+
+        } while (offset > 0);
     }
 
     public void Clear()

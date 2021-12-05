@@ -32,6 +32,8 @@ internal sealed class IndexMultiReader : IndexBaseReader
         if (data.Length == 0)
             return index;
 
+        Console.WriteLine(data.Length);
+
         int pointer = 0;
 
         index.height = Serializator.ReadInt32(data, ref pointer);

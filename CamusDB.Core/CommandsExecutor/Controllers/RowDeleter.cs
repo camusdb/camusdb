@@ -137,6 +137,6 @@ internal sealed class RowDeleter
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        Console.WriteLine("Row pk {0} with id {0} deleted from page {1}, Time taken: {2}", ticket.Id, pageOffset.SlotOne, pageOffset.SlotTwo, timeTaken.ToString(@"m\:ss\.fff"));
+        Console.WriteLine("Row pk {0} with id {1} deleted from page {2}, Time taken: {3}", ticket.Id, pageOffset.SlotOne, pageOffset.SlotTwo, timeTaken.ToString(@"m\:ss\.fff"));
     }
 }
