@@ -22,15 +22,18 @@ namespace CamusDB.Core.BufferPool;
  *
  * +--------------------+
  * | version (2 bytes)  |
- * +--------------------+--------------------+
- * | checksum (4 bytes)                      |
- * +-----------------------------------------+
- * | next page offset (4 bytes)              |
- * +-----------------------------------------+
- * | data length (4 bytes)                   |
- * +-----------------------------------------+
- * | data                                    |
- * +-----------------------------------------+
+ * +--------------------+--------------------------+
+ * | checksum (4 bytes)                            |
+ * +----------+----------+----------+--------------+
+ * | slot #0  | slot #0  | slot #0  | slot #0      |
+ * | data     | next     | next     | data         |
+ * | length   | page     | slot     | length       |
+ * | (2 byte) | (4 byte) | (1 byte) |              |
+ * |          |          |          |              |
+ * |          |          |          |              |
+ * +----------+----------+-------------------------+
+ *
+ * Every page has 4 slots numbered from 0 to 3.
  */
 public sealed class BufferPoolHandler : IDisposable
 {
