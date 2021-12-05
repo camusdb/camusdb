@@ -171,7 +171,7 @@ public sealed class BufferPoolHandler : IDisposable
                 byte[] pageData = new byte[dataLength]; // @todo avoid this allocation
                 Buffer.BlockCopy(pageBuffer, Config.DataOffset, pageData, 0, dataLength);
 
-                uint dataChecksum = XXHash.Compute(pageData, 0, dataLength);               
+                uint dataChecksum = XXHash.Compute(pageData, 0, dataLength);
 
                 if (dataChecksum != checksum)
                     throw new CamusDBException(
@@ -230,7 +230,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             int length = Serializator.ReadInt32(pageBuffer, ref pointer);
 
-            if (length == 0) 
+            if (length == 0)
             {
                 // tablespace is not initialized ?
                 WriteTableSpaceHeader(pageBuffer);
@@ -342,7 +342,7 @@ public sealed class BufferPoolHandler : IDisposable
             byte[] pageData = new byte[length];
             Buffer.BlockCopy(data, startOffset, pageData, 0, length);
 
-            uint checksum = XXHash.Compute(pageData, 0, length);            
+            uint checksum = XXHash.Compute(pageData, 0, length);
 
             // Create a new page buffer to replace the existing one
             byte[] pageBuffer = new byte[Config.PageSize];
@@ -372,7 +372,7 @@ public sealed class BufferPoolHandler : IDisposable
         }
     }
 
-    public async Task CleanPage(int offset, int startOffset = 0)
+    public async Task CleanPage(int offset)
     {
         if (offset < 0)
             throw new CamusDBException(
@@ -386,13 +386,7 @@ public sealed class BufferPoolHandler : IDisposable
                 "Cannot write to tablespace header page"
             );
 
-        if (startOffset < 0)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidPageOffset,
-                "Start offset can't be negative"
-            );
-
-        BufferPage page = await GetPage(offset);
+        BufferPage page = await ReadPage(offset);
 
         try
         {
@@ -401,6 +395,8 @@ public sealed class BufferPoolHandler : IDisposable
             byte[] pageBuffer = new byte[Config.PageSize];
 
             WritePageHeader(pageBuffer, 0, 0, 0);
+
+            accessor.WriteArray<byte>(Config.PageSize * offset, page.Buffer, 0, Config.PageSize);
 
             page.Buffer = pageBuffer;
         }
