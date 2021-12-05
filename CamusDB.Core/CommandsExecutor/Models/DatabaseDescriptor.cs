@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Journal;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 
@@ -28,4 +29,11 @@ public sealed class DatabaseDescriptor
     public SemaphoreSlim DescriptorsSemaphore = new(1, 1);
 
     public Dictionary<string, TableDescriptor> TableDescriptors = new();
+
+    public JournalWriter JournalWriter { get; set; }
+
+    public DatabaseDescriptor()
+    {
+        JournalWriter = new(this);
+    }
 }

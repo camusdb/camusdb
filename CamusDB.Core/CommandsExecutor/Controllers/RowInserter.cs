@@ -12,6 +12,7 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Journal.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -162,10 +163,13 @@ internal sealed class RowInserter
         Stopwatch timer = new();
         timer.Start();
 
+        JournalInsertSchedule schedule = new(ticket);
+        await database.JournalWriter.Append(schedule);
+
         BufferPoolHandler tablespace = database.TableSpace!;
 
         BTreeTuple rowTuple = await CheckAndUpdateUniqueKeys(database, table, ticket);
-        
+
         byte[] rowBuffer = rowSerializer.Serialize(table, ticket, rowTuple.SlotOne);
 
         // Insert data to the page offset

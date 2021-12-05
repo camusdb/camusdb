@@ -209,10 +209,10 @@ public sealed class BufferPoolHandler : IDisposable
     public static int WritePageHeader(byte[] pageBuffer, int length, int nextPage, uint checksum)
     {
         int pointer = 0;
-        Serializator.WriteInt16(pageBuffer, Config.PageLayoutVersion, ref pointer); // layout version (2 byte integer)
-        Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                       // checksum (4 bytes integer)
-        Serializator.WriteInt32(pageBuffer, nextPage, ref pointer);                 // next page (4 bytes integer)
-        Serializator.WriteInt32(pageBuffer, length, ref pointer);                   // data length (4 bytes integer)
+        Serializator.WriteInt16(pageBuffer, Config.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)
+        Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                 // checksum (4 bytes integer)
+        Serializator.WriteInt32(pageBuffer, nextPage, ref pointer);                  // next page (4 bytes integer)
+        Serializator.WriteInt32(pageBuffer, length, ref pointer);                    // data length (4 bytes integer)
         return pointer;
     }
 
@@ -396,7 +396,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             WritePageHeader(pageBuffer, 0, 0, 0);
 
-            accessor.WriteArray<byte>(Config.PageSize * offset, page.Buffer, 0, Config.PageSize);
+            accessor.WriteArray<byte>(Config.PageSize * offset, pageBuffer, 0, Config.PageSize);
 
             page.Buffer = pageBuffer;
         }

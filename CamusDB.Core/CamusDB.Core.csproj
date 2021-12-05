@@ -11,11 +11,15 @@
     <None Remove="CommandsValidator\Validators\" />
     <None Remove="Util\Hashes\" />
     <None Remove="CommandsExecutor\Controllers\Indexes\" />
+    <None Remove="Journal\" />
+    <None Remove="Journal\Models\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="CommandsValidator\" />
     <Folder Include="CommandsValidator\Validators\" />
     <Folder Include="Util\Hashes\" />
     <Folder Include="CommandsExecutor\Controllers\Indexes\" />
+    <Folder Include="Journal\" />
+    <Folder Include="Journal\Models\" />
   </ItemGroup>
 </Project>

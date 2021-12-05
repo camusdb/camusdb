@@ -62,6 +62,8 @@ internal sealed class DatabaseOpener
             await LoadDatabaseSystemSpace(databaseDescriptor);
             await LoadDatabaseTableSpace(databaseDescriptor);
 
+            await databaseDescriptor.JournalWriter.Initialize();
+
             Console.WriteLine("Database {0} opened", name);
 
             databaseDescriptors.Descriptors.Add(name, databaseDescriptor);
