@@ -96,7 +96,7 @@ internal sealed class DatabaseOpener
         // write tablespace header
         BufferPage page = await databaseDescriptor.TableSpace.ReadPage(Config.TableSpaceHeaderPage);
 
-        databaseDescriptor.TableSpace.WriteTableSpaceHeader(page);
+        databaseDescriptor.TableSpace.WriteTableSpaceHeader(page.Buffer);
         databaseDescriptor.TableSpace!.FlushPage(page); // @todo make this atomic
 
         Console.WriteLine("Data tablespaces initialized");

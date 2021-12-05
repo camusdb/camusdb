@@ -14,7 +14,7 @@ public sealed class BufferPage
 {
     public int Offset { get; }
 
-    public byte[] Buffer { get; }
+    public byte[] Buffer { get; set; }
 
     public DateTime LastAccessTime { get; set; }
 
