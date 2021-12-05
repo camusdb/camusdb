@@ -50,6 +50,13 @@ public sealed class BufferPoolHandler : IDisposable
         this.accessor = memoryFile.CreateViewAccessor();
     }
 
+    public async Task Initialize()
+    {
+        // initialize pages
+        for (int i = 0; i < Config.InitialPagesRead; i++)
+            await ReadPage(i);
+    }
+
     // Load a page without reading its contents
     public async ValueTask<BufferPage> GetPage(int offset)
     {
@@ -103,6 +110,8 @@ public sealed class BufferPoolHandler : IDisposable
             pages.Add(offset, page);
 
             accessor.ReadArray<byte>(Config.PageSize * offset, page.Buffer, 0, Config.PageSize);
+
+            // Console.WriteLine("Page {0} read", offset);
         }
         finally
         {
@@ -361,7 +370,7 @@ public sealed class BufferPoolHandler : IDisposable
             // Replace buffer, this helps to get readers consistent copies
             page.Buffer = pageBuffer;
 
-            //Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);
+            Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);
 
             if (nextPage > 0)
                 await WriteDataToPage(nextPage, data, startOffset + length);

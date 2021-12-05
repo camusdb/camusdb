@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Serializer.Models;
 using Config = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.Journal;
@@ -31,7 +32,10 @@ public sealed class JournalWriter
 
     public async Task Initialize()
     {
-        Console.WriteLine(Config.DataDirectory + "/" + database.Name + "/journal");
+        Console.WriteLine("Data journal saved at {0}", Config.DataDirectory + "/" + database.Name + "/journal");
+
+        // @todo improve recovery here
+
         fileStream = new(Config.DataDirectory + "/" + database.Name + "/journal", FileMode.Append, FileAccess.Write);
         await Task.Yield();
     }
@@ -53,15 +57,15 @@ public sealed class JournalWriter
             {
                 case ColumnType.Id:
                 case ColumnType.Integer:
-                    length += 5;
+                    length += SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32;
                     break;
 
                 case ColumnType.String:
-                    length += 1 + columnValue.Value.Value.Length;
+                    length += SerializatorTypeSizes.TypeInteger8 + columnValue.Value.Value.Length;
                     break;
 
                 case ColumnType.Bool:
-                    length += 1;
+                    length += SerializatorTypeSizes.TypeBool;
                     break;
             }
         }
@@ -78,12 +82,16 @@ public sealed class JournalWriter
 
         InsertTicket insertTicket = insertSchedule.InsertTicket;
 
-        int length = GetLogLength(insertTicket);
-        Console.WriteLine(length);
+        int length = GetLogLength(insertTicket);        
 
-        byte[] journal = new byte[4 + 2 + 4 + 2 + length]; // LSN (4 bytes) + journal type (2 bytes) + number fields (2 bytes) +
-                                                           // length(4 bytes) + payload
-
+        byte[] journal = new byte[
+            SerializatorTypeSizes.TypeInteger32 + // LSN (4 bytes)
+            SerializatorTypeSizes.TypeInteger16 + // journal type (2 bytes)            
+            SerializatorTypeSizes.TypeInteger32 + // length(4 bytes)
+            SerializatorTypeSizes.TypeInteger16 + // number fields (2 bytes)
+            length // payload
+        ];
+        
         //var b = Encoding.UTF8.GetBytes("hello");
 
         int pointer = 0;
@@ -100,21 +108,23 @@ public sealed class JournalWriter
             {
                 case ColumnType.Id:
                 case ColumnType.Integer:
-                    length += 5;
+                    Serializator.WriteInt32(journal, int.Parse(columnValue.Value.Value), ref pointer);
                     break;
 
-                case ColumnType.String:
-                    length += 1 + columnValue.Value.Value.Length;
+                case ColumnType.String:                    
                     Serializator.WriteString(journal, columnValue.Value.Value, ref pointer);
                     break;
 
                 case ColumnType.Bool:
-                    length += 1;
+                    Serializator.WriteBool(journal, columnValue.Value.Value == "true", ref pointer);
                     break;
+
+                default:
+                    throw new Exception("here");
             }
         }
 
         await fileStream.WriteAsync(journal);
-        await fileStream.FlushAsync();
+        //await fileStream.FlushAsync();
     }
 }

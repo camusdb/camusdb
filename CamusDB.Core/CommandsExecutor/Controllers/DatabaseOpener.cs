@@ -40,29 +40,34 @@ internal sealed class DatabaseOpener
             if (!Directory.Exists(Config.DataDirectory + "/" + name))
                 throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
 
-            databaseDescriptor = new();
-
-            databaseDescriptor.Name = name;
-
             string path = Config.DataDirectory + "/" + name + "/tablespace0";
-            var mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
-            databaseDescriptor.TableSpace = new BufferPoolHandler(mmf);
+            MemoryMappedFile tablespace = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
 
             path = Config.DataDirectory + "/" + name + "/schema";
-            mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
-            databaseDescriptor.SchemaSpace = new BufferPoolHandler(mmf);
+            MemoryMappedFile schema = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
 
             path = Config.DataDirectory + "/" + name + "/system";
-            mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
-            databaseDescriptor.SystemSpace = new BufferPoolHandler(mmf);
+            MemoryMappedFile system = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
 
-            // @todo initialize in parallel
+            databaseDescriptor = new(
+                name: name,
+                tableSpace: new BufferPoolHandler(tablespace),
+                schemaSpace: new BufferPoolHandler(schema),
+                systemSpace: new BufferPoolHandler(system)
+            );
 
-            await LoadDatabaseSchema(databaseDescriptor);
-            await LoadDatabaseSystemSpace(databaseDescriptor);
-            await LoadDatabaseTableSpace(databaseDescriptor);
+            await Task.WhenAll(new Task[]
+            {
+                LoadDatabaseSchema(databaseDescriptor),
+                LoadDatabaseSystemSpace(databaseDescriptor),
+                LoadDatabaseTableSpace(databaseDescriptor)
+            });
 
-            await databaseDescriptor.JournalWriter.Initialize();
+            await Task.WhenAll(new Task[]
+            {
+                databaseDescriptor.TableSpace.Initialize(),
+                databaseDescriptor.JournalWriter.Initialize()
+            });
 
             Console.WriteLine("Database {0} opened", name);
 

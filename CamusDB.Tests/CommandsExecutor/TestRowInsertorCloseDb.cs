@@ -24,6 +24,7 @@ public class TestRowInsertorCloseDb
             File.Delete(path + "/tablespace0");
             File.Delete(path + "/schema");
             File.Delete(path + "/system");
+            File.Delete(path + "/journal");
             Directory.Delete(path);
         }
     }
