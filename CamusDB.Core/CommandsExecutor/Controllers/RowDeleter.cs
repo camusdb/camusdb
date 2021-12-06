@@ -44,13 +44,21 @@ internal sealed class RowDeleter
                     "A unique index tree wasn't found"
                 );
 
-            ColumnValue? columnValue = GetColumnValue(columnValues, index.Value.Column);
-            if (columnValue is null) // @todo check what to to here
+            ColumnValue? columnKey = GetColumnValue(columnValues, index.Value.Column);
+            if (columnKey is null) // @todo check what to to here
                 continue;
 
             BTree<ColumnValue, BTreeTuple?> uniqueIndex = index.Value.UniqueRows;
 
-            await indexSaver.Remove(tablespace, uniqueIndex, columnValue);
+            RemoveUniqueIndexTicket ticket = new(
+                tablespace: tablespace,
+                journal: database.JournalWriter,
+                sequence: 0,
+                index: uniqueIndex,
+                key: columnKey
+            );
+
+            await indexSaver.Remove(ticket);
         }
     }
 

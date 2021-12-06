@@ -13,6 +13,7 @@
     <None Remove="CommandsExecutor\Controllers\Indexes\" />
     <None Remove="Journal\" />
     <None Remove="Journal\Models\" />
+    <None Remove="Journal\Controllers\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="CommandsValidator\" />
@@ -21,5 +22,6 @@
     <Folder Include="CommandsExecutor\Controllers\Indexes\" />
     <Folder Include="Journal\" />
     <Folder Include="Journal\Models\" />
+    <Folder Include="Journal\Controllers\" />
   </ItemGroup>
 </Project>

@@ -7,13 +7,14 @@
  */
 
 using System.Text;
+using CamusDB.Core.Serializer;
+using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Serializer.Models;
+using CamusDB.Core.Journal.Controllers;
+using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Journal.Models;
-using CamusDB.Core.Serializer;
-using CamusDB.Core.Serializer.Models;
-using Config = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.Journal;
 
@@ -27,7 +28,7 @@ public sealed class JournalWriter
 
     public JournalWriter(DatabaseDescriptor database)
     {
-        this.database = database;        
+        this.database = database;
     }
 
     public async Task Initialize()
@@ -45,35 +46,7 @@ public sealed class JournalWriter
         return Interlocked.Increment(ref logSequenceNumber);
     }
 
-    private int GetLogLength(InsertTicket insertTicket)
-    {
-        int length = insertTicket.TableName.Length;
-
-        foreach (KeyValuePair<string, ColumnValue> columnValue in insertTicket.Values)
-        {
-            length += columnValue.Key.Length;
-
-            switch (columnValue.Value.Type)
-            {
-                case ColumnType.Id:
-                case ColumnType.Integer:
-                    length += SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32;
-                    break;
-
-                case ColumnType.String:
-                    length += SerializatorTypeSizes.TypeInteger8 + columnValue.Value.Value.Length;
-                    break;
-
-                case ColumnType.Bool:
-                    length += SerializatorTypeSizes.TypeBool;
-                    break;
-            }
-        }
-
-        return length;
-    }    
-
-    public async Task Append(JournalInsertSchedule insertSchedule)
+    public async Task<uint> Append(JournalInsert insertSchedule)
     {
         if (fileStream is null)
             throw new Exception("Journal has not been initialized");
@@ -82,49 +55,53 @@ public sealed class JournalWriter
 
         InsertTicket insertTicket = insertSchedule.InsertTicket;
 
-        int length = GetLogLength(insertTicket);        
-
-        byte[] journal = new byte[
-            SerializatorTypeSizes.TypeInteger32 + // LSN (4 bytes)
-            SerializatorTypeSizes.TypeInteger16 + // journal type (2 bytes)            
-            SerializatorTypeSizes.TypeInteger32 + // length(4 bytes)
-            SerializatorTypeSizes.TypeInteger16 + // number fields (2 bytes)
-            length // payload
-        ];
-        
-        //var b = Encoding.UTF8.GetBytes("hello");
-
-        int pointer = 0;
-        Serializator.WriteUInt32(journal, sequence, ref pointer);
-        Serializator.WriteInt16(journal, JournalScheduleTypes.Insert, ref pointer);
-        Serializator.WriteInt32(journal, length, ref pointer);
-        Serializator.WriteInt16(journal, insertTicket.Values.Count, ref pointer);
-
-        foreach (KeyValuePair<string, ColumnValue> columnValue in insertTicket.Values)
-        {
-            Serializator.WriteString(journal, columnValue.Key, ref pointer);
-
-            switch (columnValue.Value.Type)
-            {
-                case ColumnType.Id:
-                case ColumnType.Integer:
-                    Serializator.WriteInt32(journal, int.Parse(columnValue.Value.Value), ref pointer);
-                    break;
-
-                case ColumnType.String:                    
-                    Serializator.WriteString(journal, columnValue.Value.Value, ref pointer);
-                    break;
-
-                case ColumnType.Bool:
-                    Serializator.WriteBool(journal, columnValue.Value.Value == "true", ref pointer);
-                    break;
-
-                default:
-                    throw new Exception("here");
-            }
-        }
+        byte[] journal = InsertTicketPayload.Generate(sequence, insertTicket);
 
         await fileStream.WriteAsync(journal);
-        //await fileStream.FlushAsync();
+        await fileStream.FlushAsync();
+
+        return sequence;
     }
+
+    public async Task<uint> Append(JournalInsertSlots insertSchedule)
+    {
+        if (fileStream is null)
+            throw new Exception("Journal has not been initialized");
+
+        uint sequence = GetNextSequence();
+
+        byte[] journal = InsertSlotsPayload.Generate(sequence, insertSchedule.Sequence, insertSchedule.RowTuple);
+        await fileStream.WriteAsync(journal);
+        await fileStream.FlushAsync();
+
+        return sequence;
+    }
+
+    public async Task<uint> Append(JournalWritePage insertSchedule)
+    {
+        if (fileStream is null)
+            throw new Exception("Journal has not been initialized");
+
+        uint sequence = GetNextSequence();
+
+        byte[] journal = WritePagePayload.Generate(sequence, insertSchedule.Sequence, insertSchedule.Data);
+        await fileStream.WriteAsync(journal);
+        await fileStream.FlushAsync();
+
+        return sequence;
+    }
+
+    public async Task<uint> Append(JournalUpdateUniqueIndex indexSchedule)
+    {
+        if (fileStream is null)
+            throw new Exception("Journal has not been initialized");
+
+        uint sequence = GetNextSequence();
+
+        byte[] journal = UpdateUniqueIndexPayload.Generate(sequence, indexSchedule.Sequence, indexSchedule.Index);
+        await fileStream.WriteAsync(journal);
+        await fileStream.FlushAsync();
+
+        return sequence;
+    }    
 }
