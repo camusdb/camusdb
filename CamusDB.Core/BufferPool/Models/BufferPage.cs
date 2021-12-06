@@ -6,8 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Support;
-
 namespace CamusDB.Core.BufferPool.Models;
 
 public sealed class BufferPage

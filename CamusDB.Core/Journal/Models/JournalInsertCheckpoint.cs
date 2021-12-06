@@ -6,21 +6,16 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.Journal.Models;
 
-public sealed class JournalUpdateUniqueIndex
+public class JournalInsertCheckpoint
 {
     public uint Sequence { get; }
 
-    public TableIndexSchema Index { get; }
-
-    public JournalUpdateUniqueIndex(uint sequence, TableIndexSchema index)
+    public JournalInsertCheckpoint(uint sequence)
     {
         Sequence = sequence;
-        Index = index;
-
     }
 }
-

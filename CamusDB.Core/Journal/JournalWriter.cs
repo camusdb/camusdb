@@ -6,11 +6,7 @@
  * file that was distributed with this source code.
  */
 
-using System.Text;
-using CamusDB.Core.Serializer;
 using CamusDB.Core.Journal.Models;
-using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.Journal.Controllers;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -103,5 +99,33 @@ public sealed class JournalWriter
         await fileStream.FlushAsync();
 
         return sequence;
-    }    
+    }
+
+    public async Task<uint> Append(JournalUpdateUniqueCheckpoint indexCheckpoint)
+    {
+        if (fileStream is null)
+            throw new Exception("Journal has not been initialized");
+
+        uint sequence = GetNextSequence();
+
+        byte[] journal = UpdateUniqueIndexCheckpointPayload.Generate(sequence, indexCheckpoint.Sequence, indexCheckpoint.Index);
+        await fileStream.WriteAsync(journal);
+        await fileStream.FlushAsync();
+
+        return sequence;
+    }
+
+    public async Task<uint> Append(JournalInsertCheckpoint insertCheckpoint)
+    {
+        if (fileStream is null)
+            throw new Exception("Journal has not been initialized");
+
+        uint sequence = GetNextSequence();
+
+        byte[] journal = InsertTicketCheckpointPayload.Generate(sequence, insertCheckpoint.Sequence);
+        await fileStream.WriteAsync(journal);
+        await fileStream.FlushAsync();
+
+        return sequence;
+    }
 }

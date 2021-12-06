@@ -6,15 +6,10 @@
  * file that was distributed with this source code.
  */
 
-using System.Text;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Journal.Models;
-using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Serializer.Models;
-using Config = CamusDB.Core.CamusDBConfig;
-using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.Journal.Controllers;
 

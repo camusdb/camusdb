@@ -6,14 +6,13 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Trees;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.Journal.Models;
 
 public sealed class JournalInsert
 {
-    public InsertTicket InsertTicket { get; }    
+    public InsertTicket InsertTicket { get; }
 
     public JournalInsert(InsertTicket insertTicket)
     {

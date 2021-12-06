@@ -10,17 +10,16 @@ using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.Journal.Models;
 
-public sealed class JournalUpdateUniqueIndex
+public sealed class JournalUpdateUniqueCheckpoint
 {
     public uint Sequence { get; }
 
     public TableIndexSchema Index { get; }
 
-    public JournalUpdateUniqueIndex(uint sequence, TableIndexSchema index)
+    public JournalUpdateUniqueCheckpoint(uint sequence, TableIndexSchema index)
     {
         Sequence = sequence;
         Index = index;
-
     }
 }
 

@@ -6,14 +6,12 @@
  * file that was distributed with this source code.
  */
 
-using System.Text;
+using CamusDB.Core.Serializer;
+using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Journal.Models;
-using CamusDB.Core.Serializer;
-using CamusDB.Core.Serializer.Models;
-using Config = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.Journal.Controllers;
 
@@ -53,7 +51,7 @@ public static class InsertTicketPayload
 
         byte[] journal = new byte[
             SerializatorTypeSizes.TypeInteger32 + // LSN (4 bytes)
-            SerializatorTypeSizes.TypeInteger16 + // journal type (2 bytes)            
+            SerializatorTypeSizes.TypeInteger16 + // journal type (2 bytes)
             SerializatorTypeSizes.TypeInteger32 + // length(4 bytes)
             SerializatorTypeSizes.TypeInteger16 + // number fields (2 bytes)
             length // payload

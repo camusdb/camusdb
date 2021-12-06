@@ -14,4 +14,6 @@ public static class JournalScheduleTypes
     public const int InsertSlots = 1;
     public const int WritePage = 2;
     public const int UpdateUniqueIndex = 3;
+    public const int UpdateUniqueIndexCheckpoint = 4;
+    public const int InsertTicketCheckpoint = 5;
 }

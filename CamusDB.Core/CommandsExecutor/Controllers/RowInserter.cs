@@ -139,14 +139,14 @@ internal sealed class RowInserter
 
                 await indexSaver.NoLockingSave(saveUniqueIndexTicket);
 
-                // save index save to journal
-                //JournalUpdateUniqueIndex indexSchedule = new(sequence, index.Value);
-                //uint updateIndexSequence = await database.JournalWriter.Append(schedule);
+                // save checkpoint of index saved
+                JournalUpdateUniqueCheckpoint checkpoint = new(sequence, index.Value);
+                await database.JournalWriter.Append(checkpoint);
             }
             finally
             {
                 uniqueIndex.WriteLock.Release();
-            } 
+            }
         }
 
         return rowTuple;
@@ -184,6 +184,7 @@ internal sealed class RowInserter
         Stopwatch timer = new();
         timer.Start();
 
+        // Schedule insert in the journal
         JournalInsert schedule = new(ticket);
         uint sequence = await database.JournalWriter.Append(schedule);
 
@@ -200,6 +201,9 @@ internal sealed class RowInserter
         await indexSaver.Save(tablespace, table.Rows, rowTuple.SlotOne, rowTuple.SlotTwo);
 
         await UpdateMultiKeys(database, table, ticket, rowTuple);
+
+        JournalInsertCheckpoint insertCheckpoint = new(sequence);
+        await database.JournalWriter.Append(insertCheckpoint);
 
         timer.Stop();
 
