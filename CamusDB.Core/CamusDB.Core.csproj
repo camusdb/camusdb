@@ -14,6 +14,9 @@
     <None Remove="Journal\" />
     <None Remove="Journal\Models\" />
     <None Remove="Journal\Controllers\" />
+    <None Remove="Journal\Controllers\Writers\" />
+    <None Remove="Journal\Controllers\Reader\" />
+    <None Remove="Journal\Models\Writers\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="CommandsValidator\" />
@@ -23,5 +26,8 @@
     <Folder Include="Journal\" />
     <Folder Include="Journal\Models\" />
     <Folder Include="Journal\Controllers\" />
+    <Folder Include="Journal\Controllers\Writers\" />
+    <Folder Include="Journal\Controllers\Readers\" />
+    <Folder Include="Journal\Models\Writers\" />
   </ItemGroup>
 </Project>

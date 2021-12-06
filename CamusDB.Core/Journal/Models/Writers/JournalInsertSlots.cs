@@ -8,7 +8,7 @@
 
 using CamusDB.Core.Util.Trees;
 
-namespace CamusDB.Core.Journal.Models;
+namespace CamusDB.Core.Journal.Models.Writers;
 
 public sealed class JournalInsertSlots
 {

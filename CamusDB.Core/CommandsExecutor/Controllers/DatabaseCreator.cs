@@ -17,30 +17,32 @@ internal sealed class DatabaseCreator
     {
         string name = ticket.DatabaseName;
 
-        if (Directory.Exists(Config.DataDirectory + "/" + name))
+        string absolutePath = Directory.GetCurrentDirectory();
+        string dbPath = absolutePath + "/" + Config.DataDirectory + "/" + name;
+
+        if (Directory.Exists(dbPath))
             throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Database already exists");
 
-        Directory.CreateDirectory(Config.DataDirectory + "/" + name);
+        Directory.CreateDirectory(dbPath);
 
-        await InitializeDatabaseFiles(name);
+        await InitializeDatabaseFiles(name, dbPath);
     }
 
-    private static async Task InitializeDatabaseFiles(string name)
+    private static async Task InitializeDatabaseFiles(string name, string dbPath)
     {
         byte[] initialized = new byte[Config.InitialTableSpaceSize];
-
-        string absolutePath = Directory.GetCurrentDirectory();
-
+               
         await Task.WhenAll(new Task[]
         {
-            File.WriteAllBytesAsync(absolutePath + "/" + Config.DataDirectory + "/" + name + "/tablespace0", initialized),
-            File.WriteAllBytesAsync(absolutePath + "/" + Config.DataDirectory + "/" + name + "/schema", initialized),
-            File.WriteAllBytesAsync(absolutePath + "/" + Config.DataDirectory + "/" + name + "/system", initialized)
+            File.WriteAllBytesAsync(dbPath + "/tablespace0", initialized),
+            File.WriteAllBytesAsync(dbPath + "/schema", initialized),
+            File.WriteAllBytesAsync(dbPath + "/system", initialized),
+            File.WriteAllBytesAsync(dbPath + "/journal", new byte[0])
         });
 
         // @todo catch IO Exceptions
         // @todo verify tablespaces were created sucessfully
 
-        Console.WriteLine("Database {0} tablespaces created at {1}", name, absolutePath + "/" + Config.DataDirectory + "/" + name);
+        Console.WriteLine("Database {0} tablespaces created at {1}", name, dbPath);
     }
 }

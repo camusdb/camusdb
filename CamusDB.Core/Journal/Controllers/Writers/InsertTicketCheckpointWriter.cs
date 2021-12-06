@@ -11,9 +11,9 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Serializer.Models;
 
-namespace CamusDB.Core.Journal.Controllers;
+namespace CamusDB.Core.Journal.Controllers.Writers;
 
-public static class InsertTicketCheckpointPayload
+public static class InsertTicketCheckpointWriter
 {
     public static byte[] Generate(uint sequence, uint relatedSequence)
     {
@@ -25,7 +25,7 @@ public static class InsertTicketCheckpointPayload
 
         int pointer = 0;
         Serializator.WriteUInt32(journal, sequence, ref pointer);
-        Serializator.WriteInt16(journal, JournalScheduleTypes.InsertTicketCheckpoint, ref pointer);
+        Serializator.WriteInt16(journal, JournalLogTypes.InsertTicketCheckpoint, ref pointer);
         Serializator.WriteUInt32(journal, relatedSequence, ref pointer);        
 
         return journal;

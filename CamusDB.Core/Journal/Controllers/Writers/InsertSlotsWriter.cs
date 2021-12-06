@@ -7,28 +7,32 @@
  */
 
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Serializer.Models;
 
-namespace CamusDB.Core.Journal.Controllers;
+namespace CamusDB.Core.Journal.Controllers.Writers;
 
-public class WritePagePayload
+public static class InsertSlotsWriter
 {
-    public static byte[] Generate(uint sequence, uint relatedSequence, byte[] data)
+    public static byte[] Serialize(uint sequence, uint relatedSequence, BTreeTuple rowTuple)
     {
         byte[] journal = new byte[
             SerializatorTypeSizes.TypeInteger32 + // LSN (4 bytes)
             SerializatorTypeSizes.TypeInteger16 + // journal type (2 bytes)
             SerializatorTypeSizes.TypeInteger32 + // related LSN (4 bytes)
-            data.Length
+            SerializatorTypeSizes.TypeInteger32 + // slot1 (4 bytes)
+            SerializatorTypeSizes.TypeInteger32   // slot2 (4 bytes)
         ];
+
+        //var b = Encoding.UTF8.GetBytes("hello");
 
         int pointer = 0;
         Serializator.WriteUInt32(journal, sequence, ref pointer);
-        Serializator.WriteInt16(journal, JournalScheduleTypes.InsertSlots, ref pointer);
+        Serializator.WriteInt16(journal, JournalLogTypes.InsertSlots, ref pointer);
         Serializator.WriteUInt32(journal, relatedSequence, ref pointer);
-
-        Buffer.BlockCopy(data, 0, journal, pointer, data.Length);
+        Serializator.WriteInt32(journal, rowTuple.SlotOne, ref pointer);
+        Serializator.WriteInt32(journal, rowTuple.SlotTwo, ref pointer);
 
         return journal;
     }

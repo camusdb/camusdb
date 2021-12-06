@@ -8,7 +8,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 
-namespace CamusDB.Core.Journal.Models;
+namespace CamusDB.Core.Journal.Models.Writers;
 
 public sealed class JournalUpdateUniqueCheckpoint
 {

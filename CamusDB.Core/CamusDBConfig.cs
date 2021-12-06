@@ -53,4 +53,10 @@ public static class CamusDBConfig
     public const int SchemaHeaderPage = 1;
 
     #endregion
+
+    #region journal
+
+    public const int JournalFlushInterval = 1000;
+
+    #endregion
 }

@@ -8,14 +8,14 @@
 
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-namespace CamusDB.Core.Journal.Models;
+namespace CamusDB.Core.Journal.Models.Writers;
 
-public sealed class JournalInsert
+public class JournalInsertCheckpoint
 {
-    public InsertTicket InsertTicket { get; }
+    public uint Sequence { get; }
 
-    public JournalInsert(InsertTicket insertTicket)
+    public JournalInsertCheckpoint(uint sequence)
     {
-        InsertTicket = insertTicket;
+        Sequence = sequence;
     }
 }

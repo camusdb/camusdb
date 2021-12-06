@@ -13,9 +13,9 @@ using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-namespace CamusDB.Core.Journal.Controllers;
+namespace CamusDB.Core.Journal.Controllers.Writers;
 
-public static class InsertTicketPayload
+public static class InsertTicketWriter
 {
     private static int GetLogLength(InsertTicket insertTicket)
     {
@@ -59,7 +59,7 @@ public static class InsertTicketPayload
 
         int pointer = 0;
         Serializator.WriteUInt32(journal, sequence, ref pointer);
-        Serializator.WriteInt16(journal, JournalScheduleTypes.InsertTicket, ref pointer);
+        Serializator.WriteInt16(journal, JournalLogTypes.InsertTicket, ref pointer);
         Serializator.WriteInt32(journal, length, ref pointer);
         Serializator.WriteInt16(journal, insertTicket.Values.Count, ref pointer);
 

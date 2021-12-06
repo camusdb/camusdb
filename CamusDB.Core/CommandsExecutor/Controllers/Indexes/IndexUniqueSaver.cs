@@ -10,7 +10,7 @@ using CamusDB.Core.Journal;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Journal.Models;
+using CamusDB.Core.Journal.Models.Writers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 

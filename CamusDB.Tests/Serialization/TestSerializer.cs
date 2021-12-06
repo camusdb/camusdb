@@ -81,7 +81,7 @@ public class TestSerializer
         Assert.AreEqual(pointer, SerializatorTypeSizes.TypeInteger16);
 
         pointer = 0;
-        int readValue = Serializator.ReadInt16(buffer, ref pointer);
+        short readValue = Serializator.ReadInt16(buffer, ref pointer);
         Assert.AreEqual(pointer, SerializatorTypeSizes.TypeInteger16);
         Assert.AreEqual(readValue, writeValue);
     }

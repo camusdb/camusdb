@@ -17,17 +17,17 @@ public class IndexBaseReader
 {
     protected static ColumnValue UnserializeKey(byte[] nodeBuffer, ref int pointer)
     {
-        int type = Serializator.ReadInt16(nodeBuffer, ref pointer);
+        short type = Serializator.ReadInt16(nodeBuffer, ref pointer);
 
         switch (type)
         {
-            case (int)ColumnType.Id:
+            case (short)ColumnType.Id:
                 {
                     int value = Serializator.ReadInt32(nodeBuffer, ref pointer);
                     return new ColumnValue(ColumnType.Id, value.ToString());
                 }
 
-            case (int)ColumnType.Integer:
+            case (short)ColumnType.Integer:
                 {
                     int value = Serializator.ReadInt32(nodeBuffer, ref pointer);
                     return new ColumnValue(ColumnType.Integer, value.ToString());

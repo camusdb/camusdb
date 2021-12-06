@@ -11,9 +11,9 @@ using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Serializer.Models;
 
-namespace CamusDB.Core.Journal.Controllers;
+namespace CamusDB.Core.Journal.Controllers.Writers;
 
-public static class UpdateUniqueIndexPayload
+public static class UpdateUniqueIndexCheckpointWriter
 {
     public static byte[] Generate(uint sequence, uint relatedSequence, TableIndexSchema index)
     {
@@ -26,7 +26,7 @@ public static class UpdateUniqueIndexPayload
 
         int pointer = 0;
         Serializator.WriteUInt32(journal, sequence, ref pointer);
-        Serializator.WriteInt16(journal, JournalScheduleTypes.UpdateUniqueIndex, ref pointer);
+        Serializator.WriteInt16(journal, JournalLogTypes.UpdateUniqueIndexCheckpoint, ref pointer);
         Serializator.WriteUInt32(journal, relatedSequence, ref pointer);
         Serializator.WriteString(journal, index.Column, ref pointer);
 

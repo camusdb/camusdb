@@ -10,9 +10,10 @@ using System.Diagnostics;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Journal.Models;
+using CamusDB.Core.Journal.Models.Writers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Journal.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -196,6 +197,9 @@ internal sealed class RowInserter
 
         // Insert data to the page offset
         await tablespace.WriteDataToPage(rowTuple.SlotTwo, rowBuffer);
+
+        JournalWritePage writeSchedule = new(sequence, rowBuffer);
+        await database.JournalWriter.Append(writeSchedule);
 
         // Main table index stores rowid pointing to page offeset
         await indexSaver.Save(tablespace, table.Rows, rowTuple.SlotOne, rowTuple.SlotTwo);

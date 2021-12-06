@@ -6,16 +6,18 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
+namespace CamusDB.Core.Journal.Models.Writers;
 
-namespace CamusDB.Core.Journal.Models;
-
-public class JournalInsertCheckpoint
+public sealed class JournalWritePage
 {
     public uint Sequence { get; }
 
-    public JournalInsertCheckpoint(uint sequence)
+    public byte[] Data { get; }
+
+    public JournalWritePage(uint sequence, byte[] data)
     {
         Sequence = sequence;
+        Data = data;
     }
 }
+

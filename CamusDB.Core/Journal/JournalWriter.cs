@@ -11,6 +11,8 @@ using CamusDB.Core.Journal.Controllers;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Journal.Models.Writers;
+using CamusDB.Core.Journal.Controllers.Writers;
 
 namespace CamusDB.Core.Journal;
 
@@ -18,9 +20,13 @@ public sealed class JournalWriter
 {
     private uint logSequenceNumber = 0;
 
-    private FileStream? fileStream;
+    private FileStream? journal;
+
+    public DateTime LastFlush { get; private set; } = DateTime.Now;
 
     private readonly DatabaseDescriptor database;
+
+    private readonly SemaphoreSlim semaphore = new(1, 1);    
 
     public JournalWriter(DatabaseDescriptor database)
     {
@@ -29,12 +35,41 @@ public sealed class JournalWriter
 
     public async Task Initialize()
     {
-        Console.WriteLine("Data journal saved at {0}", Config.DataDirectory + "/" + database.Name + "/journal");
+        string path = Config.DataDirectory + "/" + database.Name + "/journal";
 
-        // @todo improve recovery here
+        Console.WriteLine("Data journal saved at {0}", path);
 
-        fileStream = new(Config.DataDirectory + "/" + database.Name + "/journal", FileMode.Append, FileAccess.Write);
-        await Task.Yield();
+        // @todo improve recovery here        
+        JournalReader journalReader = new(path);
+        await journalReader.Verify();
+        journalReader.Dispose();
+
+        journal = new(path, FileMode.Append, FileAccess.Write);
+    }
+
+    private async Task TryWrite(byte[] buffer)
+    {
+        if (this.journal is null)
+            throw new Exception("Journal has not been initialized");
+
+        try
+        {
+            await semaphore.WaitAsync();
+
+            await journal.WriteAsync(buffer);
+
+            DateTime currentTime = DateTime.Now;
+
+            if ((currentTime - LastFlush).TotalMilliseconds > Config.JournalFlushInterval)
+            {
+                await journal.FlushAsync();
+                LastFlush = currentTime;
+            }
+        }
+        finally
+        {
+            semaphore.Release();
+        }
     }
 
     public uint GetNextSequence()
@@ -44,87 +79,86 @@ public sealed class JournalWriter
 
     public async Task<uint> Append(JournalInsert insertSchedule)
     {
-        if (fileStream is null)
+        if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
         uint sequence = GetNextSequence();
 
         InsertTicket insertTicket = insertSchedule.InsertTicket;
 
-        byte[] journal = InsertTicketPayload.Generate(sequence, insertTicket);
+        byte[] payload = InsertTicketWriter.Generate(sequence, insertTicket);
 
-        await fileStream.WriteAsync(journal);
-        await fileStream.FlushAsync();
+        await TryWrite(payload);
 
         return sequence;
     }
 
     public async Task<uint> Append(JournalInsertSlots insertSchedule)
     {
-        if (fileStream is null)
+        if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
         uint sequence = GetNextSequence();
 
-        byte[] journal = InsertSlotsPayload.Generate(sequence, insertSchedule.Sequence, insertSchedule.RowTuple);
-        await fileStream.WriteAsync(journal);
-        await fileStream.FlushAsync();
+        byte[] payload = InsertSlotsWriter.Serialize(sequence, insertSchedule.Sequence, insertSchedule.RowTuple);
+
+        await TryWrite(payload);
 
         return sequence;
     }
 
     public async Task<uint> Append(JournalWritePage insertSchedule)
     {
-        if (fileStream is null)
+        if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
         uint sequence = GetNextSequence();
 
-        byte[] journal = WritePagePayload.Generate(sequence, insertSchedule.Sequence, insertSchedule.Data);
-        await fileStream.WriteAsync(journal);
-        await fileStream.FlushAsync();
+        byte[] payload = WritePageWriter.Generate(sequence, insertSchedule.Sequence, insertSchedule.Data);
+
+        await TryWrite(payload);
 
         return sequence;
     }
 
     public async Task<uint> Append(JournalUpdateUniqueIndex indexSchedule)
     {
-        if (fileStream is null)
+        if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
         uint sequence = GetNextSequence();
 
-        byte[] journal = UpdateUniqueIndexPayload.Generate(sequence, indexSchedule.Sequence, indexSchedule.Index);
-        await fileStream.WriteAsync(journal);
-        await fileStream.FlushAsync();
+        byte[] payload = UpdateUniqueIndexWriter.Generate(sequence, indexSchedule.Sequence, indexSchedule.Index);
+
+        await TryWrite(payload);
 
         return sequence;
     }
 
     public async Task<uint> Append(JournalUpdateUniqueCheckpoint indexCheckpoint)
     {
-        if (fileStream is null)
+        if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
         uint sequence = GetNextSequence();
 
-        byte[] journal = UpdateUniqueIndexCheckpointPayload.Generate(sequence, indexCheckpoint.Sequence, indexCheckpoint.Index);
-        await fileStream.WriteAsync(journal);
-        await fileStream.FlushAsync();
+        byte[] payload = UpdateUniqueIndexCheckpointWriter.Generate(sequence, indexCheckpoint.Sequence, indexCheckpoint.Index);
+
+        await TryWrite(payload);
 
         return sequence;
     }
 
     public async Task<uint> Append(JournalInsertCheckpoint insertCheckpoint)
     {
-        if (fileStream is null)
+        if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
         uint sequence = GetNextSequence();
 
-        byte[] journal = InsertTicketCheckpointPayload.Generate(sequence, insertCheckpoint.Sequence);
-        await fileStream.WriteAsync(journal);
-        await fileStream.FlushAsync();
+        byte[] payload = InsertTicketCheckpointWriter.Generate(sequence, insertCheckpoint.Sequence);
+
+        await TryWrite(payload);
 
         return sequence;
     }

@@ -166,7 +166,7 @@ public sealed class Serializator
         return buffer[pointer++];
     }
 
-    public static int ReadInt16(byte[] buffer, ref int pointer)
+    public static short ReadInt16(byte[] buffer, ref int pointer)
     {
         short number = BitConverter.ToInt16(buffer, pointer);
         pointer += 2;
