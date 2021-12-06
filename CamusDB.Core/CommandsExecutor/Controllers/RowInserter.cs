@@ -88,11 +88,11 @@ internal sealed class RowInserter
         return uniqueValue;
     }
 
-    private async Task<BTreeTuple> CheckAndUpdateUniqueKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
+    private async Task<BTreeTuple> CheckAndUpdateUniqueKeys(DatabaseDescriptor database, TableDescriptor table, uint sequence, InsertTicket ticket)
     {
         BTreeTuple rowTuple = new(-1, -1);
 
-        BufferPoolHandler tablespace = database.TableSpace!;
+        BufferPoolHandler tablespace = database.TableSpace;
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
@@ -120,12 +120,33 @@ internal sealed class RowInserter
                 if (rowTuple.SlotTwo == -1)
                     rowTuple.SlotTwo = await tablespace.GetNextFreeOffset();
 
-                await indexSaver.NoLockingSave(tablespace, uniqueIndex, uniqueKeyValue, rowTuple);
+                // save page + rowid to journal
+                JournalInsertSlots schedule = new(sequence, rowTuple);
+                await database.JournalWriter.Append(schedule);
+
+                // save index save to journal
+                JournalUpdateUniqueIndex indexSchedule = new(sequence, index.Value);
+                uint updateIndexSequence = await database.JournalWriter.Append(schedule);
+
+                SaveUniqueIndexTicket saveUniqueIndexTicket = new(
+                    tablespace: tablespace,
+                    journal: database.JournalWriter,
+                    sequence: updateIndexSequence,
+                    index: uniqueIndex,
+                    key: uniqueKeyValue,
+                    value: rowTuple
+                );
+
+                await indexSaver.NoLockingSave(saveUniqueIndexTicket);
+
+                // save index save to journal
+                //JournalUpdateUniqueIndex indexSchedule = new(sequence, index.Value);
+                //uint updateIndexSequence = await database.JournalWriter.Append(schedule);
             }
             finally
             {
                 uniqueIndex.WriteLock.Release();
-            }
+            } 
         }
 
         return rowTuple;
@@ -133,7 +154,7 @@ internal sealed class RowInserter
 
     private async Task UpdateMultiKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, BTreeTuple rowTuple)
     {
-        BufferPoolHandler tablespace = database.TableSpace!;
+        BufferPoolHandler tablespace = database.TableSpace;
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
@@ -163,12 +184,12 @@ internal sealed class RowInserter
         Stopwatch timer = new();
         timer.Start();
 
-        JournalInsertSchedule schedule = new(ticket);
-        await database.JournalWriter.Append(schedule);
+        JournalInsert schedule = new(ticket);
+        uint sequence = await database.JournalWriter.Append(schedule);
 
-        BufferPoolHandler tablespace = database.TableSpace!;
+        BufferPoolHandler tablespace = database.TableSpace;
 
-        BTreeTuple rowTuple = await CheckAndUpdateUniqueKeys(database, table, ticket);
+        BTreeTuple rowTuple = await CheckAndUpdateUniqueKeys(database, table, sequence, ticket);
 
         byte[] rowBuffer = rowSerializer.Serialize(table, ticket, rowTuple.SlotOne);
 

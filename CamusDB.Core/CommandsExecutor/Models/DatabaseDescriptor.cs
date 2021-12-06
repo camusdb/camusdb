@@ -14,13 +14,13 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 
 public sealed class DatabaseDescriptor
 {
-    public string? Name { get; set; }
+    public string Name { get; set; }
 
-    public BufferPoolHandler? TableSpace { get; set; }
+    public BufferPoolHandler TableSpace { get; set; }
 
-    public BufferPoolHandler? SchemaSpace { get; set; }
+    public BufferPoolHandler SchemaSpace { get; set; }
 
-    public BufferPoolHandler? SystemSpace { get; set; }
+    public BufferPoolHandler SystemSpace { get; set; }
 
     public Schema Schema { get; set; } = new();
 
@@ -32,8 +32,12 @@ public sealed class DatabaseDescriptor
 
     public JournalWriter JournalWriter { get; set; }
 
-    public DatabaseDescriptor()
+    public DatabaseDescriptor(string name, BufferPoolHandler tableSpace, BufferPoolHandler schemaSpace, BufferPoolHandler systemSpace)
     {
+        Name = name;
+        TableSpace = tableSpace;
+        SchemaSpace = schemaSpace;
+        SystemSpace = systemSpace;
         JournalWriter = new(this);
     }
 }

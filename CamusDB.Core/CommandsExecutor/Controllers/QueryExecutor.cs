@@ -82,7 +82,7 @@ internal sealed class QueryExecutor
 
     private async Task<List<Dictionary<string, ColumnValue>>> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
     {
-        BufferPoolHandler tablespace = database.TableSpace!;
+        BufferPoolHandler tablespace = database.TableSpace;
 
         List<Dictionary<string, ColumnValue>> rows = new();
 

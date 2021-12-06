@@ -12,15 +12,17 @@ public static class CamusDBConfig
 {
     public const string DataDirectory = "Data";
 
-    public const int InitialTableSpaceSize = PageSize * TotalPages; // 4096 blocks of 1024 size
+    public const int InitialTableSpaceSize = PageSize * TotalPages; // 4096 blocks of 512 size
 
     #region bufferpool
 
     public const int PageLayoutVersion = 1;
 
-    public const int PageSize = 1024;
+    public const int PageSize = 512;
 
     public const int TotalPages = 4096;
+
+    public const int InitialPagesRead = 1024;
 
     public const int TableSpaceHeaderPage = 0;
 

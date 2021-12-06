@@ -20,13 +20,15 @@ internal sealed class RowSerializer
     {
         int length = 10; // 1 type + 4 schemaVersion + 1 type + 4 rowId
 
-        for (int i = 0; i < table.Schema!.Columns!.Count; i++)
+        List<TableColumnSchema> tableColumns = table.Schema!.Columns!;
+
+        for (int i = 0; i < tableColumns.Count; i++)
         {
-            TableColumnSchema column = table.Schema!.Columns[i];
+            TableColumnSchema column = tableColumns[i];
 
             if (!ticket.Values.TryGetValue(column.Name, out ColumnValue? columnValue))
             {
-                length += 1; // null (1 byte)
+                length += SerializatorTypeSizes.TypeNull; // null (1 byte)
                 continue;
             }
 
@@ -36,30 +38,14 @@ internal sealed class RowSerializer
                     "Type " + columnValue.Type + " cannot be assigned to " + column.Name + " (" + column.Type + ")"
                 );
 
-            switch (columnValue.Type) // @todo check if value is compatible with column
+            length += columnValue.Type switch
             {
-                case ColumnType.Id:
-                    length += 5; // type 1 byte + 4 byte int
-                    break;
-
-                case ColumnType.Integer:
-                    length += 5; // type 1 byte + 4 byte int
-                    break;
-
-                case ColumnType.String:
-                    length += 5 + columnValue.Value.Length; // type 1 byte + 4 byte length + strLength
-                    break;
-
-                case ColumnType.Bool:
-                    length++; // bool (1 byte)
-                    break;
-
-                default:
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.UnknownType,
-                        "Unknown type " + columnValue.Type
-                    );
-            }
+                ColumnType.Id => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32,// type 1 byte + 4 byte int
+                ColumnType.Integer => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32,// type 1 byte + 4 byte int
+                ColumnType.String => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + columnValue.Value.Length,// type 1 byte + 4 byte length + strLength
+                ColumnType.Bool => SerializatorTypeSizes.TypeInteger8,// bool (1 byte)
+                _ => throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnValue.Type),
+            };
         }
 
         return length;
@@ -81,7 +67,7 @@ internal sealed class RowSerializer
         Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
         Serializator.WriteInt32(rowBuffer, rowId, ref pointer); // row Id
 
-        List<TableColumnSchema> columns = table.Schema!.Columns!;
+        List<TableColumnSchema> columns = table.Schema.Columns!;
 
         for (int i = 0; i < columns.Count; i++)
         {

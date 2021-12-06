@@ -10,5 +10,8 @@ namespace CamusDB.Core.Journal.Models;
 
 public static class JournalScheduleTypes
 {
-    public const int Insert = 0;
+    public const int InsertTicket = 0;
+    public const int InsertSlots = 1;
+    public const int WritePage = 2;
+    public const int UpdateUniqueIndex = 3;
 }

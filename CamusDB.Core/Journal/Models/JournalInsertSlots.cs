@@ -7,16 +7,18 @@
  */
 
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.Journal.Models;
 
-public sealed class JournalInsertSchedule
+public sealed class JournalInsertSlots
 {
-    public InsertTicket InsertTicket { get; }    
+    public BTreeTuple RowTuple { get; }
 
-    public JournalInsertSchedule(InsertTicket insertTicket)
+    public uint Sequence { get; }
+
+    public JournalInsertSlots(uint sequence, BTreeTuple rowTuple)
     {
-        InsertTicket = insertTicket;
+        Sequence = sequence;
+        RowTuple = rowTuple;        
     }
 }

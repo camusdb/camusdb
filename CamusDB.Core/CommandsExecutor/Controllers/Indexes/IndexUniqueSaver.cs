@@ -6,10 +6,13 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Journal;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Journal.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -22,54 +25,55 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task Save(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert = true)
+    public async Task Save(SaveUniqueIndexTicket ticket)
     {
         try
         {
-            await index.WriteLock.WaitAsync();
+            await ticket.Index.WriteLock.WaitAsync();
 
-            await SaveInternal(tablespace, index, key, value, insert);
+            await SaveInternal(ticket);
         }
         finally
         {
-            index.WriteLock.Release();
+            ticket.Index.WriteLock.Release();
         }
     }
 
-    public async Task NoLockingSave(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert = true)
+    public async Task NoLockingSave(SaveUniqueIndexTicket ticket)
     {
-        await SaveInternal(tablespace, index, key, value, insert);
+        await SaveInternal(ticket);
     }
 
-    public async Task Remove(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key)
+    public async Task Remove(RemoveUniqueIndexTicket ticket)
     {
         try
         {
-            await index.WriteLock.WaitAsync();
+            await ticket.Index.WriteLock.WaitAsync();
 
-            await RemoveInternal(tablespace, index, key);
+            await RemoveInternal(ticket);
         }
         finally
         {
-            index.WriteLock.Release();
+            ticket.Index.WriteLock.Release();
         }
     }
 
-    private static async Task SaveInternal(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert)
+    private static async Task SaveInternal(SaveUniqueIndexTicket ticket)
     {
-        if (insert)
-            index.Put(key, value);
+        if (ticket.Insert)
+            ticket.Index.Put(ticket.Key, ticket.Value);
 
-        await Persist(tablespace, index);
+        await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.Index);
     }
 
-    private static async Task RemoveInternal(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key)
+    private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
     {        
-        index.Remove(key);
-        await Persist(tablespace, index);
+        ticket.Index.Remove(ticket.Key);
+
+        await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.Index);
     }
 
-    private static async Task Persist(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index)
+    private static async Task Persist(BufferPoolHandler tablespace, JournalWriter journal, uint sequence, BTree<ColumnValue, BTreeTuple?> index)
     {
         foreach (BTreeNode<ColumnValue, BTreeTuple?> node in index.NodesTraverse())
         {
@@ -89,6 +93,11 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.root.PageOffset, ref pointer);
 
+        // Save node modification to journal
+        JournalWritePage schedule = new(sequence, treeBuffer);
+        await journal.Append(schedule);
+
+        // Write to buffer page
         await tablespace.WriteDataToPage(index.PageOffset, treeBuffer);
 
         //Console.WriteLine("Will save index at {0}", index.PageOffset);
@@ -130,6 +139,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                     Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
                 }
             }
+
+            schedule = new(sequence, nodeBuffer);
+            await journal.Append(schedule);
 
             await tablespace.WriteDataToPage(node.PageOffset, nodeBuffer);
 

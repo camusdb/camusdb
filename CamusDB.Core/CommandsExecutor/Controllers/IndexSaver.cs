@@ -9,6 +9,7 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -33,9 +34,9 @@ internal sealed class IndexSaver
         await indexUniqueOffsetSaver.Save(tablespace, index, key, value, insert);
     }
 
-    public async Task Save(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert = true)
+    public async Task Save(SaveUniqueIndexTicket ticket)
     {
-        await indexUniqueSaver.Save(tablespace, index, key, value, insert);
+        await indexUniqueSaver.Save(ticket);
     }
 
     public async Task Save(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
@@ -43,9 +44,9 @@ internal sealed class IndexSaver
         await indexMultiSaver.Save(tablespace, index, key, value);
     }
 
-    public async Task NoLockingSave(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key, BTreeTuple value, bool insert = true)
+    public async Task NoLockingSave(SaveUniqueIndexTicket ticket)
     {
-        await indexUniqueSaver.NoLockingSave(tablespace, index, key, value);
+        await indexUniqueSaver.NoLockingSave(ticket);
     }
 
     public async Task NoLockingSave(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
@@ -53,9 +54,9 @@ internal sealed class IndexSaver
         await indexMultiSaver.NoLockingSave(tablespace, index, key, value);
     }
 
-    public async Task Remove(BufferPoolHandler tablespace, BTree<ColumnValue, BTreeTuple?> index, ColumnValue key)
+    public async Task Remove(RemoveUniqueIndexTicket ticket)
     {
-        await indexUniqueSaver.Remove(tablespace, index, key);
+        await indexUniqueSaver.Remove(ticket);
     }
 
     public async Task Remove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
