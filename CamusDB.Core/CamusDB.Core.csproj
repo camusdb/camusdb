@@ -22,6 +22,7 @@
     <None Remove="Journal\Models\Readers\" />
     <None Remove="Journal\Attributes\" />
     <None Remove="Journal\Utils\" />
+    <None Remove="Journal\Models\Logs\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="CommandsValidator\" />
@@ -37,6 +38,7 @@
     <Folder Include="Journal\Models\Readers\" />
     <Folder Include="Journal\Attributes\" />
     <Folder Include="Journal\Utils\" />
+    <Folder Include="Journal\Models\Logs\" />
   </ItemGroup>
 
   <ItemGroup>

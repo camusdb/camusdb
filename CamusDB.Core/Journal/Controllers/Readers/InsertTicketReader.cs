@@ -10,13 +10,14 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Serializer.Models;
-using CamusDB.Core.Journal.Models.Readers;
+//using CamusDB.Core.Journal.Models.Readers;
+using CamusDB.Core.Journal.Models.Logs;
 
 namespace CamusDB.Core.Journal.Controllers.Readers;
 
 public static class InsertTicketReader
 {
-    public static async Task<InsertTicketLog> Deserialize(FileStream journal)
+    public static async Task<InsertLog> Deserialize(FileStream journal)
     {
         byte[] buffer = new byte[
             SerializatorTypeSizes.TypeInteger16   // number fields (2 bytes)
@@ -65,6 +66,6 @@ public static class InsertTicketReader
         //throw new Exception(length.ToString());
         //throw new Exception(numberFields.ToString());
 
-        return new InsertTicketLog(tableName, new());
+        return new InsertLog(tableName, new());
     }
 }

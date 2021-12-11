@@ -59,7 +59,7 @@ public static class InsertTicketWriter
         int pointer = 0;
 
         Serializator.WriteUInt32(journal, sequence, ref pointer);
-        Serializator.WriteInt16(journal, (short)JournalLogTypes.InsertTicket, ref pointer);
+        Serializator.WriteInt16(journal, (short)JournalLogTypes.Insert, ref pointer);
 
         // Number fields
         Serializator.WriteInt16(journal, values.Count, ref pointer);

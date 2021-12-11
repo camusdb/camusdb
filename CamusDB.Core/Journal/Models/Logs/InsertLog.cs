@@ -6,14 +6,17 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Serializer;
+using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Journal.Models;
+using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.Journal.Attributes;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-namespace CamusDB.Core.Journal.Models.Writers;
+namespace CamusDB.Core.Journal.Models.Logs;
 
-[JournalSerializable]
-public sealed class JournalInsert
+[JournalSerializable(JournalLogTypes.Insert)]
+public sealed class InsertLog
 {
     [JournalField(0)]
     public string TableName { get; }
@@ -21,9 +24,10 @@ public sealed class JournalInsert
     [JournalField(1)]
     public Dictionary<string, ColumnValue> Values { get; }
 
-    public JournalInsert(string name, Dictionary<string, ColumnValue> values)
+    public InsertLog(string name, Dictionary<string, ColumnValue> values)
     {
         TableName = name;
         Values = values;
     }
 }
+

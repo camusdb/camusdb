@@ -13,6 +13,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Journal.Models.Writers;
 using CamusDB.Core.Journal.Controllers.Writers;
+using CamusDB.Core.Journal.Models.Logs;
 
 namespace CamusDB.Core.Journal;
 
@@ -77,7 +78,7 @@ public sealed class JournalWriter
         return Interlocked.Increment(ref logSequenceNumber);
     }
 
-    public async Task<uint> Append(JournalInsert insertSchedule)
+    public async Task<uint> Append(InsertLog insertSchedule)
     {
         Console.WriteLine("JournalInsert ?");
 
@@ -86,7 +87,9 @@ public sealed class JournalWriter
 
         uint sequence = GetNextSequence();        
 
-        byte[] payload = InsertTicketWriter.Generate(sequence, insertSchedule.TableName, insertSchedule.Values);
+        //byte[] payload = InsertTicketWriter.Generate(sequence, insertSchedule.TableName, insertSchedule.Values);
+
+        byte[] payload = InsertLogSerializator.Serialize(sequence, insertSchedule);
 
         await TryWrite(payload);
 

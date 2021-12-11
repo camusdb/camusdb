@@ -14,7 +14,7 @@ namespace CamusDB.Generators.Journal
             switch (type)
             {
                 case "String":
-                    sb.AppendLine("\t\t\t\tlength += keyValuePair.Key.Length;");
+                    sb.AppendLine("\t\t\t\tlength += SerializatorTypeSizes.TypeInteger16 + keyValuePair.Key.Length;");
                     break;
 
                 case "Int32":
@@ -33,7 +33,7 @@ namespace CamusDB.Generators.Journal
             switch (typeDef.fullName)
             {
                 case "System.String":
-                    sb.AppendLine("\t\t\t\tlength += keyValuePair.Value.Length;");
+                    sb.AppendLine("\t\t\t\tlength += SerializatorTypeSizes.TypeInteger16 + keyValuePair.Value.Length;");
                     break;
 
                 case "System.Int32":
@@ -56,7 +56,7 @@ namespace CamusDB.Generators.Journal
 
             string dict = JournalHelper.Uncamelize(symbol.Name);
 
-            sb.AppendLine("\t\t\tlength += " + dict + ".Count;\n");
+            sb.AppendLine("\t\t\tlength += SerializatorTypeSizes.TypeInteger16;\n");
 
             sb.AppendLine("\t\t\tforeach (KeyValuePair<" + typeOne.fullName + "," + typeTwo.fullName + "> keyValuePair in " + dict + ")");
             sb.AppendLine("\t\t\t{");

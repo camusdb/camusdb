@@ -10,7 +10,7 @@ namespace CamusDB.Core.Journal.Models;
 
 public enum JournalLogTypes
 {
-    InsertTicket = 0,
+    Insert = 0,
     InsertSlots = 1,
     WritePage = 2,
     UpdateUniqueIndex = 3,

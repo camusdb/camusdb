@@ -91,8 +91,8 @@ public class TestJournal
 
         await foreach (JournalLog journalLog in journalReader.ReadNextLog())
         {
-            Assert.AreEqual(JournalLogTypes.InsertTicket, journalLog.Type);
-            Assert.IsInstanceOf<InsertTicketLog>(journalLog.InsertTicketLog);
+            Assert.AreEqual(JournalLogTypes.Insert, journalLog.Type);
+            Assert.IsInstanceOf<InsertLog>(journalLog.InsertTicketLog);
             total++;
         }
 

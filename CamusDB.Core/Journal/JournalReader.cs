@@ -10,7 +10,7 @@ using System;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Journal.Controllers;
-using CamusDB.Core.Journal.Models.Readers;
+using CamusDB.Core.Journal.Models.Logs;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Journal.Controllers.Readers;
@@ -75,10 +75,10 @@ public sealed class JournalReader : IDisposable
 
         switch (type)
         {
-            case (short)JournalLogTypes.InsertTicket:
+            case (short)JournalLogTypes.Insert:
                 yield return new JournalLog(
-                    JournalLogTypes.InsertTicket,
-                    await InsertTicketReader.Deserialize(journal)
+                    JournalLogTypes.Insert,
+                    await InsertLogSerializator.Deserialize(journal)
                 );
                 break;
 

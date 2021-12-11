@@ -6,7 +6,7 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Journal.Models.Readers;
+using CamusDB.Core.Journal.Models.Logs;
 
 namespace CamusDB.Core.Journal.Models;
 
@@ -14,9 +14,9 @@ public class JournalLog
 {
     public JournalLogTypes Type { get; }
 
-    public InsertTicketLog InsertTicketLog { get; }
+    public InsertLog InsertTicketLog { get; }
 
-    public JournalLog(JournalLogTypes type, InsertTicketLog insertTicketLog)
+    public JournalLog(JournalLogTypes type, InsertLog insertTicketLog)
     {
         Type = type;
         InsertTicketLog = insertTicketLog;

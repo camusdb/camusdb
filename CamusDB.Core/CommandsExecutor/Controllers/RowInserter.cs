@@ -9,8 +9,9 @@
 using System.Diagnostics;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
-using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Journal.Models;
+using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.Journal.Models.Writers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -186,7 +187,7 @@ internal sealed class RowInserter
         timer.Start();
 
         // Schedule insert in the journal
-        JournalInsert schedule = new(ticket.TableName, ticket.Values);
+        InsertLog schedule = new(ticket.TableName, ticket.Values);
         uint sequence = await database.JournalWriter.Append(schedule);
 
         BufferPoolHandler tablespace = database.TableSpace;
