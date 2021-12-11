@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB.Core", "CamusDB.Cor
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB.Tests", "CamusDB.Tests\CamusDB.Tests.csproj", "{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB.Generators", "CamusDB.Generators\CamusDB.Generators.csproj", "{CA4DE866-1B2A-4BC6-A0EB-5B2CFC3304DE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -27,6 +29,10 @@ Global
 		{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CA4DE866-1B2A-4BC6-A0EB-5B2CFC3304DE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CA4DE866-1B2A-4BC6-A0EB-5B2CFC3304DE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CA4DE866-1B2A-4BC6-A0EB-5B2CFC3304DE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CA4DE866-1B2A-4BC6-A0EB-5B2CFC3304DE}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -29,7 +29,7 @@ public static class InsertSlotsWriter
 
         int pointer = 0;
         Serializator.WriteUInt32(journal, sequence, ref pointer);
-        Serializator.WriteInt16(journal, JournalLogTypes.InsertSlots, ref pointer);
+        Serializator.WriteInt16(journal, (short)JournalLogTypes.InsertSlots, ref pointer);
         Serializator.WriteUInt32(journal, relatedSequence, ref pointer);
         Serializator.WriteInt32(journal, rowTuple.SlotOne, ref pointer);
         Serializator.WriteInt32(journal, rowTuple.SlotTwo, ref pointer);

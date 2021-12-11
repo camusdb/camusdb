@@ -17,13 +17,13 @@ namespace CamusDB.Core.Journal.Controllers.Writers;
 
 public static class InsertTicketWriter
 {
-    private static int GetLogLength(InsertTicket insertTicket)
+    private static int GetLogLength(string tableName, Dictionary<string, ColumnValue> values)
     {
-        int length = insertTicket.TableName.Length;
+        int length = SerializatorTypeSizes.TypeInteger16 + tableName.Length;
 
-        foreach (KeyValuePair<string, ColumnValue> columnValue in insertTicket.Values)
+        foreach (KeyValuePair<string, ColumnValue> columnValue in values)
         {
-            length += columnValue.Key.Length;
+            length += SerializatorTypeSizes.TypeInteger16 + columnValue.Key.Length;
 
             switch (columnValue.Value.Type)
             {
@@ -45,26 +45,32 @@ public static class InsertTicketWriter
         return length;
     }
 
-    public static byte[] Generate(uint sequence, InsertTicket insertTicket)
+    public static byte[] Generate(uint sequence, string tableName, Dictionary<string, ColumnValue> values)
     {
-        int length = GetLogLength(insertTicket);
+        int length = GetLogLength(tableName, values);
 
         byte[] journal = new byte[
             SerializatorTypeSizes.TypeInteger32 + // LSN (4 bytes)
-            SerializatorTypeSizes.TypeInteger16 + // journal type (2 bytes)
-            SerializatorTypeSizes.TypeInteger32 + // length(4 bytes)
+            SerializatorTypeSizes.TypeInteger16 + // journal type (2 bytes)            
             SerializatorTypeSizes.TypeInteger16 + // number fields (2 bytes)
             length // payload
         ];
 
         int pointer = 0;
-        Serializator.WriteUInt32(journal, sequence, ref pointer);
-        Serializator.WriteInt16(journal, JournalLogTypes.InsertTicket, ref pointer);
-        Serializator.WriteInt32(journal, length, ref pointer);
-        Serializator.WriteInt16(journal, insertTicket.Values.Count, ref pointer);
 
-        foreach (KeyValuePair<string, ColumnValue> columnValue in insertTicket.Values)
+        Serializator.WriteUInt32(journal, sequence, ref pointer);
+        Serializator.WriteInt16(journal, (short)JournalLogTypes.InsertTicket, ref pointer);
+
+        // Number fields
+        Serializator.WriteInt16(journal, values.Count, ref pointer);
+
+        // Table name
+        Serializator.WriteInt16(journal, tableName.Length, ref pointer);
+        Serializator.WriteString(journal, tableName, ref pointer);
+
+        foreach (KeyValuePair<string, ColumnValue> columnValue in values)
         {
+            Serializator.WriteInt16(journal, columnValue.Key.Length, ref pointer);
             Serializator.WriteString(journal, columnValue.Key, ref pointer);
 
             switch (columnValue.Value.Type)

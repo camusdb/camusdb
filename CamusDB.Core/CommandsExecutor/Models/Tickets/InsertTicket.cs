@@ -11,15 +11,15 @@ namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 public sealed class InsertTicket
 {
     public string DatabaseName { get; }
-
-    public string TableName { get; }    
+    
+    public string TableName { get; }
 
     public Dictionary<string, ColumnValue> Values { get; }
 
     public InsertTicket(string database, string name, Dictionary<string, ColumnValue> values)
     {
         DatabaseName = database;
-        TableName = name;        
+        TableName = name;
         Values = values;
     }
 }

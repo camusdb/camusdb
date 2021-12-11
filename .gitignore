@@ -4,5 +4,7 @@ CamusDB.Core/bin
 CamusDb.Core/obj
 CamusDB.Tests/bin
 CamusDb.Tests/obj
+CamusDB.Generators/bin
+CamusDB.Generators/obj
 .vs/
 bench/node_modules/

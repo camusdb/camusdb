@@ -2,6 +2,8 @@
 
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
+    <Version>0.1.0</Version>
+    <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
@@ -17,6 +19,9 @@
     <None Remove="Journal\Controllers\Writers\" />
     <None Remove="Journal\Controllers\Reader\" />
     <None Remove="Journal\Models\Writers\" />
+    <None Remove="Journal\Models\Readers\" />
+    <None Remove="Journal\Attributes\" />
+    <None Remove="Journal\Utils\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="CommandsValidator\" />
@@ -29,5 +34,19 @@
     <Folder Include="Journal\Controllers\Writers\" />
     <Folder Include="Journal\Controllers\Readers\" />
     <Folder Include="Journal\Models\Writers\" />
+    <Folder Include="Journal\Models\Readers\" />
+    <Folder Include="Journal\Attributes\" />
+    <Folder Include="Journal\Utils\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../CamusDB.Generators/CamusDB.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Net.Compilers.Toolset" Version="4.0.1">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
 </Project>

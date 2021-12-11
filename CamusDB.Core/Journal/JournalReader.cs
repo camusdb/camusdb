@@ -10,6 +10,7 @@ using System;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Journal.Controllers;
+using CamusDB.Core.Journal.Models.Readers;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Journal.Controllers.Readers;
@@ -19,7 +20,7 @@ namespace CamusDB.Core.Journal;
 
 public sealed class JournalReader : IDisposable
 {
-    private readonly FileStream journal;
+    private readonly FileStream journal;    
 
     public JournalReader(string path)
     {
@@ -39,24 +40,27 @@ public sealed class JournalReader : IDisposable
             return;
         }
 
-        journal.Seek(0, SeekOrigin.Begin);
-
-        await ReadNextLog();
+        await foreach (JournalLog journalLog in ReadNextLog())
+        {
+            Console.WriteLine(journalLog.Type);
+        }
     }
 
-    private async Task ReadNextLog()
+    public async IAsyncEnumerable<JournalLog> ReadNextLog()
     {
-        byte[] header = new byte[8];
+        //journal.Seek(0, SeekOrigin.Begin);
 
-        int readBytes = await journal.ReadAsync(header.AsMemory(0, 8));
+        byte[] header = new byte[6];
+
+        int readBytes = await journal.ReadAsync(header, 0, 6);
 
         if (readBytes == 0)        
-            return;
+            yield break;        
 
-        if (readBytes > 0)
+        if (readBytes < 6)
         {
             Console.WriteLine("Journal is incomplete or corrupt");
-            return;
+            yield break;
         }
 
         int pointer = 0;
@@ -64,20 +68,32 @@ public sealed class JournalReader : IDisposable
         uint sequence = Serializator.ReadUInt32(header, ref pointer);
         short type = Serializator.ReadInt16(header, ref pointer);
 
-        switch (type)
-        {
-            case JournalLogTypes.InsertSlots:
-                InsertTicketReader.Deserialize(sequence, journal);
-                break;
-        }
-
+        Console.WriteLine(pointer);
         Console.WriteLine(sequence);
         Console.WriteLine(type);
+        Console.WriteLine(journal.Position);
+
+        switch (type)
+        {
+            case (short)JournalLogTypes.InsertTicket:
+                yield return new JournalLog(
+                    JournalLogTypes.InsertTicket,
+                    await InsertTicketReader.Deserialize(journal)
+                );
+                break;
+
+            default:
+                Console.WriteLine("Unsupported type" + type);
+                break;
+        }        
     }
 
     public void Dispose()
     {
-        if (journal != null)        
+        if (journal != null)
+        {
+            journal.Close();
             journal.Dispose();
+        }
     }
 }

@@ -26,7 +26,7 @@ public static class UpdateUniqueIndexCheckpointWriter
 
         int pointer = 0;
         Serializator.WriteUInt32(journal, sequence, ref pointer);
-        Serializator.WriteInt16(journal, JournalLogTypes.UpdateUniqueIndexCheckpoint, ref pointer);
+        Serializator.WriteInt16(journal, (short)JournalLogTypes.UpdateUniqueIndexCheckpoint, ref pointer);
         Serializator.WriteUInt32(journal, relatedSequence, ref pointer);
         Serializator.WriteString(journal, index.Column, ref pointer);
 

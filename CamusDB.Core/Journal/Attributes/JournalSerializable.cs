@@ -6,9 +6,10 @@
  * file that was distributed with this source code.
  */
 
-namespace CamusDB.Core.CommandsExecutor.Models;
+namespace CamusDB.Core.Journal.Attributes;
 
-public sealed class TableHeader
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class JournalSerializable : Attribute
 {
-    public int LastOffset { get; set; }
+    
 }

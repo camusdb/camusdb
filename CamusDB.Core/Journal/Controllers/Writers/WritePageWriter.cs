@@ -25,7 +25,7 @@ public class WritePageWriter
 
         int pointer = 0;
         Serializator.WriteUInt32(journal, sequence, ref pointer);
-        Serializator.WriteInt16(journal, JournalLogTypes.InsertSlots, ref pointer);
+        Serializator.WriteInt16(journal, (short)JournalLogTypes.InsertSlots, ref pointer);
         Serializator.WriteUInt32(journal, relatedSequence, ref pointer);
 
         Buffer.BlockCopy(data, 0, journal, pointer, data.Length);

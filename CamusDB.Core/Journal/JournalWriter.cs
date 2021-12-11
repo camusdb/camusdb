@@ -79,14 +79,14 @@ public sealed class JournalWriter
 
     public async Task<uint> Append(JournalInsert insertSchedule)
     {
+        Console.WriteLine("JournalInsert ?");
+
         if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
-        uint sequence = GetNextSequence();
+        uint sequence = GetNextSequence();        
 
-        InsertTicket insertTicket = insertSchedule.InsertTicket;
-
-        byte[] payload = InsertTicketWriter.Generate(sequence, insertTicket);
+        byte[] payload = InsertTicketWriter.Generate(sequence, insertSchedule.TableName, insertSchedule.Values);
 
         await TryWrite(payload);
 
@@ -95,10 +95,14 @@ public sealed class JournalWriter
 
     public async Task<uint> Append(JournalInsertSlots insertSchedule)
     {
+        Console.WriteLine("JournalInsertSlots");
+
         if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
         uint sequence = GetNextSequence();
+
+        //X.XX();
 
         byte[] payload = InsertSlotsWriter.Serialize(sequence, insertSchedule.Sequence, insertSchedule.RowTuple);
 
@@ -109,6 +113,8 @@ public sealed class JournalWriter
 
     public async Task<uint> Append(JournalWritePage insertSchedule)
     {
+        Console.WriteLine("JournalWritePage");
+
         if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
@@ -123,6 +129,8 @@ public sealed class JournalWriter
 
     public async Task<uint> Append(JournalUpdateUniqueIndex indexSchedule)
     {
+        Console.WriteLine("JournalUpdateUniqueIndex");
+
         if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
@@ -137,6 +145,8 @@ public sealed class JournalWriter
 
     public async Task<uint> Append(JournalUpdateUniqueCheckpoint indexCheckpoint)
     {
+        Console.WriteLine("JournalUpdateUniqueCheckpoint");
+
         if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
@@ -151,6 +161,8 @@ public sealed class JournalWriter
 
     public async Task<uint> Append(JournalInsertCheckpoint insertCheckpoint)
     {
+        Console.WriteLine("JournalInsertCheckpoint");
+
         if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
@@ -161,5 +173,14 @@ public sealed class JournalWriter
         await TryWrite(payload);
 
         return sequence;
+    }
+
+    public void Close()
+    {
+        if (journal != null)
+        {
+            journal.Flush();            
+            journal.Dispose();
+        }
     }
 }

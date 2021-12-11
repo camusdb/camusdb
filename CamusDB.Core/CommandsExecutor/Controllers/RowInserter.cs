@@ -186,7 +186,7 @@ internal sealed class RowInserter
         timer.Start();
 
         // Schedule insert in the journal
-        JournalInsert schedule = new(ticket);
+        JournalInsert schedule = new(ticket.TableName, ticket.Values);
         uint sequence = await database.JournalWriter.Append(schedule);
 
         BufferPoolHandler tablespace = database.TableSpace;

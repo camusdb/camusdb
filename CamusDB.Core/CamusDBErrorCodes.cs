@@ -29,4 +29,6 @@ public static class CamusDBErrorCodes
     public const string UnknownKey = "CADB0205";
 
     public const string DuplicatePrimaryKeyValue = "CADB0300";
+
+    public const string InvalidJournalData = "CADB0700";
 }

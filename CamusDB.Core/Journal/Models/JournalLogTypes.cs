@@ -8,12 +8,12 @@
 
 namespace CamusDB.Core.Journal.Models;
 
-public static class JournalLogTypes
+public enum JournalLogTypes
 {
-    public const short InsertTicket = 0;
-    public const short InsertSlots = 1;
-    public const short WritePage = 2;
-    public const short UpdateUniqueIndex = 3;
-    public const short UpdateUniqueIndexCheckpoint = 4;
-    public const short InsertTicketCheckpoint = 5;
+    InsertTicket = 0,
+    InsertSlots = 1,
+    WritePage = 2,
+    UpdateUniqueIndex = 3,
+    UpdateUniqueIndexCheckpoint = 4,
+    InsertTicketCheckpoint = 5
 }
