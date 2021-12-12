@@ -12,10 +12,10 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Journal.Models.Writers;
 using System.Collections.Generic;
-using CamusDB.Core.Journal.Controllers.Readers;
 using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.Journal;
 using CamusDB.Core.Journal.Models;
+using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Tests.Journal;
 
@@ -90,13 +90,41 @@ public class TestJournal
         await foreach (JournalLog journalLog in journalReader.ReadNextLog())
         {
             Assert.AreEqual(JournalLogTypes.Insert, journalLog.Type);
-            Assert.IsInstanceOf<InsertLog>(journalLog.InsertTicketLog);
+            Assert.AreEqual(sequence, journalLog.Sequence);
+            Assert.IsInstanceOf<InsertLog>(journalLog.InsertLog);
+            Assert.AreEqual(journalLog.InsertLog.TableName, ticket.TableName);
+            total++;
+        }
+
+        Assert.AreEqual(1, total);        
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertSlots()
+    {
+        CommandExecutor executor = await SetupDatabase();
+
+        DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
+        
+        InsertSlotsLog schedule = new(100, new BTreeTuple(50, 25));
+        uint sequence = await database.JournalWriter.Append(schedule);
+
+        database.JournalWriter.Close();
+
+        JournalReader journalReader = GetJournalReader(database);
+
+        int total = 0;
+
+        await foreach (JournalLog journalLog in journalReader.ReadNextLog())
+        {
+            Assert.AreEqual(JournalLogTypes.InsertSlots, journalLog.Type);
+            Assert.AreEqual(sequence, journalLog.Sequence);
+            //Assert.IsInstanceOf<InsertLog>(journalLog.InsertTicketLog);
+            //Assert.AreEqual(journalLog.InsertTicketLog.TableName, ticket.TableName);
             total++;
         }
 
         Assert.AreEqual(1, total);
-
-        //InsertTicketLog ticketLog = await journalReader.ReadInsertTicketLog();
-        //Assert.AreEqual(ticket.TableName, ticketLog.TableName);
     }
 }

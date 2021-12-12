@@ -55,7 +55,7 @@ namespace CamusDB.Generators.Journal
             sb.AppendLine("\t\t}\n");
         }
 
-        private void GenerateSerialize(StringBuilder sb, ITypeSymbol symbol, List<string> callParameters)
+        private void GenerateSerialize(StringBuilder sb, ITypeSymbol symbol, string logType, List<string> callParameters)
         {
             sb.AppendLine($"\t\tpublic static byte[] Serialize(uint sequence, {symbol.Name} data)");
             sb.AppendLine("\t\t{");
@@ -73,7 +73,7 @@ namespace CamusDB.Generators.Journal
             sb.AppendLine("\t\t\tint pointer = 0;\n");
 
             sb.AppendLine("\t\t\tSerializator.WriteUInt32(journal, sequence, ref pointer);");
-            sb.AppendLine("\t\t\tSerializator.WriteInt16(journal, (short)JournalLogTypes.Insert, ref pointer);\n");
+            sb.AppendLine($"\t\t\tSerializator.WriteInt16(journal, {logType}, ref pointer);\n");
 
             sb.Append("\t\t\tWritePayload(journal, ");
             sb.Append(string.Join(", ", callParameters));
@@ -125,6 +125,12 @@ namespace CamusDB.Generators.Journal
                 sb.AppendLine("\tpublic sealed class " + symbol.Name + "Serializator");
                 sb.AppendLine("\t{");
 
+                string logType = "-1";
+
+                foreach (var attribute in symbol.GetAttributes())
+                    foreach (var arg in attribute.ConstructorArguments)
+                        logType = arg.Value.ToString();
+
                 List<string> parameters = new();
 
                 foreach (var property in JournalHelper.GetProperties(symbol))
@@ -142,7 +148,7 @@ namespace CamusDB.Generators.Journal
 
                 GeneratePayloadLength(symbol, sb, parameters);
                 GeneratePayload(symbol, sb, parameters);
-                GenerateSerialize(sb, symbol, dataCallParameters);
+                GenerateSerialize(sb, symbol, logType, dataCallParameters);
                 GenerateDeserialize(sb, symbol, callParameters);
 
                 sb.AppendLine("\t}");

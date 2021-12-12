@@ -131,6 +131,23 @@ public static class SerializatorHelper
         return Serializator.ReadInt32(buffer, ref pointer);
     }
 
+    public static async Task<uint> ReadUInt32(FileStream journal)
+    {
+        byte[] buffer = new byte[
+            SerializatorTypeSizes.TypeUnsignedInteger32   // (4 bytes)
+        ];
+
+        int readBytes = await journal.ReadAsync(buffer, 0, SerializatorTypeSizes.TypeUnsignedInteger32);
+        if (readBytes != SerializatorTypeSizes.TypeUnsignedInteger32)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidJournalData,
+                "Invalid journal data when reading logs"
+            );
+
+        int pointer = 0;
+        return Serializator.ReadUInt32(buffer, ref pointer);
+    }
+
     public static async Task<string> ReadString(FileStream journal, int size)
     {
         byte[] buffer = new byte[size];

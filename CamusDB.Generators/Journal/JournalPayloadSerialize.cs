@@ -144,39 +144,32 @@ namespace CamusDB.Generators.Journal
         {
             if (!JournalHelper.IsJournalField(symbol))
                 return;
-
-            string type = symbol.Type.Name.ToString();
+            
             string varName = JournalHelper.Uncamelize(symbol.Name);
+            string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
 
-            switch (type)
+            switch (fullName)
             {
-                case "String":
+                case "System.String":
                     sb.Append($"\t\t\tSerializator.WriteInt16(journal, {varName}.Length, ref pointer);\n");
                     sb.AppendLine($"\t\t\tSerializator.WriteString(journal, {varName}, ref pointer);\n");
                     break;
 
-                /*case "Int32":
-                    //parameters.Add("int " + Uncamelize(symbol.Name));
+                case "System.UInt32":
+                    sb.AppendLine($"\t\t\tSerializator.WriteUInt32(journal, {varName}, ref pointer);\n");                    
                     break;
 
-                case "Boolean":
-                    //parameters.Add("bool " + Uncamelize(symbol.Name));
+                case "CamusDB.Core.Util.Trees.BTreeTuple":
+                    sb.AppendLine($"\t\t\tSerializator.WriteInt32(journal, {varName}.SlotOne, ref pointer);\n");
+                    sb.AppendLine($"\t\t\tSerializator.WriteInt32(journal, {varName}.SlotTwo, ref pointer);\n");
                     break;
 
-                case "List":
-                    {
-                        (ITypeSymbol type, string fullName, string name) typeOne = GetGenericArgumentType(symbol, 0);
-                        parameters.Add("List<" + typeOne.fullName + "> " + Uncamelize(symbol.Name));
-                    }
-                    break;*/
-
-                case "Dictionary":
+                case "System.Collections.Generic.Dictionary":
                     WriteDictionary(sb, symbol);
                     break;
 
-                default:
-                    string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
-                    throw new Exception("Unsupported GetParameterLength key type " + fullName);
+                default:                    
+                    throw new Exception("Unsupported WriteParameter type " + fullName);
             }
         }
 
@@ -184,24 +177,34 @@ namespace CamusDB.Generators.Journal
         {
             if (!JournalHelper.IsJournalField(symbol))
                 return;
-
-            string type = symbol.Type.Name.ToString();
+            
             string varName = JournalHelper.Uncamelize(symbol.Name);
+            string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
 
-            switch (type)
+            switch (fullName)
             {
-                case "String":
+                case "System.String":
                     sb.AppendLine($"\t\t\tshort {varName}Length = await SerializatorHelper.ReadInt16(journal);");
                     sb.AppendLine($"\t\t\tstring {varName} = await SerializatorHelper.ReadString(journal, {varName}Length);\n");
                     break;
 
-                case "Dictionary":
+                case "System.UInt32":
+                    sb.AppendLine($"\t\t\tuint {varName} = await SerializatorHelper.ReadUInt32(journal);\n");
+                    break;
+
+                case "CamusDB.Core.Util.Trees.BTreeTuple":
+                    sb.AppendLine($"\t\t\tCamusDB.Core.Util.Trees.BTreeTuple {varName} = new(\n");
+                    sb.AppendLine($"\t\t\t\tawait SerializatorHelper.ReadInt32(journal),\n");
+                    sb.AppendLine($"\t\t\t\tawait SerializatorHelper.ReadInt32(journal)\n");
+                    sb.AppendLine(");");
+                    break;
+
+                case "System.Collections.Generic.Dictionary":
                     ReadDictionary(sb, symbol);
                     break;
 
                 default:
-                    string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
-                    throw new Exception("Unsupported GetParameterLength key type " + fullName);
+                    throw new Exception("Unsupported ReadParameter type " + fullName);
             }
         }
     }

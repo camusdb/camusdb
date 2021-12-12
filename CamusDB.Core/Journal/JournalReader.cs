@@ -13,7 +13,6 @@ using CamusDB.Core.Journal.Controllers;
 using CamusDB.Core.Journal.Models.Logs;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.Journal.Controllers.Readers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.Journal;
@@ -68,22 +67,31 @@ public sealed class JournalReader : IDisposable
         uint sequence = Serializator.ReadUInt32(header, ref pointer);
         short type = Serializator.ReadInt16(header, ref pointer);
 
-        Console.WriteLine(pointer);
+        /*Console.WriteLine(pointer);
         Console.WriteLine(sequence);
         Console.WriteLine(type);
-        Console.WriteLine(journal.Position);
+        Console.WriteLine(journal.Position);*/
 
         switch (type)
         {
             case (short)JournalLogTypes.Insert:
                 yield return new JournalLog(
+                    sequence,
                     JournalLogTypes.Insert,
                     await InsertLogSerializator.Deserialize(journal)
                 );
                 break;
 
+            case (short)JournalLogTypes.InsertSlots:
+                yield return new JournalLog(
+                    sequence,
+                    JournalLogTypes.InsertSlots,
+                    await InsertSlotsLogSerializator.Deserialize(journal)
+                );
+                break;
+
             default:
-                Console.WriteLine("Unsupported type" + type);
+                throw new Exception("Unsupported type" + type);
                 break;
         }        
     }

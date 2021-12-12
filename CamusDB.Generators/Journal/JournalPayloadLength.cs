@@ -73,38 +73,30 @@ namespace CamusDB.Generators.Journal
                 return;
 
             string type = symbol.Type.Name.ToString();
+            string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
 
-            switch (type)
+            switch (fullName)
             {
-                case "String":
-
+                case "System.String":
                     sb.Append("\t\t\tlength += SerializatorTypeSizes.TypeInteger16 + ");
                     sb.Append(JournalHelper.Uncamelize(symbol.Name));
                     sb.AppendLine(".Length;\n");
                     break;
 
-                /*case "Int32":
-                    //parameters.Add("int " + Uncamelize(symbol.Name));
+                case "System.UInt32":
+                    sb.AppendLine("\t\t\tlength += SerializatorTypeSizes.TypeUnsignedInteger32;");
                     break;
 
-                case "Boolean":
-                    //parameters.Add("bool " + Uncamelize(symbol.Name));
+                case "CamusDB.Core.Util.Trees.BTreeTuple":
+                    sb.AppendLine("\t\t\tlength += SerializatorTypeSizes.TypeInteger32 + SerializatorTypeSizes.TypeInteger32;");                    
                     break;
 
-                case "List":
-                    {
-                        (ITypeSymbol type, string fullName, string name) typeOne = GetGenericArgumentType(symbol, 0);
-                        parameters.Add("List<" + typeOne.fullName + "> " + Uncamelize(symbol.Name));
-                    }
-                    break;*/
-
-                case "Dictionary":
+                case "System.Collections.Generic.Dictionary":
                     GetDictionaryLength(sb, symbol);
                     break;
 
-                default:
-                    string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
-                    throw new Exception("Unsupported GetParameterLength key type " + fullName);
+                default:                    
+                    throw new Exception("Unsupported GetParameterLength type: " + fullName);
             }
         }
     }

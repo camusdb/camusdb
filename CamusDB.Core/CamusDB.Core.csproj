@@ -32,7 +32,6 @@
     <Folder Include="Journal\Models\" />
     <Folder Include="Journal\Controllers\" />
     <Folder Include="Journal\Controllers\Writers\" />
-    <Folder Include="Journal\Controllers\Readers\" />
     <Folder Include="Journal\Models\Writers\" />
     <Folder Include="Journal\Attributes\" />
     <Folder Include="Journal\Utils\" />

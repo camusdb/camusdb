@@ -12,13 +12,25 @@ namespace CamusDB.Core.Journal.Models;
 
 public class JournalLog
 {
+    public uint Sequence { get; }
+
     public JournalLogTypes Type { get; }
 
-    public InsertLog InsertTicketLog { get; }
+    public InsertLog? InsertLog { get; }
 
-    public JournalLog(JournalLogTypes type, InsertLog insertTicketLog)
+    public InsertSlotsLog? InsertSlotsLog { get; }
+
+    public JournalLog(uint sequence, JournalLogTypes type, InsertLog insertTicketLog)
     {
+        Sequence = sequence;
         Type = type;
-        InsertTicketLog = insertTicketLog;
+        InsertLog = insertTicketLog;
     }
+
+    public JournalLog(uint sequence, JournalLogTypes type, InsertSlotsLog insertTicketLog)
+    {
+        Sequence = sequence;
+        Type = type;
+        InsertSlotsLog = insertTicketLog;
+    }    
 }

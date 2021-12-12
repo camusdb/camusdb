@@ -20,30 +20,30 @@ namespace CamusDB.Generators.Journal
             if (!JournalHelper.IsJournalField(symbol))
                 return;
 
-            string type = symbol.Type.Name.ToString();
+            string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
 
-            switch (type)
+            switch (fullName)
             {
-                case "String":
+                case "System.String":
                     parameters.Add("string " + JournalHelper.Uncamelize(symbol.Name));
                     break;
 
-                case "Int32":
+                case "System.Int32":
                     parameters.Add("int " + JournalHelper.Uncamelize(symbol.Name));
                     break;
 
-                case "Boolean":
+                case "System.Boolean":
                     parameters.Add("bool " + JournalHelper.Uncamelize(symbol.Name));
                     break;
 
-                case "List":
+                case "System.Collections.Generic.List":
                     {
                         (ITypeSymbol type, string fullName, string name) typeOne = JournalHelper.GetGenericArgumentType(symbol, 0);
                         parameters.Add("List<" + typeOne.fullName + "> " + JournalHelper.Uncamelize(symbol.Name));
                     }
                     break;
 
-                case "Dictionary":
+                case "System.Collections.Generic.Dictionary":
                     {
                         (ITypeSymbol type, string fullName, string name) typeOne = JournalHelper.GetGenericArgumentType(symbol, 0);
                         (ITypeSymbol type, string fullName, string name) typeTwo = JournalHelper.GetGenericArgumentType(symbol, 1);
@@ -52,7 +52,7 @@ namespace CamusDB.Generators.Journal
                     break;
 
                 default:
-                    string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
+                    parameters.Add(fullName + " " + JournalHelper.Uncamelize(symbol.Name));
                     break;
             }
         }
@@ -69,7 +69,7 @@ namespace CamusDB.Generators.Journal
         {
             if (!JournalHelper.IsJournalField(symbol))
                 return;
-            
+
             parameters.Add($"data.{symbol.Name}");
         }
     }

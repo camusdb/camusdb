@@ -123,7 +123,7 @@ internal sealed class RowInserter
                     rowTuple.SlotTwo = await tablespace.GetNextFreeOffset();
 
                 // save page + rowid to journal
-                JournalInsertSlots schedule = new(sequence, rowTuple);
+                InsertSlotsLog schedule = new(sequence, rowTuple);
                 await database.JournalWriter.Append(schedule);
 
                 // save index save to journal

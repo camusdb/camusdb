@@ -85,9 +85,7 @@ public sealed class JournalWriter
         if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
-        uint sequence = GetNextSequence();        
-
-        //byte[] payload = InsertTicketWriter.Generate(sequence, insertSchedule.TableName, insertSchedule.Values);
+        uint sequence = GetNextSequence();
 
         byte[] payload = InsertLogSerializator.Serialize(sequence, insertSchedule);
 
@@ -96,18 +94,16 @@ public sealed class JournalWriter
         return sequence;
     }
 
-    public async Task<uint> Append(JournalInsertSlots insertSchedule)
+    public async Task<uint> Append(InsertSlotsLog insertSchedule)
     {
         Console.WriteLine("JournalInsertSlots");
 
         if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
-        uint sequence = GetNextSequence();
+        uint sequence = GetNextSequence();        
 
-        //X.XX();
-
-        byte[] payload = InsertSlotsWriter.Serialize(sequence, insertSchedule.Sequence, insertSchedule.RowTuple);
+        byte[] payload = InsertSlotsLogSerializator.Serialize(sequence, insertSchedule);
 
         await TryWrite(payload);
 
