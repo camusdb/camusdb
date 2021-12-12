@@ -67,17 +67,38 @@ namespace CamusDB.Generators.Journal
             sb.AppendLine("\t\t\t}\n");
         }
 
+        private static void GetArrayParameterLength(StringBuilder sb, IPropertySymbol symbol, ITypeSymbol type)
+        {
+            string fullName = type.ContainingNamespace + "." + type.Name;
+
+            sb.AppendLine("\t\t\tlength += SerializatorTypeSizes.TypeUnsignedInteger32;");
+
+            switch (fullName)
+            {
+                case "System.Byte":
+                    sb.Append("\t\t\tlength += SerializatorTypeSizes.TypeInteger8 * ");
+                    sb.Append(JournalHelper.Uncamelize(symbol.Name));
+                    sb.AppendLine(".Length;\n");
+                    break;
+
+                default:
+                    throw new Exception("Unsupported array GetParameterLength type: " + fullName);
+            }
+        }
+
         public static void GetParameterLength(StringBuilder sb, IPropertySymbol symbol)
         {
             if (!JournalHelper.IsJournalField(symbol))
+                return;            
+
+            if (symbol.Type.Kind == SymbolKind.ArrayType)
+            {
+                var element = ((IArrayTypeSymbol)symbol.Type).ElementType;
+                GetArrayParameterLength(sb, symbol, element);
                 return;
+            }
 
-            //var underlyingNonArrayType = "";
-            //if (symbol.Kind == SymbolKind.ArrayType)
-            //    underlyingNonArrayType = ((IArrayTypeSymbol)symbol).ElementType.ToString();
-
-            string type = symbol.Type.Name.ToString();
-            string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;            
+            string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
 
             switch (fullName)
             {
@@ -92,14 +113,14 @@ namespace CamusDB.Generators.Journal
                     break;
 
                 case "CamusDB.Core.Util.Trees.BTreeTuple":
-                    sb.AppendLine("\t\t\tlength += SerializatorTypeSizes.TypeInteger32 + SerializatorTypeSizes.TypeInteger32;");                    
+                    sb.AppendLine("\t\t\tlength += SerializatorTypeSizes.TypeInteger32 + SerializatorTypeSizes.TypeInteger32;");
                     break;
 
                 case "System.Collections.Generic.Dictionary":
                     GetDictionaryLength(sb, symbol);
                     break;
 
-                default:                    
+                default:
                     throw new Exception("Unsupported GetParameterLength type: " + fullName + " - " + symbol.Type.Kind);
             }
         }

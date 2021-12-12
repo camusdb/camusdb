@@ -92,7 +92,7 @@ public class TestJournal
             Assert.AreEqual(JournalLogTypes.Insert, journalLog.Type);
             Assert.AreEqual(sequence, journalLog.Sequence);
             Assert.IsInstanceOf<InsertLog>(journalLog.InsertLog);
-            Assert.AreEqual(journalLog.InsertLog.TableName, ticket.TableName);
+            Assert.AreEqual(journalLog.InsertLog!.TableName, ticket.TableName);
             total++;
         }
 

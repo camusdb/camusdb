@@ -98,8 +98,6 @@ namespace CamusDB.Generators.Journal
 
         private static void ReadDictionaryValue(StringBuilder sb, (ITypeSymbol type, string fullName, string name) typeDef)
         {
-            string type = typeDef.type.Name.ToString();
-
             switch (typeDef.fullName)
             {
                 case "System.String":
@@ -140,11 +138,36 @@ namespace CamusDB.Generators.Journal
             sb.AppendLine("\t\t\t}\n");
         }
 
+        public static void WriteArrayParameter(StringBuilder sb, IPropertySymbol symbol, ITypeSymbol type)
+        {
+            string varName = JournalHelper.Uncamelize(symbol.Name);
+            string fullName = type.ContainingNamespace + "." + type.Name;
+
+            sb.AppendLine($"\t\t\tSerializator.WriteInt32(journal, {varName}.Length, ref pointer);");
+
+            switch (fullName)
+            {
+                case "System.Byte":
+                    sb.AppendLine($"\t\t\tSerializator.WriteByteArray(journal, {varName}, ref pointer);");
+                    break;
+
+                default:
+                    throw new Exception("Unsupported array WriteParameter type: " + fullName);
+            }
+        }
+
         public static void WriteParameter(StringBuilder sb, IPropertySymbol symbol)
         {
             if (!JournalHelper.IsJournalField(symbol))
                 return;
-            
+
+            if (symbol.Type.Kind == SymbolKind.ArrayType)
+            {
+                var element = ((IArrayTypeSymbol)symbol.Type).ElementType;
+                WriteArrayParameter(sb, symbol, element);
+                return;
+            }
+
             string varName = JournalHelper.Uncamelize(symbol.Name);
             string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
 
@@ -156,7 +179,7 @@ namespace CamusDB.Generators.Journal
                     break;
 
                 case "System.UInt32":
-                    sb.AppendLine($"\t\t\tSerializator.WriteUInt32(journal, {varName}, ref pointer);\n");                    
+                    sb.AppendLine($"\t\t\tSerializator.WriteUInt32(journal, {varName}, ref pointer);\n");
                     break;
 
                 case "CamusDB.Core.Util.Trees.BTreeTuple":
@@ -168,8 +191,26 @@ namespace CamusDB.Generators.Journal
                     WriteDictionary(sb, symbol);
                     break;
 
-                default:                    
+                default:
                     throw new Exception("Unsupported WriteParameter type " + fullName);
+            }
+        }
+
+        public static void ReadArrayParameter(StringBuilder sb, IPropertySymbol symbol, ITypeSymbol type)
+        {            
+            string varName = JournalHelper.Uncamelize(symbol.Name);
+            string fullName = type.ContainingNamespace + "." + type.Name;
+            
+            sb.AppendLine($"\t\t\tint {varName}Length = await SerializatorHelper.ReadInt32(journal);");
+
+            switch (fullName)
+            {
+                case "System.Byte":
+                    sb.AppendLine($"\t\t\t{fullName}[] {varName} = await SerializatorHelper.ReadByteArray(journal, {varName}Length);");
+                    break;
+
+                default:
+                    throw new Exception("Unsupported array ReadArrayParameter type: " + fullName);
             }
         }
 
@@ -177,7 +218,14 @@ namespace CamusDB.Generators.Journal
         {
             if (!JournalHelper.IsJournalField(symbol))
                 return;
-            
+
+            if (symbol.Type.Kind == SymbolKind.ArrayType)
+            {
+                var element = ((IArrayTypeSymbol)symbol.Type).ElementType;
+                ReadArrayParameter(sb, symbol, element);
+                return;
+            }
+
             string varName = JournalHelper.Uncamelize(symbol.Name);
             string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
 

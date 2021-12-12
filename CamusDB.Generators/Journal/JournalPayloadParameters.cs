@@ -15,10 +15,23 @@ namespace CamusDB.Generators.Journal
 {
     internal static class JournalPayloadParameters
     {
+        private static void GetMethodArrayParameters(IPropertySymbol symbol, ITypeSymbol type, List<string> parameters)
+        {
+            string fullName = type.ContainingNamespace + "." + type.Name;
+            parameters.Add(fullName + "[] " + JournalHelper.Uncamelize(symbol.Name));
+        }
+
         public static void GetMethodParameters(IPropertySymbol symbol, List<string> parameters)
         {
             if (!JournalHelper.IsJournalField(symbol))
                 return;
+
+            if (symbol.Type.Kind == SymbolKind.ArrayType)
+            {
+                var element = ((IArrayTypeSymbol)symbol.Type).ElementType;
+                GetMethodArrayParameters(symbol, element, parameters);
+                return;
+            }
 
             string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
 

@@ -163,6 +163,21 @@ public static class SerializatorHelper
         return Serializator.ReadString(buffer, size, ref pointer);
     }
 
+    public static async Task<byte[]> ReadByteArray(FileStream journal, int size)
+    {
+        byte[] buffer = new byte[size];
+
+        int readBytes = await journal.ReadAsync(buffer, 0, size);
+        if (readBytes != size)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidJournalData,
+                "Invalid journal data when reading logs"
+            );
+
+        int pointer = 0;
+        return Serializator.ReadByteArray(buffer, size, ref pointer);
+    }
+
     public static async Task<bool> ReadBool(FileStream journal)
     {
         byte[] buffer = new byte[

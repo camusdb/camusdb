@@ -110,6 +110,15 @@ namespace CamusDB.Generators.Journal
                 var model = context.Compilation.GetSemanticModel(node.SyntaxTree);
                 var symbol = model.GetDeclaredSymbol(node, context.CancellationToken) as ITypeSymbol;
 
+                string logType = "";
+
+                foreach (var attribute in symbol.GetAttributes())
+                    foreach (var arg in attribute.ConstructorArguments)
+                        logType = arg.Value.ToString();
+
+                if (string.IsNullOrEmpty(logType))
+                    throw new Exception("Can't load log type in " + symbol.Name);
+
                 var sb = new StringBuilder();
 
                 sb.AppendLine("using System.Diagnostics;");
@@ -123,13 +132,7 @@ namespace CamusDB.Generators.Journal
                 sb.AppendLine("namespace " + symbol.ContainingNamespace);
                 sb.AppendLine("{");
                 sb.AppendLine("\tpublic sealed class " + symbol.Name + "Serializator");
-                sb.AppendLine("\t{");
-
-                string logType = "-1";
-
-                foreach (var attribute in symbol.GetAttributes())
-                    foreach (var arg in attribute.ConstructorArguments)
-                        logType = arg.Value.ToString();
+                sb.AppendLine("\t{");                
 
                 List<string> parameters = new();
 

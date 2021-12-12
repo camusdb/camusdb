@@ -143,6 +143,12 @@ public sealed class Serializator
         pointer += bytes.Length;
     }
 
+    public static void WriteByteArray(byte[] buffer, byte[] bytes, ref int pointer)
+    {
+        Buffer.BlockCopy(bytes, 0, buffer, pointer, bytes.Length);
+        pointer += bytes.Length;
+    }
+
     public static void WriteBool(byte[] buffer, bool value, ref int pointer)
     {
         int typedBool = 0;
@@ -173,7 +179,7 @@ public sealed class Serializator
         return number;
     }
 
-    private float ReadFloat(byte[] buffer, ref int pointer)
+    private static float ReadFloat(byte[] buffer, ref int pointer)
     {
         float number = BitConverter.ToSingle(buffer, pointer);
         pointer += 4;
@@ -206,6 +212,14 @@ public sealed class Serializator
         string str = Encoding.UTF8.GetString(bytes);
         pointer += length;
         return str;
+    }
+
+    public static byte[] ReadByteArray(byte[] buffer, int length, ref int pointer)
+    {
+        byte[] bytes = new byte[length];
+        Buffer.BlockCopy(buffer, pointer, bytes, 0, length);        
+        pointer += length;
+        return bytes;
     }
 
     public static bool ReadBool(byte[] buffer, ref int pointer)
