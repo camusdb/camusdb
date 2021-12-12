@@ -110,7 +110,7 @@ public sealed class JournalWriter
         return sequence;
     }
 
-    public async Task<uint> Append(JournalWritePage insertSchedule)
+    public async Task<uint> Append(WritePageLog insertSchedule)
     {
         Console.WriteLine("JournalWritePage");
 
@@ -158,7 +158,7 @@ public sealed class JournalWriter
         return sequence;
     }
 
-    public async Task<uint> Append(JournalInsertCheckpoint insertCheckpoint)
+    public async Task<uint> Append(InsertCheckpointLog insertCheckpoint)
     {
         Console.WriteLine("JournalInsertCheckpoint");
 

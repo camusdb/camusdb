@@ -6,15 +6,18 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Journal.Attributes;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-namespace CamusDB.Core.Journal.Models.Writers;
+namespace CamusDB.Core.Journal.Models.Logs;
 
-public class JournalInsertCheckpoint
+[JournalSerializable(JournalLogTypes.InsertCheckpoint)]
+public sealed class InsertCheckpointLog
 {
+    [JournalField(0)]
     public uint Sequence { get; }
 
-    public JournalInsertCheckpoint(uint sequence)
+    public InsertCheckpointLog(uint sequence)
     {
         Sequence = sequence;
     }

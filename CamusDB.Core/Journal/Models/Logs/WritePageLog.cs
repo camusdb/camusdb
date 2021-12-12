@@ -6,15 +6,20 @@
  * file that was distributed with this source code.
  */
 
-namespace CamusDB.Core.Journal.Models.Writers;
+using CamusDB.Core.Journal.Attributes;
 
-public sealed class JournalWritePage
+namespace CamusDB.Core.Journal.Models.Logs;
+
+[JournalSerializable(JournalLogTypes.WritePage)]
+public sealed class WritePageLog
 {
+    [JournalField(0)]
     public uint Sequence { get; }
 
+    [JournalField(1)]
     public byte[] Data { get; }
 
-    public JournalWritePage(uint sequence, byte[] data)
+    public WritePageLog(uint sequence, byte[] data)
     {
         Sequence = sequence;
         Data = data;

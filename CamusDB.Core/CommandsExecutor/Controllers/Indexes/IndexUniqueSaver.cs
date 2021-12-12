@@ -10,7 +10,7 @@ using CamusDB.Core.Journal;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Journal.Models.Writers;
+using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -94,7 +94,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         Serializator.WriteInt32(treeBuffer, index.root.PageOffset, ref pointer);
 
         // Save node modification to journal
-        JournalWritePage schedule = new(sequence, treeBuffer);
+        WritePageLog schedule = new(sequence, treeBuffer);
         await journal.Append(schedule);
 
         // Write to buffer page

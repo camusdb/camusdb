@@ -15,5 +15,5 @@ public enum JournalLogTypes
     WritePage = 2,
     UpdateUniqueIndex = 3,
     UpdateUniqueIndexCheckpoint = 4,
-    InsertTicketCheckpoint = 5
+    InsertCheckpoint = 5
 }

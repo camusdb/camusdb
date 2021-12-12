@@ -72,8 +72,12 @@ namespace CamusDB.Generators.Journal
             if (!JournalHelper.IsJournalField(symbol))
                 return;
 
+            //var underlyingNonArrayType = "";
+            //if (symbol.Kind == SymbolKind.ArrayType)
+            //    underlyingNonArrayType = ((IArrayTypeSymbol)symbol).ElementType.ToString();
+
             string type = symbol.Type.Name.ToString();
-            string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;
+            string fullName = symbol.Type.ContainingNamespace + "." + symbol.Type.Name;            
 
             switch (fullName)
             {
@@ -96,7 +100,7 @@ namespace CamusDB.Generators.Journal
                     break;
 
                 default:                    
-                    throw new Exception("Unsupported GetParameterLength type: " + fullName);
+                    throw new Exception("Unsupported GetParameterLength type: " + fullName + " - " + symbol.Type.Kind);
             }
         }
     }

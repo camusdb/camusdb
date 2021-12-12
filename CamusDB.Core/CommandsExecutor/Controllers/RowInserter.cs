@@ -199,7 +199,7 @@ internal sealed class RowInserter
         // Insert data to the page offset
         await tablespace.WriteDataToPage(rowTuple.SlotTwo, rowBuffer);
 
-        JournalWritePage writeSchedule = new(sequence, rowBuffer);
+        WritePageLog writeSchedule = new(sequence, rowBuffer);
         await database.JournalWriter.Append(writeSchedule);
 
         // Main table index stores rowid pointing to page offeset
@@ -207,7 +207,7 @@ internal sealed class RowInserter
 
         await UpdateMultiKeys(database, table, ticket, rowTuple);
 
-        JournalInsertCheckpoint insertCheckpoint = new(sequence);
+        InsertCheckpointLog insertCheckpoint = new(sequence);
         await database.JournalWriter.Append(insertCheckpoint);
 
         timer.Stop();
