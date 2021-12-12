@@ -20,15 +20,15 @@ public static class SerializatorHelper
         return value.Type switch
         {
             ColumnType.Id or ColumnType.Integer => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32,
-            ColumnType.String => SerializatorTypeSizes.TypeInteger16 + value.Value.Length,
-            ColumnType.Bool => SerializatorTypeSizes.TypeBool,
+            ColumnType.String => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + value.Value.Length,
+            ColumnType.Bool => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeBool,
             _ => throw new Exception("Unsupported column value type"),
         };
     }
 
     public static void WriteColumnValue(byte[] journal, ColumnValue value, ref int pointer)
     {
-        Serializator.WriteInt8(journal, (int) value.Type, ref pointer);
+        Serializator.WriteInt8(journal, (int)value.Type, ref pointer);
 
         switch (value.Type)
         {
@@ -37,7 +37,7 @@ public static class SerializatorHelper
                 Serializator.WriteInt32(journal, int.Parse(value.Value), ref pointer);
                 break;
 
-            case ColumnType.String:
+            case ColumnType.String:                
                 Serializator.WriteInt32(journal, value.Value.Length, ref pointer);
                 Serializator.WriteString(journal, value.Value, ref pointer);
                 break;
@@ -53,8 +53,8 @@ public static class SerializatorHelper
 
     public static async Task<ColumnValue> ReadColumnValue(FileStream journal)
     {
-        string value = "";
-        ColumnType type = (ColumnType) (await ReadInt8(journal));
+        string value;
+        ColumnType type = (ColumnType)(await ReadInt8(journal));
 
         switch (type)
         {
@@ -69,7 +69,8 @@ public static class SerializatorHelper
                 break;
 
             case ColumnType.Bool:
-                //Serializator.WriteBool(journal, value.Value == "true", ref pointer);
+                bool boolValue = await ReadBool(journal);
+                value = boolValue ? "true" : "false";
                 break;
 
             default:
@@ -143,5 +144,22 @@ public static class SerializatorHelper
 
         int pointer = 0;
         return Serializator.ReadString(buffer, size, ref pointer);
+    }
+
+    public static async Task<bool> ReadBool(FileStream journal)
+    {
+        byte[] buffer = new byte[
+            SerializatorTypeSizes.TypeBool   // (1 byte)
+        ];
+
+        int readBytes = await journal.ReadAsync(buffer, 0, SerializatorTypeSizes.TypeBool);
+        if (readBytes != SerializatorTypeSizes.TypeBool)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidJournalData,
+                "Invalid journal data when reading logs"
+            );
+
+        int pointer = 0;
+        return Serializator.ReadBoolAhead(buffer, ref pointer);
     }
 }

@@ -13,7 +13,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Journal.Models.Writers;
 using System.Collections.Generic;
 using CamusDB.Core.Journal.Controllers.Readers;
-using CamusDB.Core.Journal.Models.Readers;
+using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.Journal;
 using CamusDB.Core.Journal.Models;
 
@@ -78,10 +78,8 @@ public class TestJournal
             }
         );
 
-        JournalInsert schedule = new(ticket);
+        InsertLog schedule = new(ticket.TableName, ticket.Values);
         uint sequence = await database.JournalWriter.Append(schedule);
-
-        //await database.JournalWriter.Append(schedule);
 
         database.JournalWriter.Close();
 

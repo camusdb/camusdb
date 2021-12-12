@@ -47,7 +47,7 @@ namespace CamusDB.Generators.Journal
                     {
                         (ITypeSymbol type, string fullName, string name) typeOne = JournalHelper.GetGenericArgumentType(symbol, 0);
                         (ITypeSymbol type, string fullName, string name) typeTwo = JournalHelper.GetGenericArgumentType(symbol, 1);
-                        parameters.Add("Dictionary<" + typeOne.fullName + "," + typeTwo.fullName + "> " + JournalHelper.Uncamelize(symbol.Name));
+                        parameters.Add($"Dictionary<{typeOne.fullName},{typeTwo.fullName}> {JournalHelper.Uncamelize(symbol.Name)}");
                     }
                     break;
 
@@ -62,6 +62,14 @@ namespace CamusDB.Generators.Journal
             if (!JournalHelper.IsJournalField(symbol))
                 return;
 
+            parameters.Add(JournalHelper.Uncamelize(symbol.Name));
+        }
+
+        public static void GetDataCallParameters(IPropertySymbol symbol, List<string> parameters)
+        {
+            if (!JournalHelper.IsJournalField(symbol))
+                return;
+            
             parameters.Add($"data.{symbol.Name}");
         }
     }

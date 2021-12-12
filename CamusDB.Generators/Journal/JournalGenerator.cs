@@ -81,7 +81,7 @@ namespace CamusDB.Generators.Journal
 
             sb.AppendLine("\t\t\treturn journal;");
 
-            sb.AppendLine("\t\t}");
+            sb.AppendLine("\t\t}\n");
         }
 
         private void GenerateDeserialize(StringBuilder sb, ITypeSymbol symbol, List<string> callParameters)
@@ -90,9 +90,13 @@ namespace CamusDB.Generators.Journal
             sb.AppendLine("\t\t{");
 
             foreach (var property in JournalHelper.GetProperties(symbol))
-                JournalPayloadSerialize.ReadParameter(sb, property);            
+                JournalPayloadSerialize.ReadParameter(sb, property);
 
-            sb.AppendLine("\t\treturn null;}");
+            sb.Append("\t\t\treturn new(");
+            sb.Append(string.Join(", ", callParameters));
+            sb.AppendLine(");");
+
+            sb.AppendLine("\t\t}");
         }
 
         public void Execute(GeneratorExecutionContext context)
@@ -131,10 +135,14 @@ namespace CamusDB.Generators.Journal
                 foreach (var property in JournalHelper.GetProperties(symbol))
                     JournalPayloadParameters.GetCallParameters(property, callParameters);
 
+                List<string> dataCallParameters = new();
+
+                foreach (var property in JournalHelper.GetProperties(symbol))
+                    JournalPayloadParameters.GetDataCallParameters(property, dataCallParameters);
+
                 GeneratePayloadLength(symbol, sb, parameters);
                 GeneratePayload(symbol, sb, parameters);
-                GenerateSerialize(sb, symbol, callParameters);
-
+                GenerateSerialize(sb, symbol, dataCallParameters);
                 GenerateDeserialize(sb, symbol, callParameters);
 
                 sb.AppendLine("\t}");

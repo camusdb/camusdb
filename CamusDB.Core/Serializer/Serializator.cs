@@ -212,5 +212,10 @@ public sealed class Serializator
     {
         return (buffer[pointer - 1] & 0xf) == 1;
     }
+
+    public static bool ReadBoolAhead(byte[] buffer, ref int pointer)
+    {
+        return (buffer[pointer++] & 0xf) == 1;
+    }
 }
 

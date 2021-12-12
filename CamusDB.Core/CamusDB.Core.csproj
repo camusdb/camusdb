@@ -19,7 +19,6 @@
     <None Remove="Journal\Controllers\Writers\" />
     <None Remove="Journal\Controllers\Reader\" />
     <None Remove="Journal\Models\Writers\" />
-    <None Remove="Journal\Models\Readers\" />
     <None Remove="Journal\Attributes\" />
     <None Remove="Journal\Utils\" />
     <None Remove="Journal\Models\Logs\" />
@@ -35,7 +34,6 @@
     <Folder Include="Journal\Controllers\Writers\" />
     <Folder Include="Journal\Controllers\Readers\" />
     <Folder Include="Journal\Models\Writers\" />
-    <Folder Include="Journal\Models\Readers\" />
     <Folder Include="Journal\Attributes\" />
     <Folder Include="Journal\Utils\" />
     <Folder Include="Journal\Models\Logs\" />

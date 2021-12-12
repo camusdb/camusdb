@@ -77,7 +77,8 @@ namespace CamusDB.Generators.Journal
             switch (type)
             {
                 case "String":
-                    sb.Append("\t\t\tlength += ");
+
+                    sb.Append("\t\t\tlength += SerializatorTypeSizes.TypeInteger16 + ");
                     sb.Append(JournalHelper.Uncamelize(symbol.Name));
                     sb.AppendLine(".Length;\n");
                     break;

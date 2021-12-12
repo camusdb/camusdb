@@ -83,8 +83,8 @@ namespace CamusDB.Generators.Journal
             switch (type)
             {
                 case "String":
-                    sb.AppendLine($"\t\t\tshort _keyLength = await SerializatorHelper.ReadInt16(journal);");
-                    sb.AppendLine($"\t\t\tstring _key = await SerializatorHelper.ReadString(journal, _keyLength);\n");
+                    sb.AppendLine($"\t\t\t\tshort _keyLength = await SerializatorHelper.ReadInt16(journal);");
+                    sb.AppendLine($"\t\t\t\tstring _key = await SerializatorHelper.ReadString(journal, _keyLength);\n");
                     break;
 
                 /*case "Int32":
@@ -135,7 +135,7 @@ namespace CamusDB.Generators.Journal
             ReadDictionaryKey(sb, typeOne);
             ReadDictionaryValue(sb, typeTwo);
 
-            sb.AppendLine($"\t\t\t{dict}.Add(_key, _value);");
+            sb.AppendLine($"\t\t\t\t{dict}.Add(_key, _value);");
 
             sb.AppendLine("\t\t\t}\n");
         }
