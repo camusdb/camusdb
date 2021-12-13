@@ -119,7 +119,7 @@ public sealed class JournalWriter
 
         uint sequence = GetNextSequence();
 
-        byte[] payload = WritePageWriter.Generate(sequence, insertSchedule.Sequence, insertSchedule.Data);
+        byte[] payload = WritePageLogSerializator.Serialize(sequence, insertSchedule);
 
         await TryWrite(payload);
 
@@ -142,7 +142,7 @@ public sealed class JournalWriter
         return sequence;
     }
 
-    public async Task<uint> Append(JournalUpdateUniqueCheckpoint indexCheckpoint)
+    public async Task<uint> Append(UpdateUniqueCheckpointLog indexCheckpoint)
     {
         Console.WriteLine("JournalUpdateUniqueCheckpoint");
 
@@ -151,7 +151,7 @@ public sealed class JournalWriter
 
         uint sequence = GetNextSequence();
 
-        byte[] payload = UpdateUniqueIndexCheckpointWriter.Generate(sequence, indexCheckpoint.Sequence, indexCheckpoint.Index);
+        byte[] payload = UpdateUniqueCheckpointLogSerializator.Serialize(sequence, indexCheckpoint);
 
         await TryWrite(payload);
 
@@ -167,7 +167,7 @@ public sealed class JournalWriter
 
         uint sequence = GetNextSequence();
 
-        byte[] payload = InsertTicketCheckpointWriter.Generate(sequence, insertCheckpoint.Sequence);
+        byte[] payload = InsertCheckpointLogSerializator.Serialize(sequence, insertCheckpoint);
 
         await TryWrite(payload);
 

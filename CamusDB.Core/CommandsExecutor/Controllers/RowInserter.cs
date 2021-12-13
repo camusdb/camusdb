@@ -142,7 +142,7 @@ internal sealed class RowInserter
                 await indexSaver.NoLockingSave(saveUniqueIndexTicket);
 
                 // save checkpoint of index saved
-                JournalUpdateUniqueCheckpoint checkpoint = new(sequence, index.Value);
+                UpdateUniqueCheckpointLog checkpoint = new(sequence, index.Value.Column);
                 await database.JournalWriter.Append(checkpoint);
             }
             finally

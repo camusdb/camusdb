@@ -65,7 +65,7 @@ public sealed class JournalReader : IDisposable
         int pointer = 0;
 
         uint sequence = Serializator.ReadUInt32(header, ref pointer);
-        short type = Serializator.ReadInt16(header, ref pointer);
+        JournalLogTypes type = (JournalLogTypes) Serializator.ReadInt16(header, ref pointer);
 
         /*Console.WriteLine(pointer);
         Console.WriteLine(sequence);
@@ -74,7 +74,7 @@ public sealed class JournalReader : IDisposable
 
         switch (type)
         {
-            case (short)JournalLogTypes.Insert:
+            case JournalLogTypes.Insert:
                 yield return new JournalLog(
                     sequence,
                     JournalLogTypes.Insert,
@@ -82,7 +82,7 @@ public sealed class JournalReader : IDisposable
                 );
                 break;
 
-            case (short)JournalLogTypes.InsertSlots:
+            case JournalLogTypes.InsertSlots:
                 yield return new JournalLog(
                     sequence,
                     JournalLogTypes.InsertSlots,
@@ -90,9 +90,32 @@ public sealed class JournalReader : IDisposable
                 );
                 break;
 
-            default:
-                throw new Exception("Unsupported type" + type);
+            case JournalLogTypes.WritePage:
+                yield return new JournalLog(
+                    sequence,
+                    JournalLogTypes.WritePage,
+                    await WritePageLogSerializator.Deserialize(journal)
+                );
                 break;
+
+            case JournalLogTypes.InsertCheckpoint:
+                yield return new JournalLog(
+                    sequence,
+                    JournalLogTypes.InsertCheckpoint,
+                    await InsertCheckpointLogSerializator.Deserialize(journal)
+                );
+                break;
+
+            case JournalLogTypes.UpdateUniqueIndexCheckpoint:
+                yield return new JournalLog(
+                    sequence,
+                    JournalLogTypes.UpdateUniqueIndexCheckpoint,
+                    await UpdateUniqueCheckpointLogSerializator.Deserialize(journal)
+                );
+                break;
+
+            default:
+                throw new Exception("Unsupported type: " + type);
         }        
     }
 

@@ -92,11 +92,12 @@ public class TestJournal
             Assert.AreEqual(JournalLogTypes.Insert, journalLog.Type);
             Assert.AreEqual(sequence, journalLog.Sequence);
             Assert.IsInstanceOf<InsertLog>(journalLog.InsertLog);
-            Assert.AreEqual(journalLog.InsertLog!.TableName, ticket.TableName);
+            Assert.AreEqual(ticket.TableName, journalLog.InsertLog!.TableName);
+            Assert.AreEqual(ticket.Values.Count, journalLog.InsertLog!.Values.Count);
             total++;
         }
 
-        Assert.AreEqual(1, total);        
+        Assert.AreEqual(1, total);
     }
 
     [Test]
@@ -106,7 +107,7 @@ public class TestJournal
         CommandExecutor executor = await SetupDatabase();
 
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
-        
+
         InsertSlotsLog schedule = new(100, new BTreeTuple(50, 25));
         uint sequence = await database.JournalWriter.Append(schedule);
 
@@ -120,8 +121,98 @@ public class TestJournal
         {
             Assert.AreEqual(JournalLogTypes.InsertSlots, journalLog.Type);
             Assert.AreEqual(sequence, journalLog.Sequence);
-            //Assert.IsInstanceOf<InsertLog>(journalLog.InsertTicketLog);
-            //Assert.AreEqual(journalLog.InsertTicketLog.TableName, ticket.TableName);
+            Assert.IsInstanceOf<InsertSlotsLog>(journalLog.InsertSlotsLog);
+            Assert.AreEqual(100, journalLog.InsertSlotsLog!.Sequence);
+            Assert.AreEqual(50, journalLog.InsertSlotsLog!.RowTuple.SlotOne);
+            Assert.AreEqual(25, journalLog.InsertSlotsLog!.RowTuple.SlotTwo);
+            total++;
+        }
+
+        Assert.AreEqual(1, total);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalWritePage()
+    {
+        CommandExecutor executor = await SetupDatabase();
+
+        DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
+
+        WritePageLog schedule = new(100, new byte[5] { 1, 2, 3, 4, 5 });
+        uint sequence = await database.JournalWriter.Append(schedule);
+
+        database.JournalWriter.Close();
+
+        JournalReader journalReader = GetJournalReader(database);
+
+        int total = 0;
+
+        await foreach (JournalLog journalLog in journalReader.ReadNextLog())
+        {
+            Assert.AreEqual(JournalLogTypes.WritePage, journalLog.Type);
+            Assert.AreEqual(sequence, journalLog.Sequence);
+            Assert.IsInstanceOf<WritePageLog>(journalLog.WritePageLog);
+            Assert.AreEqual(100, journalLog.WritePageLog!.Sequence);
+            Assert.AreEqual(5, journalLog.WritePageLog.Data.Length);
+            total++;
+        }
+
+        Assert.AreEqual(1, total);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertCheckpoint()
+    {
+        CommandExecutor executor = await SetupDatabase();
+
+        DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
+
+        InsertCheckpointLog schedule = new(100);
+        uint sequence = await database.JournalWriter.Append(schedule);
+
+        database.JournalWriter.Close();
+
+        JournalReader journalReader = GetJournalReader(database);
+
+        int total = 0;
+
+        await foreach (JournalLog journalLog in journalReader.ReadNextLog())
+        {
+            Assert.AreEqual(JournalLogTypes.InsertCheckpoint, journalLog.Type);
+            Assert.AreEqual(sequence, journalLog.Sequence);
+            Assert.IsInstanceOf<InsertCheckpointLog>(journalLog.InsertCheckpointLog);
+            Assert.AreEqual(100, journalLog.InsertCheckpointLog!.Sequence);
+            total++;
+        }
+
+        Assert.AreEqual(1, total);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalUpdateUniqueCheckpoint()
+    {
+        CommandExecutor executor = await SetupDatabase();
+
+        DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
+
+        UpdateUniqueCheckpointLog schedule = new(100, "unique");
+        uint sequence = await database.JournalWriter.Append(schedule);
+
+        database.JournalWriter.Close();
+
+        JournalReader journalReader = GetJournalReader(database);
+
+        int total = 0;
+
+        await foreach (JournalLog journalLog in journalReader.ReadNextLog())
+        {
+            Assert.AreEqual(JournalLogTypes.UpdateUniqueIndexCheckpoint, journalLog.Type);
+            Assert.AreEqual(sequence, journalLog.Sequence);
+            Assert.IsInstanceOf<UpdateUniqueCheckpointLog>(journalLog.UpdateUniqueCheckpointLog);
+            Assert.AreEqual(100, journalLog.UpdateUniqueCheckpointLog!.Sequence);
             total++;
         }
 

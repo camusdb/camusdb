@@ -20,17 +20,44 @@ public class JournalLog
 
     public InsertSlotsLog? InsertSlotsLog { get; }
 
-    public JournalLog(uint sequence, JournalLogTypes type, InsertLog insertTicketLog)
+    public InsertCheckpointLog? InsertCheckpointLog { get; }
+
+    public UpdateUniqueCheckpointLog? UpdateUniqueCheckpointLog { get; }
+
+    public WritePageLog? WritePageLog { get; }
+
+    public JournalLog(uint sequence, JournalLogTypes type, InsertLog insertLog)
     {
         Sequence = sequence;
         Type = type;
-        InsertLog = insertTicketLog;
+        InsertLog = insertLog;
     }
 
-    public JournalLog(uint sequence, JournalLogTypes type, InsertSlotsLog insertTicketLog)
+    public JournalLog(uint sequence, JournalLogTypes type, InsertSlotsLog insertSlotsLog)
     {
         Sequence = sequence;
         Type = type;
-        InsertSlotsLog = insertTicketLog;
-    }    
+        InsertSlotsLog = insertSlotsLog;
+    }
+
+    public JournalLog(uint sequence, JournalLogTypes type, InsertCheckpointLog insertLog)
+    {
+        Sequence = sequence;
+        Type = type;
+        InsertCheckpointLog = insertLog;
+    }
+
+    public JournalLog(uint sequence, JournalLogTypes type, WritePageLog writePageLog)
+    {
+        Sequence = sequence;
+        Type = type;
+        WritePageLog = writePageLog;
+    }
+
+    public JournalLog(uint sequence, JournalLogTypes type, UpdateUniqueCheckpointLog checkpointLog)
+    {
+        Sequence = sequence;
+        Type = type;
+        UpdateUniqueCheckpointLog = checkpointLog;
+    }
 }
