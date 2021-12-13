@@ -10,7 +10,7 @@ using CamusDB.Core.Journal.Models.Logs;
 
 namespace CamusDB.Core.Journal.Models;
 
-public class JournalLog
+public sealed class JournalLog
 {
     public uint Sequence { get; }
 

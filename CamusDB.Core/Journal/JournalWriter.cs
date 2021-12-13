@@ -38,9 +38,8 @@ public sealed class JournalWriter
         Console.WriteLine("Data journal saved at {0}", path);
 
         // @todo improve recovery here        
-        JournalReader journalReader = new(path);
-        await journalReader.Verify();
-        journalReader.Dispose();
+        JournalVerifier journalVerifier = new();
+        await journalVerifier.Verify(path);
 
         journal = new(path, FileMode.Append, FileAccess.Write);
     }
@@ -48,7 +47,10 @@ public sealed class JournalWriter
     private async Task TryWrite(byte[] buffer)
     {
         if (this.journal is null)
-            throw new Exception("Journal has not been initialized");
+            throw new CamusDBException(
+                CamusDBErrorCodes.JournalNotInitialized,
+                "Journal has not been initialized"
+            );
 
         try
         {
@@ -75,28 +77,36 @@ public sealed class JournalWriter
         return Interlocked.Increment(ref logSequenceNumber);
     }
 
-    public async Task<uint> Append(InsertLog insertSchedule)
+    public void ForceFailure(JournalFailureTypes failureType)
+    {
+        throw new CamusDBException(
+            CamusDBErrorCodes.JournalForcedFailure,
+            "Journal forced failure: " + failureType
+        );
+    }
+
+    public async Task<uint> Append(JournalFailureTypes failureType, InsertLog insertSchedule)
     {
         Console.WriteLine("JournalInsert ?");
 
-        if (this.journal is null)
-            throw new Exception("Journal has not been initialized");
-
+        if (failureType == JournalFailureTypes.PreInsert)
+            ForceFailure(failureType);
+       
         uint sequence = GetNextSequence();
 
         byte[] payload = InsertLogSerializator.Serialize(sequence, insertSchedule);
 
         await TryWrite(payload);
 
+        if (failureType == JournalFailureTypes.PostInsert)
+            ForceFailure(failureType);
+
         return sequence;
     }
 
-    public async Task<uint> Append(InsertSlotsLog insertSchedule)
+    public async Task<uint> Append(JournalFailureTypes failureType, InsertSlotsLog insertSchedule)
     {
-        Console.WriteLine("JournalInsertSlots");
-
-        if (this.journal is null)
-            throw new Exception("Journal has not been initialized");
+        Console.WriteLine("JournalInsertSlots");        
 
         uint sequence = GetNextSequence();
 
@@ -107,12 +117,9 @@ public sealed class JournalWriter
         return sequence;
     }
 
-    public async Task<uint> Append(WritePageLog insertSchedule)
+    public async Task<uint> Append(JournalFailureTypes failureType, WritePageLog insertSchedule)
     {
-        Console.WriteLine("JournalWritePage");
-
-        if (this.journal is null)
-            throw new Exception("Journal has not been initialized");
+        Console.WriteLine("JournalWritePage");        
 
         uint sequence = GetNextSequence();
 
@@ -123,12 +130,9 @@ public sealed class JournalWriter
         return sequence;
     }
 
-    public async Task<uint> Append(UpdateUniqueIndexLog indexSchedule)
+    public async Task<uint> Append(JournalFailureTypes failureType, UpdateUniqueIndexLog indexSchedule)
     {
-        Console.WriteLine("JournalUpdateUniqueIndex");
-
-        if (this.journal is null)
-            throw new Exception("Journal has not been initialized");
+        Console.WriteLine("JournalUpdateUniqueIndex");        
 
         uint sequence = GetNextSequence();
 
@@ -139,12 +143,9 @@ public sealed class JournalWriter
         return sequence;
     }
 
-    public async Task<uint> Append(UpdateUniqueCheckpointLog indexCheckpoint)
+    public async Task<uint> Append(JournalFailureTypes failureType, UpdateUniqueCheckpointLog indexCheckpoint)
     {
-        Console.WriteLine("JournalUpdateUniqueCheckpoint");
-
-        if (this.journal is null)
-            throw new Exception("Journal has not been initialized");
+        Console.WriteLine("JournalUpdateUniqueCheckpoint");        
 
         uint sequence = GetNextSequence();
 
@@ -155,12 +156,9 @@ public sealed class JournalWriter
         return sequence;
     }
 
-    public async Task<uint> Append(InsertCheckpointLog insertCheckpoint)
+    public async Task<uint> Append(JournalFailureTypes failureType, InsertCheckpointLog insertCheckpoint)
     {
-        Console.WriteLine("JournalInsertCheckpoint");
-
-        if (this.journal is null)
-            throw new Exception("Journal has not been initialized");
+        Console.WriteLine("JournalInsertCheckpoint");        
 
         uint sequence = GetNextSequence();
 

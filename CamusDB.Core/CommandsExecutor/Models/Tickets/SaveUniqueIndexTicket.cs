@@ -9,6 +9,7 @@
 using CamusDB.Core.Journal;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Journal.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -19,6 +20,8 @@ public sealed class SaveUniqueIndexTicket
     public JournalWriter Journal { get; }
 
     public uint Sequence { get; }
+
+    public JournalFailureTypes FailureType { get; }
 
     public BTree<ColumnValue, BTreeTuple?> Index { get; }
 
@@ -32,6 +35,7 @@ public sealed class SaveUniqueIndexTicket
         BufferPoolHandler tablespace,
         JournalWriter journal,
         uint sequence,
+        JournalFailureTypes failureType,
         BTree<ColumnValue, BTreeTuple?> index,
         ColumnValue key,
         BTreeTuple value,
@@ -41,6 +45,7 @@ public sealed class SaveUniqueIndexTicket
         Tablespace = tablespace;
         Journal = journal;
         Sequence = sequence;
+        FailureType = failureType;
         Index = index;
         Key = key;
         Value = value;

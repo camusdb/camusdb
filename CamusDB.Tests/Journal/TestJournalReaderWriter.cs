@@ -79,7 +79,7 @@ public class TestJournal
         );
 
         InsertLog schedule = new(ticket.TableName, ticket.Values);
-        uint sequence = await database.JournalWriter.Append(schedule);
+        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
 
         database.JournalWriter.Close();
 
@@ -94,6 +94,18 @@ public class TestJournal
             Assert.IsInstanceOf<InsertLog>(journalLog.InsertLog);
             Assert.AreEqual(ticket.TableName, journalLog.InsertLog!.TableName);
             Assert.AreEqual(ticket.Values.Count, journalLog.InsertLog!.Values.Count);
+
+            Assert.AreEqual(ticket.Values["id"].Type, journalLog.InsertLog!.Values["id"].Type);
+            Assert.AreEqual(ticket.Values["id"].Value, journalLog.InsertLog!.Values["id"].Value);
+
+            Assert.AreEqual(ticket.Values["name"].Type, journalLog.InsertLog!.Values["name"].Type);
+            Assert.AreEqual(ticket.Values["name"].Value, journalLog.InsertLog!.Values["name"].Value);
+
+            Assert.AreEqual(ticket.Values["year"].Type, journalLog.InsertLog!.Values["year"].Type);
+            Assert.AreEqual(ticket.Values["year"].Value, journalLog.InsertLog!.Values["year"].Value);
+
+            Assert.AreEqual(ticket.Values["enabled"].Type, journalLog.InsertLog!.Values["enabled"].Type);
+            Assert.AreEqual(ticket.Values["enabled"].Value, journalLog.InsertLog!.Values["enabled"].Value);
             total++;
         }
 
@@ -109,7 +121,7 @@ public class TestJournal
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
 
         InsertSlotsLog schedule = new(100, new BTreeTuple(50, 25));
-        uint sequence = await database.JournalWriter.Append(schedule);
+        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
 
         database.JournalWriter.Close();
 
@@ -140,7 +152,7 @@ public class TestJournal
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
 
         WritePageLog schedule = new(100, new byte[5] { 1, 2, 3, 4, 5 });
-        uint sequence = await database.JournalWriter.Append(schedule);
+        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
 
         database.JournalWriter.Close();
 
@@ -170,7 +182,7 @@ public class TestJournal
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
 
         InsertCheckpointLog schedule = new(100);
-        uint sequence = await database.JournalWriter.Append(schedule);
+        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
 
         database.JournalWriter.Close();
 
@@ -199,7 +211,7 @@ public class TestJournal
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
 
         UpdateUniqueCheckpointLog schedule = new(100, "unique");
-        uint sequence = await database.JournalWriter.Append(schedule);
+        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
 
         database.JournalWriter.Close();
 
@@ -229,7 +241,7 @@ public class TestJournal
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
 
         UpdateUniqueIndexLog schedule = new(100, "unique");
-        uint sequence = await database.JournalWriter.Append(schedule);
+        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
 
         database.JournalWriter.Close();
 
@@ -248,5 +260,54 @@ public class TestJournal
         }
 
         Assert.AreEqual(1, total);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertTicketMultiple()
+    {
+        CommandExecutor executor = await SetupDatabase();
+
+        DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
+
+        InsertTicket ticket = new(
+            database: DatabaseName,
+            name: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Id, "1") },
+                { "name", new ColumnValue(ColumnType.String, "some name") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
+            }
+        );
+
+        InsertLog schedule = new(ticket.TableName, ticket.Values);
+        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
+
+        InsertCheckpointLog checkpointSchedule = new(sequence);
+        uint checkpointSequence = await database.JournalWriter.Append(JournalFailureTypes.None, checkpointSchedule);
+
+        database.JournalWriter.Close();
+
+        JournalReader journalReader = GetJournalReader(database);
+
+        List<JournalLog> journalLogs = new();
+
+        await foreach (JournalLog journalLog in journalReader.ReadNextLog())
+            journalLogs.Add(journalLog);
+
+        Assert.AreEqual(2, journalLogs.Count);
+
+        Assert.AreEqual(JournalLogTypes.Insert, journalLogs[0].Type);
+        Assert.AreEqual(sequence, journalLogs[0].Sequence);
+        Assert.IsInstanceOf<InsertLog>(journalLogs[0].InsertLog);
+        Assert.AreEqual(ticket.TableName, journalLogs[0].InsertLog!.TableName);
+        Assert.AreEqual(ticket.Values.Count, journalLogs[0].InsertLog!.Values.Count);
+
+        Assert.AreEqual(JournalLogTypes.InsertCheckpoint, journalLogs[1].Type);
+        Assert.AreEqual(checkpointSequence, journalLogs[1].Sequence);
+        Assert.IsInstanceOf<InsertCheckpointLog>(journalLogs[1].InsertCheckpointLog);
+        Assert.AreEqual(sequence, journalLogs[1].InsertCheckpointLog!.Sequence);
     }
 }

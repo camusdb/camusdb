@@ -159,7 +159,7 @@ namespace CamusDB.Generators.Journal
 
                 context.AddSource((symbol.ContainingNamespace + "." + symbol.Name + "Serializator.cs"), SourceText.From(sb.ToString(), Encoding.UTF8));
 
-                File.WriteAllText("/tmp/" + (symbol.ContainingNamespace + "." + symbol.Name + "Serializator.cs"), (symbol.ContainingNamespace + "." + symbol.Name + "Serializator.cs").ToLowerInvariant() + "\n" + sb.ToString() + "\n");
+                //File.WriteAllText("/tmp/" + (symbol.ContainingNamespace + "." + symbol.Name + "Serializator.cs"), (symbol.ContainingNamespace + "." + symbol.Name + "Serializator.cs").ToLowerInvariant() + "\n" + sb.ToString() + "\n");
             }
         }
     }

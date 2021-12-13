@@ -123,16 +123,17 @@ internal sealed class RowInserter
 
                 // save page + rowid to journal
                 InsertSlotsLog schedule = new(sequence, rowTuple);
-                await database.JournalWriter.Append(schedule);
+                await database.JournalWriter.Append(ticket.ForceFailureType, schedule);
 
                 // save index save to journal
                 UpdateUniqueIndexLog indexSchedule = new(sequence, index.Value.Column);
-                uint updateIndexSequence = await database.JournalWriter.Append(schedule);
+                uint updateIndexSequence = await database.JournalWriter.Append(ticket.ForceFailureType, schedule);
 
                 SaveUniqueIndexTicket saveUniqueIndexTicket = new(
                     tablespace: tablespace,
                     journal: database.JournalWriter,
                     sequence: updateIndexSequence,
+                    failureType: ticket.ForceFailureType,
                     index: uniqueIndex,
                     key: uniqueKeyValue,
                     value: rowTuple
@@ -142,7 +143,7 @@ internal sealed class RowInserter
 
                 // save checkpoint of index saved
                 UpdateUniqueCheckpointLog checkpoint = new(sequence, index.Value.Column);
-                await database.JournalWriter.Append(checkpoint);
+                await database.JournalWriter.Append(ticket.ForceFailureType, checkpoint);
             }
             finally
             {
@@ -187,7 +188,7 @@ internal sealed class RowInserter
 
         // Schedule insert in the journal
         InsertLog schedule = new(ticket.TableName, ticket.Values);
-        uint sequence = await database.JournalWriter.Append(schedule);
+        uint sequence = await database.JournalWriter.Append(ticket.ForceFailureType, schedule);
 
         BufferPoolHandler tablespace = database.TableSpace;
 
@@ -199,7 +200,7 @@ internal sealed class RowInserter
         await tablespace.WriteDataToPage(rowTuple.SlotTwo, rowBuffer);
 
         WritePageLog writeSchedule = new(sequence, rowBuffer);
-        await database.JournalWriter.Append(writeSchedule);
+        await database.JournalWriter.Append(ticket.ForceFailureType, writeSchedule);
 
         // Main table index stores rowid pointing to page offeset
         await indexSaver.Save(tablespace, table.Rows, rowTuple.SlotOne, rowTuple.SlotTwo);
@@ -207,7 +208,7 @@ internal sealed class RowInserter
         await UpdateMultiKeys(database, table, ticket, rowTuple);
 
         InsertCheckpointLog insertCheckpoint = new(sequence);
-        await database.JournalWriter.Append(insertCheckpoint);
+        await database.JournalWriter.Append(ticket.ForceFailureType, insertCheckpoint);
 
         timer.Stop();
 

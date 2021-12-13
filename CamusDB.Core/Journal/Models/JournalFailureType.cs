@@ -8,12 +8,11 @@
 
 namespace CamusDB.Core.Journal.Models;
 
-public enum JournalLogTypes
+public enum JournalFailureTypes
 {
-    Insert = 100,
-    InsertSlots = 101,
-    WritePage = 102,
-    UpdateUniqueIndex = 103,
-    UpdateUniqueIndexCheckpoint = 104,
-    InsertCheckpoint = 105
+    None = 0,
+
+    PreInsert = 1,
+    PostInsert = 2,
 }
+

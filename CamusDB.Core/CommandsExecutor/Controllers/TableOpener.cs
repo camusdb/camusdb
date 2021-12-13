@@ -18,7 +18,7 @@ internal sealed class TableOpener
 {
     private readonly IndexReader indexReader = new();
 
-    private CatalogsManager Catalogs { get; set; }
+    private CatalogsManager Catalogs { get; }
 
     public TableOpener(CatalogsManager catalogsManager)
     {
@@ -104,17 +104,5 @@ internal sealed class TableOpener
         Console.WriteLine("Table {0} opened at offset={1}", tableName, databaseObject.StartOffset);
 
         return databaseObject;
-    }
-
-    private int GetTablePage(DatabaseDescriptor database, string tableName)
-    {
-        var objects = database.SystemSchema.Objects;
-
-        if (!objects.TryGetValue(tableName, out DatabaseObject? databaseObject))
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Table system data is corrupt");
-
-        Console.WriteLine("Table {0} opened at offset={1}", tableName, databaseObject.StartOffset);
-
-        return databaseObject.StartOffset;
     }
 }

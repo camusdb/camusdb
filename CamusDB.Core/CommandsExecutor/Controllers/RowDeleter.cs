@@ -12,6 +12,7 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Journal.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -54,6 +55,7 @@ internal sealed class RowDeleter
                 tablespace: tablespace,
                 journal: database.JournalWriter,
                 sequence: 0,
+                failureType: JournalFailureTypes.None,
                 index: uniqueIndex,
                 key: columnKey
             );
