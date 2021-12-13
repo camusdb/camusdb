@@ -12,7 +12,6 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Journal.Models.Logs;
-using CamusDB.Core.Journal.Models.Writers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -127,7 +126,7 @@ internal sealed class RowInserter
                 await database.JournalWriter.Append(schedule);
 
                 // save index save to journal
-                JournalUpdateUniqueIndex indexSchedule = new(sequence, index.Value);
+                UpdateUniqueIndexLog indexSchedule = new(sequence, index.Value.Column);
                 uint updateIndexSequence = await database.JournalWriter.Append(schedule);
 
                 SaveUniqueIndexTicket saveUniqueIndexTicket = new(

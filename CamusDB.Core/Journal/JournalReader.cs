@@ -9,7 +9,6 @@
 using System;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Journal.Models;
-using CamusDB.Core.Journal.Controllers;
 using CamusDB.Core.Journal.Models.Logs;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -111,6 +110,14 @@ public sealed class JournalReader : IDisposable
                     sequence,
                     JournalLogTypes.UpdateUniqueIndexCheckpoint,
                     await UpdateUniqueCheckpointLogSerializator.Deserialize(journal)
+                );
+                break;
+
+            case JournalLogTypes.UpdateUniqueIndex:
+                yield return new JournalLog(
+                    sequence,
+                    JournalLogTypes.UpdateUniqueIndex,
+                    await UpdateUniqueIndexLogSerializator.Deserialize(journal)
                 );
                 break;
 

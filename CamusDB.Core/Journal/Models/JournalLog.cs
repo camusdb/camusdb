@@ -22,6 +22,8 @@ public class JournalLog
 
     public InsertCheckpointLog? InsertCheckpointLog { get; }
 
+    public UpdateUniqueIndexLog? UpdateUniqueIndexLog { get; }
+
     public UpdateUniqueCheckpointLog? UpdateUniqueCheckpointLog { get; }
 
     public WritePageLog? WritePageLog { get; }
@@ -59,5 +61,12 @@ public class JournalLog
         Sequence = sequence;
         Type = type;
         UpdateUniqueCheckpointLog = checkpointLog;
+    }
+
+    public JournalLog(uint sequence, JournalLogTypes type, UpdateUniqueIndexLog updateLog)
+    {
+        Sequence = sequence;
+        Type = type;
+        UpdateUniqueIndexLog = updateLog;
     }
 }

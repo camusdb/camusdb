@@ -7,13 +7,10 @@
  */
 
 using CamusDB.Core.Journal.Models;
-using CamusDB.Core.Journal.Controllers;
+using CamusDB.Core.Journal.Models.Logs;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Journal.Models.Writers;
-using CamusDB.Core.Journal.Controllers.Writers;
-using CamusDB.Core.Journal.Models.Logs;
 
 namespace CamusDB.Core.Journal;
 
@@ -27,7 +24,7 @@ public sealed class JournalWriter
 
     private readonly DatabaseDescriptor database;
 
-    private readonly SemaphoreSlim semaphore = new(1, 1);    
+    private readonly SemaphoreSlim semaphore = new(1, 1);
 
     public JournalWriter(DatabaseDescriptor database)
     {
@@ -101,7 +98,7 @@ public sealed class JournalWriter
         if (this.journal is null)
             throw new Exception("Journal has not been initialized");
 
-        uint sequence = GetNextSequence();        
+        uint sequence = GetNextSequence();
 
         byte[] payload = InsertSlotsLogSerializator.Serialize(sequence, insertSchedule);
 
@@ -126,7 +123,7 @@ public sealed class JournalWriter
         return sequence;
     }
 
-    public async Task<uint> Append(JournalUpdateUniqueIndex indexSchedule)
+    public async Task<uint> Append(UpdateUniqueIndexLog indexSchedule)
     {
         Console.WriteLine("JournalUpdateUniqueIndex");
 
@@ -135,7 +132,7 @@ public sealed class JournalWriter
 
         uint sequence = GetNextSequence();
 
-        byte[] payload = UpdateUniqueIndexWriter.Generate(sequence, indexSchedule.Sequence, indexSchedule.Index);
+        byte[] payload = UpdateUniqueIndexLogSerializator.Serialize(sequence, indexSchedule);
 
         await TryWrite(payload);
 
@@ -178,7 +175,7 @@ public sealed class JournalWriter
     {
         if (journal != null)
         {
-            journal.Flush();            
+            journal.Flush();
             journal.Dispose();
         }
     }

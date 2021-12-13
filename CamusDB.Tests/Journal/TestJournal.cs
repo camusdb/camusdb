@@ -1,21 +1,21 @@
 ﻿
 using System.IO;
-using CamusDB.Core;
 using NUnit.Framework;
-using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
+using System.Collections.Generic;
+
+using CamusDB.Core;
+using CamusDB.Core.Catalogs;
+using CamusDB.Core.Journal;
+using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.Journal.Models.Logs;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Journal.Models.Writers;
-using System.Collections.Generic;
-using CamusDB.Core.Journal.Models.Logs;
-using CamusDB.Core.Journal;
-using CamusDB.Core.Journal.Models;
-using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Tests.Journal;
 
@@ -213,6 +213,37 @@ public class TestJournal
             Assert.AreEqual(sequence, journalLog.Sequence);
             Assert.IsInstanceOf<UpdateUniqueCheckpointLog>(journalLog.UpdateUniqueCheckpointLog);
             Assert.AreEqual(100, journalLog.UpdateUniqueCheckpointLog!.Sequence);
+            Assert.AreEqual("unique", journalLog.UpdateUniqueCheckpointLog!.ColumnIndex);
+            total++;
+        }
+
+        Assert.AreEqual(1, total);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalUpdateUniqueIndex()
+    {
+        CommandExecutor executor = await SetupDatabase();
+
+        DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
+
+        UpdateUniqueIndexLog schedule = new(100, "unique");
+        uint sequence = await database.JournalWriter.Append(schedule);
+
+        database.JournalWriter.Close();
+
+        JournalReader journalReader = GetJournalReader(database);
+
+        int total = 0;
+
+        await foreach (JournalLog journalLog in journalReader.ReadNextLog())
+        {
+            Assert.AreEqual(JournalLogTypes.UpdateUniqueIndex, journalLog.Type);
+            Assert.AreEqual(sequence, journalLog.Sequence);
+            Assert.IsInstanceOf<UpdateUniqueIndexLog>(journalLog.UpdateUniqueIndexLog);
+            Assert.AreEqual(100, journalLog.UpdateUniqueIndexLog!.Sequence);
+            Assert.AreEqual("unique", journalLog.UpdateUniqueIndexLog!.ColumnIndex);
             total++;
         }
 
