@@ -2,6 +2,7 @@
 using System.IO;
 using CamusDB.Core;
 using NUnit.Framework;
+using CamusDB.Tests.Utils;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
 using CamusDB.Core.Catalogs.Models;
@@ -13,20 +14,12 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestTableCreator
+internal sealed class TestTableCreator
 {
     [SetUp]
     public void Setup()
     {
-        string path = Config.DataDirectory + "/test";
-        if (Directory.Exists(path))
-        {
-            File.Delete(path + "/tablespace0");
-            File.Delete(path + "/schema");
-            File.Delete(path + "/system");
-            File.Delete(path + "/journal");
-            Directory.Delete(path);
-        }
+        SetupDb.Remove("test");
     }
 
     private async Task<CommandExecutor> SetupDatabase()

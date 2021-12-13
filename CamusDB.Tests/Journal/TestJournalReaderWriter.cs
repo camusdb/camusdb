@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using System.Collections.Generic;
 
 using CamusDB.Core;
+using CamusDB.Tests.Utils;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Journal;
 using CamusDB.Core.Util.Trees;
@@ -19,22 +20,14 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Tests.Journal;
 
-public class TestJournal
+internal class TestJournal
 {
     private const string DatabaseName = "test";
 
     [SetUp]
     public void Setup()
     {
-        string path = Config.DataDirectory + "/" + DatabaseName;
-        if (Directory.Exists(path))
-        {
-            File.Delete(path + "/tablespace0");
-            File.Delete(path + "/schema");
-            File.Delete(path + "/system");
-            File.Delete(path + "/journal");
-            Directory.Delete(path);
-        }
+        SetupDb.Remove(DatabaseName);
     }
 
     private JournalReader GetJournalReader(DatabaseDescriptor database)

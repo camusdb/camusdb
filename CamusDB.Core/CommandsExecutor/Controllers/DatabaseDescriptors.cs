@@ -10,9 +10,25 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-internal class DatabaseDescriptors
+internal class DatabaseDescriptors : IDisposable
 {
     public readonly SemaphoreSlim Semaphore = new(1, 1);
 
     public readonly Dictionary<string, DatabaseDescriptor> Descriptors = new();
+
+    public DatabaseDescriptors()
+    {
+        AppDomain.CurrentDomain.ProcessExit += DatabaseDescriptors_Dtor;
+    }
+
+    private void DatabaseDescriptors_Dtor(object? sender, EventArgs e)
+    {
+        foreach (KeyValuePair<string, DatabaseDescriptor> keyValuePair in Descriptors)
+            Console.WriteLine(keyValuePair.Key);
+    }
+
+    public void Dispose()
+    {
+        AppDomain.CurrentDomain.ProcessExit -= DatabaseDescriptors_Dtor;
+    }
 }

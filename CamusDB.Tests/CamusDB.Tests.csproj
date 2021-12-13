@@ -24,6 +24,7 @@
     <None Remove="Fixtures\" />
     <None Remove="Serializator\" />
     <None Remove="Journal\" />
+    <None Remove="Utils\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="BufferPool\" />
@@ -32,5 +33,6 @@
     <Folder Include="Fixtures\" />
     <Folder Include="Serialization\" />
     <Folder Include="Journal\" />
+    <Folder Include="Utils\" />
   </ItemGroup>
 </Project>

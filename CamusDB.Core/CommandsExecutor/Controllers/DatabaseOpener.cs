@@ -17,7 +17,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class DatabaseOpener
-{
+{    
     private readonly DatabaseDescriptors databaseDescriptors;
 
     public DatabaseOpener(DatabaseDescriptors databaseDescriptors)
@@ -37,16 +37,18 @@ internal sealed class DatabaseOpener
             if (databaseDescriptors.Descriptors.TryGetValue(name, out databaseDescriptor))
                 return databaseDescriptor;
 
-            if (!Directory.Exists(Config.DataDirectory + "/" + name))
+            string path = Path.Combine(Config.DataDirectory, name);
+
+            if (!Directory.Exists(path))
                 throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
 
-            string path = Config.DataDirectory + "/" + name + "/tablespace0";
+            path = Path.Combine(Config.DataDirectory, name, "tablespace0");
             MemoryMappedFile tablespace = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
 
-            path = Config.DataDirectory + "/" + name + "/schema";
+            path = Path.Combine(Config.DataDirectory, name, "schema");
             MemoryMappedFile schema = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
 
-            path = Config.DataDirectory + "/" + name + "/system";
+            path = Path.Combine(Config.DataDirectory, name, "system");
             MemoryMappedFile system = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
 
             databaseDescriptor = new(
@@ -63,10 +65,13 @@ internal sealed class DatabaseOpener
                 LoadDatabaseTableSpace(databaseDescriptor)
             });
 
+            path = Path.Combine(Config.DataDirectory, name, "camus.lock");
+
             await Task.WhenAll(new Task[]
             {
                 databaseDescriptor.TableSpace.Initialize(),
-                databaseDescriptor.JournalWriter.Initialize()
+                databaseDescriptor.JournalWriter.Initialize(),
+                File.WriteAllBytesAsync(path, Array.Empty<byte>())
             });
 
             Console.WriteLine("Database {0} opened", name);

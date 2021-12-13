@@ -1,8 +1,10 @@
 ﻿
 using System.IO;
 using NUnit.Framework;
-using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
+
+using CamusDB.Tests.Utils;
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 using Config = CamusDB.Core.CamusDBConfig;
@@ -15,15 +17,7 @@ public class TestDatabaseCreator
     [SetUp]
     public void Setup()
     {
-        string path = Config.DataDirectory + "/test";
-        if (Directory.Exists(path))
-        {
-            File.Delete(path + "/tablespace0");
-            File.Delete(path + "/schema");
-            File.Delete(path + "/system");
-            File.Delete(path + "/journal");
-            Directory.Delete(path);
-        }
+        SetupDb.Remove("test");
     }
 
     [Test]
