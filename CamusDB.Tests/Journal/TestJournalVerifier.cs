@@ -31,9 +31,10 @@ internal class TestJournalVerifier
     }
 
     private JournalReader GetJournalReader(DatabaseDescriptor database)
-    {
-        string path = Config.DataDirectory + "/" + database.Name + "/journal";
-        return new(path);
+    {        
+        return new(
+            Path.Combine(Config.DataDirectory, database.Name, "journal")
+        );
     }
 
     private async Task<CommandExecutor> SetupDatabase()

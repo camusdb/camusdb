@@ -18,7 +18,7 @@ internal sealed class DatabaseCreator
         string name = ticket.DatabaseName;
 
         string absolutePath = Directory.GetCurrentDirectory();
-        string dbPath = absolutePath + "/" + Config.DataDirectory + "/" + name;
+        string dbPath = Path.Combine(absolutePath, Config.DataDirectory, name);
 
         if (Directory.Exists(dbPath))
             throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Database already exists");
@@ -34,10 +34,10 @@ internal sealed class DatabaseCreator
                
         await Task.WhenAll(new Task[]
         {
-            File.WriteAllBytesAsync(dbPath + "/tablespace0", initialized),
-            File.WriteAllBytesAsync(dbPath + "/schema", initialized),
-            File.WriteAllBytesAsync(dbPath + "/system", initialized),
-            File.WriteAllBytesAsync(dbPath + "/journal", new byte[0])
+            File.WriteAllBytesAsync(Path.Combine(dbPath, "tablespace0"), initialized),
+            File.WriteAllBytesAsync(Path.Combine(dbPath, "schema"), initialized),
+            File.WriteAllBytesAsync(Path.Combine(dbPath, "system"), initialized),
+            File.WriteAllBytesAsync(Path.Combine(dbPath, "journal"), new byte[0])
         });
 
         // @todo catch IO Exceptions

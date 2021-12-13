@@ -33,7 +33,7 @@ public sealed class JournalWriter
 
     public async Task Initialize()
     {
-        string path = Config.DataDirectory + "/" + database.Name + "/journal";
+        string path = Path.Combine(Config.DataDirectory, database.Name, "journal");
 
         Console.WriteLine("Data journal saved at {0}", path);
 

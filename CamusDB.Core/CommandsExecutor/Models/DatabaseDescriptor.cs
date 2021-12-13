@@ -24,15 +24,19 @@ public sealed class DatabaseDescriptor
 
     public Schema Schema { get; set; } = new();
 
+    public JournalWriter JournalWriter { get; set; }
+
     public SystemSchema SystemSchema { get; set; } = new();
 
     public SemaphoreSlim DescriptorsSemaphore = new(1, 1);
 
     public Dictionary<string, TableDescriptor> TableDescriptors = new();
 
-    public JournalWriter JournalWriter { get; set; }
-
-    public DatabaseDescriptor(string name, BufferPoolHandler tableSpace, BufferPoolHandler schemaSpace, BufferPoolHandler systemSpace)
+    public DatabaseDescriptor(
+        string name,
+        BufferPoolHandler tableSpace,
+        BufferPoolHandler schemaSpace,
+        BufferPoolHandler systemSpace)
     {
         Name = name;
         TableSpace = tableSpace;

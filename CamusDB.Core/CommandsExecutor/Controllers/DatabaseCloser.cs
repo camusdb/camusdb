@@ -10,13 +10,13 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-internal sealed class DatabaseCloser
+internal sealed class DatabaseCloser : IDisposable
 {
     private readonly DatabaseDescriptors databaseDescriptors;
 
     public DatabaseCloser(DatabaseDescriptors databaseDescriptors)
     {
-        this.databaseDescriptors = databaseDescriptors;
+        this.databaseDescriptors = databaseDescriptors;        
     }
 
     public async ValueTask Close(string name)
@@ -39,7 +39,8 @@ internal sealed class DatabaseCloser
 
             databaseDescriptors.Descriptors.Remove(name);
 
-            File.Delete(Path.Combine(CamusDBConfig.DataDirectory, name, "camus.lock"));
+            string path = Path.Combine(CamusDBConfig.DataDirectory, name, "camus.lock");
+            File.Delete(path);
 
             Console.WriteLine("Database {0} closed", name);
         }
@@ -48,5 +49,10 @@ internal sealed class DatabaseCloser
             databaseDescriptors.Semaphore.Release();
         }
     }
-}
 
+    public void Dispose()
+    {
+        foreach (KeyValuePair<string, DatabaseDescriptor> keyValuePair in databaseDescriptors.Descriptors)
+            Close(keyValuePair.Key).AsTask().Wait();
+    }
+}

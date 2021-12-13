@@ -14,7 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor;
 
-public sealed class CommandExecutor
+public sealed class CommandExecutor : IDisposable
 {
     private readonly DatabaseOpener databaseOpener;
 
@@ -129,4 +129,9 @@ public sealed class CommandExecutor
     }
 
     #endregion
+
+    public void Dispose()
+    {
+        databaseCloser.Dispose();
+    }
 }

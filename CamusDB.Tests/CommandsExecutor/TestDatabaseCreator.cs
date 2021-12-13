@@ -34,16 +34,16 @@ public class TestDatabaseCreator
 
         await executor.CreateDatabase(databaseTicket);
 
-        string path = Config.DataDirectory + "/test";
+        string path = Path.Combine(Config.DataDirectory, "test");
 
         Assert.IsTrue(Directory.Exists(path));
 
         string[] tablespaces = new string[] { "tablespace0", "schema", "system" };
         for (int i = 0; i < tablespaces.Length; i++)
         {
-            Assert.IsTrue(File.Exists(path + "/" + tablespaces[i]));
+            Assert.IsTrue(File.Exists(Path.Combine(path, tablespaces[i])));
 
-            FileInfo fi = new(path + "/" + tablespaces[i]);
+            FileInfo fi = new(Path.Combine(path, tablespaces[i]));
             Assert.AreEqual(fi.Length, Config.InitialTableSpaceSize);
         }
     }

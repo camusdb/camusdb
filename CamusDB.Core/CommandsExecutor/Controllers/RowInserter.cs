@@ -127,7 +127,7 @@ internal sealed class RowInserter
 
                 // save index save to journal
                 UpdateUniqueIndexLog indexSchedule = new(sequence, index.Value.Column);
-                uint updateIndexSequence = await database.JournalWriter.Append(ticket.ForceFailureType, schedule);
+                uint updateIndexSequence = await database.JournalWriter.Append(ticket.ForceFailureType, indexSchedule);
 
                 SaveUniqueIndexTicket saveUniqueIndexTicket = new(
                     tablespace: tablespace,
