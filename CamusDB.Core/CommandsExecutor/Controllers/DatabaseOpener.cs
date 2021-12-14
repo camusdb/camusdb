@@ -100,7 +100,9 @@ internal sealed class DatabaseOpener
 
     private static async Task LoadDatabaseTableSpace(DatabaseDescriptor databaseDescriptor)
     {
-        byte[] data = await databaseDescriptor.TableSpace!.GetDataFromPage(Config.TableSpaceHeaderPage);
+        BufferPoolHandler tablespace = databaseDescriptor.TableSpace;
+
+        byte[] data = await tablespace.GetDataFromPage(Config.TableSpaceHeaderPage);
 
         if (data.Length != 0) // tablespace is initialized?
             return;
@@ -108,8 +110,8 @@ internal sealed class DatabaseOpener
         // write tablespace header
         BufferPage page = await databaseDescriptor.TableSpace.ReadPage(Config.TableSpaceHeaderPage);
 
-        databaseDescriptor.TableSpace.WriteTableSpaceHeader(page.Buffer);
-        databaseDescriptor.TableSpace!.FlushPage(page); // @todo make this atomic
+        tablespace.WriteTableSpaceHeader(page.Buffer);
+        tablespace.FlushPage(page); // @todo make this atomic
 
         Console.WriteLine("Data tablespaces initialized");
     }

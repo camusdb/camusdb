@@ -34,12 +34,13 @@ public sealed class JournalWriter
     public async Task Initialize()
     {
         string path = Path.Combine(Config.DataDirectory, database.Name, "journal");
-
-        Console.WriteLine("Data journal saved at {0}", path);
-
+       
         // @todo improve recovery here        
         JournalVerifier journalVerifier = new();
         await journalVerifier.Verify(path);
+
+        // Remove existing journal
+        File.Delete(path);
 
         journal = new(path, FileMode.Append, FileAccess.Write);
     }
@@ -60,11 +61,11 @@ public sealed class JournalWriter
 
             DateTime currentTime = DateTime.Now;
 
-            if ((currentTime - LastFlush).TotalMilliseconds > Config.JournalFlushInterval)
-            {
-                await journal.FlushAsync();
-                LastFlush = currentTime;
-            }
+            //if ((currentTime - LastFlush).TotalMilliseconds > Config.JournalFlushInterval)
+            //{
+            await journal.FlushAsync();
+            //    LastFlush = currentTime;
+            //}
         }
         finally
         {

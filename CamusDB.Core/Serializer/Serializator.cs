@@ -39,7 +39,7 @@ public sealed class Serializator
     public static T Unserialize<T>(byte[] buffer) where T : new()
     {
         string xp = Encoding.UTF8.GetString(buffer);
-        Console.WriteLine(xp);
+        //Console.WriteLine(xp);
 
         T? deserialized = JsonSerializer.Deserialize<T>(xp);
         if (deserialized is null)

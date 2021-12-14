@@ -16,9 +16,8 @@ internal sealed class DatabaseCreator
     public async Task Create(CreateDatabaseTicket ticket)
     {
         string name = ticket.DatabaseName;
-
-        string absolutePath = Directory.GetCurrentDirectory();
-        string dbPath = Path.Combine(absolutePath, Config.DataDirectory, name);
+        
+        string dbPath = Path.Combine(Config.DataDirectory, name);
 
         if (Directory.Exists(dbPath))
             throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Database already exists");

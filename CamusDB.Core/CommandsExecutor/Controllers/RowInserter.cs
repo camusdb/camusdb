@@ -14,6 +14,8 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Flux;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -74,7 +76,7 @@ internal sealed class RowInserter
 
         if (uniqueValue is null)
             throw new CamusDBException(
-                CamusDBErrorCodes.DuplicatePrimaryKeyValue,
+                CamusDBErrorCodes.InvalidInternalOperation,
                 "Cannot retrieve unique key for table " + table.Name
             );
 
@@ -82,14 +84,33 @@ internal sealed class RowInserter
 
         if (rowTuple is not null)
             throw new CamusDBException(
-                CamusDBErrorCodes.DuplicatePrimaryKeyValue,
+                CamusDBErrorCodes.DuplicateUniqueKeyValue,
                 "Duplicate entry for key " + table.Name + " " + uniqueValue
             );
 
         return uniqueValue;
     }
 
-    private async Task<BTreeTuple> CheckAndUpdateUniqueKeys(DatabaseDescriptor database, TableDescriptor table, uint sequence, InsertTicket ticket)
+    private void CheckUniqueKeys(TableDescriptor table, InsertTicket ticket)
+    {
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        {
+            if (index.Value.Type != IndexType.Unique)
+                continue;
+
+            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.Value.UniqueRows;
+
+            if (uniqueIndex is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A multi index tree wasn't found"
+                );
+
+            CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
+        }
+    }
+
+    private async Task<BTreeTuple> UpdateUniqueKeys(DatabaseDescriptor database, TableDescriptor table, uint sequence, InsertTicket ticket)
     {
         BTreeTuple rowTuple = new(-1, -1);
 
@@ -100,19 +121,25 @@ internal sealed class RowInserter
             if (index.Value.Type != IndexType.Unique)
                 continue;
 
-            if (index.Value.UniqueRows is null)
+            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.Value.UniqueRows;
+
+            if (uniqueIndex is null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
-                    "A multi index tree wasn't found"
+                    "A unique index tree wasn't found"
                 );
-
-            BTree<ColumnValue, BTreeTuple?> uniqueIndex = index.Value.UniqueRows;
 
             try
             {
                 await uniqueIndex.WriteLock.WaitAsync();
 
-                ColumnValue uniqueKeyValue = CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
+                ColumnValue? uniqueKeyValue = GetColumnValue(table, ticket, index.Key);
+
+                if (uniqueKeyValue is null)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInternalOperation,
+                        "A unique index tree wasn't found"
+                    );
 
                 // allocate pages and rowid when needed
                 if (rowTuple.SlotOne == -1)
@@ -179,6 +206,34 @@ internal sealed class RowInserter
         }
     }
 
+    /**
+     * First step is insert in the WAL
+     */
+    private async Task<FluxAction> InitializeStep(InsertFluxState state)
+    {        
+        InsertLog schedule = new(state.Ticket.TableName, state.Ticket.Values);
+        uint sequence = await state.Database.JournalWriter.Append(state.Ticket.ForceFailureType, schedule);
+        return FluxAction.Continue;
+    }
+
+    /**
+     * Second step is check for unique key violations
+     */
+    private FluxAction CheckUniqueKeysStep(InsertFluxState state)
+    {        
+        CheckUniqueKeys(state.Table, state.Ticket);
+        return FluxAction.Continue;
+    }
+
+    /**
+     * Unique keys after updated before inserting the actual row
+     */
+    public async Task<FluxAction> UpdateUniqueKeysStep(InsertFluxState state)
+    {
+        BTreeTuple rowTuple = await UpdateUniqueKeys(state.Database, state.Table, state.Sequence, state.Ticket);
+        return FluxAction.Continue;
+    }
+
     public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
         Validate(table, ticket);
@@ -186,13 +241,30 @@ internal sealed class RowInserter
         Stopwatch timer = new();
         timer.Start();
 
-        // Schedule insert in the journal
-        InsertLog schedule = new(ticket.TableName, ticket.Values);
-        uint sequence = await database.JournalWriter.Append(ticket.ForceFailureType, schedule);
+        InsertFluxState state = new(
+            database: database,
+            table: table,
+            ticket: ticket
+        );
+
+        var insertFlux = new FluxMachine<InsertFluxSteps, InsertFluxState>(state);
+
+        insertFlux.When(InsertFluxSteps.NotInitialized, InitializeStep);
+        insertFlux.When(InsertFluxSteps.CheckUniqueKeys, CheckUniqueKeysStep);
+        insertFlux.When(InsertFluxSteps.UpdateUniqueKeys, UpdateUniqueKeysStep);
+
+        while (!insertFlux.IsAborted)
+        {
+
+        }
+
+        
+
+        
 
         BufferPoolHandler tablespace = database.TableSpace;
 
-        BTreeTuple rowTuple = await CheckAndUpdateUniqueKeys(database, table, sequence, ticket);
+        BTreeTuple rowTuple = await UpdateUniqueKeys(database, table, sequence, ticket);
 
         byte[] rowBuffer = rowSerializer.Serialize(table, ticket, rowTuple.SlotOne);
 

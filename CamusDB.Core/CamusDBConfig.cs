@@ -10,7 +10,7 @@ namespace CamusDB.Core;
 
 public static class CamusDBConfig
 {
-    public const string DataDirectory = "Data";
+    public static string DataDirectory = Path.GetFullPath("Data");
 
     public const int InitialTableSpaceSize = PageSize * TotalPages; // 4096 blocks of 512 size
 

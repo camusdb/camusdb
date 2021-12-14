@@ -13,6 +13,7 @@ using CamusDB.Core.Journal.Models.Logs;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Serializer.Models;
 
 namespace CamusDB.Core.Journal;
 
@@ -42,14 +43,19 @@ public sealed class JournalReader : IDisposable
 
         while (true)
         {
-            header = new byte[6];
+            header = new byte[
+                SerializatorTypeSizes.TypeInteger32 +
+                SerializatorTypeSizes.TypeInteger16
+            ];
 
-            readBytes = await journal.ReadAsync(header, 0, 6);
+            readBytes = await journal.ReadAsync(header, 0, header.Length);
+
+            //Console.WriteLine(readBytes);
 
             if (readBytes == 0)
                 yield break;
 
-            if (readBytes < 6)
+            if (readBytes < header.Length)
             {
                 Console.WriteLine("Journal is incomplete or corrupt");
                 yield break;
