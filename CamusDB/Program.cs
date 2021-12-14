@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core;
 using CamusDB.Core.Util;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
@@ -21,6 +22,13 @@ builder.Services.AddSingleton<CommandValidator>();
 builder.Services.AddSingleton<CatalogsManager>();
 
 var app = builder.Build();
+
+// Initialize DB system
+var camus = new CamusStartup(
+    app.Services.GetRequiredService<CommandExecutor>()
+);
+
+await camus.Initialize();
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
