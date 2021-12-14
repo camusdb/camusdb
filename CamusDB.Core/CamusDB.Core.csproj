@@ -22,6 +22,7 @@
     <None Remove="Journal\Models\Logs\" />
     <None Remove="CommandsExecutor\Models\StateMachines\" />
     <None Remove="Machines\" />
+    <None Remove="CommandsExecutor\Controllers\Insert\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="CommandsValidator\" />
@@ -36,6 +37,7 @@
     <Folder Include="Journal\Models\Logs\" />
     <Folder Include="CommandsExecutor\Models\StateMachines\" />
     <Folder Include="Flux\" />
+    <Folder Include="CommandsExecutor\Controllers\Insert\" />
   </ItemGroup>
 
   <ItemGroup>

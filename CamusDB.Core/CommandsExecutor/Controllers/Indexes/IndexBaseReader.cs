@@ -13,7 +13,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
-public class IndexBaseReader
+internal abstract class IndexBaseReader
 {
     protected static ColumnValue UnserializeKey(byte[] nodeBuffer, ref int pointer)
     {

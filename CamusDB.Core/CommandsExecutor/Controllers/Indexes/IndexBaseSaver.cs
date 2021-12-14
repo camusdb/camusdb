@@ -13,7 +13,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
-public abstract class IndexBaseSaver
+internal abstract class IndexBaseSaver
 {
     protected static int GetKeySize(ColumnValue columnValue)
     {

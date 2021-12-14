@@ -12,7 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestDatabaseCreator
+internal class TestDatabaseCreator
 {
     [SetUp]
     public void Setup()

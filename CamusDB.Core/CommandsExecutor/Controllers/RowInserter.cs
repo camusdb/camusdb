@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Flux;
 using System.Diagnostics;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
@@ -14,8 +15,8 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Flux;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
+using CamusDB.Core.CommandsExecutor.Controllers.Insert;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -24,6 +25,10 @@ internal sealed class RowInserter
     private readonly IndexSaver indexSaver = new();
 
     private readonly RowSerializer rowSerializer = new();
+
+    private readonly InsertMultiKeySaver insertMultiKeySaver = new();
+
+    private readonly InsertUniqueKeySaver insertUniqueKeySaver = new();
 
     private static void Validate(TableDescriptor table, InsertTicket ticket) // @todo optimize this
     {
@@ -51,168 +56,13 @@ internal sealed class RowInserter
         }
     }
 
-    private static ColumnValue? GetColumnValue(TableDescriptor table, InsertTicket ticket, string name)
-    {
-        List<TableColumnSchema> columns = table.Schema!.Columns!;
-
-        for (int i = 0; i < columns.Count; i++)
-        {
-            TableColumnSchema column = columns[i];
-
-            if (column.Name == name)
-            {
-                if (ticket.Values.TryGetValue(column.Name, out ColumnValue? value))
-                    return value;
-                break;
-            }
-        }
-
-        return null;
-    }
-
-    private static ColumnValue CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue, BTreeTuple?> uniqueIndex, InsertTicket ticket, string name)
-    {
-        ColumnValue? uniqueValue = GetColumnValue(table, ticket, name);
-
-        if (uniqueValue is null)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "Cannot retrieve unique key for table " + table.Name
-            );
-
-        BTreeTuple? rowTuple = uniqueIndex.Get(uniqueValue);
-
-        if (rowTuple is not null)
-            throw new CamusDBException(
-                CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                "Duplicate entry for key " + table.Name + " " + uniqueValue
-            );
-
-        return uniqueValue;
-    }
-
-    private void CheckUniqueKeys(TableDescriptor table, InsertTicket ticket)
-    {
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
-        {
-            if (index.Value.Type != IndexType.Unique)
-                continue;
-
-            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.Value.UniqueRows;
-
-            if (uniqueIndex is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A multi index tree wasn't found"
-                );
-
-            CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
-        }
-    }
-
-    private async Task<BTreeTuple> UpdateUniqueKeys(DatabaseDescriptor database, TableDescriptor table, uint sequence, InsertTicket ticket)
-    {
-        BTreeTuple rowTuple = new(-1, -1);
-
-        BufferPoolHandler tablespace = database.TableSpace;
-
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
-        {
-            if (index.Value.Type != IndexType.Unique)
-                continue;
-
-            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.Value.UniqueRows;
-
-            if (uniqueIndex is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A unique index tree wasn't found"
-                );
-
-            try
-            {
-                await uniqueIndex.WriteLock.WaitAsync();
-
-                ColumnValue? uniqueKeyValue = GetColumnValue(table, ticket, index.Key);
-
-                if (uniqueKeyValue is null)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInternalOperation,
-                        "A unique index tree wasn't found"
-                    );
-
-                // allocate pages and rowid when needed
-                if (rowTuple.SlotOne == -1)
-                    rowTuple.SlotOne = await tablespace.GetNextRowId();
-
-                if (rowTuple.SlotTwo == -1)
-                    rowTuple.SlotTwo = await tablespace.GetNextFreeOffset();
-
-                // save page + rowid to journal
-                InsertSlotsLog schedule = new(sequence, rowTuple);
-                await database.JournalWriter.Append(ticket.ForceFailureType, schedule);
-
-                // save index save to journal
-                UpdateUniqueIndexLog indexSchedule = new(sequence, index.Value.Column);
-                uint updateIndexSequence = await database.JournalWriter.Append(ticket.ForceFailureType, indexSchedule);
-
-                SaveUniqueIndexTicket saveUniqueIndexTicket = new(
-                    tablespace: tablespace,
-                    journal: database.JournalWriter,
-                    sequence: updateIndexSequence,
-                    failureType: ticket.ForceFailureType,
-                    index: uniqueIndex,
-                    key: uniqueKeyValue,
-                    value: rowTuple
-                );
-
-                await indexSaver.NoLockingSave(saveUniqueIndexTicket);
-
-                // save checkpoint of index saved
-                UpdateUniqueCheckpointLog checkpoint = new(sequence, index.Value.Column);
-                await database.JournalWriter.Append(ticket.ForceFailureType, checkpoint);
-            }
-            finally
-            {
-                uniqueIndex.WriteLock.Release();
-            }
-        }
-
-        return rowTuple;
-    }
-
-    private async Task UpdateMultiKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, BTreeTuple rowTuple)
-    {
-        BufferPoolHandler tablespace = database.TableSpace;
-
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
-        {
-            if (index.Value.Type != IndexType.Multi)
-                continue;
-
-            if (index.Value.MultiRows is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A multi index tree wasn't found"
-                );
-
-            BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
-
-            ColumnValue? multiKeyValue = GetColumnValue(table, ticket, index.Value.Column);
-            if (multiKeyValue is null)
-                continue;
-
-            await indexSaver.Save(tablespace, multiIndex, multiKeyValue, rowTuple);
-        }
-    }
-
     /**
      * First step is insert in the WAL
      */
     private async Task<FluxAction> InitializeStep(InsertFluxState state)
-    {        
+    {
         InsertLog schedule = new(state.Ticket.TableName, state.Ticket.Values);
-        uint sequence = await state.Database.JournalWriter.Append(state.Ticket.ForceFailureType, schedule);
+        state.Sequence = await state.Database.JournalWriter.Append(state.Ticket.ForceFailureType, schedule);
         return FluxAction.Continue;
     }
 
@@ -220,18 +70,69 @@ internal sealed class RowInserter
      * Second step is check for unique key violations
      */
     private FluxAction CheckUniqueKeysStep(InsertFluxState state)
-    {        
-        CheckUniqueKeys(state.Table, state.Ticket);
+    {
+        insertUniqueKeySaver.CheckUniqueKeys(state.Table, state.Ticket);
         return FluxAction.Continue;
     }
 
     /**
      * Unique keys after updated before inserting the actual row
      */
-    public async Task<FluxAction> UpdateUniqueKeysStep(InsertFluxState state)
+    private async Task<FluxAction> UpdateUniqueKeysStep(InsertFluxState state)
     {
-        BTreeTuple rowTuple = await UpdateUniqueKeys(state.Database, state.Table, state.Sequence, state.Ticket);
+        state.RowTuple = await insertUniqueKeySaver.UpdateUniqueKeys(state.Database, state.Table, state.Sequence, state.Ticket);
         return FluxAction.Continue;
+    }
+
+    /**
+     * Allocate a new page in the buffer pool and insert the serializated row into it
+     */
+    private async Task<FluxAction> InsertToPageStep(InsertFluxState state)
+    {
+        BufferPoolHandler tablespace = state.Database.TableSpace;
+
+        byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket, state.RowTuple.SlotOne);
+
+        // Insert data to the page offset
+        await tablespace.WriteDataToPage(state.RowTuple.SlotTwo, rowBuffer);
+
+        WritePageLog writeSchedule = new(state.Sequence, rowBuffer);
+        await state.Database.JournalWriter.Append(state.Ticket.ForceFailureType, writeSchedule);
+
+        return FluxAction.Continue;
+    }
+
+    /**
+     * Every table has a B+Tree index where the data can be easily located by rowid
+     * We take the page created in the previous step and insert it in the tree
+     */
+    private async Task<FluxAction> UpdateTableIndex(InsertFluxState state)
+    {
+        BufferPoolHandler tablespace = state.Database.TableSpace;
+
+        // Main table index stores rowid pointing to page offeset
+        await indexSaver.Save(tablespace, state.Table.Rows, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
+
+        return FluxAction.Continue;
+    }
+
+    /**
+     * In the last step multi indexes are updated
+     */
+    private async Task<FluxAction> UpdateMultiIndexes(InsertFluxState state)
+    {
+        await insertMultiKeySaver.UpdateMultiKeys(state.Database, state.Table, state.Ticket, state.RowTuple);
+        return FluxAction.Continue;
+    }
+
+    /**
+     * Finally we checkpoint the insert to the WAL
+     */
+    private async Task<FluxAction> CheckpointInsert(InsertFluxState state)
+    {
+        InsertCheckpointLog insertCheckpoint = new(state.Sequence);
+        await state.Database.JournalWriter.Append(state.Ticket.ForceFailureType, insertCheckpoint);
+        return FluxAction.Completed;
     }
 
     public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
@@ -247,40 +148,18 @@ internal sealed class RowInserter
             ticket: ticket
         );
 
-        var insertFlux = new FluxMachine<InsertFluxSteps, InsertFluxState>(state);
+        FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
 
-        insertFlux.When(InsertFluxSteps.NotInitialized, InitializeStep);
-        insertFlux.When(InsertFluxSteps.CheckUniqueKeys, CheckUniqueKeysStep);
-        insertFlux.When(InsertFluxSteps.UpdateUniqueKeys, UpdateUniqueKeysStep);
+        machine.When(InsertFluxSteps.NotInitialized, InitializeStep);
+        machine.When(InsertFluxSteps.CheckUniqueKeys, CheckUniqueKeysStep);
+        machine.When(InsertFluxSteps.UpdateUniqueKeys, UpdateUniqueKeysStep);
+        machine.When(InsertFluxSteps.InsertToPage, InsertToPageStep);
+        machine.When(InsertFluxSteps.UpdateTableIndex, UpdateTableIndex);
+        machine.When(InsertFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
+        machine.When(InsertFluxSteps.CheckpointInsert, CheckpointInsert);
 
-        while (!insertFlux.IsAborted)
-        {
-
-        }
-
-        
-
-        
-
-        BufferPoolHandler tablespace = database.TableSpace;
-
-        BTreeTuple rowTuple = await UpdateUniqueKeys(database, table, sequence, ticket);
-
-        byte[] rowBuffer = rowSerializer.Serialize(table, ticket, rowTuple.SlotOne);
-
-        // Insert data to the page offset
-        await tablespace.WriteDataToPage(rowTuple.SlotTwo, rowBuffer);
-
-        WritePageLog writeSchedule = new(sequence, rowBuffer);
-        await database.JournalWriter.Append(ticket.ForceFailureType, writeSchedule);
-
-        // Main table index stores rowid pointing to page offeset
-        await indexSaver.Save(tablespace, table.Rows, rowTuple.SlotOne, rowTuple.SlotTwo);
-
-        await UpdateMultiKeys(database, table, ticket, rowTuple);
-
-        InsertCheckpointLog insertCheckpoint = new(sequence);
-        await database.JournalWriter.Append(ticket.ForceFailureType, insertCheckpoint);
+        while (!machine.IsAborted)
+            await machine.Feed(machine.NextStep());
 
         timer.Stop();
 
@@ -302,6 +181,11 @@ internal sealed class RowInserter
             }
         }*/
 
-        Console.WriteLine("Row {0} inserted at {1}, Time taken: {2}", rowTuple.SlotOne, rowTuple.SlotTwo, timeTaken.ToString(@"m\:ss\.fff"));
+        Console.WriteLine(
+            "Row {0} inserted at {1}, Time taken: {2}",
+            state.RowTuple.SlotOne,
+            state.RowTuple.SlotTwo,
+            timeTaken.ToString(@"m\:ss\.fff")
+        );
     }
 }

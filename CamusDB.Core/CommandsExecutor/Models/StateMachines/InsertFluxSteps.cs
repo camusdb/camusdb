@@ -13,4 +13,8 @@ public enum InsertFluxSteps
     NotInitialized = 0,
     CheckUniqueKeys = 1,
     UpdateUniqueKeys = 2,
+    InsertToPage = 3,
+    UpdateTableIndex = 4,
+    UpdateMultiIndexes = 5,
+    CheckpointInsert = 6
 }

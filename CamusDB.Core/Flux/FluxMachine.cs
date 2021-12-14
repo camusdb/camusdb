@@ -17,6 +17,8 @@ public enum FluxAction
 
 public class FluxMachine<TSteps, TState> where TSteps : Enum
 {
+    private int currentStep = -1;
+
     private readonly TState state;
 
     private readonly Dictionary<TSteps, Func<TState, FluxAction>> handlers = new();
@@ -48,6 +50,9 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
 
     private void TryExecuteHandler(TSteps status)
     {
+        if (IsAborted)
+            return;
+
         if (!handlers.TryGetValue(status, out Func<TState, FluxAction>? handler))
             return;
 
@@ -62,6 +67,9 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
 
     private async Task TryExecuteAsyncHandler(TSteps status)
     {
+        if (IsAborted)
+            return;
+
         if (!asyncHandlers.TryGetValue(status, out Func<TState, Task<FluxAction>>? handler))
             return;
 
@@ -74,4 +82,19 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
         }
     }
 
+    public TSteps NextStep()
+    {
+        currentStep++;
+        Type type = typeof(TSteps);
+
+        if (!Enum.IsDefined(type, currentStep))
+        {
+            currentStep = 0;
+            IsAborted = true;
+        }
+
+        Console.WriteLine(currentStep);
+
+        return (TSteps)Enum.ToObject(type, currentStep);
+    }
 }
