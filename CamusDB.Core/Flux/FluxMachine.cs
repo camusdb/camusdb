@@ -21,11 +21,17 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
 
     private readonly TState state;
 
+    private Func<TState, FluxAction>? abortHandler;
+
+    private Func<TState, Task<FluxAction>>? abortAsyncHandler;
+
     private readonly Dictionary<TSteps, Func<TState, FluxAction>> handlers = new();
 
     private readonly Dictionary<TSteps, Func<TState, Task<FluxAction>>> asyncHandlers = new();
 
     public bool IsAborted { get; private set; }
+
+    public FluxAction LastAction { get; private set; }
 
     public FluxMachine(TState state)
     {
@@ -42,13 +48,23 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
         asyncHandlers.Add(status, handler);
     }
 
-    public async Task Feed(TSteps status)
+    public void WhenAbort(Func<TState, FluxAction> handler)
     {
-        TryExecuteHandler(status);
+        abortHandler = handler;
+    }
+
+    public void WhenAbort(Func<TState, Task<FluxAction>> handler)
+    {
+        abortAsyncHandler = handler;
+    }
+
+    public async Task RunStep(TSteps status)
+    {
+        await TryExecuteHandler(status);
         await TryExecuteAsyncHandler(status);
     }
 
-    private void TryExecuteHandler(TSteps status)
+    private async Task TryExecuteHandler(TSteps status)
     {
         if (IsAborted)
             return;
@@ -56,12 +72,23 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
         if (!handlers.TryGetValue(status, out Func<TState, FluxAction>? handler))
             return;
 
-        FluxAction action = handler(state);
-
-        if (action == FluxAction.Abort || action == FluxAction.Completed)
+        try
         {
-            IsAborted = true;
-            return;
+            LastAction = handler(state);
+
+            if (LastAction == FluxAction.Abort)
+                IsAborted = true;
+
+            if (LastAction == FluxAction.Completed)
+            {
+                IsAborted = true;
+                await RunAbortHandlers();
+            }
+        }
+        catch (Exception)
+        {
+            await RunAbortHandlers();
+            throw;
         }
     }
 
@@ -73,13 +100,33 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
         if (!asyncHandlers.TryGetValue(status, out Func<TState, Task<FluxAction>>? handler))
             return;
 
-        FluxAction action = await handler(state);
-
-        if (action == FluxAction.Abort || action == FluxAction.Completed)
+        try
         {
-            IsAborted = true;
-            return;
+            LastAction = await handler(state);
+
+            if (LastAction == FluxAction.Abort)
+                IsAborted = true;
+
+            if (LastAction == FluxAction.Completed)
+            {
+                IsAborted = true;
+                await RunAbortHandlers();
+            }
         }
+        catch (Exception)
+        {
+            await RunAbortHandlers();
+            throw;
+        }
+    }
+
+    private async Task RunAbortHandlers()
+    {
+        if (abortHandler != null)
+            abortHandler(state);
+
+        if (abortAsyncHandler != null)
+            await abortAsyncHandler(state);
     }
 
     public TSteps NextStep()
@@ -91,6 +138,7 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
         {
             currentStep = 0;
             IsAborted = true;
+            LastAction = FluxAction.Completed;
         }
 
         Console.WriteLine(currentStep);

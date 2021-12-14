@@ -158,8 +158,10 @@ internal sealed class RowInserter
         machine.When(InsertFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
         machine.When(InsertFluxSteps.CheckpointInsert, CheckpointInsert);
 
+        machine.WhenAbort(CheckpointInsert);
+
         while (!machine.IsAborted)
-            await machine.Feed(machine.NextStep());
+            await machine.RunStep(machine.NextStep());
 
         timer.Stop();
 

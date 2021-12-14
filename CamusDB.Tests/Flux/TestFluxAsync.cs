@@ -44,7 +44,7 @@ internal sealed class TestFluxAsync
         machine.When(TestFluxEnum.Step0, CallStepAsync);
 
         while (!machine.IsAborted)
-            await machine.Feed(machine.NextStep());
+            await machine.RunStep(machine.NextStep());
 
         Assert.AreEqual(1, state.Number);
     }
@@ -59,7 +59,7 @@ internal sealed class TestFluxAsync
         machine.When(TestFluxEnum.Step1, CallStepAsync);
 
         while (!machine.IsAborted)
-            await machine.Feed(machine.NextStep());
+            await machine.RunStep(machine.NextStep());
 
         Assert.AreEqual(2, state.Number);
     }
@@ -75,7 +75,7 @@ internal sealed class TestFluxAsync
         machine.When(TestFluxEnum.Step2, CallStepAsync);
 
         while (!machine.IsAborted)
-            await machine.Feed(machine.NextStep());
+            await machine.RunStep(machine.NextStep());
 
         Assert.AreEqual(3, state.Number);
     }
@@ -91,7 +91,7 @@ internal sealed class TestFluxAsync
         machine.When(TestFluxEnum.Step4, CallStepAsync);
 
         while (!machine.IsAborted)
-            await machine.Feed(machine.NextStep());
+            await machine.RunStep(machine.NextStep());
 
         Assert.AreEqual(3, state.Number);
     }
@@ -107,7 +107,7 @@ internal sealed class TestFluxAsync
         machine.When(TestFluxEnum.Step4, CallStepAsync);
 
         while (!machine.IsAborted)
-            await machine.Feed(machine.NextStep());
+            await machine.RunStep(machine.NextStep());
 
         Assert.AreEqual(2, state.Number);
     }
@@ -123,7 +123,7 @@ internal sealed class TestFluxAsync
         machine.When(TestFluxEnum.Step4, CallStepAsync);
 
         while (!machine.IsAborted)
-            await machine.Feed(machine.NextStep());
+            await machine.RunStep(machine.NextStep());
 
         Assert.AreEqual(2, state.Number);
     }
