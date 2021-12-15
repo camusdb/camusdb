@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-
 using System.IO;
 using NUnit.Framework;
 using System.Threading.Tasks;

@@ -6,12 +6,12 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Journal.Models.Logs;
+namespace CamusDB.Core.Journal.Controllers;
 
-namespace CamusDB.Core.Journal.Models;
-
-public sealed class JournalLogGroup
+internal class InsertRecoverer
 {
-    public JournalGroupType Type { get; }
-}
+    public void Recovery()
+    {
 
+    }
+}

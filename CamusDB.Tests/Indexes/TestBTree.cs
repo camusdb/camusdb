@@ -8,7 +8,7 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Tests.Indexes;
 
-public class TestBTree
+internal sealed class TestBTree
 {
     [Test]
     public void TestBasicInsert()

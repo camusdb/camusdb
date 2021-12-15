@@ -6,12 +6,10 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Journal.Models.Logs;
-
 namespace CamusDB.Core.Journal.Models;
 
-public sealed class JournalLogGroup
+public enum JournalGroupType
 {
-    public JournalGroupType Type { get; }
+    Insert = 0,
+    Delete = 1,
 }
-

@@ -7,12 +7,13 @@
  */
 
 using CamusDB.Core.Journal.Models;
+using CamusDB.Core.CommandsExecutor;
 
 namespace CamusDB.Core.Journal;
 
 public sealed class JournalVerifier
 {
-    public async Task Verify(string path)
+    public async Task<Dictionary<uint, JournalLogGroup>> Verify(string path)
     {
         JournalReader journalReader = new(path);
 
@@ -47,18 +48,9 @@ public sealed class JournalVerifier
                     break;
             }
         }
-
-        if (logGroups.Count == 0)
-        {
-            journalReader.Dispose();
-            return;
-        }
-
-        foreach (KeyValuePair<uint, JournalLogGroup> group in logGroups)
-        {
-            Console.WriteLine("Incomplete insert found {0}");
-        }
-
+        
         journalReader.Dispose();
+
+        return logGroups;                     
     }
 }

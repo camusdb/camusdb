@@ -1,4 +1,11 @@
 ﻿
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.IO;
 using NUnit.Framework;
 using System.Threading.Tasks;
@@ -80,7 +87,10 @@ internal class TestJournalVerifier
 
         database.JournalWriter.Close();
 
-        JournalReader journalReader = GetJournalReader(database);
+        JournalVerifier journalVerifier = new();
+        await journalVerifier.Verify(Path.Combine(Config.DataDirectory, ""));
+
+        /*JournalReader journalReader = GetJournalReader(database);
 
         List<JournalLog> journalLogs = new();
 
@@ -98,6 +108,6 @@ internal class TestJournalVerifier
         Assert.AreEqual(JournalLogTypes.InsertCheckpoint, journalLogs[1].Type);
         Assert.AreEqual(checkpointSequence, journalLogs[1].Sequence);
         Assert.IsInstanceOf<InsertCheckpointLog>(journalLogs[1].InsertCheckpointLog);
-        Assert.AreEqual(sequence, journalLogs[1].InsertCheckpointLog!.Sequence);
+        Assert.AreEqual(sequence, journalLogs[1].InsertCheckpointLog!.Sequence);*/
     }
 }
