@@ -62,7 +62,7 @@ internal sealed class RowInserter
     private async Task<FluxAction> InitializeStep(InsertFluxState state)
     {
         InsertLog schedule = new(state.Ticket.TableName, state.Ticket.Values);
-        state.Sequence = await state.Database.JournalWriter.Append(state.Ticket.ForceFailureType, schedule);
+        state.Sequence = await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, schedule);
         return FluxAction.Continue;
     }
 
@@ -97,7 +97,7 @@ internal sealed class RowInserter
         await tablespace.WriteDataToPage(state.RowTuple.SlotTwo, rowBuffer);
 
         WritePageLog writeSchedule = new(state.Sequence, rowBuffer);
-        await state.Database.JournalWriter.Append(state.Ticket.ForceFailureType, writeSchedule);
+        await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, writeSchedule);
 
         return FluxAction.Continue;
     }
@@ -131,7 +131,7 @@ internal sealed class RowInserter
     private async Task<FluxAction> CheckpointInsert(InsertFluxState state)
     {
         InsertCheckpointLog insertCheckpoint = new(state.Sequence);
-        await state.Database.JournalWriter.Append(state.Ticket.ForceFailureType, insertCheckpoint);
+        await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, insertCheckpoint);
         return FluxAction.Completed;
     }
 

@@ -9,10 +9,10 @@
 using System.Diagnostics;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
+using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Journal.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -53,7 +53,7 @@ internal sealed class RowDeleter
 
             RemoveUniqueIndexTicket ticket = new(
                 tablespace: tablespace,
-                journal: database.JournalWriter,
+                journal: database.Journal.Writer,
                 sequence: 0,
                 failureType: JournalFailureTypes.None,
                 index: uniqueIndex,

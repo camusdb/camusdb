@@ -23,6 +23,7 @@
     <None Remove="CommandsExecutor\Models\StateMachines\" />
     <None Remove="Machines\" />
     <None Remove="CommandsExecutor\Controllers\Insert\" />
+    <None Remove="Journal\Controllers\Recovery\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="CommandsValidator\" />
@@ -38,6 +39,7 @@
     <Folder Include="CommandsExecutor\Models\StateMachines\" />
     <Folder Include="Flux\" />
     <Folder Include="CommandsExecutor\Controllers\Insert\" />
+    <Folder Include="Journal\Controllers\Recovery\" />
   </ItemGroup>
 
   <ItemGroup>

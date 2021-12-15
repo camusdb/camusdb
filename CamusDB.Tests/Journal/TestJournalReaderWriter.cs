@@ -80,9 +80,9 @@ internal class TestJournal
         );
 
         InsertLog schedule = new(ticket.TableName, ticket.Values);
-        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
+        uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
-        database.JournalWriter.Close();
+        database.Journal.Writer.Close();
 
         JournalReader journalReader = GetJournalReader(database);
 
@@ -122,9 +122,9 @@ internal class TestJournal
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
 
         InsertSlotsLog schedule = new(100, new BTreeTuple(50, 25));
-        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
+        uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
-        database.JournalWriter.Close();
+        database.Journal.Writer.Close();
 
         JournalReader journalReader = GetJournalReader(database);
 
@@ -153,9 +153,9 @@ internal class TestJournal
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
 
         WritePageLog schedule = new(100, new byte[5] { 1, 2, 3, 4, 5 });
-        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
+        uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
-        database.JournalWriter.Close();
+        database.Journal.Writer.Close();
 
         JournalReader journalReader = GetJournalReader(database);
 
@@ -183,9 +183,9 @@ internal class TestJournal
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
 
         InsertCheckpointLog schedule = new(100);
-        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
+        uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
-        database.JournalWriter.Close();
+        database.Journal.Writer.Close();
 
         JournalReader journalReader = GetJournalReader(database);
 
@@ -212,9 +212,9 @@ internal class TestJournal
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
 
         UpdateUniqueCheckpointLog schedule = new(100, "unique");
-        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
+        uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
-        database.JournalWriter.Close();
+        database.Journal.Writer.Close();
 
         JournalReader journalReader = GetJournalReader(database);
 
@@ -242,9 +242,9 @@ internal class TestJournal
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
 
         UpdateUniqueIndexLog schedule = new(100, "unique");
-        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
+        uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
-        database.JournalWriter.Close();
+        database.Journal.Writer.Close();
 
         JournalReader journalReader = GetJournalReader(database);
 
@@ -284,12 +284,12 @@ internal class TestJournal
         );
 
         InsertLog schedule = new(ticket.TableName, ticket.Values);
-        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
+        uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
         InsertCheckpointLog checkpointSchedule = new(sequence);
-        uint checkpointSequence = await database.JournalWriter.Append(JournalFailureTypes.None, checkpointSchedule);
+        uint checkpointSequence = await database.Journal.Writer.Append(JournalFailureTypes.None, checkpointSchedule);
 
-        database.JournalWriter.Close();
+        database.Journal.Writer.Close();
 
         JournalReader journalReader = GetJournalReader(database);
 

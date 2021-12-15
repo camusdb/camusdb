@@ -80,12 +80,12 @@ internal class TestJournalVerifier
         );
 
         InsertLog schedule = new(ticket.TableName, ticket.Values);
-        uint sequence = await database.JournalWriter.Append(JournalFailureTypes.None, schedule);
+        uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
         InsertCheckpointLog checkpointSchedule = new(sequence);
-        uint checkpointSequence = await database.JournalWriter.Append(JournalFailureTypes.None, checkpointSchedule);
+        uint checkpointSequence = await database.Journal.Writer.Append(JournalFailureTypes.None, checkpointSchedule);
 
-        database.JournalWriter.Close();
+        database.Journal.Writer.Close();
 
         JournalVerifier journalVerifier = new();
         await journalVerifier.Verify(Path.Combine(Config.DataDirectory, ""));

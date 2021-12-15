@@ -99,15 +99,15 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
 
                 // save page + rowid to journal
                 InsertSlotsLog schedule = new(sequence, rowTuple);
-                await database.JournalWriter.Append(ticket.ForceFailureType, schedule);
+                await database.Journal.Writer.Append(ticket.ForceFailureType, schedule);
 
                 // save index save to journal
                 UpdateUniqueIndexLog indexSchedule = new(sequence, index.Value.Column);
-                uint updateIndexSequence = await database.JournalWriter.Append(ticket.ForceFailureType, indexSchedule);
+                uint updateIndexSequence = await database.Journal.Writer.Append(ticket.ForceFailureType, indexSchedule);
 
                 SaveUniqueIndexTicket saveUniqueIndexTicket = new(
                     tablespace: tablespace,
-                    journal: database.JournalWriter,
+                    journal: database.Journal.Writer,
                     sequence: updateIndexSequence,
                     failureType: ticket.ForceFailureType,
                     index: uniqueIndex,
@@ -119,7 +119,7 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
 
                 // save checkpoint of index saved
                 UpdateUniqueCheckpointLog checkpoint = new(sequence, index.Value.Column);
-                await database.JournalWriter.Append(ticket.ForceFailureType, checkpoint);
+                await database.Journal.Writer.Append(ticket.ForceFailureType, checkpoint);
             }
             finally
             {

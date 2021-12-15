@@ -7,9 +7,9 @@
  */
 
 using CamusDB.Core.CommandsExecutor;
+using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using Config = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core;
 

@@ -41,7 +41,7 @@ public sealed class CommandExecutor : IDisposable
         this.validator = validator;
 
         databaseDescriptors = new();
-        databaseOpener = new(databaseDescriptors);        
+        databaseOpener = new(databaseDescriptors);
         databaseCloser = new(databaseDescriptors);
         databaseCreator = new();
         tableOpener = new(catalogs);
@@ -62,7 +62,7 @@ public sealed class CommandExecutor : IDisposable
 
     public async Task<DatabaseDescriptor> OpenDatabase(string database)
     {
-        return await databaseOpener.Open(database);
+        return await databaseOpener.Open(this, database);
     }
 
     public async Task CloseDatabase(CloseDatabaseTicket ticket)
@@ -80,7 +80,7 @@ public sealed class CommandExecutor : IDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor descriptor = await databaseOpener.Open(ticket.DatabaseName);
+        DatabaseDescriptor descriptor = await databaseOpener.Open(this, ticket.DatabaseName);
         return await tableCreator.Create(descriptor, ticket);
     }
 
@@ -92,7 +92,7 @@ public sealed class CommandExecutor : IDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);        
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -103,7 +103,7 @@ public sealed class CommandExecutor : IDisposable
     {
         //validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -112,7 +112,7 @@ public sealed class CommandExecutor : IDisposable
 
     public async Task<List<Dictionary<string, ColumnValue>>> Query(QueryTicket ticket)
     {
-        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);        
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -121,14 +121,14 @@ public sealed class CommandExecutor : IDisposable
 
     public async Task<List<Dictionary<string, ColumnValue>>> QueryById(QueryByIdTicket ticket)
     {
-        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
         return await queryExecutor.QueryById(database, table, ticket);
     }
 
-    #endregion
+    #endregion    
 
     public void Dispose()
     {

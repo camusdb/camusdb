@@ -37,7 +37,6 @@ public sealed class JournalVerifier
                     if (!logGroups.TryGetValue(parentSequence, out JournalLogGroup? group))
                     {
                         Console.WriteLine("Insert checkpoint {0} not found", parentSequence);
-
                         break;
                     }
 

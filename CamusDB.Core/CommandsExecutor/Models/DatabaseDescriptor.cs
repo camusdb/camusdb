@@ -24,11 +24,11 @@ public sealed class DatabaseDescriptor
 
     public Schema Schema { get; set; } = new();
 
-    public JournalWriter JournalWriter { get; set; }
+    public JournalManager Journal { get; }
 
     public SystemSchema SystemSchema { get; set; } = new();
 
-    public SemaphoreSlim DescriptorsSemaphore = new(1, 1);
+    public SemaphoreSlim DescriptorsSemaphore { get; } = new(1, 1);
 
     public Dictionary<string, TableDescriptor> TableDescriptors = new();
 
@@ -42,6 +42,6 @@ public sealed class DatabaseDescriptor
         TableSpace = tableSpace;
         SchemaSpace = schemaSpace;
         SystemSpace = systemSpace;
-        JournalWriter = new(this);
+        Journal = new(name);
     }
 }

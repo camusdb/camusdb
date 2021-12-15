@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Journal.Models;
+using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.Journal.Models.Logs;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -22,22 +23,28 @@ public sealed class JournalWriter
 
     public DateTime LastFlush { get; private set; } = DateTime.Now;
 
-    private readonly DatabaseDescriptor database;
+    private readonly string database;
 
     private readonly SemaphoreSlim semaphore = new(1, 1);
 
-    public JournalWriter(DatabaseDescriptor database)
+    public JournalWriter(string name)
     {
-        this.database = database;
+        this.database = name;
     }
 
-    public async Task Initialize()
+    public async Task Initialize(CommandExecutor executor)
     {
-        string path = Path.Combine(Config.DataDirectory, database.Name, "journal");
+        string path = Path.Combine(Config.DataDirectory, database, "journal");
        
         // @todo improve recovery here        
-        JournalVerifier journalVerifier = new();
-        await journalVerifier.Verify(path);
+        JournalVerifier verifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await verifier.Verify(path);
+        if (groups.Count > 0)
+        {
+            JournalRecoverer recoverer = new();
+            await recoverer.Recover(executor, groups);
+        }
 
         // Remove existing journal
         File.Delete(path);

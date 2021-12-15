@@ -17,7 +17,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class DatabaseOpener
-{    
+{
     private readonly DatabaseDescriptors databaseDescriptors;
 
     public DatabaseOpener(DatabaseDescriptors databaseDescriptors)
@@ -25,7 +25,7 @@ internal sealed class DatabaseOpener
         this.databaseDescriptors = databaseDescriptors;
     }
 
-    public async ValueTask<DatabaseDescriptor> Open(string name)
+    public async ValueTask<DatabaseDescriptor> Open(CommandExecutor executor, string name)
     {
         if (databaseDescriptors.Descriptors.TryGetValue(name, out DatabaseDescriptor? databaseDescriptor))
             return databaseDescriptor;
@@ -70,7 +70,7 @@ internal sealed class DatabaseOpener
             await Task.WhenAll(new Task[]
             {
                 databaseDescriptor.TableSpace.Initialize(),
-                databaseDescriptor.JournalWriter.Initialize(),
+                databaseDescriptor.Journal.Writer.Initialize(executor),
                 File.WriteAllBytesAsync(path, Array.Empty<byte>())
             });
 
