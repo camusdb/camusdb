@@ -12,7 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 namespace CamusDB.Core.Journal.Models.Logs;
 
 [JournalSerializable(JournalLogTypes.InsertCheckpoint)]
-public sealed class InsertCheckpointLog
+public sealed class InsertCheckpointLog : IJournalLog
 {
     [JournalField(0)]
     public uint Sequence { get; }

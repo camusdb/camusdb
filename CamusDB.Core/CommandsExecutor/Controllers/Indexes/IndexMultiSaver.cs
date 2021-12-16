@@ -88,7 +88,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         Serializator.WriteInt32(treeBuffer, index.denseSize, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.root.PageOffset, ref pointer);
 
-        await tablespace.WriteDataToPage(index.PageOffset, treeBuffer);
+        await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
 
         //Console.WriteLine("Will save index at {0}", index.PageOffset);
 
@@ -149,7 +149,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                 Serializator.WriteInt32(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : -1, ref pointer);
             }
 
-            await tablespace.WriteDataToPage(node.PageOffset, nodeBuffer);
+            await tablespace.WriteDataToPage(node.PageOffset, 0, nodeBuffer);
 
             //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);
             dirty++;
@@ -176,7 +176,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.root.PageOffset, ref pointer);
 
-        await tablespace.WriteDataToPage(index.PageOffset, treeBuffer);
+        await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
 
         //Console.WriteLine("Will save index at {0}", index.PageOffset);
 
@@ -237,7 +237,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                 Serializator.WriteInt32(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : -1, ref pointer);
             }
 
-            await tablespace.WriteDataToPage(node.PageOffset, nodeBuffer);
+            await tablespace.WriteDataToPage(node.PageOffset, 0, nodeBuffer);
 
             //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);
             dirty++;

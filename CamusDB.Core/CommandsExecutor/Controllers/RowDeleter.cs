@@ -55,6 +55,7 @@ internal sealed class RowDeleter
                 tablespace: tablespace,
                 journal: database.Journal.Writer,
                 sequence: 0,
+                subSequence: 0,
                 failureType: JournalFailureTypes.None,
                 index: uniqueIndex,
                 key: columnKey

@@ -1,4 +1,5 @@
 ﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -6,12 +7,9 @@
  * file that was distributed with this source code.
  */
 
-namespace CamusDB.Core.Journal.Controllers;
+namespace CamusDB.Core.Journal.Models.Logs;
 
-internal class InsertRecoverer
+public interface IJournalLog
 {
-    public void Recovery()
-    {
-
-    }
+    public uint Sequence { get; }
 }

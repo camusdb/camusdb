@@ -24,6 +24,7 @@ using CamusDB.Core.Journal.Models.Logs;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Journal.Controllers;
 
 namespace CamusDB.Tests.Journal;
 
@@ -79,7 +80,7 @@ internal class TestJournal
             }
         );
 
-        InsertLog schedule = new(ticket.TableName, ticket.Values);
+        InsertLog schedule = new(0, ticket.TableName, ticket.Values);
         uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
         database.Journal.Writer.Close();
@@ -92,21 +93,24 @@ internal class TestJournal
         {
             Assert.AreEqual(JournalLogTypes.Insert, journalLog.Type);
             Assert.AreEqual(sequence, journalLog.Sequence);
-            Assert.IsInstanceOf<InsertLog>(journalLog.InsertLog);
-            Assert.AreEqual(ticket.TableName, journalLog.InsertLog!.TableName);
-            Assert.AreEqual(ticket.Values.Count, journalLog.InsertLog!.Values.Count);
 
-            Assert.AreEqual(ticket.Values["id"].Type, journalLog.InsertLog!.Values["id"].Type);
-            Assert.AreEqual(ticket.Values["id"].Value, journalLog.InsertLog!.Values["id"].Value);
+            InsertLog? insertLog = journalLog.Log as InsertLog;
 
-            Assert.AreEqual(ticket.Values["name"].Type, journalLog.InsertLog!.Values["name"].Type);
-            Assert.AreEqual(ticket.Values["name"].Value, journalLog.InsertLog!.Values["name"].Value);
+            Assert.IsInstanceOf<InsertLog>(insertLog);
+            Assert.AreEqual(ticket.TableName, insertLog!.TableName);
+            Assert.AreEqual(ticket.Values.Count, insertLog!.Values.Count);
 
-            Assert.AreEqual(ticket.Values["year"].Type, journalLog.InsertLog!.Values["year"].Type);
-            Assert.AreEqual(ticket.Values["year"].Value, journalLog.InsertLog!.Values["year"].Value);
+            Assert.AreEqual(ticket.Values["id"].Type, insertLog.Values["id"].Type);
+            Assert.AreEqual(ticket.Values["id"].Value, insertLog.Values["id"].Value);
 
-            Assert.AreEqual(ticket.Values["enabled"].Type, journalLog.InsertLog!.Values["enabled"].Type);
-            Assert.AreEqual(ticket.Values["enabled"].Value, journalLog.InsertLog!.Values["enabled"].Value);
+            Assert.AreEqual(ticket.Values["name"].Type, insertLog.Values["name"].Type);
+            Assert.AreEqual(ticket.Values["name"].Value, insertLog.Values["name"].Value);
+
+            Assert.AreEqual(ticket.Values["year"].Type, insertLog.Values["year"].Type);
+            Assert.AreEqual(ticket.Values["year"].Value, insertLog.Values["year"].Value);
+
+            Assert.AreEqual(ticket.Values["enabled"].Type, insertLog.Values["enabled"].Type);
+            Assert.AreEqual(ticket.Values["enabled"].Value, insertLog.Values["enabled"].Value);
             total++;
         }
 
@@ -134,10 +138,13 @@ internal class TestJournal
         {
             Assert.AreEqual(JournalLogTypes.InsertSlots, journalLog.Type);
             Assert.AreEqual(sequence, journalLog.Sequence);
-            Assert.IsInstanceOf<InsertSlotsLog>(journalLog.InsertSlotsLog);
-            Assert.AreEqual(100, journalLog.InsertSlotsLog!.Sequence);
-            Assert.AreEqual(50, journalLog.InsertSlotsLog!.RowTuple.SlotOne);
-            Assert.AreEqual(25, journalLog.InsertSlotsLog!.RowTuple.SlotTwo);
+
+            InsertSlotsLog? insertLog = journalLog.Log as InsertSlotsLog;
+
+            Assert.IsInstanceOf<InsertSlotsLog>(insertLog);
+            Assert.AreEqual(100, insertLog!.Sequence);
+            Assert.AreEqual(50, insertLog.RowTuple.SlotOne);
+            Assert.AreEqual(25, insertLog.RowTuple.SlotTwo);
             total++;
         }
 
@@ -165,9 +172,12 @@ internal class TestJournal
         {
             Assert.AreEqual(JournalLogTypes.WritePage, journalLog.Type);
             Assert.AreEqual(sequence, journalLog.Sequence);
-            Assert.IsInstanceOf<WritePageLog>(journalLog.WritePageLog);
-            Assert.AreEqual(100, journalLog.WritePageLog!.Sequence);
-            Assert.AreEqual(5, journalLog.WritePageLog.Data.Length);
+
+            WritePageLog? writePageLog = journalLog.Log as WritePageLog;
+
+            Assert.IsInstanceOf<WritePageLog>(writePageLog);
+            Assert.AreEqual(100, writePageLog!.Sequence);
+            Assert.AreEqual(5, writePageLog.Data.Length);
             total++;
         }
 
@@ -195,8 +205,11 @@ internal class TestJournal
         {
             Assert.AreEqual(JournalLogTypes.InsertCheckpoint, journalLog.Type);
             Assert.AreEqual(sequence, journalLog.Sequence);
-            Assert.IsInstanceOf<InsertCheckpointLog>(journalLog.InsertCheckpointLog);
-            Assert.AreEqual(100, journalLog.InsertCheckpointLog!.Sequence);
+
+            InsertCheckpointLog? insertCheckpointLog = journalLog.Log as InsertCheckpointLog;
+
+            Assert.IsInstanceOf<InsertCheckpointLog>(insertCheckpointLog);
+            Assert.AreEqual(100, insertCheckpointLog!.Sequence);
             total++;
         }
 
@@ -224,9 +237,12 @@ internal class TestJournal
         {
             Assert.AreEqual(JournalLogTypes.UpdateUniqueIndexCheckpoint, journalLog.Type);
             Assert.AreEqual(sequence, journalLog.Sequence);
-            Assert.IsInstanceOf<UpdateUniqueCheckpointLog>(journalLog.UpdateUniqueCheckpointLog);
-            Assert.AreEqual(100, journalLog.UpdateUniqueCheckpointLog!.Sequence);
-            Assert.AreEqual("unique", journalLog.UpdateUniqueCheckpointLog!.ColumnIndex);
+
+            UpdateUniqueCheckpointLog? updateUniqueCheckpointLog = journalLog.Log as UpdateUniqueCheckpointLog;
+
+            Assert.IsInstanceOf<UpdateUniqueCheckpointLog>(updateUniqueCheckpointLog);
+            Assert.AreEqual(100, updateUniqueCheckpointLog!.Sequence);
+            Assert.AreEqual("unique", updateUniqueCheckpointLog.ColumnIndex);
             total++;
         }
 
@@ -254,9 +270,12 @@ internal class TestJournal
         {
             Assert.AreEqual(JournalLogTypes.UpdateUniqueIndex, journalLog.Type);
             Assert.AreEqual(sequence, journalLog.Sequence);
-            Assert.IsInstanceOf<UpdateUniqueIndexLog>(journalLog.UpdateUniqueIndexLog);
-            Assert.AreEqual(100, journalLog.UpdateUniqueIndexLog!.Sequence);
-            Assert.AreEqual("unique", journalLog.UpdateUniqueIndexLog!.ColumnIndex);
+
+            UpdateUniqueIndexLog? updateUniqueIndexLog = journalLog.Log as UpdateUniqueIndexLog;
+
+            Assert.IsInstanceOf<UpdateUniqueIndexLog>(updateUniqueIndexLog);
+            Assert.AreEqual(100, updateUniqueIndexLog!.Sequence);
+            Assert.AreEqual("unique", updateUniqueIndexLog!.ColumnIndex);
             total++;
         }
 
@@ -283,7 +302,7 @@ internal class TestJournal
             }
         );
 
-        InsertLog schedule = new(ticket.TableName, ticket.Values);
+        InsertLog schedule = new(0, ticket.TableName, ticket.Values);
         uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
         InsertCheckpointLog checkpointSchedule = new(sequence);
@@ -302,13 +321,19 @@ internal class TestJournal
 
         Assert.AreEqual(JournalLogTypes.Insert, journalLogs[0].Type);
         Assert.AreEqual(sequence, journalLogs[0].Sequence);
-        Assert.IsInstanceOf<InsertLog>(journalLogs[0].InsertLog);
-        Assert.AreEqual(ticket.TableName, journalLogs[0].InsertLog!.TableName);
-        Assert.AreEqual(ticket.Values.Count, journalLogs[0].InsertLog!.Values.Count);
+
+        InsertLog? insertLog = journalLogs[0].Log! as InsertLog;
+
+        Assert.IsInstanceOf<InsertLog>(insertLog);
+        Assert.AreEqual(ticket.TableName, insertLog!.TableName);
+        Assert.AreEqual(ticket.Values.Count, insertLog.Values.Count);
 
         Assert.AreEqual(JournalLogTypes.InsertCheckpoint, journalLogs[1].Type);
         Assert.AreEqual(checkpointSequence, journalLogs[1].Sequence);
-        Assert.IsInstanceOf<InsertCheckpointLog>(journalLogs[1].InsertCheckpointLog);
-        Assert.AreEqual(sequence, journalLogs[1].InsertCheckpointLog!.Sequence);
+
+        InsertCheckpointLog? insertCheckpointLog = journalLogs[1].Log! as InsertCheckpointLog;
+
+        Assert.IsInstanceOf<InsertCheckpointLog>(insertCheckpointLog);
+        Assert.AreEqual(sequence, insertCheckpointLog!.Sequence);
     }
 }

@@ -108,7 +108,8 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
                 SaveUniqueIndexTicket saveUniqueIndexTicket = new(
                     tablespace: tablespace,
                     journal: database.Journal.Writer,
-                    sequence: updateIndexSequence,
+                    sequence: sequence,
+                    subSequence: updateIndexSequence,
                     failureType: ticket.ForceFailureType,
                     index: uniqueIndex,
                     key: uniqueKeyValue,

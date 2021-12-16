@@ -12,6 +12,8 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 
+Console.WriteLine(UInt32.MaxValue);
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.

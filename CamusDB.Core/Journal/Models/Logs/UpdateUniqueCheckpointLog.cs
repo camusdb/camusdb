@@ -12,7 +12,7 @@ using CamusDB.Core.Journal.Attributes;
 namespace CamusDB.Core.Journal.Models.Logs;
 
 [JournalSerializable(JournalLogTypes.UpdateUniqueIndexCheckpoint)]
-public sealed class UpdateUniqueCheckpointLog
+public sealed class UpdateUniqueCheckpointLog : IJournalLog
 {
     [JournalField(0)]
     public uint Sequence { get; }

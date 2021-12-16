@@ -16,16 +16,20 @@ using CamusDB.Core.CommandsExecutor.Models;
 namespace CamusDB.Core.Journal.Models.Logs;
 
 [JournalSerializable(JournalLogTypes.Insert)]
-public sealed class InsertLog
+public sealed class InsertLog : IJournalLog
 {
     [JournalField(0)]
-    public string TableName { get; }
+    public uint Sequence { get; }
 
     [JournalField(1)]
+    public string TableName { get; }
+
+    [JournalField(2)]
     public Dictionary<string, ColumnValue> Values { get; }
 
-    public InsertLog(string name, Dictionary<string, ColumnValue> values)
+    public InsertLog(uint sequence, string name, Dictionary<string, ColumnValue> values)
     {
+        Sequence = sequence;
         TableName = name;
         Values = values;
     }

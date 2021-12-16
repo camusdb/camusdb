@@ -8,9 +8,9 @@
 
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Serializer.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 

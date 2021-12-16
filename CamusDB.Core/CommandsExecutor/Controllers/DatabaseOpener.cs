@@ -32,6 +32,7 @@ internal sealed class DatabaseOpener
 
         try
         {
+            // This semamphore prevents multiple threads to open the same database
             await databaseDescriptors.Semaphore.WaitAsync();
 
             if (databaseDescriptors.Descriptors.TryGetValue(name, out databaseDescriptor))
@@ -65,16 +66,20 @@ internal sealed class DatabaseOpener
                 LoadDatabaseTableSpace(databaseDescriptor)
             });
 
+            // Create this file when the database is open, remove it when closed
+            // If the file exists when the server starts up then it might crashed
             path = Path.Combine(Config.DataDirectory, name, "camus.lock");
 
             await Task.WhenAll(new Task[]
             {
-                databaseDescriptor.TableSpace.Initialize(),
-                databaseDescriptor.Journal.Writer.Initialize(executor),
+                databaseDescriptor.TableSpace.Initialize(),                
                 File.WriteAllBytesAsync(path, Array.Empty<byte>())
             });
 
             Console.WriteLine("Database {0} opened", name);
+
+            // Check journal for recovery
+            await databaseDescriptor.Journal.Writer.Initialize(executor);
 
             databaseDescriptors.Descriptors.Add(name, databaseDescriptor);
         }

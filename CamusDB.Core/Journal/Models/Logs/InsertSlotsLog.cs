@@ -12,7 +12,7 @@ using CamusDB.Core.Journal.Attributes;
 namespace CamusDB.Core.Journal.Models.Logs;
 
 [JournalSerializable(JournalLogTypes.InsertSlots)]
-public sealed class InsertSlotsLog
+public sealed class InsertSlotsLog : IJournalLog
 {
     [JournalField(0)]
     public uint Sequence { get; }

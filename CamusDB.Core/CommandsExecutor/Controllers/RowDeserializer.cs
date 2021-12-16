@@ -8,8 +8,8 @@
 
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer.Models;
+using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -32,7 +32,7 @@ internal sealed class RowDeserializer
 
         int pointer = 0;
 
-        Serializator.ReadType(data, ref pointer); // type 
+        Serializator.ReadType(data, ref pointer); // type
         Serializator.ReadInt32(data, ref pointer); // schema
 
         Serializator.ReadType(data, ref pointer); // type
@@ -63,7 +63,7 @@ internal sealed class RowDeserializer
                         {
                             if (columnType != SerializatorTypes.TypeNull)
                                 throw new Exception(columnType.ToString());
-                        }                        
+                        }
                     }
                     break;
 

@@ -12,7 +12,7 @@ using CamusDB.Core.Journal.Attributes;
 namespace CamusDB.Core.Journal.Models.Logs;
 
 [JournalSerializable(JournalLogTypes.UpdateUniqueIndex)]
-public sealed class UpdateUniqueIndexLog
+public sealed class UpdateUniqueIndexLog : IJournalLog
 {
     [JournalField(0)]
     public uint Sequence { get; }

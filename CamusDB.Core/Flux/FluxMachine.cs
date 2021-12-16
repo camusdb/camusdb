@@ -76,10 +76,10 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
         {
             LastAction = handler(state);
 
-            if (LastAction == FluxAction.Abort)
+            if (LastAction == FluxAction.Completed)
                 IsAborted = true;
 
-            if (LastAction == FluxAction.Completed)
+            if (LastAction == FluxAction.Abort)
             {
                 IsAborted = true;
                 await RunAbortHandlers();
@@ -104,10 +104,10 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
         {
             LastAction = await handler(state);
 
-            if (LastAction == FluxAction.Abort)
+            if (LastAction == FluxAction.Completed)
                 IsAborted = true;
 
-            if (LastAction == FluxAction.Completed)
+            if (LastAction == FluxAction.Abort)
             {
                 IsAborted = true;
                 await RunAbortHandlers();
@@ -141,7 +141,7 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
             LastAction = FluxAction.Completed;
         }
 
-        Console.WriteLine(currentStep);
+        //Console.WriteLine(currentStep);
 
         return (TSteps)Enum.ToObject(type, currentStep);
     }

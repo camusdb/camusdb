@@ -111,6 +111,9 @@ internal sealed class TestRowInsertorCloseDb
             executor.Insert(ticket2)
         });
 
+        CloseDatabaseTicket closeTicket = new("factory");
+        await executor.CloseDatabase(closeTicket);
+
         QueryByIdTicket queryTicket = new(
             database: "factory",
             name: "user_robots",

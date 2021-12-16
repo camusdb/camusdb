@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.Journal.Controllers;
 
 namespace CamusDB.Core.Journal;
 
@@ -20,7 +21,7 @@ public sealed class JournalRecoverer
             switch (logGroup.Value.Type)
             {
                 case JournalGroupType.Insert:
-                    //InsertRecoverer.
+                    await InsertRecoverer.Recover(executor, logGroup.Value);
                     break;
             }
         }

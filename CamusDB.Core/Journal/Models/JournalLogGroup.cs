@@ -13,5 +13,11 @@ namespace CamusDB.Core.Journal.Models;
 public sealed class JournalLogGroup
 {
     public JournalGroupType Type { get; }
-}
 
+    public List<IJournalLog> Logs { get; } = new();
+
+    public JournalLogGroup(JournalGroupType type)
+    {
+        Type = type;
+    }
+}

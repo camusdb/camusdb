@@ -45,7 +45,7 @@ public sealed class CatalogsManager
 
             database.Schema.Tables.Add(ticket.TableName, tableSchema);
 
-            await database.SchemaSpace!.WriteDataToPage(CamusDBConfig.SchemaHeaderPage, Serializator.Serialize(database.Schema.Tables));
+            await database.SchemaSpace!.WriteDataToPage(CamusDBConfig.SchemaHeaderPage, 0, Serializator.Serialize(database.Schema.Tables));
 
             Console.WriteLine("Added table {0} to schema", ticket.TableName);
 

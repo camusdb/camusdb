@@ -16,57 +16,12 @@ public sealed class JournalLog
 
     public JournalLogTypes Type { get; }
 
-    public InsertLog? InsertLog { get; }
+    public IJournalLog? Log { get; }
 
-    public InsertSlotsLog? InsertSlotsLog { get; }
-
-    public InsertCheckpointLog? InsertCheckpointLog { get; }
-
-    public UpdateUniqueIndexLog? UpdateUniqueIndexLog { get; }
-
-    public UpdateUniqueCheckpointLog? UpdateUniqueCheckpointLog { get; }
-
-    public WritePageLog? WritePageLog { get; }
-
-    public JournalLog(uint sequence, JournalLogTypes type, InsertLog insertLog)
+    public JournalLog(uint sequence, JournalLogTypes type, IJournalLog log)
     {
         Sequence = sequence;
         Type = type;
-        InsertLog = insertLog;
-    }
-
-    public JournalLog(uint sequence, JournalLogTypes type, InsertSlotsLog insertSlotsLog)
-    {
-        Sequence = sequence;
-        Type = type;
-        InsertSlotsLog = insertSlotsLog;
-    }
-
-    public JournalLog(uint sequence, JournalLogTypes type, InsertCheckpointLog insertLog)
-    {
-        Sequence = sequence;
-        Type = type;
-        InsertCheckpointLog = insertLog;
-    }
-
-    public JournalLog(uint sequence, JournalLogTypes type, WritePageLog writePageLog)
-    {
-        Sequence = sequence;
-        Type = type;
-        WritePageLog = writePageLog;
-    }
-
-    public JournalLog(uint sequence, JournalLogTypes type, UpdateUniqueCheckpointLog checkpointLog)
-    {
-        Sequence = sequence;
-        Type = type;
-        UpdateUniqueCheckpointLog = checkpointLog;
-    }
-
-    public JournalLog(uint sequence, JournalLogTypes type, UpdateUniqueIndexLog updateLog)
-    {
-        Sequence = sequence;
-        Type = type;
-        UpdateUniqueIndexLog = updateLog;
-    }
+        Log = log;
+    }    
 }

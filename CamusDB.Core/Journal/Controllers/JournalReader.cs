@@ -6,16 +6,12 @@
  * file that was distributed with this source code.
  */
 
-using System;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Journal.Models;
-using CamusDB.Core.Journal.Models.Logs;
-using Config = CamusDB.Core.CamusDBConfig;
-using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Serializer.Models;
+using CamusDB.Core.Journal.Models.Logs;
 
-namespace CamusDB.Core.Journal;
+namespace CamusDB.Core.Journal.Controllers;
 
 public sealed class JournalReader : IDisposable
 {
@@ -25,7 +21,7 @@ public sealed class JournalReader : IDisposable
     {
         this.journal = new FileStream(path, FileMode.OpenOrCreate, FileAccess.Read);
     }
-    
+
     public async IAsyncEnumerable<JournalLog> ReadNextLog()
     {
         journal.Seek(0, SeekOrigin.Begin);
@@ -50,8 +46,6 @@ public sealed class JournalReader : IDisposable
 
             readBytes = await journal.ReadAsync(header, 0, header.Length);
 
-            //Console.WriteLine(readBytes);
-
             if (readBytes == 0)
                 yield break;
 
@@ -65,11 +59,6 @@ public sealed class JournalReader : IDisposable
 
             uint sequence = Serializator.ReadUInt32(header, ref pointer);
             JournalLogTypes type = (JournalLogTypes)Serializator.ReadInt16(header, ref pointer);
-
-            /*Console.WriteLine(pointer);
-            Console.WriteLine(sequence);
-            Console.WriteLine(type);
-            Console.WriteLine(journal.Position);*/
 
             switch (type)
             {

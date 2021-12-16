@@ -13,7 +13,7 @@ using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-namespace CamusDB.Core.Journal;
+namespace CamusDB.Core.Journal.Controllers.Controllers;
 
 public sealed class JournalWriter
 {

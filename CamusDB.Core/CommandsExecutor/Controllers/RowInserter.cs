@@ -8,9 +8,7 @@
 
 using CamusDB.Core.Flux;
 using System.Diagnostics;
-using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
-using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -61,7 +59,7 @@ internal sealed class RowInserter
      */
     private async Task<FluxAction> InitializeStep(InsertFluxState state)
     {
-        InsertLog schedule = new(state.Ticket.TableName, state.Ticket.Values);
+        InsertLog schedule = new(0, state.Ticket.TableName, state.Ticket.Values);
         state.Sequence = await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, schedule);
         return FluxAction.Continue;
     }
@@ -93,11 +91,11 @@ internal sealed class RowInserter
 
         byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket, state.RowTuple.SlotOne);
 
-        // Insert data to the page offset
-        await tablespace.WriteDataToPage(state.RowTuple.SlotTwo, rowBuffer);
+        WritePageLog writeSchedule = new(state.Sequence, 0, rowBuffer);
+        uint pageSequence = await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, writeSchedule);
 
-        WritePageLog writeSchedule = new(state.Sequence, rowBuffer);
-        await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, writeSchedule);
+        // Insert data to the page offset
+        await tablespace.WriteDataToPage(state.RowTuple.SlotTwo, pageSequence, rowBuffer);
 
         return FluxAction.Continue;
     }

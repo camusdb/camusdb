@@ -218,11 +218,12 @@ public sealed class BufferPoolHandler : IDisposable
         Serializator.WriteInt32(pageBuffer, 1, ref pointer);  // first row id
     }
 
-    public static int WritePageHeader(byte[] pageBuffer, int length, int nextPage, uint checksum)
+    public static int WritePageHeader(byte[] pageBuffer, uint checksum, uint lastSequence, int nextPage, int length)
     {
         int pointer = 0;
         Serializator.WriteInt16(pageBuffer, Config.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)
-        Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                 // checksum (4 bytes integer)
+        Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                 // checksum (4 bytes unsigned integer)
+        Serializator.WriteUInt32(pageBuffer, lastSequence, ref pointer);                 // lastWroteSequence (4 bytes unsigned integer)
         Serializator.WriteInt32(pageBuffer, nextPage, ref pointer);                  // next page (4 bytes integer)
         Serializator.WriteInt32(pageBuffer, length, ref pointer);                    // data length (4 bytes integer)
         return pointer;
@@ -312,11 +313,11 @@ public sealed class BufferPoolHandler : IDisposable
     public async Task<int> WriteDataToFreePage(byte[] data)
     {
         int freeOffset = await GetNextFreeOffset();
-        await WriteDataToPage(freeOffset, data);
+        await WriteDataToPage(freeOffset, 0, data);
         return freeOffset;
     }
 
-    public async Task WriteDataToPage(int offset, byte[] data, int startOffset = 0)
+    public async Task WriteDataToPage(int offset, uint sequence, byte[] data, int startOffset = 0)
     {
         if (offset < 0)
             throw new CamusDBException(
@@ -359,7 +360,7 @@ public sealed class BufferPoolHandler : IDisposable
             // Create a new page buffer to replace the existing one
             byte[] pageBuffer = new byte[Config.PageSize];
 
-            int pointer = WritePageHeader(pageBuffer, length, nextPage, checksum);
+            int pointer = WritePageHeader(pageBuffer, checksum, sequence, nextPage, length);
 
             if (nextPage > 0 && nextPage == offset)
                 throw new CamusDBException(
@@ -376,7 +377,7 @@ public sealed class BufferPoolHandler : IDisposable
             Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);
 
             if (nextPage > 0)
-                await WriteDataToPage(nextPage, data, startOffset + length);
+                await WriteDataToPage(nextPage, sequence, data, startOffset + length);
         }
         finally
         {
@@ -406,7 +407,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             byte[] pageBuffer = new byte[Config.PageSize];
 
-            WritePageHeader(pageBuffer, 0, 0, 0);
+            WritePageHeader(pageBuffer, 0, 0, 0, 0);
 
             accessor.WriteArray<byte>(Config.PageSize * offset, pageBuffer, 0, Config.PageSize);
 

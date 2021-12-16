@@ -88,6 +88,7 @@ internal sealed class TableCreator
 
             await systemTablespace.WriteDataToPage(
                 CamusDBConfig.SystemHeaderPage,
+                0,
                 Serializator.Serialize(database.SystemSchema.Objects)
             );
 
