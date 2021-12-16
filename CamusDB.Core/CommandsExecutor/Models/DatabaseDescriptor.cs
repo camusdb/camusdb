@@ -9,28 +9,31 @@
 using CamusDB.Core.Journal;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.BufferPool.Controllers;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
 public sealed class DatabaseDescriptor
 {
-    public string Name { get; set; }
+    public string Name { get; }
 
-    public BufferPoolHandler TableSpace { get; set; }
+    public BufferPoolHandler TableSpace { get; }
 
-    public BufferPoolHandler SchemaSpace { get; set; }
+    public BufferPoolHandler SchemaSpace { get; }
 
-    public BufferPoolHandler SystemSpace { get; set; }
+    public BufferPoolHandler SystemSpace { get; }
 
-    public Schema Schema { get; set; } = new();
+    public BufferPoolFlusher TableSpaceFlusher { get; }
+
+    public Schema Schema { get; } = new();
 
     public JournalManager Journal { get; }
 
-    public SystemSchema SystemSchema { get; set; } = new();
+    public SystemSchema SystemSchema { get; } = new();
 
     public SemaphoreSlim DescriptorsSemaphore { get; } = new(1, 1);
 
-    public Dictionary<string, TableDescriptor> TableDescriptors = new();
+    public Dictionary<string, TableDescriptor> TableDescriptors = new();    
 
     public DatabaseDescriptor(
         string name,
@@ -43,5 +46,6 @@ public sealed class DatabaseDescriptor
         SchemaSpace = schemaSpace;
         SystemSpace = systemSpace;
         Journal = new(name);
+        TableSpaceFlusher = new(TableSpace, Journal);
     }
 }

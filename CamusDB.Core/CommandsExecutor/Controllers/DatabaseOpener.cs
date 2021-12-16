@@ -13,6 +13,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.BufferPool.Controllers;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -56,8 +57,8 @@ internal sealed class DatabaseOpener
                 name: name,
                 tableSpace: new BufferPoolHandler(tablespace),
                 schemaSpace: new BufferPoolHandler(schema),
-                systemSpace: new BufferPoolHandler(system)
-            );
+                systemSpace: new BufferPoolHandler(system)                
+            );            
 
             await Task.WhenAll(new Task[]
             {
@@ -80,6 +81,9 @@ internal sealed class DatabaseOpener
 
             // Check journal for recovery
             await databaseDescriptor.Journal.Writer.Initialize(executor);
+
+            // Only the data table space has a concurrent dirty page flusher
+            _ = Task.Factory.StartNew(databaseDescriptor.TableSpaceFlusher.PeriodicallyFlush);
 
             databaseDescriptors.Descriptors.Add(name, databaseDescriptor);
         }

@@ -24,19 +24,7 @@ public static class CamusDBConfig
 
     public const int InitialPagesRead = 1024;
 
-    public const int TableSpaceHeaderPage = 0;
-
-    public const int DataOffset = 2 + 4 * 3; // 2 version + 4 checksum + 4 next page + 4 data length
-
-    public const int LengthOffset = 2 + 4 * 2; // 2 version + 4 checksum + 4 next page + 4 data length
-
-    public const int NextPageOffset = 2 + 4 * 1; // 2 version + 4 checksum + 4 next page + 4 data length
-
-    public const int ChecksumOffset = 2 + 4 * 0; // 2 version + 4 checksum + 4 next page + 4 data length
-
-    public const int RowIdOffset = 14;
-
-    public const int FreePageOffset = 10;
+    public const int TableSpaceHeaderPage = 0;    
 
     #endregion
 

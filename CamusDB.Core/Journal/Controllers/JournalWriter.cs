@@ -177,6 +177,19 @@ public sealed class JournalWriter
         return sequence;
     }
 
+    public async Task<uint> Append(JournalFailureTypes failureType, FlushedPagesLog flushedPages)
+    {
+        Console.WriteLine("FlushedPages");
+
+        uint sequence = GetNextSequence();
+
+        byte[] payload = FlushedPagesLogSerializator.Serialize(sequence, flushedPages);
+
+        await TryWrite(payload);
+
+        return sequence;
+    }
+
     public void Close()
     {
         if (journal != null)

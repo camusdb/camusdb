@@ -24,6 +24,7 @@
     <None Remove="Machines\" />
     <None Remove="CommandsExecutor\Controllers\Insert\" />
     <None Remove="Journal\Controllers\Recovery\" />
+    <None Remove="BufferPool\Controllers\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="CommandsValidator\" />
@@ -40,6 +41,7 @@
     <Folder Include="Flux\" />
     <Folder Include="CommandsExecutor\Controllers\Insert\" />
     <Folder Include="Journal\Controllers\Recovery\" />
+    <Folder Include="BufferPool\Controllers\" />
   </ItemGroup>
 
   <ItemGroup>

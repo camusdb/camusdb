@@ -15,6 +15,8 @@ public sealed class BufferPage
     public byte[] Buffer { get; set; }
 
     public DateTime LastAccessTime { get; set; }
+    
+    public bool Dirty { get; set; }
 
     public SemaphoreSlim Semaphore { get; } = new(1, 1);
 

@@ -11,6 +11,7 @@ using CamusDB.Core.Util.Hashes;
 using System.IO.MemoryMappedFiles;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
+using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
 
 namespace CamusDB.Core.BufferPool;
 
@@ -23,17 +24,10 @@ namespace CamusDB.Core.BufferPool;
  * +--------------------+
  * | version (2 bytes)  |
  * +--------------------+--------------------------+
- * | checksum (4 bytes)                            |
+ * | checksum (4 bytes unsigned integer)           |
  * +----------+----------+----------+--------------+
- * | slot #0  | slot #0  | slot #0  | slot #0      |
- * | data     | next     | next     | data         |
- * | length   | page     | slot     | length       |
- * | (2 byte) | (4 byte) | (1 byte) |              |
- * |          |          |          |              |
- * |          |          |          |              |
- * +----------+----------+-------------------------+
- *
- * Every page has 4 slots numbered from 0 to 3.
+ * | checksum (4 bytes unsigned integer)           |
+ * +----------+----------+----------+--------------+
  */
 public sealed class BufferPoolHandler : IDisposable
 {
@@ -46,6 +40,8 @@ public sealed class BufferPoolHandler : IDisposable
     private readonly SemaphoreSlim semaphore = new(1, 1);
 
     public int NumberPages => pages.Count;
+
+    public Dictionary<int, BufferPage> Pages => pages;
 
     public BufferPoolHandler(MemoryMappedFile memoryFile)
     {
@@ -134,10 +130,10 @@ public sealed class BufferPoolHandler : IDisposable
 
             byte[] pageBuffer = memoryPage.Buffer; // get a pointer to the buffer to get a consistent read
 
-            int pointer = Config.LengthOffset;
+            int pointer = BConfig.LengthOffset;
             length += Serializator.ReadInt32(pageBuffer, ref pointer);
 
-            pointer = Config.NextPageOffset;
+            pointer = BConfig.NextPageOffset;
             offset = Serializator.ReadInt32(pageBuffer, ref pointer);
 
         } while (offset > 0);
@@ -169,19 +165,19 @@ public sealed class BufferPoolHandler : IDisposable
 
             byte[] pageBuffer = memoryPage.Buffer; // get a pointer to the buffer to get a consistent read
 
-            int pointer = Config.LengthOffset;
+            int pointer = BConfig.LengthOffset;
             int dataLength = Serializator.ReadInt32(pageBuffer, ref pointer);
 
-            pointer = Config.NextPageOffset;
+            pointer = BConfig.NextPageOffset;
             offset = Serializator.ReadInt32(pageBuffer, ref pointer);
 
-            pointer = Config.ChecksumOffset;
+            pointer = BConfig.ChecksumOffset;
             checksum = Serializator.ReadUInt32(pageBuffer, ref pointer);
 
             if (checksum > 0) // check checksum only if available
             {
                 byte[] pageData = new byte[dataLength]; // @todo avoid this allocation
-                Buffer.BlockCopy(pageBuffer, Config.DataOffset, pageData, 0, dataLength);
+                Buffer.BlockCopy(pageBuffer, BConfig.DataOffset, pageData, 0, dataLength);
 
                 uint dataChecksum = XXHash.Compute(pageData, 0, dataLength);
 
@@ -192,7 +188,7 @@ public sealed class BufferPoolHandler : IDisposable
                     );
             }
 
-            Buffer.BlockCopy(pageBuffer, Config.DataOffset, data, bufferOffset, dataLength);
+            Buffer.BlockCopy(pageBuffer, BConfig.DataOffset, data, bufferOffset, dataLength);
             bufferOffset += dataLength;
 
             //Console.WriteLine("Read {0} bytes from page {1}", dataLength, offset);
@@ -223,7 +219,7 @@ public sealed class BufferPoolHandler : IDisposable
         int pointer = 0;
         Serializator.WriteInt16(pageBuffer, Config.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)
         Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                 // checksum (4 bytes unsigned integer)
-        Serializator.WriteUInt32(pageBuffer, lastSequence, ref pointer);                 // lastWroteSequence (4 bytes unsigned integer)
+        Serializator.WriteUInt32(pageBuffer, lastSequence, ref pointer);             // lastWroteSequence (4 bytes unsigned integer)
         Serializator.WriteInt32(pageBuffer, nextPage, ref pointer);                  // next page (4 bytes integer)
         Serializator.WriteInt32(pageBuffer, length, ref pointer);                    // data length (4 bytes integer)
         return pointer;
@@ -233,7 +229,7 @@ public sealed class BufferPoolHandler : IDisposable
     {
         BufferPage page = await ReadPage(Config.TableSpaceHeaderPage);
 
-        int pointer = Config.FreePageOffset - 4, pageOffset = 1;
+        int pointer = BConfig.FreePageOffset - 4, pageOffset = 1;
 
         try
         {
@@ -250,14 +246,16 @@ public sealed class BufferPoolHandler : IDisposable
             }
             else
             {
-                pointer = Config.FreePageOffset;
+                pointer = BConfig.FreePageOffset;
                 pageOffset = Serializator.ReadInt32(pageBuffer, ref pointer); // retrieve existing offset
             }
 
-            pointer = Config.FreePageOffset;
+            pointer = BConfig.FreePageOffset;
             Serializator.WriteInt32(pageBuffer, pageOffset + 1, ref pointer); // write new offset
 
             accessor.WriteArray<byte>(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer, 0, Config.PageSize);
+
+            page.Dirty = true;
         }
         finally
         {
@@ -281,7 +279,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             byte[] pageBuffer = page.Buffer; // get a pointer to the buffer to get a consistent read
 
-            int pointer = Config.FreePageOffset - 4, rowId = 1;
+            int pointer = BConfig.FreePageOffset - 4, rowId = 1;
 
             int length = Serializator.ReadInt32(pageBuffer, ref pointer);
 
@@ -289,17 +287,18 @@ public sealed class BufferPoolHandler : IDisposable
                 WriteTableSpaceHeader(pageBuffer);
             else
             {
-                pointer = Config.RowIdOffset;
+                pointer = BConfig.RowIdOffset;
                 rowId = Serializator.ReadInt32(pageBuffer, ref pointer); // retrieve existing row id
             }
 
-            pointer = Config.RowIdOffset;
+            pointer = BConfig.RowIdOffset;
             Serializator.WriteInt32(pageBuffer, rowId + 1, ref pointer); // write new row id
 
             //Console.WriteLine("CurrentRowId={0} NextRowId={1}", rowId, rowId + 1);
 
             accessor.WriteArray<byte>(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer, 0, Config.PageSize);
 
+            page.Dirty = true;
             page.Buffer = pageBuffer;
 
             return rowId;
@@ -345,7 +344,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             //await page.Semaphore.WaitAsync();
 
-            int length = ((data.Length - startOffset) + Config.DataOffset) < Config.PageSize ? (data.Length - startOffset) : (Config.PageSize - Config.DataOffset);
+            int length = ((data.Length - startOffset) + BConfig.DataOffset) < Config.PageSize ? (data.Length - startOffset) : (Config.PageSize - BConfig.DataOffset);
             int remaining = (data.Length - startOffset) - length;
 
             if (remaining > 0)
@@ -373,6 +372,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             // Replace buffer, this helps to get readers consistent copies
             page.Buffer = pageBuffer;
+            page.Dirty = true;
 
             Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);
 
@@ -412,11 +412,17 @@ public sealed class BufferPoolHandler : IDisposable
             accessor.WriteArray<byte>(Config.PageSize * offset, pageBuffer, 0, Config.PageSize);
 
             page.Buffer = pageBuffer;
+            page.Dirty = true;
         }
         finally
         {
             //page.Semaphore.Release();
         }
+    }
+
+    public void Flush()
+    {
+        accessor.Flush();
     }
 
     public void Clear()
