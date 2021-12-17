@@ -22,6 +22,7 @@ using CamusDB.Core.Journal.Controllers;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core;
 
 namespace CamusDB.Tests.Journal;
 
@@ -33,13 +34,6 @@ internal class TestJournalVerifier
     public void Setup()
     {
         SetupDb.Remove(DatabaseName);
-    }
-
-    private JournalReader GetJournalReader(DatabaseDescriptor database)
-    {
-        return new(
-            Path.Combine(Config.DataDirectory, database.Name, "journal")
-        );
     }
 
     private async Task<CommandExecutor> SetupDatabase()
@@ -57,9 +51,30 @@ internal class TestJournalVerifier
         return executor;
     }
 
+    private async Task<CommandExecutor> SetupBasicTable()
+    {
+        var executor = await SetupDatabase();
+
+        CreateTableTicket tableTicket = new(
+            database: DatabaseName,
+            name: "robots",
+            new ColumnInfo[]
+            {
+                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("name", ColumnType.String, notNull: true),
+                new ColumnInfo("year", ColumnType.Integer),
+                new ColumnInfo("enabled", ColumnType.Bool)
+            }
+        );
+
+        await executor.CreateTable(tableTicket);
+
+        return executor;
+    }
+
     [Test]
     [NonParallelizable]
-    public async Task TestJournalInsertTicketMultiple()
+    public async Task TestJournalInsertTicketCheckpoint()
     {
         CommandExecutor executor = await SetupDatabase();
 
@@ -91,26 +106,45 @@ internal class TestJournalVerifier
             Path.Combine(Config.DataDirectory, DatabaseName, "journal")
         );
 
-        Assert.AreEqual(groups.Count, 0);
+        Assert.AreEqual(groups.Count, 0);        
+    }
 
-        /*JournalReader journalReader = GetJournalReader(database);
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFail()
+    {
+        var executor = await SetupBasicTable();
 
-        List<JournalLog> journalLogs = new();
+        InsertTicket ticket = new(
+            database: DatabaseName,
+            name: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Id, "1") },
+                { "name", new ColumnValue(ColumnType.String, "some name") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
+            },
+            forceFailureType: JournalFailureTypes.PreInsert
+        );
 
-        await foreach (JournalLog journalLog in journalReader.ReadNextLog())
-            journalLogs.Add(journalLog);
+        var e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
+        Assert.IsInstanceOf<CamusDBException>(e);
 
-        Assert.AreEqual(2, journalLogs.Count);
+        /*InsertLog schedule = new(0, ticket.TableName, ticket.Values);
+        uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
-        Assert.AreEqual(JournalLogTypes.Insert, journalLogs[0].Type);
-        Assert.AreEqual(sequence, journalLogs[0].Sequence);
-        Assert.IsInstanceOf<InsertLog>(journalLogs[0].InsertLog);
-        Assert.AreEqual(ticket.TableName, journalLogs[0].InsertLog!.TableName);
-        Assert.AreEqual(ticket.Values.Count, journalLogs[0].InsertLog!.Values.Count);
+        InsertCheckpointLog checkpointSchedule = new(sequence);
+        uint checkpointSequence = await database.Journal.Writer.Append(JournalFailureTypes.None, checkpointSchedule);
 
-        Assert.AreEqual(JournalLogTypes.InsertCheckpoint, journalLogs[1].Type);
-        Assert.AreEqual(checkpointSequence, journalLogs[1].Sequence);
-        Assert.IsInstanceOf<InsertCheckpointLog>(journalLogs[1].InsertCheckpointLog);
-        Assert.AreEqual(sequence, journalLogs[1].InsertCheckpointLog!.Sequence);*/
+        database.Journal.Writer.Close();
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(groups.Count, 0);*/
     }
 }
