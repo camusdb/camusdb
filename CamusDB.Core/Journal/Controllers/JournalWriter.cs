@@ -73,8 +73,10 @@ public sealed class JournalWriter
     {
         foreach (FileInfo file in journals)
         {
-            int number = int.Parse(file.Name.Replace("journal", ""));
-            Console.WriteLine(number);
+            if (int.TryParse(file.Name.Replace("journal", ""), out int journalId))    
+                Console.WriteLine(journalId);
+            else            
+                Console.WriteLine(file.Name);
         }
 
         var r = new System.Random();

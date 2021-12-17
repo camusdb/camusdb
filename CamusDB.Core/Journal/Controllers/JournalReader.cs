@@ -26,10 +26,13 @@ public sealed class JournalReader : IDisposable
     {
         journal.Seek(0, SeekOrigin.Begin);
 
-        byte[] header = new byte[8];
+        byte[] header = new byte[
+            SerializatorTypeSizes.TypeInteger32 +
+            SerializatorTypeSizes.TypeInteger32
+        ];
 
-        int readBytes = await journal.ReadAsync(header.AsMemory(0, 8));
-        if (readBytes != 8)
+        int readBytes = await journal.ReadAsync(header.AsMemory(0, header.Length));
+        if (readBytes != header.Length)
         {
             Console.WriteLine("Journal is empty");
             yield break;
