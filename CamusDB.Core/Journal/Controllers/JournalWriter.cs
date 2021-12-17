@@ -10,8 +10,9 @@ using CamusDB.Core.Journal.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.Journal.Models.Logs;
 using Config = CamusDB.Core.CamusDBConfig;
+using CamusDB.Core.CommandsExecutor.Models;
 
-namespace CamusDB.Core.Journal.Controllers.Controllers;
+namespace CamusDB.Core.Journal.Controllers;
 
 public sealed class JournalWriter
 {
@@ -32,24 +33,69 @@ public sealed class JournalWriter
         this.database = name;
     }
 
-    public async Task Initialize(CommandExecutor executor)
+    private static List<FileInfo> GetJournals(string name)
     {
-        string path = Path.Combine(Config.DataDirectory, database, "journal");
+        DirectoryInfo directory = new(
+            Path.Combine(Config.DataDirectory, name)
+        );
 
-        // @todo improve recovery here
-        JournalVerifier verifier = new();
+        List<FileInfo> journals = new();
 
-        Dictionary<uint, JournalLogGroup> groups = await verifier.Verify(path);
-        if (groups.Count > 0)
+        FileInfo[] files = directory.GetFiles();
+
+        for (int i = 0; i < files.Length; i++)
         {
-            JournalRecoverer recoverer = new();
-            await recoverer.Recover(executor, groups);
+            FileInfo file = files[i];
+
+            if (file.Name.Length >= 7 && file.Name[..7] == "journal")
+                journals.Add(file);
         }
 
-        // Remove existing journal
-        File.Delete(path);
+        return journals;
+    }
 
-        journal = new(path, FileMode.Append, FileAccess.Write);
+    private async Task RecoverJournals(CommandExecutor executor, DatabaseDescriptor database, List<FileInfo> journals)
+    {
+        JournalVerifier verifier = new();
+        JournalRecoverer recoverer = new();
+
+        foreach (FileInfo file in journals)
+        {
+            Console.WriteLine("{0}", file.FullName);
+
+            Dictionary<uint, JournalLogGroup> groups = await verifier.Verify(file.FullName);
+            if (groups.Count > 0)
+                await recoverer.Recover(executor, database, groups);
+        }
+    }
+
+    private async Task<int> GetNextJournal(List<FileInfo> journals)
+    {
+        foreach (FileInfo file in journals)
+        {
+            int number = int.Parse(file.Name.Replace("journal", ""));
+            Console.WriteLine(number);
+        }
+
+        var r = new System.Random();
+        return r.Next(1000, 9999);
+    }
+
+    public async Task Initialize(CommandExecutor executor, DatabaseDescriptor database)
+    {
+        List<FileInfo> journals = GetJournals(database.Name);
+
+        int next = await GetNextJournal(journals);
+
+        journal = new(
+            Path.Combine(Config.DataDirectory, this.database, "journal" + next.ToString()),
+            FileMode.Append,
+            FileAccess.Write
+        );
+
+        await RecoverJournals(executor, database, journals);
+
+        Console.WriteLine("{0}", journal.Name);
     }
 
     private async Task TryWrite(uint lastSequence, byte[] buffer)

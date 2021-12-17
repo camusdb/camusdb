@@ -9,6 +9,7 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
@@ -80,7 +81,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
             }
         }
 
-        byte[] treeBuffer = new byte[16]; // height(4 byte) + size(4 byte) + denseSize(4 byte) + root(4 byte)
+        byte[] treeBuffer = new byte[SerializatorTypeSizes.TypeInteger32 * 4]; // height(4 byte) + size(4 byte) + denseSize(4 byte) + root(4 byte)
 
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
@@ -106,7 +107,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
             }
 
             // @todo number entries must not be harcoded
-            byte[] nodeBuffer = new byte[8 + GetKeySizes(node)]; // 8 node entries + 12 int (4 byte) * nodeKeyCount
+            byte[] nodeBuffer = new byte[SerializatorTypeSizes.TypeInteger32 * 2 + GetKeySizes(node)]; // 8 node entries + 12 int (4 byte) * nodeKeyCount
 
             pointer = 0;
             Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);
@@ -169,7 +170,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
             }
         }
 
-        byte[] treeBuffer = new byte[12]; // height(4 byte) + size(4 byte) + root(4 byte)
+        byte[] treeBuffer = new byte[SerializatorTypeSizes.TypeInteger32 * 3]; // height(4 byte) + size(4 byte) + root(4 byte)
 
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);

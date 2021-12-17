@@ -25,7 +25,7 @@ internal sealed class DatabaseOpener
         this.databaseDescriptors = databaseDescriptors;
     }
 
-    public async ValueTask<DatabaseDescriptor> Open(CommandExecutor executor, string name)
+    public async ValueTask<DatabaseDescriptor> Open(CommandExecutor executor, string name, bool recoveryMode = false)
     {
         if (databaseDescriptors.Descriptors.TryGetValue(name, out DatabaseDescriptor? databaseDescriptor))
             return databaseDescriptor;
@@ -78,11 +78,12 @@ internal sealed class DatabaseOpener
 
             Console.WriteLine("Database {0} opened", name);
 
-            // Check journal for recovery
-            await databaseDescriptor.Journal.Writer.Initialize(executor);
-
             // Only the data table space has a concurrent dirty page flusher
             _ = Task.Factory.StartNew(databaseDescriptor.TableSpaceFlusher.PeriodicallyFlush);
+
+            // Check journal for recovery
+            if (recoveryMode)
+                await databaseDescriptor.Journal.Writer.Initialize(executor, databaseDescriptor);            
 
             databaseDescriptors.Descriptors.Add(name, databaseDescriptor);
         }

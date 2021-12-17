@@ -6,11 +6,13 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Flux;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 namespace CamusDB.Core.CommandsExecutor;
 
@@ -60,9 +62,9 @@ public sealed class CommandExecutor : IDisposable
         await databaseCreator.Create(ticket);
     }
 
-    public async Task<DatabaseDescriptor> OpenDatabase(string database)
+    public async Task<DatabaseDescriptor> OpenDatabase(string database, bool recoveryMode = false)
     {
-        return await databaseOpener.Open(this, database);
+        return await databaseOpener.Open(this, database, recoveryMode);
     }
 
     public async Task CloseDatabase(CloseDatabaseTicket ticket)
@@ -84,6 +86,17 @@ public sealed class CommandExecutor : IDisposable
         return await tableCreator.Create(descriptor, ticket);
     }
 
+    public async Task<TableDescriptor> OpenTable(OpenTableTicket ticket)
+    {
+        DatabaseDescriptor descriptor = await databaseOpener.Open(this, ticket.DatabaseName);
+        return await tableOpener.Open(descriptor, ticket.TableName);
+    }
+
+    public async Task<TableDescriptor> OpenTableWithDescriptor(DatabaseDescriptor descriptor, OpenTableTicket ticket)
+    {
+        return await tableOpener.Open(descriptor, ticket.TableName);
+    }
+
     #endregion
 
     #region DML
@@ -97,6 +110,11 @@ public sealed class CommandExecutor : IDisposable
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
         await rowInserter.Insert(database, table, ticket);
+    }
+    
+    public async Task InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
+    {
+        await rowInserter.InsertWithState(machine, state);
     }
 
     public async Task DeleteById(DeleteByIdTicket ticket)

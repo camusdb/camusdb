@@ -35,8 +35,7 @@ internal sealed class DatabaseCreator
         {
             File.WriteAllBytesAsync(Path.Combine(dbPath, "tablespace0"), initialized),
             File.WriteAllBytesAsync(Path.Combine(dbPath, "schema"), initialized),
-            File.WriteAllBytesAsync(Path.Combine(dbPath, "system"), initialized),
-            File.WriteAllBytesAsync(Path.Combine(dbPath, "journal"), new byte[0])
+            File.WriteAllBytesAsync(Path.Combine(dbPath, "system"), initialized)
         });
 
         // @todo catch IO Exceptions

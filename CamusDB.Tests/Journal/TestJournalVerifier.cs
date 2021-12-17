@@ -11,6 +11,7 @@ using NUnit.Framework;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Tests.Utils;
 using CamusDB.Core.Journal.Models;
@@ -22,7 +23,6 @@ using CamusDB.Core.Journal.Controllers;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core;
 
 namespace CamusDB.Tests.Journal;
 

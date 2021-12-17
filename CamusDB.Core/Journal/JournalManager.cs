@@ -6,7 +6,7 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Journal.Controllers.Controllers;
+using CamusDB.Core.Journal.Controllers;
 
 namespace CamusDB.Core.Journal;
 

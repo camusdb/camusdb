@@ -132,14 +132,11 @@ internal sealed class RowInserter
         InsertCheckpointLog insertCheckpoint = new(state.Sequence);
         await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, insertCheckpoint);
         return FluxAction.Completed;
-    }
+    }   
 
     public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
         Validate(table, ticket);
-
-        Stopwatch timer = new();
-        timer.Start();
 
         InsertFluxState state = new(
             database: database,
@@ -148,6 +145,19 @@ internal sealed class RowInserter
         );
 
         FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
+
+        await InsertInternal(machine, state);        
+    }
+
+    public async Task InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
+    {
+        await InsertInternal(machine, state);
+    }
+
+    private async Task InsertInternal(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
+    {
+        Stopwatch timer = new();
+        timer.Start();
 
         machine.When(InsertFluxSteps.NotInitialized, InitializeStep);
         machine.When(InsertFluxSteps.CheckUniqueKeys, CheckUniqueKeysStep);
@@ -166,7 +176,17 @@ internal sealed class RowInserter
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        /*foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        Console.WriteLine(
+            "Row {0} inserted at {1}, Time taken: {2}",
+            state.RowTuple.SlotOne,
+            state.RowTuple.SlotTwo,
+            timeTaken.ToString(@"m\:ss\.fff")
+        );
+    }
+}
+
+
+/*foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
             if (index.Value.MultiRows is not null)
             {
@@ -181,12 +201,3 @@ internal sealed class RowInserter
                 }
             }
         }*/
-
-        Console.WriteLine(
-            "Row {0} inserted at {1}, Time taken: {2}",
-            state.RowTuple.SlotOne,
-            state.RowTuple.SlotTwo,
-            timeTaken.ToString(@"m\:ss\.fff")
-        );
-    }
-}

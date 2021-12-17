@@ -9,7 +9,7 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Journal.Models;
-using CamusDB.Core.Journal.Controllers.Controllers;
+using CamusDB.Core.Journal.Controllers;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 

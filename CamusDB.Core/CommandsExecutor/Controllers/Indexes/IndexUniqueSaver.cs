@@ -11,9 +11,9 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Journal.Models.Logs;
+using CamusDB.Core.Journal.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Journal.Controllers.Controllers;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 

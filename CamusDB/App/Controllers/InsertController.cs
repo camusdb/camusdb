@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Journal.Models;
 
 namespace CamusDB.App.Controllers;
 
@@ -40,7 +41,8 @@ public sealed class InsertController : CommandsController
             InsertTicket ticket = new(
                 database: request.DatabaseName ?? "",
                 name: request.TableName ?? "",
-                values: request.Values ?? new Dictionary<string, ColumnValue>()
+                values: request.Values ?? new Dictionary<string, ColumnValue>(),
+                forceFailureType: JournalFailureTypes.PostInsert
             );
 
             await executor.Insert(ticket);

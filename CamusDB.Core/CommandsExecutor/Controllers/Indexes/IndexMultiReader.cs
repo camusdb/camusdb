@@ -30,9 +30,7 @@ internal sealed class IndexMultiReader : IndexBaseReader
 
         byte[] data = await tablespace.GetDataFromPage(offset);
         if (data.Length == 0)
-            return index;
-
-        Console.WriteLine(data.Length);
+            return index;        
 
         int pointer = 0;
 

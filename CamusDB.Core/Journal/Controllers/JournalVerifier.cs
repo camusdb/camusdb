@@ -40,25 +40,27 @@ public sealed class JournalVerifier
                     parentSequence = journalLog.Log!.Sequence;
                     if (logGroups.TryGetValue(parentSequence, out group))
                         group.Logs.Add(journalLog.Log);
-                    else
-                        Console.WriteLine("Group {0}/{1} not found", parentSequence, journalLog.Type);
+                    //else
+                    //    Console.WriteLine("Group {0}/{1} not found", parentSequence, journalLog.Type);
                     break;
 
                 case JournalLogTypes.InsertCheckpoint:
                     parentSequence = journalLog.Log!.Sequence;
                     if (!logGroups.TryGetValue(parentSequence, out group))
                     {
-                        Console.WriteLine("Insert checkpoint {0} not found", parentSequence);
+                        //Console.WriteLine("Insert checkpoint {0} not found", parentSequence);
                         break;
                     }
 
-                    Console.WriteLine("Removed insert {0} from journal", parentSequence);
+                    //Console.WriteLine("Removed insert {0} from journal", parentSequence);
                     logGroups.Remove(parentSequence); // Insert is complete so remove
                     break;
 
-                default:
-                    Console.WriteLine("Unknown {0}", journalLog.Type);
+                case JournalLogTypes.FlushedPages: // nothing to do yet
                     break;
+
+                default:
+                    throw new Exception(string.Format("Unknown {0}", journalLog.Type));
             }
         }
 

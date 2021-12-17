@@ -51,7 +51,7 @@ public class CamusStartup
 
         Console.WriteLine("Database recovery started for {0}", databaseName);
 
-        DatabaseDescriptor database = await executor.OpenDatabase(databaseName);
+        DatabaseDescriptor database = await executor.OpenDatabase(databaseName, true);
         await executor.CloseDatabase(new CloseDatabaseTicket(databaseName));
 
         Console.WriteLine("Database recovery completed for {0}", databaseName);

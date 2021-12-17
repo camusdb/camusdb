@@ -41,8 +41,8 @@ internal sealed class DatabaseCloser : IDisposable
 
             databaseDescriptors.Descriptors.Remove(name);
 
-            string path = Path.Combine(CamusDBConfig.DataDirectory, name, "camus.lock");
-            File.Delete(path);
+            //string path = Path.Combine(CamusDBConfig.DataDirectory, name, "camus.lock");
+            //File.Delete(path);
 
             Console.WriteLine("Database {0} closed", name);
         }
