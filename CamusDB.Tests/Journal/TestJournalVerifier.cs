@@ -11,16 +11,14 @@ using NUnit.Framework;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
-using CamusDB.Core;
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.Journal;
 using CamusDB.Tests.Utils;
-using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.Journal.Models.Logs;
+using CamusDB.Core.Journal.Controllers;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -38,7 +36,7 @@ internal class TestJournalVerifier
     }
 
     private JournalReader GetJournalReader(DatabaseDescriptor database)
-    {        
+    {
         return new(
             Path.Combine(Config.DataDirectory, database.Name, "journal")
         );
@@ -79,7 +77,7 @@ internal class TestJournalVerifier
             }
         );
 
-        InsertLog schedule = new(ticket.TableName, ticket.Values);
+        InsertLog schedule = new(0, ticket.TableName, ticket.Values);
         uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
         InsertCheckpointLog checkpointSchedule = new(sequence);
@@ -88,7 +86,12 @@ internal class TestJournalVerifier
         database.Journal.Writer.Close();
 
         JournalVerifier journalVerifier = new();
-        await journalVerifier.Verify(Path.Combine(Config.DataDirectory, ""));
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(groups.Count, 0);
 
         /*JournalReader journalReader = GetJournalReader(database);
 

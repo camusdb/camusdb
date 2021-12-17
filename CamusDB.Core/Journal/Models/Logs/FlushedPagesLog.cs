@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.Journal.Attributes;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.Journal.Models.Logs;
 

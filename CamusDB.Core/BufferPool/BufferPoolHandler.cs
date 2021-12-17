@@ -23,11 +23,11 @@ namespace CamusDB.Core.BufferPool;
  *
  * +--------------------+
  * | version (2 bytes)  |
- * +--------------------+--------------------------+
- * | checksum (4 bytes unsigned integer)           |
- * +----------+----------+----------+--------------+
- * | checksum (4 bytes unsigned integer)           |
- * +----------+----------+----------+--------------+
+ * +--------------------+---------------------------------+
+ * | checksum (4 bytes unsigned integer)                  |
+ * +----------+----------+----------+---------------------+
+ * | last wrote journal seq (4 bytes unsigned integer)    |
+ * +----------+----------+----------+---------------------+
  */
 public sealed class BufferPoolHandler : IDisposable
 {

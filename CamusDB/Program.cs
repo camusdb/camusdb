@@ -12,7 +12,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 
-Console.WriteLine(UInt32.MaxValue);
+//Console.WriteLine(UInt32.MaxValue);
 
 var builder = WebApplication.CreateBuilder(args);
 

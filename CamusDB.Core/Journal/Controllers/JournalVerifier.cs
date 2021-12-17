@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.Journal.Models;
-using CamusDB.Core.CommandsExecutor;
 
 namespace CamusDB.Core.Journal.Controllers;
 
@@ -54,7 +53,7 @@ public sealed class JournalVerifier
                     }
 
                     Console.WriteLine("Removed insert {0} from journal", parentSequence);
-                    logGroups.Remove(parentSequence); // Insert is complete so remove                    
+                    logGroups.Remove(parentSequence); // Insert is complete so remove
                     break;
 
                 default:

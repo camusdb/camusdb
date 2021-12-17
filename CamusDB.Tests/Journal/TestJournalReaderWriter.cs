@@ -11,10 +11,8 @@ using NUnit.Framework;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
-using CamusDB.Core;
 using CamusDB.Tests.Utils;
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.Journal;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Catalogs.Models;
@@ -159,7 +157,7 @@ internal class TestJournal
 
         DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName);
 
-        WritePageLog schedule = new(100, new byte[5] { 1, 2, 3, 4, 5 });
+        WritePageLog schedule = new(100, 0, new byte[5] { 1, 2, 3, 4, 5 });
         uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
 
         database.Journal.Writer.Close();

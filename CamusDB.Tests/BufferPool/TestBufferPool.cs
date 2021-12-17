@@ -7,6 +7,7 @@ using CamusDB.Core.BufferPool;
 using System.IO.MemoryMappedFiles;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
+using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
 
 namespace CamusDB.Tests.BufferPool;
 
@@ -83,13 +84,13 @@ public class TestBufferPool
 
         byte[] data = Encoding.UTF8.GetBytes("some data");
 
-        await bufferPool.WriteDataToPage(1, data);
+        await bufferPool.WriteDataToPage(1, 0, data);
 
         BufferPage page = await bufferPool.ReadPage(1);
 
         Assert.AreEqual(page.Buffer.Length, Config.PageSize);
-        Assert.AreEqual(page.Offset, 1);        
-        
+        Assert.AreEqual(page.Offset, 1);
+
         Assert.AreEqual(bufferPool.NumberPages, 1); // page #1
     }
 
@@ -100,17 +101,17 @@ public class TestBufferPool
 
         using (var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open))
         {
-            using BufferPoolHandler? bufferPool = new(mmf);           
-            await bufferPool.WriteDataToPage(1, data);
+            using BufferPoolHandler? bufferPool = new(mmf);
+            await bufferPool.WriteDataToPage(1, 0, data);
         }
 
-        using var mmf2 = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);        
+        using var mmf2 = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
         using BufferPoolHandler? bufferPool2 = new(mmf2);
 
         BufferPage page = await bufferPool2.ReadPage(1);
 
-        for (int i = 0; i < data.Length; i++)        
-            Assert.AreEqual(page.Buffer[Config.DataOffset + i], data[i]);
+        for (int i = 0; i < data.Length; i++)
+            Assert.AreEqual(page.Buffer[BConfig.DataOffset + i], data[i]);
     }
 
     [Test]
@@ -121,12 +122,12 @@ public class TestBufferPool
 
         byte[] data = Encoding.UTF8.GetBytes("some data some data");
 
-        await bufferPool.WriteDataToPage(1, data);
+        await bufferPool.WriteDataToPage(1, 0, data);
 
         BufferPage page = await bufferPool.ReadPage(1);
 
         for (int i = 0; i < data.Length; i++)
-            Assert.AreEqual(page.Buffer[Config.DataOffset + i], data[i]);
+            Assert.AreEqual(page.Buffer[BConfig.DataOffset + i], data[i]);
     }
 
     [Test]
@@ -137,7 +138,7 @@ public class TestBufferPool
 
         byte[] data = Encoding.UTF8.GetBytes("some data some data");
 
-        await bufferPool.WriteDataToPage(1, data);
+        await bufferPool.WriteDataToPage(1, 0, data);
 
         byte[] readData = await bufferPool.GetDataFromPage(1);
 
@@ -151,7 +152,7 @@ public class TestBufferPool
         using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
         using BufferPoolHandler bufferPool = new(mmf);
 
-        byte[] data = Encoding.UTF8.GetBytes(new string('s', Config.PageSize));        
+        byte[] data = Encoding.UTF8.GetBytes(new string('s', Config.PageSize));
 
         int pageOffset = await bufferPool.WriteDataToFreePage(data);
 

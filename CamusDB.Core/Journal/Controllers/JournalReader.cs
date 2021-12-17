@@ -110,6 +110,14 @@ public sealed class JournalReader : IDisposable
                     );
                     break;
 
+                case JournalLogTypes.FlushedPages:
+                    yield return new JournalLog(
+                        sequence,
+                        JournalLogTypes.FlushedPages,
+                        await FlushedPagesLogSerializator.Deserialize(journal)
+                    );
+                    break;
+
                 default:
                     throw new Exception("Unsupported type: " + type);
             }

@@ -10,8 +10,6 @@ using CamusDB.Core.Journal.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.Journal.Models.Logs;
 using Config = CamusDB.Core.CamusDBConfig;
-using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.Journal.Controllers.Controllers;
 
@@ -19,9 +17,11 @@ public sealed class JournalWriter
 {
     private uint logSequenceNumber = 0;
 
-    private FileStream? journal;
+    private uint lastSequence = 0;
 
-    public DateTime LastFlush { get; private set; } = DateTime.Now;
+    private uint lastFlushedSequence = 0;
+
+    private FileStream? journal;
 
     private readonly string database;
 
@@ -35,8 +35,8 @@ public sealed class JournalWriter
     public async Task Initialize(CommandExecutor executor)
     {
         string path = Path.Combine(Config.DataDirectory, database, "journal");
-       
-        // @todo improve recovery here        
+
+        // @todo improve recovery here
         JournalVerifier verifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await verifier.Verify(path);
@@ -52,7 +52,7 @@ public sealed class JournalWriter
         journal = new(path, FileMode.Append, FileAccess.Write);
     }
 
-    private async Task TryWrite(byte[] buffer)
+    private async Task TryWrite(uint lastSequence, byte[] buffer)
     {
         if (this.journal is null)
             throw new CamusDBException(
@@ -66,13 +66,32 @@ public sealed class JournalWriter
 
             await journal.WriteAsync(buffer);
 
-            DateTime currentTime = DateTime.Now;
+            this.lastSequence = lastSequence;
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
 
-            //if ((currentTime - LastFlush).TotalMilliseconds > Config.JournalFlushInterval)
-            //{
+    public async Task Flush()
+    {
+        if (lastFlushedSequence == lastSequence)
+            return;
+
+        if (this.journal is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.JournalNotInitialized,
+                "Journal has not been initialized"
+            );
+
+        try
+        {
+            await semaphore.WaitAsync();
+
             await journal.FlushAsync();
-            //    LastFlush = currentTime;
-            //}
+
+            lastFlushedSequence = lastSequence;
         }
         finally
         {
@@ -95,16 +114,16 @@ public sealed class JournalWriter
 
     public async Task<uint> Append(JournalFailureTypes failureType, InsertLog insertSchedule)
     {
-        Console.WriteLine("JournalInsert ?");
+        //Console.WriteLine("JournalInsert ?");
 
         if (failureType == JournalFailureTypes.PreInsert)
             ForceFailure(failureType);
-       
+
         uint sequence = GetNextSequence();
 
         byte[] payload = InsertLogSerializator.Serialize(sequence, insertSchedule);
 
-        await TryWrite(payload);
+        await TryWrite(sequence, payload);
 
         if (failureType == JournalFailureTypes.PostInsert)
             ForceFailure(failureType);
@@ -114,78 +133,78 @@ public sealed class JournalWriter
 
     public async Task<uint> Append(JournalFailureTypes failureType, InsertSlotsLog insertSchedule)
     {
-        Console.WriteLine("JournalInsertSlots");        
+        //Console.WriteLine("JournalInsertSlots");
 
         uint sequence = GetNextSequence();
 
         byte[] payload = InsertSlotsLogSerializator.Serialize(sequence, insertSchedule);
 
-        await TryWrite(payload);
+        await TryWrite(sequence, payload);
 
         return sequence;
     }
 
     public async Task<uint> Append(JournalFailureTypes failureType, WritePageLog insertSchedule)
     {
-        Console.WriteLine("JournalWritePage");        
+        //Console.WriteLine("JournalWritePage");
 
         uint sequence = GetNextSequence();
 
         byte[] payload = WritePageLogSerializator.Serialize(sequence, insertSchedule);
 
-        await TryWrite(payload);
+        await TryWrite(sequence, payload);
 
         return sequence;
     }
 
     public async Task<uint> Append(JournalFailureTypes failureType, UpdateUniqueIndexLog indexSchedule)
     {
-        Console.WriteLine("JournalUpdateUniqueIndex");        
+        //Console.WriteLine("JournalUpdateUniqueIndex");
 
         uint sequence = GetNextSequence();
 
         byte[] payload = UpdateUniqueIndexLogSerializator.Serialize(sequence, indexSchedule);
 
-        await TryWrite(payload);
+        await TryWrite(sequence, payload);
 
         return sequence;
     }
 
     public async Task<uint> Append(JournalFailureTypes failureType, UpdateUniqueCheckpointLog indexCheckpoint)
     {
-        Console.WriteLine("JournalUpdateUniqueCheckpoint");        
+        //Console.WriteLine("JournalUpdateUniqueCheckpoint");
 
         uint sequence = GetNextSequence();
 
         byte[] payload = UpdateUniqueCheckpointLogSerializator.Serialize(sequence, indexCheckpoint);
 
-        await TryWrite(payload);
+        await TryWrite(sequence, payload);
 
         return sequence;
     }
 
     public async Task<uint> Append(JournalFailureTypes failureType, InsertCheckpointLog insertCheckpoint)
     {
-        Console.WriteLine("JournalInsertCheckpoint");        
+        //Console.WriteLine("JournalInsertCheckpoint");
 
         uint sequence = GetNextSequence();
 
         byte[] payload = InsertCheckpointLogSerializator.Serialize(sequence, insertCheckpoint);
 
-        await TryWrite(payload);
+        await TryWrite(sequence, payload);
 
         return sequence;
     }
 
     public async Task<uint> Append(JournalFailureTypes failureType, FlushedPagesLog flushedPages)
     {
-        Console.WriteLine("FlushedPages");
+        //Console.WriteLine("FlushedPages");
 
         uint sequence = GetNextSequence();
 
         byte[] payload = FlushedPagesLogSerializator.Serialize(sequence, flushedPages);
 
-        await TryWrite(payload);
+        await TryWrite(sequence, payload);
 
         return sequence;
     }

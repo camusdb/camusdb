@@ -42,15 +42,18 @@ public sealed class BufferPoolFlusher
 
         foreach (KeyValuePair<int, BufferPage> keyValuePair in bufferPool.Pages)
         {
-            if (keyValuePair.Value.Dirty)
-            {
-                keyValuePair.Value.Dirty = false;
-                pagesToFlush.Add(keyValuePair.Value);
-            }
+            if (!keyValuePair.Value.Dirty)
+                continue;
+            
+            keyValuePair.Value.Dirty = false;
+            pagesToFlush.Add(keyValuePair.Value);
         }
 
         if (pagesToFlush.Count == 0)
+        {
+            await journal.Writer.Flush();
             return;
+        }
 
         Console.WriteLine("Flushed {0} dirty pages", pagesToFlush.Count);
 
@@ -60,6 +63,8 @@ public sealed class BufferPoolFlusher
             JournalFailureTypes.None,
             new FlushedPagesLog(0)
         );
+
+        await journal.Writer.Flush();
     }
 
     public void Dispose()

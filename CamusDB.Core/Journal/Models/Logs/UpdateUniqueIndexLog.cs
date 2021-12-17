@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Journal.Attributes;
 
 namespace CamusDB.Core.Journal.Models.Logs;
