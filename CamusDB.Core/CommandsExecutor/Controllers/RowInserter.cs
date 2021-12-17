@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.Insert;
+using CamusDB.Core.Flux.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 

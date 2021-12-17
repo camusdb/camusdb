@@ -16,8 +16,9 @@ public sealed class JournalLogGroup
 
     public List<IJournalLog> Logs { get; } = new();
 
-    public JournalLogGroup(JournalGroupType type)
+    public JournalLogGroup(JournalGroupType type, IJournalLog initialLog)
     {
         Type = type;
+        Logs.Add(initialLog);
     }
 }

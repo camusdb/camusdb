@@ -14,5 +14,15 @@ public enum JournalFailureTypes
 
     PreInsert = 1,
     PostInsert = 2,
+    PreInsertSlots = 3,
+    PostInsertSlots = 4,
+    PreWritePage = 5,
+    PostWritePage = 6,
+    PreUpdateUniqueIndex = 7,
+    PostUpdateUniqueIndex = 8,
+    PreUpdateUniqueCheckpoint = 9,
+    PostUpdateUniqueCheckpoint = 10,
+    PreInsertCheckpoint = 11,
+    PostInsertCheckpoint = 12
 }
 

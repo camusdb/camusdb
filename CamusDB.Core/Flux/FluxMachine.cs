@@ -6,14 +6,9 @@
  * file that was distributed with this source code.
  */
 
-namespace CamusDB.Core.Flux;
+using CamusDB.Core.Flux.Models;
 
-public enum FluxAction
-{
-    Abort = 0,
-    Continue = 1,
-    Completed = 2,
-}
+namespace CamusDB.Core.Flux;
 
 public class FluxMachine<TSteps, TState> where TSteps : Enum
 {
@@ -85,6 +80,12 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
                 await RunAbortHandlers();
             }
         }
+        catch (CamusDBException e)
+        {
+            if (e.Code != CamusDBErrorCodes.JournalForcedFailure)
+                await RunAbortHandlers();
+            throw;
+        }
         catch (Exception)
         {
             await RunAbortHandlers();
@@ -112,6 +113,12 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
                 IsAborted = true;
                 await RunAbortHandlers();
             }
+        }
+        catch (CamusDBException e)
+        {
+            if (e.Code != CamusDBErrorCodes.JournalForcedFailure)
+                await RunAbortHandlers();
+            throw;
         }
         catch (Exception)
         {

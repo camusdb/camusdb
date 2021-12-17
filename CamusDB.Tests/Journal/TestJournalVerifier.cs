@@ -72,6 +72,24 @@ internal class TestJournalVerifier
         return executor;
     }
 
+    private InsertTicket GetInsertTicket(JournalFailureTypes type)
+    {
+        InsertTicket ticket = new(
+            database: DatabaseName,
+            name: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Id, "1") },
+                { "name", new ColumnValue(ColumnType.String, "some name") },
+                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
+            },
+            forceFailureType: type
+        );
+
+        return ticket;
+    }
+
     [Test]
     [NonParallelizable]
     public async Task TestJournalInsertTicketCheckpoint()
@@ -106,38 +124,22 @@ internal class TestJournalVerifier
             Path.Combine(Config.DataDirectory, DatabaseName, "journal")
         );
 
-        Assert.AreEqual(groups.Count, 0);        
+        Assert.AreEqual(groups.Count, 0);
     }
 
     [Test]
     [NonParallelizable]
-    public async Task TestJournalInsertFail()
+    public async Task TestJournalInsertFailPreInsert()
     {
         var executor = await SetupBasicTable();
 
-        InsertTicket ticket = new(
-            database: DatabaseName,
-            name: "robots",
-            values: new Dictionary<string, ColumnValue>()
-            {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
-            },
-            forceFailureType: JournalFailureTypes.PreInsert
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PreInsert))
         );
 
-        var e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
         Assert.IsInstanceOf<CamusDBException>(e);
 
-        /*InsertLog schedule = new(0, ticket.TableName, ticket.Values);
-        uint sequence = await database.Journal.Writer.Append(JournalFailureTypes.None, schedule);
-
-        InsertCheckpointLog checkpointSchedule = new(sequence);
-        uint checkpointSequence = await database.Journal.Writer.Append(JournalFailureTypes.None, checkpointSchedule);
-
-        database.Journal.Writer.Close();
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));     
 
         JournalVerifier journalVerifier = new();
 
@@ -145,6 +147,270 @@ internal class TestJournalVerifier
             Path.Combine(Config.DataDirectory, DatabaseName, "journal")
         );
 
-        Assert.AreEqual(groups.Count, 0);*/
+        Assert.AreEqual(groups.Count, 0);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPostInsert()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PostInsert))
+        );
+
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(1, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPreInsertSlots()
+    {
+        var executor = await SetupBasicTable();        
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PreInsertSlots))
+        );
+
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(1, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPostInsertSlots()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PostInsertSlots))
+        );
+        
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(2, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPreUpdateUniqueIndex()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PreUpdateUniqueIndex))
+        );
+        
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(2, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPostUpdateUniqueIndex()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PostUpdateUniqueIndex))
+        );
+
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(3, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPreWritePage()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PreWritePage))
+        );
+        
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(3, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPostWritePage()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PostWritePage))
+        );
+        
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(4, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPreUpdateUniqueIndexCheckpoint()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PreUpdateUniqueCheckpoint))
+        );
+
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(5, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPostUpdateUniqueIndexCheckpoint()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PostUpdateUniqueCheckpoint))
+        );
+
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(6, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPreInsertCheckpoint()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PreInsertCheckpoint))
+        );
+
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(7, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPostInsertCheckpoint()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PostInsertCheckpoint))
+        );
+
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+        );
+
+        Assert.AreEqual(0, groups.Count);
+        //Assert.AreEqual(8, groups[1].Logs.Count);
     }
 }

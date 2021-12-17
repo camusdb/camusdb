@@ -135,11 +135,17 @@ public sealed class JournalWriter
     {
         //Console.WriteLine("JournalInsertSlots");
 
+        if (failureType == JournalFailureTypes.PreInsertSlots)
+            ForceFailure(failureType);
+
         uint sequence = GetNextSequence();
 
         byte[] payload = InsertSlotsLogSerializator.Serialize(sequence, insertSchedule);
 
         await TryWrite(sequence, payload);
+
+        if (failureType == JournalFailureTypes.PostInsertSlots)
+            ForceFailure(failureType);
 
         return sequence;
     }
@@ -148,11 +154,17 @@ public sealed class JournalWriter
     {
         //Console.WriteLine("JournalWritePage");
 
+        if (failureType == JournalFailureTypes.PreWritePage)
+            ForceFailure(failureType);
+
         uint sequence = GetNextSequence();
 
         byte[] payload = WritePageLogSerializator.Serialize(sequence, insertSchedule);
 
         await TryWrite(sequence, payload);
+
+        if (failureType == JournalFailureTypes.PostWritePage)
+            ForceFailure(failureType);
 
         return sequence;
     }
@@ -161,11 +173,17 @@ public sealed class JournalWriter
     {
         //Console.WriteLine("JournalUpdateUniqueIndex");
 
+        if (failureType == JournalFailureTypes.PreUpdateUniqueIndex)
+            ForceFailure(failureType);
+
         uint sequence = GetNextSequence();
 
         byte[] payload = UpdateUniqueIndexLogSerializator.Serialize(sequence, indexSchedule);
 
         await TryWrite(sequence, payload);
+
+        if (failureType == JournalFailureTypes.PostUpdateUniqueIndex)
+            ForceFailure(failureType);
 
         return sequence;
     }
@@ -174,11 +192,17 @@ public sealed class JournalWriter
     {
         //Console.WriteLine("JournalUpdateUniqueCheckpoint");
 
+        if (failureType == JournalFailureTypes.PreUpdateUniqueCheckpoint)
+            ForceFailure(failureType);
+
         uint sequence = GetNextSequence();
 
         byte[] payload = UpdateUniqueCheckpointLogSerializator.Serialize(sequence, indexCheckpoint);
 
         await TryWrite(sequence, payload);
+
+        if (failureType == JournalFailureTypes.PostUpdateUniqueCheckpoint)
+            ForceFailure(failureType);
 
         return sequence;
     }
@@ -187,11 +211,17 @@ public sealed class JournalWriter
     {
         //Console.WriteLine("JournalInsertCheckpoint");
 
+        if (failureType == JournalFailureTypes.PreInsertCheckpoint)
+            ForceFailure(failureType);
+
         uint sequence = GetNextSequence();
 
         byte[] payload = InsertCheckpointLogSerializator.Serialize(sequence, insertCheckpoint);
 
         await TryWrite(sequence, payload);
+
+        if (failureType == JournalFailureTypes.PostInsertCheckpoint)
+            ForceFailure(failureType);
 
         return sequence;
     }

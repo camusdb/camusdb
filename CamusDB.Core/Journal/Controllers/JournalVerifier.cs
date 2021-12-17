@@ -30,7 +30,7 @@ public sealed class JournalVerifier
             switch (journalLog.Type)
             {
                 case JournalLogTypes.Insert:
-                    logGroups.Add(journalLog.Sequence, new JournalLogGroup(JournalGroupType.Insert));
+                    logGroups.Add(journalLog.Sequence, new JournalLogGroup(JournalGroupType.Insert, journalLog.Log!));
                     break;
 
                 case JournalLogTypes.WritePage:

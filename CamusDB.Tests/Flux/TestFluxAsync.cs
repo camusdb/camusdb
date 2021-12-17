@@ -12,6 +12,7 @@ using NUnit.Framework;
 using CamusDB.Core.Flux;
 using System.Threading.Tasks;
 using CamusDB.Tests.Flux.Fixtures;
+using CamusDB.Core.Flux.Models;
 
 namespace CamusDB.Tests.Flux;
 
@@ -30,6 +31,18 @@ internal sealed class TestFluxAsync
     }
 
     private async Task<FluxAction> CompleteStepAsync(TestFluxState state)
+    {
+        await state.IncreaseAsync();
+        return FluxAction.Completed;
+    }
+
+    private async Task<FluxAction> ExceptionStepAsync(TestFluxState state)
+    {
+        await Task.Yield();
+        throw new System.Exception("error");
+    }
+
+    private async Task<FluxAction> OnExceptionAsync(TestFluxState state)
     {
         await state.IncreaseAsync();
         return FluxAction.Completed;
@@ -126,5 +139,47 @@ internal sealed class TestFluxAsync
             await machine.RunStep(machine.NextStep());
 
         Assert.AreEqual(2, state.Number);
+    }
+
+    [Test]
+    public async Task TestSimpleMachineAutoCompleteSteps()
+    {
+        TestFluxState state = new();
+        FluxMachine<TestFluxEnum, TestFluxState> machine = new(state);
+
+        machine.When(TestFluxEnum.Step0, CallStepAsync);
+        machine.When(TestFluxEnum.Step1, CallStepAsync);
+        machine.When(TestFluxEnum.Step2, CallStepAsync);
+        machine.When(TestFluxEnum.Step3, CallStepAsync);
+        machine.When(TestFluxEnum.Step4, CallStepAsync);
+        machine.When(TestFluxEnum.Step5, CallStepAsync);
+
+        while (!machine.IsAborted)
+            await machine.RunStep(machine.NextStep());
+
+        Assert.AreEqual(6, state.Number);
+    }
+
+    [Test]
+    public void TestSimpleMachineForceAbortException()
+    {
+        TestFluxState state = new();
+        FluxMachine<TestFluxEnum, TestFluxState> machine = new(state);
+
+        machine.When(TestFluxEnum.Step0, ExceptionStepAsync);
+        machine.When(TestFluxEnum.Step1, CallStepAsync);
+        machine.When(TestFluxEnum.Step2, CallStepAsync);
+
+        machine.WhenAbort(OnExceptionAsync);
+
+        var ex = Assert.CatchAsync<System.Exception>(async () =>
+        {
+            while (!machine.IsAborted)
+                await machine.RunStep(machine.NextStep());
+        });
+
+        Assert.IsInstanceOf<System.Exception>(ex);
+        Assert.AreEqual("error", ex!.Message);
+        Assert.AreEqual(1, state.Number);
     }
 }
