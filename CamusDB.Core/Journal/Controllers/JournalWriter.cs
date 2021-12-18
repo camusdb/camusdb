@@ -51,53 +51,65 @@ public sealed class JournalWriter
                 journals.Add(file);
         }
 
+        //Console.WriteLine(journals.Count);
+
         return journals;
     }
 
     private async Task RecoverJournals(CommandExecutor executor, DatabaseDescriptor database, List<FileInfo> journals)
     {
+        //Console.WriteLine("?");
+
         JournalVerifier verifier = new();
         JournalRecoverer recoverer = new();
 
         foreach (FileInfo file in journals)
         {
-            Console.WriteLine("{0}", file.FullName);
+            if (journal is not null && file.FullName == journal.Name)
+                continue;
 
+            //Console.WriteLine("Recovered={0}", file.FullName);
+            
             Dictionary<uint, JournalLogGroup> groups = await verifier.Verify(file.FullName);
             if (groups.Count > 0)
-                await recoverer.Recover(executor, database, groups);
+                await recoverer.Recover(executor, database, groups);   
+
+            File.Delete(file.FullName);
         }
     }
 
-    private async Task<int> GetNextJournal(List<FileInfo> journals)
+    private int GetNextJournal(List<FileInfo> journals)
     {
+        int max = -1;
+
         foreach (FileInfo file in journals)
         {
-            if (int.TryParse(file.Name.Replace("journal", ""), out int journalId))    
-                Console.WriteLine(journalId);
-            else            
-                Console.WriteLine(file.Name);
+            if (int.TryParse(file.Name.Replace("journal", ""), out int journalId))
+            {
+                if (journalId > max)
+                    max = journalId;
+            }      
         }
 
-        var r = new System.Random();
-        return r.Next(1000, 9999);
+        return max + 1;
     }
 
-    public async Task Initialize(CommandExecutor executor, DatabaseDescriptor database)
-    {
-        List<FileInfo> journals = GetJournals(database.Name);
+    public async Task TryRecover(CommandExecutor executor, DatabaseDescriptor database)
+    {      
+        await RecoverJournals(executor, database, GetJournals(database.Name));
+    }
 
-        int next = await GetNextJournal(journals);
+    public void Initialize()
+    {
+        List<FileInfo> journals = GetJournals(this.database);
+
+        int next = GetNextJournal(journals);
 
         journal = new(
             Path.Combine(Config.DataDirectory, this.database, "journal" + next.ToString()),
             FileMode.Append,
             FileAccess.Write
-        );
-
-        await RecoverJournals(executor, database, journals);
-
-        Console.WriteLine("{0}", journal.Name);
+        ); 
     }
 
     private async Task TryWrite(uint lastSequence, byte[] buffer)

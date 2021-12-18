@@ -81,9 +81,12 @@ internal sealed class DatabaseOpener
             // Only the data table space has a concurrent dirty page flusher
             _ = Task.Factory.StartNew(databaseDescriptor.TableSpaceFlusher.PeriodicallyFlush);
 
+            // Initialize a new journal
+            databaseDescriptor.Journal.Writer.Initialize();
+
             // Check journal for recovery
             if (recoveryMode)
-                await databaseDescriptor.Journal.Writer.Initialize(executor, databaseDescriptor);            
+                await databaseDescriptor.Journal.Writer.TryRecover(executor, databaseDescriptor);            
 
             databaseDescriptors.Descriptors.Add(name, databaseDescriptor);
         }
