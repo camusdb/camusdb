@@ -19,7 +19,17 @@ Internal Features
  - [B+Trees](https://en.wikipedia.org/wiki/B%2B_tree) to organize rows in storage and for unique/multi indexes
  - Data integrity is checked computing [XXHash](https://cyan4973.github.io/xxHash/) checksums
 
-Requirements
-------------
+## Requirements
  - .NET 6 (SDK 6.0.100)
+
+## License
+
+This project is licensed under the [MIT license](LICENSE).
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in CamusDB by you, shall be licensed as MIT, without any additional
+terms or conditions.
+
 
