@@ -72,14 +72,14 @@ internal class TestJournalRecoverer
         return executor;
     }
 
-    private InsertTicket GetInsertTicket(JournalFailureTypes type)
+    private InsertTicket GetInsertTicket(string id, JournalFailureTypes type)
     {
         InsertTicket ticket = new(
             database: DatabaseName,
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "100") },
+                { "id", new ColumnValue(ColumnType.Id, id) },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
@@ -119,8 +119,45 @@ internal class TestJournalRecoverer
         var executor = await SetupBasicTable();
         var database = await executor.OpenDatabase(DatabaseName);
 
+        for (int i = 0; i < 5; i++)
+            await executor.Insert(GetInsertTicket((200 + i).ToString(), JournalFailureTypes.None));
+
         var e = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await executor.Insert(GetInsertTicket(JournalFailureTypes.PostInsert))
+            await executor.Insert(GetInsertTicket("100", JournalFailureTypes.PostInsert))
+        );
+
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        database = await executor.OpenDatabase(DatabaseName);
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+
+        JournalRecoverer recoverer = new();
+        await recoverer.Recover(executor, database, groups);
+
+        await CheckRecoveredRow(executor);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalRecoverInsertFailPostInsertSlots()
+    {
+        var executor = await SetupBasicTable();
+        var database = await executor.OpenDatabase(DatabaseName);
+
+        for (int i = 0; i < 5; i++)
+            await executor.Insert(GetInsertTicket((200 + i).ToString(), JournalFailureTypes.None));
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket("100", JournalFailureTypes.PostInsertSlots))
         );
 
         Assert.IsInstanceOf<CamusDBException>(e);
