@@ -1,6 +1,6 @@
 CamusDB
 =======
-CamusDB is a modern multi-platform lightweight NoSQL/strict schema database server written in C# and .NET 6. 
+CamusDB is a modern multi-platform lightweight NoSQL/strict schema database server. 
 
 [![Build Status](https://app.travis-ci.com/camusdb/camusdb.svg?branch=main)](https://app.travis-ci.com/camusdb/camusdb)
 
@@ -14,9 +14,10 @@ Features
 
 Internal Features
 -----------------
+ - [Write Ahead Log (WAL)](https://en.wikipedia.org/wiki/Write-ahead_logging) implementation to provide Atomicity and Durability 
  - Parallel processing of database operations using [Task Parallel Library (TPL)](https://docs.microsoft.com/en-us/dotnet/standard/parallel-programming/task-parallel-library-tpl)
  - [Memory-mapped files](https://en.wikipedia.org/wiki/Memory-mapped_file) to avoid double buffering
- - [B+Trees](https://en.wikipedia.org/wiki/B%2B_tree) to organize rows in storage and for unique/multi indexes
+ - [B+Trees](https://en.wikipedia.org/wiki/B%2B_tree) to organize and index rows in the storage layer and for unique/multi indexes
  - Data integrity is checked computing [XXHash](https://cyan4973.github.io/xxHash/) checksums
 
 ## Requirements
@@ -24,7 +25,7 @@ Internal Features
 
 ## License
 
-This project is licensed under the [MIT license](LICENSE).
+This project is licensed under the [MIT license](LICENSE.txt).
 
 ### Contribution
 
