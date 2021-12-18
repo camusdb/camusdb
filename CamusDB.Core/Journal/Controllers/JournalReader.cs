@@ -97,6 +97,14 @@ public sealed class JournalReader : IDisposable
                     );
                     break;
 
+                case JournalLogTypes.UpdateUniqueIndex:
+                    yield return new JournalLog(
+                        sequence,
+                        JournalLogTypes.UpdateUniqueIndex,
+                        await UpdateUniqueIndexLogSerializator.Deserialize(journal)
+                    );
+                    break;
+
                 case JournalLogTypes.UpdateUniqueIndexCheckpoint:
                     yield return new JournalLog(
                         sequence,
@@ -105,11 +113,19 @@ public sealed class JournalReader : IDisposable
                     );
                     break;
 
-                case JournalLogTypes.UpdateUniqueIndex:
+                case JournalLogTypes.UpdateTableIndex:
                     yield return new JournalLog(
                         sequence,
-                        JournalLogTypes.UpdateUniqueIndex,
-                        await UpdateUniqueIndexLogSerializator.Deserialize(journal)
+                        JournalLogTypes.UpdateTableIndex,
+                        await UpdateTableIndexLogSerializator.Deserialize(journal)
+                    );
+                    break;
+
+                case JournalLogTypes.UpdateTableIndexCheckpoint:
+                    yield return new JournalLog(
+                        sequence,
+                        JournalLogTypes.UpdateTableIndexCheckpoint,
+                        await UpdateTableIndexCheckpointLogSerializator.Deserialize(journal)
                     );
                     break;
 

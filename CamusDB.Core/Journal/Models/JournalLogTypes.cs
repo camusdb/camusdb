@@ -15,7 +15,9 @@ public enum JournalLogTypes
     WritePage = 102,
     UpdateUniqueIndex = 103,
     UpdateUniqueIndexCheckpoint = 104,
-    InsertCheckpoint = 105,
+    UpdateTableIndex = 105,
+    UpdateTableIndexCheckpoint = 106,
+    InsertCheckpoint = 110,
 
     FlushedPages = 999
 }

@@ -24,7 +24,9 @@ public static class CamusDBConfig
 
     public const int InitialPagesRead = 1024;
 
-    public const int TableSpaceHeaderPage = 0;    
+    public const int TableSpaceHeaderPage = 0;
+
+    public const int FlushToDiskInterval = 1000;
 
     #endregion
 

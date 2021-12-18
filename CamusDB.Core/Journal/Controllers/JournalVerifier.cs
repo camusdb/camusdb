@@ -37,6 +37,8 @@ public sealed class JournalVerifier
                 case JournalLogTypes.InsertSlots:
                 case JournalLogTypes.UpdateUniqueIndex:
                 case JournalLogTypes.UpdateUniqueIndexCheckpoint:
+                case JournalLogTypes.UpdateTableIndex:
+                case JournalLogTypes.UpdateTableIndexCheckpoint:
                     parentSequence = journalLog.Log!.Sequence;
                     if (logGroups.TryGetValue(parentSequence, out group))
                         group.Logs.Add(journalLog.Log);
@@ -57,6 +59,7 @@ public sealed class JournalVerifier
                     break;
 
                 case JournalLogTypes.FlushedPages: // nothing to do yet
+                    uint flushedSequence = journalLog.Log!.Sequence;
                     break;
 
                 default:

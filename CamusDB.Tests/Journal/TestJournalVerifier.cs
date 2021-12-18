@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.IO;
 using NUnit.Framework;
 using System.Threading.Tasks;
@@ -368,6 +369,54 @@ internal class TestJournalVerifier
 
     [Test]
     [NonParallelizable]
+    public async Task TestJournalInsertFailPreUpdateTableIndexCheckpoint()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PreUpdateTableIndexCheckpoint))
+        );
+
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+        );        
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(8, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalInsertFailPostUpdateTableIndexCheckpoint()
+    {
+        var executor = await SetupBasicTable();
+
+        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.Insert(GetInsertTicket(JournalFailureTypes.PostUpdateTableIndexCheckpoint))
+        );
+
+        Assert.IsInstanceOf<CamusDBException>(e);
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
+
+        JournalVerifier journalVerifier = new();
+
+        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+        );
+
+        Assert.AreEqual(1, groups.Count);
+        Assert.AreEqual(9, groups[1].Logs.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestJournalInsertFailPreInsertCheckpoint()
     {
         var executor = await SetupBasicTable();
@@ -387,7 +436,7 @@ internal class TestJournalVerifier
         );
 
         Assert.AreEqual(1, groups.Count);
-        Assert.AreEqual(7, groups[1].Logs.Count);
+        Assert.AreEqual(9, groups[1].Logs.Count);
     }
 
     [Test]

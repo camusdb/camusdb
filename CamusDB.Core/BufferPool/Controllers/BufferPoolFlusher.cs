@@ -10,9 +10,17 @@ using CamusDB.Core.Journal;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Journal.Models.Logs;
+using Config = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.BufferPool.Controllers;
 
+/**
+ * BufferPoolFlusher
+ * 
+ * PeriodicallyFlush runs every X ms interval and checks for dirty pages 
+ * in the buffer pool and flushes changes to disk, it also flushes
+ * the journal writer to disk.
+ */
 public sealed class BufferPoolFlusher
 {
     private bool disposed = false;
@@ -31,7 +39,7 @@ public sealed class BufferPoolFlusher
     {
         while (!disposed)
         {
-            await Task.Delay(1000);
+            await Task.Delay(Config.FlushToDiskInterval);
             await FlushPages();
         }
     }
@@ -59,10 +67,10 @@ public sealed class BufferPoolFlusher
 
         bufferPool.Flush();
 
-        await journal.Writer.Append(
-            JournalFailureTypes.None,
-            new FlushedPagesLog(0)
-        );
+        foreach (BufferPage page in pagesToFlush)
+        {
+            await journal.Writer.Append(JournalFailureTypes.None, new FlushedPagesLog(0));
+        }
 
         await journal.Writer.Flush();
     }

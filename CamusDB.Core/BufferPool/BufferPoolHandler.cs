@@ -28,6 +28,10 @@ namespace CamusDB.Core.BufferPool;
  * +----------+----------+----------+---------------------+
  * | last wrote journal seq (4 bytes unsigned integer)    |
  * +----------+----------+----------+---------------------+
+ * | next page offset (4 bytes integer)                   |
+ * +----------+----------+----------+---------------------+
+ * | data length (4 bytes integer)                        |
+ * +----------+----------+----------+---------------------+
  */
 public sealed class BufferPoolHandler : IDisposable
 {
@@ -340,11 +344,16 @@ public sealed class BufferPoolHandler : IDisposable
 
         try
         {
-            int nextPage = 0;
+            int nextPage = 0, length;
 
             //await page.Semaphore.WaitAsync();
 
-            int length = ((data.Length - startOffset) + BConfig.DataOffset) < Config.PageSize ? (data.Length - startOffset) : (Config.PageSize - BConfig.DataOffset);
+            // Calculate remaining data length less the page's header
+            if (((data.Length - startOffset) + BConfig.DataOffset) < Config.PageSize)
+                length = data.Length - startOffset;
+            else
+                length = Config.PageSize - BConfig.DataOffset;
+            
             int remaining = (data.Length - startOffset) - length;
 
             if (remaining > 0)

@@ -17,6 +17,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.Insert;
+using CamusDB.Core.Journal.Controllers;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -118,10 +119,10 @@ internal sealed class RowInserter
         byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket, state.RowTuple.SlotOne);
 
         WritePageLog writeSchedule = new(state.Sequence, 0, rowBuffer);
-        uint pageSequence = await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, writeSchedule);
+        await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, writeSchedule);
 
         // Insert data to the page offset
-        await tablespace.WriteDataToPage(state.RowTuple.SlotTwo, pageSequence, rowBuffer);
+        await tablespace.WriteDataToPage(state.RowTuple.SlotTwo, state.Sequence, rowBuffer);
 
         return FluxAction.Continue;
     }
@@ -133,9 +134,16 @@ internal sealed class RowInserter
     private async Task<FluxAction> UpdateTableIndex(InsertFluxState state)
     {
         BufferPoolHandler tablespace = state.Database.TableSpace;
+        JournalWriter journalWriter = state.Database.Journal.Writer;
+
+        UpdateTableIndexLog indexSchedule = new(state.Sequence);
+        uint updateIndexSequence = await journalWriter.Append(state.Ticket.ForceFailureType, indexSchedule);
 
         // Main table index stores rowid pointing to page offeset
         await indexSaver.Save(tablespace, state.Table.Rows, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
+
+        UpdateTableIndexCheckpointLog checkpointSchedule = new(state.Sequence, updateIndexSequence);
+        await journalWriter.Append(state.Ticket.ForceFailureType, checkpointSchedule);
 
         return FluxAction.Continue;
     }

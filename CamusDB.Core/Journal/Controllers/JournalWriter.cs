@@ -267,6 +267,46 @@ public sealed class JournalWriter
         return sequence;
     }
 
+    public async Task<uint> Append(JournalFailureTypes failureType, UpdateTableIndexLog indexSchedule)
+    {
+        //Console.WriteLine("JournalUpdateUniqueIndex");
+
+        if (failureType == JournalFailureTypes.PreUpdateTableIndex)
+            ForceFailure(failureType);
+
+        uint sequence = GetNextSequence();
+
+        byte[] payload = UpdateTableIndexLogSerializator.Serialize(sequence, indexSchedule);
+        
+        await TryWrite(sequence, payload);
+
+        if (failureType == JournalFailureTypes.PostUpdateTableIndex)
+            ForceFailure(failureType);
+
+        return sequence;
+    }
+
+    public async Task<uint> Append(JournalFailureTypes failureType, UpdateTableIndexCheckpointLog indexSchedule)
+    {
+        //Console.WriteLine("JournalUpdateUniqueIndex");
+
+        if (failureType == JournalFailureTypes.PreUpdateTableIndexCheckpoint)
+            ForceFailure(failureType);
+
+        uint sequence = GetNextSequence();
+
+        byte[] payload = UpdateTableIndexCheckpointLogSerializator.Serialize(sequence, indexSchedule);
+
+        await TryWrite(sequence, payload);
+
+        if (failureType == JournalFailureTypes.PostUpdateTableIndexCheckpoint)
+            ForceFailure(failureType);
+
+        return sequence;
+    }
+
+    // 
+
     public async Task<uint> Append(JournalFailureTypes failureType, InsertCheckpointLog insertCheckpoint)
     {
         //Console.WriteLine("JournalInsertCheckpoint");

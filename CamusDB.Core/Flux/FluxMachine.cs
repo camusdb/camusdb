@@ -36,7 +36,7 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
     public FluxMachine(TState state, TSteps step)
     {
         this.state = state;
-        this.currentStep = Convert.ToInt32(step);
+        this.currentStep = Convert.ToInt32(step) - 1;
     }
 
     public void When(TSteps status, Func<TState, FluxAction> handler)
@@ -61,12 +61,14 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
 
     public async Task RunStep(TSteps status)
     {
+        //Console.WriteLine(status);
+
         await TryExecuteHandler(status);
         await TryExecuteAsyncHandler(status);
     }
 
     private async Task TryExecuteHandler(TSteps status)
-    {
+    {        
         if (IsAborted)
             return;
 

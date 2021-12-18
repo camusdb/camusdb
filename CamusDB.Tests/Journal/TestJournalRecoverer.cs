@@ -100,6 +100,8 @@ internal class TestJournalRecoverer
 
         List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
 
+        Assert.AreEqual(1, result.Count);
+
         Dictionary<string, ColumnValue> row = result[0];
 
         Assert.AreEqual(row["id"].Type, ColumnType.Id);

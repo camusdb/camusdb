@@ -22,7 +22,11 @@ public enum JournalFailureTypes
     PostUpdateUniqueIndex = 8,
     PreUpdateUniqueCheckpoint = 9,
     PostUpdateUniqueCheckpoint = 10,
-    PreInsertCheckpoint = 11,
-    PostInsertCheckpoint = 12
+    PreUpdateTableIndex = 11,
+    PostUpdateTableIndex = 12,
+    PreUpdateTableIndexCheckpoint = 13,
+    PostUpdateTableIndexCheckpoint = 14,
+    PreInsertCheckpoint = 15,
+    PostInsertCheckpoint = 16
 }
 

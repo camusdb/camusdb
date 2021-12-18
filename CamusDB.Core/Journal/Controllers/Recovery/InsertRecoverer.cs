@@ -20,12 +20,16 @@ namespace CamusDB.Core.Journal.Controllers;
 
 internal static class InsertRecoverer
 {
+    /*
+     * In order to recover the partial insert we need to know which steps are in the journal
+     * so we can perform the remaining ones
+     */
     public static async Task Recover(CommandExecutor executor, DatabaseDescriptor database, JournalLogGroup group)
     {
         InsertFluxSteps step = InsertFluxSteps.NotInitialized;
 
         // Get main insert log from group
-        InsertLog? insertLog = GetInsertLog(group.Logs);
+        InsertLog? insertLog = GetLog<InsertLog>(group.Logs);
         if (insertLog is null)
             throw new Exception("Couldn't load insert log from insert group");
 
@@ -43,19 +47,33 @@ internal static class InsertRecoverer
             indexes: GetIndexInsertPlan(table, group.Logs)
         );
 
-        // Check if group has insert slots log 
-        InsertSlotsLog? insertSlotsLog = GetInsertSlotsLog(group.Logs);
-        if (insertSlotsLog is not null)
-        {
-            state.RowTuple = insertSlotsLog.RowTuple;
-            step = InsertFluxSteps.InsertToPage;
-        }
-
         // If there are no unique indexes to update insert data to page
-        if (state.Indexes.UniqueIndexes.Count == 0)
-            step = InsertFluxSteps.InsertToPage;
+        if (state.Indexes.UniqueIndexes.Count > 0)
+            step = InsertFluxSteps.UpdateUniqueKeys;
 
-        Console.WriteLine("Recovering at step {0} {1}/{2}", step, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
+        // Check if group has insert slots log
+        InsertSlotsLog? insertSlotsLog = GetLog<InsertSlotsLog>(group.Logs);
+        if (insertSlotsLog is not null)
+            state.RowTuple = insertSlotsLog.RowTuple;
+
+        // if indexes are already updated then just insert page data
+        if (state.Indexes.UniqueIndexes.Count == 0 && state.RowTuple.SlotOne > -1)
+            step = InsertFluxSteps.InsertToPage;
+        
+        UpdateTableIndexLog? updateTableIndexLog = GetLog<UpdateTableIndexLog>(group.Logs);
+        UpdateTableIndexCheckpointLog? updateTableIndexCheckpointLog = GetLog<UpdateTableIndexCheckpointLog>(group.Logs);
+
+        // Check if table index has been updated
+        if (updateTableIndexLog is null || (updateTableIndexLog is not null && updateTableIndexCheckpointLog is null))
+            step = InsertFluxSteps.UpdateTableIndex;
+
+        Console.WriteLine(
+            "Recovering at step {0} RowId={1} PageNum={2} Indexes={3}",
+            step,
+            state.RowTuple.SlotOne,
+            state.RowTuple.SlotTwo,
+            state.Indexes.UniqueIndexes.Count
+        );
 
         FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state, step);
 
@@ -105,25 +123,14 @@ internal static class InsertRecoverer
         return indexState;
     }
 
-    private static InsertLog? GetInsertLog(List<IJournalLog> logs)
+    private static T? GetLog<T>(List<IJournalLog> logs)
     {
         foreach (IJournalLog journalLog in logs)
         {
-            if (journalLog is InsertLog log)
+            if (journalLog is T log)
                 return log;
         }
 
-        return null;
-    }
-
-    private static InsertSlotsLog? GetInsertSlotsLog(List<IJournalLog> logs)
-    {
-        foreach (IJournalLog journalLog in logs)
-        {
-            if (journalLog is InsertSlotsLog log)
-                return log;
-        }
-
-        return null;
+        return default(T);
     }
 }
