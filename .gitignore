@@ -8,3 +8,4 @@ CamusDB.Generators/bin
 CamusDB.Generators/obj
 .vs/
 bench/node_modules/
+CamusDB/Data/

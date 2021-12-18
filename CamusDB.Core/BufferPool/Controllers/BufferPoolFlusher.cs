@@ -55,7 +55,7 @@ public sealed class BufferPoolFlusher
             return;
         }
 
-        Console.WriteLine("Flushed {0} dirty pages", pagesToFlush.Count);
+        Console.WriteLine("Flushed {0} dirty pages, memory={1}", pagesToFlush.Count, GC.GetTotalAllocatedBytes());
 
         bufferPool.Flush();
 

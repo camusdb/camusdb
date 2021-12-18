@@ -79,7 +79,7 @@ internal class TestJournalRecoverer
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
+                { "id", new ColumnValue(ColumnType.Id, "100") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
@@ -90,11 +90,34 @@ internal class TestJournalRecoverer
         return ticket;
     }
 
+    private async Task CheckRecoveredRow(CommandExecutor executor)
+    {
+        QueryByIdTicket queryTicket = new(
+            database: DatabaseName,
+            name: "robots",
+            id: 100
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
+
+        Dictionary<string, ColumnValue> row = result[0];
+
+        Assert.AreEqual(row["id"].Type, ColumnType.Id);
+        Assert.AreEqual(row["id"].Value, "100");
+
+        Assert.AreEqual(row["name"].Type, ColumnType.String);
+        Assert.AreEqual(row["name"].Value, "some name");
+
+        Assert.AreEqual(row["year"].Type, ColumnType.Integer);
+        Assert.AreEqual(row["year"].Value, "1234");
+    }
+
     [Test]
     [NonParallelizable]
     public async Task TestJournalRecoverInsertFailPostInsert()
     {
         var executor = await SetupBasicTable();
+        var database = await executor.OpenDatabase(DatabaseName);
 
         var e = Assert.ThrowsAsync<CamusDBException>(async () =>
             await executor.Insert(GetInsertTicket(JournalFailureTypes.PostInsert))
@@ -104,15 +127,19 @@ internal class TestJournalRecoverer
 
         await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
 
+        database = await executor.OpenDatabase(DatabaseName);
+
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
         );
 
-        Assert.AreNotEqual(0, groups.Count);
+        Assert.AreEqual(1, groups.Count);
 
         JournalRecoverer recoverer = new();
-        await recoverer.Recover(executor, groups);
+        await recoverer.Recover(executor, database, groups);
+
+        await CheckRecoveredRow(executor);
     }
 }

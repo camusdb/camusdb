@@ -30,6 +30,9 @@ internal sealed class DatabaseCloser : IDisposable
             
             await databaseDescriptor.Journal.Writer.Flush();
 
+            if (databaseDescriptor.TableSpaceFlusher is not null)
+                databaseDescriptor.TableSpaceFlusher.Dispose();
+
             if (databaseDescriptor.TableSpace is not null)
                 databaseDescriptor.TableSpace.Dispose();
 

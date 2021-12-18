@@ -39,7 +39,7 @@ internal class TestJournal
     private JournalReader GetJournalReader(DatabaseDescriptor database)
     {
         return new(
-            Path.Combine(Config.DataDirectory, database.Name, "journal")
+            Path.Combine(Config.DataDirectory, database.Name, "journal0")
         );
     }
 
