@@ -14,7 +14,7 @@ Features
 
 Internal Features
 -----------------
- - [Write Ahead Log (WAL)](https://en.wikipedia.org/wiki/Write-ahead_logging) implementation to provide Atomicity and Durability 
+ - [Write Ahead Log (WAL)](https://en.wikipedia.org/wiki/Write-ahead_logging) implementation to provide [Atomicity](https://en.wikipedia.org/wiki/Atomicity_(database_systems)) and [Durability](https://en.wikipedia.org/wiki/Durability_(database_systems))
  - Parallel processing of database operations using [Task Parallel Library (TPL)](https://docs.microsoft.com/en-us/dotnet/standard/parallel-programming/task-parallel-library-tpl)
  - [Memory-mapped files](https://en.wikipedia.org/wiki/Memory-mapped_file) to avoid double buffering
  - [B+Trees](https://en.wikipedia.org/wiki/B%2B_tree) to organize and index rows in the storage layer and for unique/multi indexes
