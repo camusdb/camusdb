@@ -10,10 +10,10 @@ using CamusDB.Core;
 using System.Text.Json;
 using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
+using CamusDB.Core.Journal.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Journal.Models;
 
 namespace CamusDB.App.Controllers;
 
@@ -42,7 +42,7 @@ public sealed class InsertController : CommandsController
                 database: request.DatabaseName ?? "",
                 name: request.TableName ?? "",
                 values: request.Values ?? new Dictionary<string, ColumnValue>(),
-                forceFailureType: JournalFailureTypes.PostInsert
+                forceFailureType: JournalFailureTypes.PreUpdateUniqueCheckpoint
             );
 
             await executor.Insert(ticket);

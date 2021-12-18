@@ -12,6 +12,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Journal.Controllers;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Insert;
 
@@ -59,18 +60,15 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
         }
     }
 
-    public async Task<BTreeTuple> UpdateUniqueKeys(DatabaseDescriptor database, TableDescriptor table, uint sequence, InsertTicket ticket)
+    public async Task<BTreeTuple> UpdateUniqueKeys(UpdateUniqueIndexTicket ticket)
     {
-        BTreeTuple rowTuple = new(-1, -1);
+        InsertTicket insertTicket = ticket.InsertTicket;
+        BufferPoolHandler tablespace = ticket.Database.TableSpace;
+        JournalWriter journalWriter = ticket.Database.Journal.Writer;
 
-        BufferPoolHandler tablespace = database.TableSpace;
-
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        foreach (TableIndexSchema index in ticket.Indexes)
         {
-            if (index.Value.Type != IndexType.Unique)
-                continue;
-
-            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.Value.UniqueRows;
+            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.UniqueRows;
 
             if (uniqueIndex is null)
                 throw new CamusDBException(
@@ -82,45 +80,45 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
             {
                 await uniqueIndex.WriteLock.WaitAsync();
 
-                ColumnValue? uniqueKeyValue = GetColumnValue(table, ticket, index.Value.Column);
+                ColumnValue? uniqueKeyValue = GetColumnValue(ticket.Table, insertTicket, index.Column);
 
                 if (uniqueKeyValue is null)
                     throw new CamusDBException(
                         CamusDBErrorCodes.InvalidInternalOperation,
-                        "A null value was found for unique key field " + index.Key
+                        "A null value was found for unique key field " + index.Column
                     );
 
                 // allocate pages and rowid when needed
-                if (rowTuple.SlotOne == -1)
-                    rowTuple.SlotOne = await tablespace.GetNextRowId();
+                if (ticket.RowTuple.SlotOne == -1 && ticket.RowTuple.SlotTwo == -1)
+                {
+                    ticket.RowTuple.SlotOne = await tablespace.GetNextRowId();
+                    ticket.RowTuple.SlotTwo = await tablespace.GetNextFreeOffset();
 
-                if (rowTuple.SlotTwo == -1)
-                    rowTuple.SlotTwo = await tablespace.GetNextFreeOffset();
-
-                // save page + rowid to journal
-                InsertSlotsLog schedule = new(sequence, rowTuple);
-                await database.Journal.Writer.Append(ticket.ForceFailureType, schedule);
+                    // save page + rowid to journal
+                    InsertSlotsLog schedule = new(ticket.Sequence, ticket.RowTuple);
+                    await journalWriter.Append(insertTicket.ForceFailureType, schedule);
+                }                
 
                 // save index save to journal
-                UpdateUniqueIndexLog indexSchedule = new(sequence, index.Value.Column);
-                uint updateIndexSequence = await database.Journal.Writer.Append(ticket.ForceFailureType, indexSchedule);
+                UpdateUniqueIndexLog indexSchedule = new(ticket.Sequence, index.Column);
+                uint updateIndexSequence = await journalWriter.Append(insertTicket.ForceFailureType, indexSchedule);
 
                 SaveUniqueIndexTicket saveUniqueIndexTicket = new(
                     tablespace: tablespace,
-                    journal: database.Journal.Writer,
-                    sequence: sequence,
+                    journal: journalWriter,
+                    sequence: ticket.Sequence,
                     subSequence: updateIndexSequence,
-                    failureType: ticket.ForceFailureType,
+                    failureType: ticket.InsertTicket.ForceFailureType,
                     index: uniqueIndex,
                     key: uniqueKeyValue,
-                    value: rowTuple
+                    value: ticket.RowTuple
                 );
 
                 await indexSaver.NoLockingSave(saveUniqueIndexTicket);
 
                 // save checkpoint of index saved
-                UpdateUniqueCheckpointLog checkpoint = new(sequence, index.Value.Column);
-                await database.Journal.Writer.Append(ticket.ForceFailureType, checkpoint);
+                UpdateUniqueCheckpointLog checkpoint = new(ticket.Sequence, index.Column);
+                await journalWriter.Append(insertTicket.ForceFailureType, checkpoint);
             }
             finally
             {
@@ -128,6 +126,6 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
             }
         }
 
-        return rowTuple;
+        return ticket.RowTuple;
     }
 }

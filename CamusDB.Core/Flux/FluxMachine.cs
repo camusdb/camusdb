@@ -33,6 +33,12 @@ public class FluxMachine<TSteps, TState> where TSteps : Enum
         this.state = state;
     }
 
+    public FluxMachine(TState state, TSteps step)
+    {
+        this.state = state;
+        this.currentStep = Convert.ToInt32(step);
+    }
+
     public void When(TSteps status, Func<TState, FluxAction> handler)
     {
         handlers.Add(status, handler);

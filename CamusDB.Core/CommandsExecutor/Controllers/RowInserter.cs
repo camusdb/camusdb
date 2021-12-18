@@ -8,14 +8,15 @@
 
 using CamusDB.Core.Flux;
 using System.Diagnostics;
+using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
+using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.Insert;
-using CamusDB.Core.Flux.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -55,6 +56,21 @@ internal sealed class RowInserter
         }
     }
 
+    private static InsertFluxIndexState GetIndexInsertPlan(TableDescriptor table)
+    {
+        InsertFluxIndexState indexState = new();
+
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        {
+            if (index.Value.Type != IndexType.Unique)
+                continue;
+
+            indexState.UniqueIndexes.Add(index.Value);
+        }
+
+        return indexState;
+    }
+
     /**
      * First step is insert in the WAL
      */
@@ -79,7 +95,16 @@ internal sealed class RowInserter
      */
     private async Task<FluxAction> UpdateUniqueKeysStep(InsertFluxState state)
     {
-        state.RowTuple = await insertUniqueKeySaver.UpdateUniqueKeys(state.Database, state.Table, state.Sequence, state.Ticket);
+        UpdateUniqueIndexTicket ticket = new(
+            database: state.Database,
+            table: state.Table,
+            sequence: state.Sequence,
+            rowTuple: state.RowTuple,
+            ticket: state.Ticket,
+            indexes: state.Indexes.UniqueIndexes
+        );
+
+        state.RowTuple = await insertUniqueKeySaver.UpdateUniqueKeys(ticket);
         return FluxAction.Continue;
     }
 
@@ -137,11 +162,12 @@ internal sealed class RowInserter
     public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
         Validate(table, ticket);
-
+        
         InsertFluxState state = new(
             database: database,
             table: table,
-            ticket: ticket
+            ticket: ticket,
+            indexes: GetIndexInsertPlan(table)
         );
 
         FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
@@ -185,19 +211,18 @@ internal sealed class RowInserter
     }
 }
 
-
 /*foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+{
+    if (index.Value.MultiRows is not null)
+    {
+        foreach (BTreeMultiEntry entry in index.Value.MultiRows.EntriesTraverse())
         {
-            if (index.Value.MultiRows is not null)
-            {
-                foreach (BTreeMultiEntry entry in index.Value.MultiRows.EntriesTraverse())
-                {
-                    Console.WriteLine("Index Key={0}/{1} PageOffset={2}", index.Key, entry.Key, entry.Value!.Size());
+            Console.WriteLine("Index Key={0}/{1} PageOffset={2}", index.Key, entry.Key, entry.Value!.Size());
 
-                    foreach (BTreeEntry entry2 in entry.Value.EntriesTraverse())
-                    {
-                        Console.WriteLine(" > Index Key={0} PageOffset={1}", entry2.Key, entry2.Value);
-                    }
-                }
+            foreach (BTreeEntry entry2 in entry.Value.EntriesTraverse())
+            {
+                Console.WriteLine(" > Index Key={0} PageOffset={1}", entry2.Key, entry2.Value);
             }
-        }*/
+        }
+    }
+}*/

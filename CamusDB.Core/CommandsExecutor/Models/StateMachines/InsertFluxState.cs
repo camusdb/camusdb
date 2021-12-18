@@ -23,10 +23,13 @@ public sealed class InsertFluxState
 
     public BTreeTuple RowTuple { get; set; } = new(-1, -1);
 
-    public InsertFluxState(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
+    public InsertFluxIndexState Indexes { get; }
+
+    public InsertFluxState(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, InsertFluxIndexState indexes)
     {
         Database = database;
         Table = table;
         Ticket = ticket;
+        Indexes = indexes;
     }
 }
