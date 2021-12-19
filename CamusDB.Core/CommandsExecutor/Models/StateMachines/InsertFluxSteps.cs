@@ -8,13 +8,18 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
+/**
+ * The elements in this enum are the steps required to insert a row
+ * Keep the order is very important to ensure the proper operation
+ */
 public enum InsertFluxSteps
 {
     NotInitialized = 0,
     CheckUniqueKeys = 1,
-    UpdateUniqueKeys = 2,
-    InsertToPage = 3,
-    UpdateTableIndex = 4,
-    UpdateMultiIndexes = 5,
-    CheckpointInsert = 6
+    AllocateInsertTuple = 2,
+    UpdateUniqueKeys = 3,
+    InsertToPage = 4,
+    UpdateTableIndex = 5,
+    UpdateMultiIndexes = 6,
+    CheckpointInsert = 7
 }

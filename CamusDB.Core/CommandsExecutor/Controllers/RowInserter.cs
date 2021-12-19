@@ -73,7 +73,7 @@ internal sealed class RowInserter
     }
 
     /**
-     * First step is insert in the WAL
+     * First step is schedule the insert operation in the WAL
      */
     private async Task<FluxAction> InitializeStep(InsertFluxState state)
     {
@@ -92,6 +92,24 @@ internal sealed class RowInserter
     }
 
     /**
+     * If there are no unique key violations we can allocate a tuple to insert the row
+     */
+    private async Task<FluxAction> AllocateInsertTuple(InsertFluxState state)
+    {
+        BufferPoolHandler tablespace = state.Database.TableSpace;
+        JournalWriter journalWriter = state.Database.Journal.Writer;
+
+        state.RowTuple.SlotOne = await tablespace.GetNextRowId();
+        state.RowTuple.SlotTwo = await tablespace.GetNextFreeOffset();
+
+        // save page + rowid to journal
+        InsertSlotsLog schedule = new(state.Sequence, state.RowTuple);
+        await journalWriter.Append(state.Ticket.ForceFailureType, schedule);
+
+        return FluxAction.Continue;
+    }
+
+    /**
      * Unique keys after updated before inserting the actual row
      */
     private async Task<FluxAction> UpdateUniqueKeysStep(InsertFluxState state)
@@ -105,7 +123,8 @@ internal sealed class RowInserter
             indexes: state.Indexes.UniqueIndexes
         );
 
-        state.RowTuple = await insertUniqueKeySaver.UpdateUniqueKeys(ticket);
+        await insertUniqueKeySaver.UpdateUniqueKeys(ticket);
+
         return FluxAction.Continue;
     }
 
@@ -165,12 +184,12 @@ internal sealed class RowInserter
         InsertCheckpointLog insertCheckpoint = new(state.Sequence);
         await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, insertCheckpoint);
         return FluxAction.Completed;
-    }   
+    }
 
     public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
         Validate(table, ticket);
-        
+
         InsertFluxState state = new(
             database: database,
             table: table,
@@ -180,7 +199,7 @@ internal sealed class RowInserter
 
         FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
 
-        await InsertInternal(machine, state);        
+        await InsertInternal(machine, state);
     }
 
     public async Task InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
@@ -196,6 +215,7 @@ internal sealed class RowInserter
         machine.When(InsertFluxSteps.NotInitialized, InitializeStep);
         machine.When(InsertFluxSteps.CheckUniqueKeys, CheckUniqueKeysStep);
         machine.When(InsertFluxSteps.UpdateUniqueKeys, UpdateUniqueKeysStep);
+        machine.When(InsertFluxSteps.AllocateInsertTuple, AllocateInsertTuple);
         machine.When(InsertFluxSteps.InsertToPage, InsertToPageStep);
         machine.When(InsertFluxSteps.UpdateTableIndex, UpdateTableIndex);
         machine.When(InsertFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);

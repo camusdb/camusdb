@@ -8,7 +8,7 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public class DeleteByIdTicket
+public sealed class DeleteByIdTicket
 {
     public string DatabaseName { get; }
 

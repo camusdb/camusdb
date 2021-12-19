@@ -88,17 +88,6 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
                         "A null value was found for unique key field " + index.Column
                     );
 
-                // allocate pages and rowid when needed
-                if (ticket.RowTuple.SlotOne == -1 && ticket.RowTuple.SlotTwo == -1)
-                {
-                    ticket.RowTuple.SlotOne = await tablespace.GetNextRowId();
-                    ticket.RowTuple.SlotTwo = await tablespace.GetNextFreeOffset();
-
-                    // save page + rowid to journal
-                    InsertSlotsLog schedule = new(ticket.Sequence, ticket.RowTuple);
-                    await journalWriter.Append(insertTicket.ForceFailureType, schedule);
-                }                
-
                 // save index save to journal
                 UpdateUniqueIndexLog indexSchedule = new(ticket.Sequence, index.Column);
                 uint updateIndexSequence = await journalWriter.Append(insertTicket.ForceFailureType, indexSchedule);

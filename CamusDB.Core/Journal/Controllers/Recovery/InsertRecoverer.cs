@@ -15,6 +15,7 @@ using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
+using CamusDB.Core.BufferPool;
 
 namespace CamusDB.Core.Journal.Controllers;
 
@@ -26,8 +27,6 @@ internal static class InsertRecoverer
      */
     public static async Task Recover(CommandExecutor executor, DatabaseDescriptor database, JournalLogGroup group)
     {
-        InsertFluxSteps step = InsertFluxSteps.NotInitialized;
-
         // Get main insert log from group
         InsertLog? insertLog = GetLog<InsertLog>(group.Logs);
         if (insertLog is null)
@@ -47,37 +46,59 @@ internal static class InsertRecoverer
             indexes: GetIndexInsertPlan(table, group.Logs)
         );
 
-        // If there are no unique indexes to update insert data to page
-        if (state.Indexes.UniqueIndexes.Count > 0)
-            step = InsertFluxSteps.UpdateUniqueKeys;
+        InsertFluxSteps step = await GetRestoreState(database, state, group, insertLog.Sequence);
+
+        Console.WriteLine("Partial insert {0} will be restored at {1}", insertLog.Sequence, step);
+
+        FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(
+            state,
+            step
+        );
+
+        await executor.InsertWithState(machine, state);
+    }
+
+    private static async Task<InsertFluxSteps> GetRestoreState(
+        DatabaseDescriptor database,
+        InsertFluxState state,
+        JournalLogGroup group,
+        uint originalSequence)
+    {
+        BufferPoolHandler tablespace = database.TableSpace;
 
         // Check if group has insert slots log
         InsertSlotsLog? insertSlotsLog = GetLog<InsertSlotsLog>(group.Logs);
-        if (insertSlotsLog is not null)
-            state.RowTuple = insertSlotsLog.RowTuple;
+        if (insertSlotsLog is null)
+            return InsertFluxSteps.AllocateInsertTuple;
 
-        // if indexes are already updated then just insert page data
-        if (state.Indexes.UniqueIndexes.Count == 0 && state.RowTuple.SlotOne > -1)
-            step = InsertFluxSteps.InsertToPage;
-        
-        UpdateTableIndexLog? updateTableIndexLog = GetLog<UpdateTableIndexLog>(group.Logs);
-        UpdateTableIndexCheckpointLog? updateTableIndexCheckpointLog = GetLog<UpdateTableIndexCheckpointLog>(group.Logs);
+        // Assign the row tuple found before update any indexes
+        state.RowTuple = insertSlotsLog.RowTuple;
+
+        // Check If there are remaining unique indexes to update
+        if (state.Indexes.UniqueIndexes.Count > 0)
+            return InsertFluxSteps.UpdateUniqueKeys;
+
+        // Check if the row was inserted at the specified page
+        if (state.RowTuple.SlotOne > -1)
+        {
+            uint flushedSequence = await tablespace.GetSequenceFromPage(state.RowTuple.SlotTwo);
+            Console.WriteLine("FlushedSequence={0} ", flushedSequence, originalSequence);
+
+            if (flushedSequence != originalSequence)
+                return InsertFluxSteps.InsertToPage;
+        }
 
         // Check if table index has been updated
-        if (updateTableIndexLog is null || (updateTableIndexLog is not null && updateTableIndexCheckpointLog is null))
-            step = InsertFluxSteps.UpdateTableIndex;
+        UpdateTableIndexLog? updateTableIndexLog = GetLog<UpdateTableIndexLog>(group.Logs);
+        if (updateTableIndexLog is null)
+            return InsertFluxSteps.UpdateTableIndex;
 
-        Console.WriteLine(
-            "Recovering at step {0} RowId={1} PageNum={2} Indexes={3}",
-            step,
-            state.RowTuple.SlotOne,
-            state.RowTuple.SlotTwo,
-            state.Indexes.UniqueIndexes.Count
-        );
+        UpdateTableIndexCheckpointLog? updateTableIndexCheckpointLog = GetLog<UpdateTableIndexCheckpointLog>(group.Logs);
+        if (updateTableIndexCheckpointLog is null)
+            return InsertFluxSteps.UpdateTableIndex;
 
-        FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state, step);
-
-        await executor.InsertWithState(machine, state);
+        // if indexes are already updated then just checkpoint the insert
+        return InsertFluxSteps.CheckpointInsert;
     }
 
     /*
@@ -94,13 +115,14 @@ internal static class InsertRecoverer
             if (journalLog is UpdateUniqueIndexLog log)
             {
                 updatedIndexes.Add(log.ColumnIndex, false);
-                break;
+                continue;
             }
 
             if (journalLog is UpdateUniqueCheckpointLog checkpointLog)
             {
+                //Console.WriteLine("{0}?", checkpointLog.ColumnIndex);
                 updatedIndexes[checkpointLog.ColumnIndex] = true;
-                break;
+                continue;
             }
         }
 
@@ -111,6 +133,8 @@ internal static class InsertRecoverer
 
             if (updatedIndexes.TryGetValue(index.Value.Column, out bool completed))
             {
+                //Console.WriteLine("{0} {1}", index.Value.Column, completed);
+
                 if (!completed)
                     indexState.UniqueIndexes.Add(index.Value);
             }
@@ -119,6 +143,8 @@ internal static class InsertRecoverer
                 indexState.UniqueIndexes.Add(index.Value);
             }
         }
+
+        //Console.WriteLine(indexState.UniqueIndexes.Count);
 
         return indexState;
     }

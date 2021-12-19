@@ -143,7 +143,7 @@ public sealed class BufferPoolHandler : IDisposable
         } while (offset > 0);
 
         return length;
-    }
+    }    
 
     public async Task<byte[]> GetDataFromPage(int offset)
     {
@@ -200,6 +200,16 @@ public sealed class BufferPoolHandler : IDisposable
         } while (offset > 0);
 
         return data;
+    }
+
+    public async Task<uint> GetSequenceFromPage(int offset)
+    {
+        BufferPage memoryPage = await ReadPage(offset);
+
+        byte[] pageBuffer = memoryPage.Buffer; // get a pointer to the buffer to get a consistent read
+
+        int pointer = BConfig.LastSequenceOffset;
+        return Serializator.ReadUInt32(pageBuffer, ref pointer);
     }
 
     public void FlushPage(BufferPage memoryPage)
@@ -353,7 +363,7 @@ public sealed class BufferPoolHandler : IDisposable
                 length = data.Length - startOffset;
             else
                 length = Config.PageSize - BConfig.DataOffset;
-            
+
             int remaining = (data.Length - startOffset) - length;
 
             if (remaining > 0)
