@@ -114,9 +114,7 @@ internal class TestJournalRecoverer
         Assert.AreEqual(row["year"].Value, "1234");
     }
 
-    [Test]
-    [NonParallelizable]
-    public async Task TestJournalRecoverInsertFailPostInsert()
+    private async Task TestInsertWithSpecificFailure(JournalFailureTypes type)
     {
         var executor = await SetupBasicTable();
         var database = await executor.OpenDatabase(DatabaseName);
@@ -125,7 +123,7 @@ internal class TestJournalRecoverer
             await executor.Insert(GetInsertTicket((200 + i).ToString(), JournalFailureTypes.None));
 
         var e = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await executor.Insert(GetInsertTicket("100", JournalFailureTypes.PostInsert))
+            await executor.Insert(GetInsertTicket("100", type))
         );
 
         Assert.IsInstanceOf<CamusDBException>(e);
@@ -150,35 +148,43 @@ internal class TestJournalRecoverer
 
     [Test]
     [NonParallelizable]
+    public async Task TestJournalRecoverInsertFailPostInsert()
+    {
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostInsert);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestJournalRecoverInsertFailPostInsertSlots()
     {
-        var executor = await SetupBasicTable();
-        var database = await executor.OpenDatabase(DatabaseName);
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostInsertSlots);        
+    }
 
-        for (int i = 0; i < 5; i++)
-            await executor.Insert(GetInsertTicket((200 + i).ToString(), JournalFailureTypes.None));
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalRecoverInsertFailPostUpdateUnique()
+    {
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateUniqueIndex);
+    }
 
-        var e = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await executor.Insert(GetInsertTicket("100", JournalFailureTypes.PostInsertSlots))
-        );
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalRecoverInsertFailPostUpdateUniqueCheckpoint()
+    {
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateUniqueCheckpoint);
+    }
 
-        Assert.IsInstanceOf<CamusDBException>(e);
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalRecoverInsertFailPostUpdateTableIndex()
+    {
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateTableIndex);
+    }
 
-        await executor.CloseDatabase(new CloseDatabaseTicket(DatabaseName));
-
-        database = await executor.OpenDatabase(DatabaseName);
-
-        JournalVerifier journalVerifier = new();
-
-        Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
-        );
-
-        Assert.AreEqual(1, groups.Count);
-
-        JournalRecoverer recoverer = new();
-        await recoverer.Recover(executor, database, groups);
-
-        await CheckRecoveredRow(executor);
+    [Test]
+    [NonParallelizable]
+    public async Task TestJournalRecoverInsertFailPostUpdateTableIndexCheckpoint()
+    {
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateTableIndexCheckpoint);
     }
 }
