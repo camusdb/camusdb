@@ -3,14 +3,16 @@
 - Block table to read indexes
 - Destroy internal subtrees in multi index after delete
 - Version b+trees on disk
+- Autoextend tablespaces when more space is needed
+- Add multi index insert to journal recovery
+- Check pages modified by indexes in journal recovery
 
 - Receive POST parameters for query
 
 - Dont allow null type columns in create table
-- Get consistent reads of pages 
+- Get consistent reads of pages when reading data
 - Flush mapped files every x seconds
 - Validate not null fields
-- Load x pages automatically in memory
 - Support multiple items per page to avoid storage waste
 - Implement real objectids
 - Replace large objects in the same pages used before instead of allocating new ones
