@@ -18,11 +18,30 @@ public sealed class BufferPage
     
     public bool Dirty { get; set; }
 
-    public SemaphoreSlim Semaphore { get; } = new(1, 1);
+    private SemaphoreSlim? semaphore;
+
+    private readonly object semaphoreLock = new();
 
     public BufferPage(int offset, byte[] buffer)
     {
         Offset = offset;
         Buffer = buffer;
+    }
+
+    public async Task LockAsync()
+    {
+        lock (semaphoreLock)
+        {
+            if (semaphore is null)
+                semaphore = new(1, 1);
+        }
+
+        await semaphore.WaitAsync();
+    }
+
+    public void Unlock()
+    {
+        if (semaphore is not null)
+            semaphore.Release();
     }
 }

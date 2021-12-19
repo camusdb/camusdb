@@ -247,7 +247,7 @@ public sealed class BufferPoolHandler : IDisposable
 
         try
         {
-            await page.Semaphore.WaitAsync();
+            await page.LockAsync();
 
             byte[] pageBuffer = page.Buffer; // get a pointer to the buffer to get a consistent read
 
@@ -273,7 +273,7 @@ public sealed class BufferPoolHandler : IDisposable
         }
         finally
         {
-            page.Semaphore.Release();
+            page.Unlock();
         }
 
         //Console.WriteLine("CurrentPageOffset={0} NextPageOffset={1}", pageOffset, pageOffset + 1);
@@ -287,7 +287,7 @@ public sealed class BufferPoolHandler : IDisposable
 
         try
         {
-            await page.Semaphore.WaitAsync();
+            await page.LockAsync();
 
             // @todo page's content can change here?
 
@@ -319,7 +319,7 @@ public sealed class BufferPoolHandler : IDisposable
         }
         finally
         {
-            page.Semaphore.Release();
+            page.Unlock();
         }
     }
 

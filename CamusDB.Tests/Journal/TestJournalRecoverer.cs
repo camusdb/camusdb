@@ -23,6 +23,7 @@ using CamusDB.Core.Journal.Controllers;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 namespace CamusDB.Tests.Journal;
 
@@ -137,7 +138,7 @@ internal class TestJournalRecoverer
         Assert.AreEqual(row["year"].Value, "1234");
     }
 
-    private async Task TestInsertWithSpecificFailure(JournalFailureTypes type)
+    private async Task TestInsertWithSpecificFailure(JournalFailureTypes type, InsertFluxSteps recoveryStep)
     {
         var executor = await SetupBasicTable();
         var database = await executor.OpenDatabase(DatabaseName);
@@ -168,6 +169,7 @@ internal class TestJournalRecoverer
 
         Assert.AreEqual(1, results.Count);
         Assert.AreEqual(JournalGroupType.Insert, results[0].Type);
+        Assert.AreEqual(recoveryStep, (InsertFluxSteps)results[0].Step);
 
         await CheckRecoveredRow(executor);
         await CheckRecoveredTable(executor);
@@ -177,41 +179,41 @@ internal class TestJournalRecoverer
     [NonParallelizable]
     public async Task TestJournalRecoverInsertFailPostInsert()
     {
-        await TestInsertWithSpecificFailure(JournalFailureTypes.PostInsert);
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostInsert, InsertFluxSteps.AllocateInsertTuple);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestJournalRecoverInsertFailPostInsertSlots()
     {
-        await TestInsertWithSpecificFailure(JournalFailureTypes.PostInsertSlots);        
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostInsertSlots, InsertFluxSteps.UpdateUniqueKeys);        
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestJournalRecoverInsertFailPostUpdateUnique()
     {
-        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateUniqueIndex);
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateUniqueIndex, InsertFluxSteps.UpdateUniqueKeys);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestJournalRecoverInsertFailPostUpdateUniqueCheckpoint()
     {
-        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateUniqueCheckpoint);
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateUniqueCheckpoint, InsertFluxSteps.InsertToPage);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestJournalRecoverInsertFailPostUpdateTableIndex()
     {
-        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateTableIndex);
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateTableIndex, InsertFluxSteps.UpdateTableIndex);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestJournalRecoverInsertFailPostUpdateTableIndexCheckpoint()
     {
-        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateTableIndexCheckpoint);
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostUpdateTableIndexCheckpoint, InsertFluxSteps.CheckpointInsert);
     }
 }
