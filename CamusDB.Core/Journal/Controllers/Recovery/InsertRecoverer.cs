@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Flux;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.BufferPool;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.Catalogs.Models;
@@ -15,7 +16,6 @@ using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
-using CamusDB.Core.BufferPool;
 
 namespace CamusDB.Core.Journal.Controllers;
 
@@ -25,7 +25,7 @@ internal static class InsertRecoverer
      * In order to recover the partial insert we need to know which steps are in the journal
      * so we can perform the remaining ones
      */
-    public static async Task Recover(CommandExecutor executor, DatabaseDescriptor database, JournalLogGroup group)
+    public static async Task<JournalRecoverResult> Recover(CommandExecutor executor, DatabaseDescriptor database, uint sequence, JournalLogGroup group)
     {
         // Get main insert log from group
         InsertLog? insertLog = GetLog<InsertLog>(group.Logs);
@@ -46,9 +46,15 @@ internal static class InsertRecoverer
             indexes: GetIndexInsertPlan(table, group.Logs)
         );
 
-        InsertFluxSteps step = await GetRestoreState(database, state, group, insertLog.Sequence);
+        InsertFluxSteps step = await GetRestoreState(database, state, group, sequence);
 
-        Console.WriteLine("Partial insert {0} will be restored at {1}", insertLog.Sequence, step);
+        Console.WriteLine(
+            "Partial insert {0} will be restored at {1} {2}/{3}",
+            insertLog.Sequence,
+            step,
+            state.RowTuple.SlotOne,
+            state.RowTuple.SlotTwo
+        );
 
         FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(
             state,
@@ -56,6 +62,12 @@ internal static class InsertRecoverer
         );
 
         await executor.InsertWithState(machine, state);
+
+        return new JournalRecoverResult(
+            JournalGroupType.Insert,
+            state,
+            step
+        );
     }
 
     private static async Task<InsertFluxSteps> GetRestoreState(
@@ -82,7 +94,7 @@ internal static class InsertRecoverer
         if (state.RowTuple.SlotOne > -1)
         {
             uint flushedSequence = await tablespace.GetSequenceFromPage(state.RowTuple.SlotTwo);
-            Console.WriteLine("FlushedSequence={0} ", flushedSequence, originalSequence);
+            Console.WriteLine("FlushedSequence={0} Original={1}", flushedSequence, originalSequence);
 
             if (flushedSequence != originalSequence)
                 return InsertFluxSteps.InsertToPage;

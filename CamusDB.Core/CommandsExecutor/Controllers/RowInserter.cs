@@ -13,11 +13,11 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Journal.Models.Logs;
+using CamusDB.Core.Journal.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.Insert;
-using CamusDB.Core.Journal.Controllers;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -78,7 +78,7 @@ internal sealed class RowInserter
     private async Task<FluxAction> InitializeStep(InsertFluxState state)
     {
         InsertLog schedule = new(0, state.Ticket.TableName, state.Ticket.Values);
-        state.Sequence = await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, schedule);
+        state.Sequence = await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, schedule);        
         return FluxAction.Continue;
     }
 

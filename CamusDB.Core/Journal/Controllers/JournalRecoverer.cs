@@ -15,19 +15,23 @@ namespace CamusDB.Core.Journal.Controllers;
 
 public sealed class JournalRecoverer
 {
-    public async Task Recover(CommandExecutor executor, DatabaseDescriptor database, Dictionary<uint, JournalLogGroup> logGroups)
+    public async Task<List<JournalRecoverResult>> Recover(CommandExecutor executor, DatabaseDescriptor database, Dictionary<uint, JournalLogGroup> logGroups)
     {
+        List<JournalRecoverResult> results = new();
+
         foreach (KeyValuePair<uint, JournalLogGroup> logGroup in logGroups)
         {
             switch (logGroup.Value.Type)
             {
                 case JournalGroupType.Insert:
-                    await InsertRecoverer.Recover(executor, database, logGroup.Value);
+                    results.Add(await InsertRecoverer.Recover(executor, database, logGroup.Key, logGroup.Value));
                     break;
 
                 default:
                     throw new Exception("Unknown recovery group type: " + logGroup.Value.Type);
             }
         }
+
+        return results;
     }
 }

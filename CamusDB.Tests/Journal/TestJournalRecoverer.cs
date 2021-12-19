@@ -114,6 +114,29 @@ internal class TestJournalRecoverer
         Assert.AreEqual(row["year"].Value, "1234");
     }
 
+    private async Task CheckRecoveredTable(CommandExecutor executor)
+    {
+        QueryTicket queryTicket = new(
+            database: DatabaseName,
+            name: "robots"
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await executor.Query(queryTicket);
+
+        Assert.AreEqual(6, result.Count);
+
+        Dictionary<string, ColumnValue> row = result[5];
+
+        Assert.AreEqual(row["id"].Type, ColumnType.Id);
+        Assert.AreEqual(row["id"].Value, "100");
+
+        Assert.AreEqual(row["name"].Type, ColumnType.String);
+        Assert.AreEqual(row["name"].Value, "some name");
+
+        Assert.AreEqual(row["year"].Type, ColumnType.Integer);
+        Assert.AreEqual(row["year"].Value, "1234");
+    }
+
     private async Task TestInsertWithSpecificFailure(JournalFailureTypes type)
     {
         var executor = await SetupBasicTable();
@@ -141,9 +164,13 @@ internal class TestJournalRecoverer
         Assert.AreEqual(1, groups.Count);
 
         JournalRecoverer recoverer = new();
-        await recoverer.Recover(executor, database, groups);
+        List<JournalRecoverResult> results = await recoverer.Recover(executor, database, groups);
+
+        Assert.AreEqual(1, results.Count);
+        Assert.AreEqual(JournalGroupType.Insert, results[0].Type);
 
         await CheckRecoveredRow(executor);
+        await CheckRecoveredTable(executor);
     }
 
     [Test]
