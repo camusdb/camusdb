@@ -11,6 +11,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -40,10 +41,18 @@ internal sealed class RowSerializer
 
             length += columnValue.Type switch
             {
-                ColumnType.Id => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32,// type 1 byte + 4 byte int
-                ColumnType.Integer => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32,// type 1 byte + 4 byte int
-                ColumnType.String => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + columnValue.Value.Length,// type 1 byte + 4 byte length + strLength
-                ColumnType.Bool => SerializatorTypeSizes.TypeInteger8,// bool (1 byte)
+                // type 1 byte + 3 * 4 byte int
+                ColumnType.Id => SerializatorTypeSizes.TypeInteger8 + (SerializatorTypeSizes.TypeInteger32 * 3),
+
+                // type 1 byte + 4 byte int
+                ColumnType.Integer => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32,
+
+                // type 1 byte + 4 byte length + strLength
+                ColumnType.String => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + columnValue.Value.Length,
+
+                // bool (1 byte)
+                ColumnType.Bool => SerializatorTypeSizes.TypeInteger8,
+
                 _ => throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnValue.Type),
             };
         }
@@ -75,7 +84,6 @@ internal sealed class RowSerializer
 
             if (!ticket.Values.TryGetValue(column.Name, out ColumnValue? columnValue))
             {
-                //Console.WriteLine("here?");
                 Serializator.WriteType(rowBuffer, SerializatorTypes.TypeNull, ref pointer);
                 continue;
             }
@@ -84,9 +92,10 @@ internal sealed class RowSerializer
 
             switch (columnValue.Type)
             {
-                case ColumnType.Id: // @todo use int.TryParse
-                    Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
-                    Serializator.WriteInt32(rowBuffer, int.Parse(columnValue.Value), ref pointer);
+                case ColumnType.Id:
+                    ObjectIdValue objectId = ObjectId.ToValue(columnValue.Value);
+                    Serializator.WriteType(rowBuffer, SerializatorTypes.TypeId, ref pointer);
+                    Serializator.WriteObjectId(rowBuffer, objectId, ref pointer);
                     break;
 
                 case ColumnType.Integer: // @todo use int.TryParse

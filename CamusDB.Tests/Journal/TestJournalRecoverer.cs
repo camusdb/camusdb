@@ -14,6 +14,7 @@ using System.Collections.Generic;
 using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Tests.Utils;
+using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
@@ -96,7 +97,7 @@ internal class TestJournalRecoverer
         QueryByIdTicket queryTicket = new(
             database: DatabaseName,
             name: "robots",
-            id: 100
+            id: "5e1aac86542f77367452d9b3"
         );
 
         List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
@@ -106,7 +107,7 @@ internal class TestJournalRecoverer
         Dictionary<string, ColumnValue> row = result[0];
 
         Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "100");
+        Assert.AreEqual(row["id"].Value, "5e1aac86542f77367452d9b3");
 
         Assert.AreEqual(row["name"].Type, ColumnType.String);
         Assert.AreEqual(row["name"].Value, "some name");
@@ -129,7 +130,7 @@ internal class TestJournalRecoverer
         Dictionary<string, ColumnValue> row = result[5];
 
         Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "100");
+        Assert.AreEqual(row["id"].Value, "5e1aac86542f77367452d9b3");
 
         Assert.AreEqual(row["name"].Type, ColumnType.String);
         Assert.AreEqual(row["name"].Value, "some name");
@@ -144,10 +145,13 @@ internal class TestJournalRecoverer
         var database = await executor.OpenDatabase(DatabaseName);
 
         for (int i = 0; i < 5; i++)
-            await executor.Insert(GetInsertTicket((200 + i).ToString(), JournalFailureTypes.None));
+            await executor.Insert(GetInsertTicket(
+                ObjectIdGenerator.Generate().ToString(),
+                JournalFailureTypes.None
+            ));
 
         var e = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await executor.Insert(GetInsertTicket("100", type))
+            await executor.Insert(GetInsertTicket("5e1aac86542f77367452d9b3", type))
         );
 
         Assert.IsInstanceOf<CamusDBException>(e);

@@ -30,7 +30,7 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         if (Type != other.Type)
             throw new ArgumentException("Comparing incompatible ColumnValue");
 
-        if (Type == ColumnType.Id || Type == ColumnType.Integer)
+        if (Type == ColumnType.Integer)
         {
             int value1 = int.Parse(Value);
             int value2 = int.Parse(other.Value);

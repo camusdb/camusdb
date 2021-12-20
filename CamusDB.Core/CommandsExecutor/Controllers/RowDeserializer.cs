@@ -10,6 +10,7 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -54,10 +55,10 @@ internal sealed class RowDeserializer
                 case ColumnType.Id:
                     {
                         int columnType = Serializator.ReadType(data, ref pointer);
-                        if (columnType == SerializatorTypes.TypeInteger32)
+                        if (columnType == SerializatorTypes.TypeId)
                         {
-                            value = Serializator.ReadInt32(data, ref pointer);
-                            columnValues.Add(column.Name, new(ColumnType.Id, value.ToString()));
+                            ObjectIdValue idValue = Serializator.ReadObjectId(data, ref pointer);
+                            columnValues.Add(column.Name, new(ColumnType.Id, idValue.ToString()));
                         }
                         else
                         {

@@ -152,7 +152,7 @@ internal sealed class QueryExecutor
             );
         }
 
-        ColumnValue columnId = new(ColumnType.Id, ticket.Id.ToString());
+        ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
         BTreeTuple? pageOffset = index.UniqueRows.Get(columnId);
 

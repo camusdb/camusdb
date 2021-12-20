@@ -14,9 +14,9 @@ public sealed class QueryByIdTicket
 
     public string TableName { get; }
 
-    public int Id { get; }
+    public string Id { get; }
 
-    public QueryByIdTicket(string database, string name, int id)
+    public QueryByIdTicket(string database, string name, string id)
     {
         DatabaseName = database;
         TableName = name;

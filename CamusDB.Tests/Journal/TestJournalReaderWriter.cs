@@ -71,7 +71,7 @@ internal class TestJournal
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
+                { "id", new ColumnValue(ColumnType.Id, "5e1aac86542f77367452d9b3") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
@@ -293,7 +293,7 @@ internal class TestJournal
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
+                { "id", new ColumnValue(ColumnType.Id, "5e1aac86542f77367452d9b3") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },

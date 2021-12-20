@@ -10,6 +10,7 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.Journal.Utils;
 
@@ -19,7 +20,8 @@ public static class SerializatorHelper
     {
         return value.Type switch
         {
-            ColumnType.Id or ColumnType.Integer => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32,
+            ColumnType.Id => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 * 3,
+            ColumnType.Integer => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32,
             ColumnType.String => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + value.Value.Length,
             ColumnType.Bool => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeBool,
             _ => throw new Exception("Unsupported column value type"),
@@ -32,7 +34,10 @@ public static class SerializatorHelper
 
         switch (value.Type)
         {
-            case ColumnType.Id:
+            case ColumnType.Id:                
+                Serializator.WriteObjectId(journal, ObjectId.ToValue(value.Value), ref pointer);
+                break;
+
             case ColumnType.Integer:                
                 Serializator.WriteInt32(journal, int.Parse(value.Value), ref pointer);
                 break;
@@ -59,6 +64,9 @@ public static class SerializatorHelper
         switch (type)
         {
             case ColumnType.Id:
+                value = (await ReadObjectId(journal)).ToString();
+                break;
+
             case ColumnType.Integer:
                 value = (await ReadInt32(journal)).ToString();
                 break;
@@ -146,6 +154,23 @@ public static class SerializatorHelper
 
         int pointer = 0;
         return Serializator.ReadUInt32(buffer, ref pointer);
+    }
+
+    public static async Task<ObjectIdValue> ReadObjectId(FileStream journal)
+    {
+        byte[] buffer = new byte[
+            3 * SerializatorTypeSizes.TypeInteger32   // (3 * 4 bytes)
+        ];
+
+        int readBytes = await journal.ReadAsync(buffer, 0, buffer.Length);
+        if (readBytes != buffer.Length)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidJournalData,
+                "Invalid journal data when reading logs"
+            );
+
+        int pointer = 0;
+        return Serializator.ReadObjectId(buffer, ref pointer);
     }
 
     public static async Task<string> ReadString(FileStream journal, int size)

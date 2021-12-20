@@ -38,7 +38,14 @@ internal sealed class InsertValidator : ValidatorBase
         {
             switch (columnValue.Value.Type)
             {
-                case ColumnType.Id:
+                case ColumnType.Id: // @todo validate alphanumeric digits
+                    if (!string.IsNullOrEmpty(columnValue.Value.Value) && columnValue.Value.Value.Length != 24)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidInput,
+                            "Invalid id value for field '" + columnValue.Key + "'"
+                        );
+                    break;
+
                 case ColumnType.Integer:
                     if (!int.TryParse(columnValue.Value.Value, out int _))
                         throw new CamusDBException(

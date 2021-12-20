@@ -11,6 +11,7 @@ using System.Text.Json;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.Serializer;
 
@@ -136,6 +137,27 @@ public sealed class Serializator
         pointer += 4;
     }
 
+    public static void WriteObjectId(byte[] buffer, ObjectIdValue id, ref int pointer)
+    {
+        //CheckBufferOverflow(4);
+        buffer[pointer + 0] = (byte)((id.a >> 0) & 0xff);
+        buffer[pointer + 1] = (byte)((id.a >> 8) & 0xff);
+        buffer[pointer + 2] = (byte)((id.a >> 16) & 0xff);
+        buffer[pointer + 3] = (byte)((id.a >> 24) & 0xff);
+
+        buffer[pointer + 4] = (byte)((id.b >> 0) & 0xff);
+        buffer[pointer + 5] = (byte)((id.b >> 8) & 0xff);
+        buffer[pointer + 6] = (byte)((id.b >> 16) & 0xff);
+        buffer[pointer + 7] = (byte)((id.b >> 24) & 0xff);
+
+        buffer[pointer + 8] = (byte)((id.c >> 0) & 0xff);
+        buffer[pointer + 9] = (byte)((id.c >> 8) & 0xff);
+        buffer[pointer + 10] = (byte)((id.c >> 16) & 0xff);
+        buffer[pointer + 11] = (byte)((id.c >> 24) & 0xff);
+
+        pointer += 12;
+    }
+
     public static void WriteString(byte[] buffer, string str, ref int pointer)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(str);
@@ -202,6 +224,26 @@ public sealed class Serializator
         number += (uint)(buffer[pointer++] << 16);
         number += (uint)(buffer[pointer++] << 24);
         return number;
+    }
+
+    public static ObjectIdValue ReadObjectId(byte[] buffer, ref int pointer)
+    {
+        int a = buffer[pointer++];
+        a += (buffer[pointer++] << 8);
+        a += (buffer[pointer++] << 16);
+        a += (buffer[pointer++] << 24);
+
+        int b = buffer[pointer++];
+        b += (buffer[pointer++] << 8);
+        b += (buffer[pointer++] << 16);
+        b += (buffer[pointer++] << 24);
+
+        int c = buffer[pointer++];
+        c += (buffer[pointer++] << 8);
+        c += (buffer[pointer++] << 16);
+        c += (buffer[pointer++] << 24);
+
+        return new ObjectIdValue(a, b, c);
     }
 
     public static string ReadString(byte[] buffer, int length, ref int pointer)

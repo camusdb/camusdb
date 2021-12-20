@@ -9,6 +9,7 @@
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
@@ -17,17 +18,17 @@ internal abstract class IndexBaseReader
 {
     protected static ColumnValue UnserializeKey(byte[] nodeBuffer, ref int pointer)
     {
-        short type = Serializator.ReadInt16(nodeBuffer, ref pointer);
+        ColumnType type = (ColumnType) Serializator.ReadInt16(nodeBuffer, ref pointer);
 
         switch (type)
         {
-            case (short)ColumnType.Id:
+            case ColumnType.Id:
                 {
-                    int value = Serializator.ReadInt32(nodeBuffer, ref pointer);
+                    ObjectIdValue value = Serializator.ReadObjectId(nodeBuffer, ref pointer);
                     return new ColumnValue(ColumnType.Id, value.ToString());
                 }
 
-            case (short)ColumnType.Integer:
+            case ColumnType.Integer:
                 {
                     int value = Serializator.ReadInt32(nodeBuffer, ref pointer);
                     return new ColumnValue(ColumnType.Integer, value.ToString());

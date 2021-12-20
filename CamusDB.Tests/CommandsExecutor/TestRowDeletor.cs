@@ -1,4 +1,11 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.IO;
 using CamusDB.Core;
 using NUnit.Framework;
@@ -12,6 +19,7 @@ using CamusDB.Core.CommandsExecutor;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -63,7 +71,7 @@ public class TestRowDeletor
                 name: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, i.ToString()) },
+                    { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
                     { "year", new ColumnValue(ColumnType.Integer, (2000 + i).ToString()) },
                     { "enabled", new ColumnValue(ColumnType.Bool, "FALSE") },

@@ -1,4 +1,11 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using NUnit.Framework;
 
 using System.IO;
@@ -14,6 +21,7 @@ using CamusDB.Core.CommandsExecutor;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -138,7 +146,7 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "FALSE") },
@@ -160,7 +168,7 @@ internal sealed class TestRowInsertor
             name: "unknown_table",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "true") },
@@ -182,7 +190,7 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "unknownColumn", new ColumnValue(ColumnType.Bool, "TRUE") },
@@ -204,7 +212,7 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
@@ -225,7 +233,7 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
@@ -239,7 +247,7 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "2") },
+                { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "true") },
@@ -260,7 +268,7 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
@@ -272,7 +280,7 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "2") },
+                { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "true") },
@@ -297,7 +305,7 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
@@ -309,7 +317,7 @@ internal sealed class TestRowInsertor
         QueryByIdTicket queryTicket = new(
             database: "factory",
             name: "robots",
-            id: 1
+            id: "507f1f77bcf86cd799439011"
         );
 
         List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
@@ -317,7 +325,7 @@ internal sealed class TestRowInsertor
         Dictionary<string, ColumnValue> row = result[0];
 
         Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "1");
+        Assert.AreEqual(row["id"].Value, "507f1f77bcf86cd799439011");
 
         Assert.AreEqual(row["name"].Type, ColumnType.String);
         Assert.AreEqual(row["name"].Value, "some name");
@@ -337,7 +345,7 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name 1") },
                 { "year", new ColumnValue(ColumnType.Integer, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
@@ -349,7 +357,7 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "2") },
+                { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
                 { "name", new ColumnValue(ColumnType.String, "some name 2") },
                 { "year", new ColumnValue(ColumnType.Integer, "4567") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "true") },
@@ -365,7 +373,7 @@ internal sealed class TestRowInsertor
         QueryByIdTicket queryTicket = new(
             database: "factory",
             name: "robots",
-            id: 2
+            id: "507f191e810c19729de860ea"
         );
 
         List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
@@ -373,7 +381,7 @@ internal sealed class TestRowInsertor
         Dictionary<string, ColumnValue> row = result[0];
 
         Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "2");
+        Assert.AreEqual(row["id"].Value, "507f191e810c19729de860ea");
 
         Assert.AreEqual(row["name"].Type, ColumnType.String);
         Assert.AreEqual(row["name"].Value, "some name 2");
@@ -387,7 +395,7 @@ internal sealed class TestRowInsertor
         QueryByIdTicket queryTicket2 = new(
             database: "factory",
             name: "robots",
-            id: 1
+            id: "507f1f77bcf86cd799439011"
         );
 
         result = await executor.QueryById(queryTicket2);
@@ -395,7 +403,7 @@ internal sealed class TestRowInsertor
         row = result[0];
 
         Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "1");
+        Assert.AreEqual(row["id"].Value, "507f1f77bcf86cd799439011");
 
         Assert.AreEqual(row["name"].Type, ColumnType.String);
         Assert.AreEqual(row["name"].Value, "some name 1");
@@ -413,14 +421,20 @@ internal sealed class TestRowInsertor
     {
         var executor = await SetupBasicTable();
 
-        for (int i = 0; i < 50; i++)
+        int i;
+        List<string> objectIds = new();
+
+        for (i = 0; i < 50; i++)
         {
+            string objectId = ObjectIdGenerator.Generate().ToString();
+            objectIds.Add(objectId);
+
             InsertTicket insertTicket = new(
                 database: "factory",
                 name: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, i.ToString()) },
+                    { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
                     { "year", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) },
                     { "enabled", new ColumnValue(ColumnType.Bool, "false") },
@@ -430,26 +444,30 @@ internal sealed class TestRowInsertor
             await executor.Insert(insertTicket);
         }
 
-        for (int i = 0; i < 50; i++)
+        i = 0;
+
+        foreach (string objectId in objectIds)
         {
             QueryByIdTicket queryTicket = new(
                 database: "factory",
                 name: "robots",
-                id: i
+                id: objectId
             );
 
             List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
 
             Dictionary<string, ColumnValue> row = result[0];
 
-            Assert.AreEqual(row["id"].Type, ColumnType.Id);
-            Assert.AreEqual(row["id"].Value, i.ToString());
+            Assert.AreEqual(ColumnType.Id, row["id"].Type);
+            Assert.AreEqual(24, row["id"].Value.Length);
 
-            Assert.AreEqual(row["name"].Type, ColumnType.String);
-            Assert.AreEqual(row["name"].Value, "some name " + i);
+            Assert.AreEqual(ColumnType.String, row["name"].Type);
+            Assert.AreEqual("some name " + i, row["name"].Value);
 
-            Assert.AreEqual(row["year"].Type, ColumnType.Integer);
-            Assert.AreEqual(row["year"].Value, (i * 1000).ToString());
+            Assert.AreEqual(ColumnType.Integer, row["year"].Type);
+            Assert.AreEqual((i * 1000).ToString(), row["year"].Value);
+
+            i++;
         }
     }
 
@@ -466,7 +484,7 @@ internal sealed class TestRowInsertor
                 name: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, i.ToString()) },
+                    { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
                     { "year", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) },
                     { "enabled", new ColumnValue(ColumnType.Bool, "false") },
@@ -487,14 +505,14 @@ internal sealed class TestRowInsertor
         {
             Dictionary<string, ColumnValue> row = result[i];
 
-            Assert.AreEqual(row["id"].Type, ColumnType.Id);
-            Assert.AreEqual(row["id"].Value, i.ToString());
+            Assert.AreEqual(ColumnType.Id, row["id"].Type);
+            Assert.AreEqual(24, row["id"].Value.Length);
 
-            Assert.AreEqual(row["name"].Type, ColumnType.String);
-            Assert.AreEqual(row["name"].Value, "some name " + i);
+            Assert.AreEqual(ColumnType.String, row["name"].Type);
+            Assert.AreEqual("some name " + i, row["name"].Value);
 
-            Assert.AreEqual(row["year"].Type, ColumnType.Integer);
-            Assert.AreEqual(row["year"].Value, (i * 1000).ToString());
+            Assert.AreEqual(ColumnType.Integer, row["year"].Type);
+            Assert.AreEqual((i * 1000).ToString(), row["year"].Value);
         }
     }
 }

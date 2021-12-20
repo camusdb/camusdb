@@ -27,6 +27,7 @@
     <None Remove="Utils\" />
     <None Remove="Flux\" />
     <None Remove="Flux\Fixtures\" />
+    <None Remove="ObjectIds\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="BufferPool\" />
@@ -38,5 +39,6 @@
     <Folder Include="Utils\" />
     <Folder Include="Flux\" />
     <Folder Include="Flux\Fixtures\" />
+    <Folder Include="ObjectIds\" />
   </ItemGroup>
 </Project>

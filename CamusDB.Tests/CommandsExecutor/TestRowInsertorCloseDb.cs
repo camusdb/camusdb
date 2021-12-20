@@ -1,4 +1,11 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.IO;
 using NUnit.Framework;
 using CamusDB.Tests.Utils;
@@ -68,8 +75,8 @@ internal sealed class TestRowInsertorCloseDb
             name: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
-                { "usersId", new ColumnValue(ColumnType.Id, "5") },
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
                 { "amount", new ColumnValue(ColumnType.Integer, "100") }
             }
         );
@@ -88,8 +95,8 @@ internal sealed class TestRowInsertorCloseDb
             name: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
-                { "usersId", new ColumnValue(ColumnType.Id, "1234") },
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
                 { "amount", new ColumnValue(ColumnType.Integer, "50") },
             }
         );
@@ -99,8 +106,8 @@ internal sealed class TestRowInsertorCloseDb
             name: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Id, "2") },
-                { "usersId", new ColumnValue(ColumnType.Id, "1234") },
+                { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
+                { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
                 { "amount", new ColumnValue(ColumnType.Integer, "50") },
             }
         );
@@ -117,7 +124,7 @@ internal sealed class TestRowInsertorCloseDb
         QueryByIdTicket queryTicket = new(
             database: "factory",
             name: "user_robots",
-            id: 2
+            id: "507f191e810c19729de860ea"
         );
 
         List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
@@ -125,10 +132,10 @@ internal sealed class TestRowInsertorCloseDb
         Dictionary<string, ColumnValue> row = result[0];
 
         Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "2");
+        Assert.AreEqual(row["id"].Value, "507f191e810c19729de860ea");
 
         Assert.AreEqual(row["usersId"].Type, ColumnType.Id);
-        Assert.AreEqual(row["usersId"].Value, "1234");
+        Assert.AreEqual(row["usersId"].Value, "5e353cf5e95f1e3a432e49aa");
 
         /*Assert.AreEqual(row[2].Type, ColumnType.Integer);
         Assert.AreEqual(row[2].Value, "4567");
@@ -139,7 +146,7 @@ internal sealed class TestRowInsertorCloseDb
         QueryByIdTicket queryTicket2 = new(
             database: "factory",
             name: "user_robots",
-            id: 1
+            id: "507f1f77bcf86cd799439011"
         );
 
         result = await executor.QueryById(queryTicket2);
@@ -147,7 +154,7 @@ internal sealed class TestRowInsertorCloseDb
         row = result[0];
 
         Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "1");
+        Assert.AreEqual(row["id"].Value, "507f1f77bcf86cd799439011");
 
         /*Assert.AreEqual(row[1].Type, ColumnType.String);
         Assert.AreEqual(row[1].Value, "some name 1");

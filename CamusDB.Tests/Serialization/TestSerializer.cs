@@ -1,4 +1,11 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.IO;
 using System.Text;
 using NUnit.Framework;
@@ -9,6 +16,7 @@ using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Serializer.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.Serialization;
 
@@ -48,7 +56,6 @@ public class TestSerializer
     }
 
     [Test]
-    //[TestCase(-128)]
     [TestCase(0)]
     [TestCase(1)]
     [TestCase(128)]
@@ -72,6 +79,8 @@ public class TestSerializer
     [TestCase(1)]
     [TestCase(256)]
     [TestCase(2048)]
+    [TestCase(short.MinValue)]
+    [TestCase(short.MaxValue)]
     public void TestSerializeInt16(int writeValue)
     {
         byte[] buffer = new byte[SerializatorTypeSizes.TypeInteger16];
@@ -93,6 +102,8 @@ public class TestSerializer
     [TestCase(256)]
     [TestCase(2048)]
     [TestCase(65512)]
+    [TestCase(int.MinValue)]
+    [TestCase(int.MaxValue)]
     public void TestSerializeInt32(int writeValue)
     {
         byte[] buffer = new byte[SerializatorTypeSizes.TypeInteger32];
@@ -112,7 +123,9 @@ public class TestSerializer
     [TestCase(1U)]
     [TestCase(256U)]
     [TestCase(2048U)]
-    [TestCase(65512U)]    
+    [TestCase(65512U)]
+    [TestCase(uint.MinValue)]
+    [TestCase(uint.MaxValue)]
     public void TestSerializeUInt32(uint writeValue)
     {
         byte[] buffer = new byte[SerializatorTypeSizes.TypeUnsignedInteger32];
@@ -127,10 +140,11 @@ public class TestSerializer
         Assert.AreEqual(readValue, writeValue);
     }
 
-    [Test]
-    public void TestSerializeBool()
+    [Test]    
+    [TestCase(true)]
+    [TestCase(false)]
+    public void TestSerializeBool(bool writeValue)
     {
-        bool writeValue = true;
         byte[] buffer = new byte[SerializatorTypeSizes.TypeBool];
 
         int pointer = 0;
@@ -144,9 +158,11 @@ public class TestSerializer
     }
 
     [Test]
-    public void TestSerializeString()
+    [TestCase("")]
+    [TestCase("hello")]
+    [TestCase("hëllœ")]
+    public void TestSerializeString(string writeValue)
     {
-        string writeValue = "hello";
         byte[] buffer = Encoding.UTF8.GetBytes(writeValue);
 
         int pointer = 0;
@@ -171,6 +187,24 @@ public class TestSerializer
 
         pointer = 0;
         string readValue = Serializator.ReadString(buffer, buffer.Length, ref pointer);
+        Assert.AreEqual(pointer, buffer.Length);
+        Assert.AreEqual(readValue, writeValue);
+    }
+
+    [Test]
+    [TestCase(1639931684, -1154155741, -743207513)]    
+    public void TestSerializeObjectId(int a, int b, int c)
+    {
+        byte[] buffer = new byte[12];
+
+        ObjectIdValue writeValue = new(a, b, c);
+
+        int pointer = 0;
+        Serializator.WriteObjectId(buffer, writeValue, ref pointer);
+        Assert.AreEqual(pointer, buffer.Length);
+
+        pointer = 0;
+        ObjectIdValue readValue = Serializator.ReadObjectId(buffer, ref pointer);
         Assert.AreEqual(pointer, buffer.Length);
         Assert.AreEqual(readValue, writeValue);
     }
