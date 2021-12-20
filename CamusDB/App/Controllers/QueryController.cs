@@ -66,7 +66,7 @@ public sealed class QueryController : CommandsController
             QueryByIdTicket ticket = new(
                 database: request.DatabaseName ?? "",
                 name: request.TableName ?? "",
-                id: request.Id
+                id: request.Id ?? ""
             );
 
             List<Dictionary<string, ColumnValue>> rows = await executor.QueryById(ticket);

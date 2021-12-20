@@ -41,8 +41,8 @@ public sealed class InsertController : CommandsController
             InsertTicket ticket = new(
                 database: request.DatabaseName ?? "",
                 name: request.TableName ?? "",
-                values: request.Values ?? new Dictionary<string, ColumnValue>(),
-                forceFailureType: JournalFailureTypes.PreUpdateUniqueCheckpoint
+                values: request.Values ?? new Dictionary<string, ColumnValue>() //,
+                //forceFailureType: JournalFailureTypes.PreUpdateUniqueCheckpoint
             );
 
             await executor.Insert(ticket);

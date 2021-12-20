@@ -16,5 +16,5 @@ public sealed class QueryByIdRequest
 
     public string? TableName { get; set; }
 
-    public int Id { get; set; }
+    public string? Id { get; set; }
 }
