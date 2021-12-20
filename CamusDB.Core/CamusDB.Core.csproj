@@ -9,8 +9,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Remove="CommandsValidator\" />
-    <None Remove="CommandsValidator\Validators\" />
     <None Remove="Util\Hashes\" />
     <None Remove="CommandsExecutor\Controllers\Indexes\" />
     <None Remove="Journal\" />
@@ -27,25 +25,34 @@
     <None Remove="BufferPool\Controllers\" />
     <None Remove="Flux\Models\" />
     <None Remove="Util\ObjectId\" />
+    <None Remove="Commands\Executor\" />
+    <None Remove="Commands\Executor\Controllers\" />
+    <None Remove="Commands\Executor\Models\" />
+    <None Remove="Commands\Validator\" />
+    <None Remove="Commands\Validator\Validators\" />
+    <None Remove="Storage\" />
+    <None Remove="Storage\Adapters\" />
   </ItemGroup>
   <ItemGroup>
-    <Folder Include="CommandsValidator\" />
-    <Folder Include="CommandsValidator\Validators\" />
     <Folder Include="Util\Hashes\" />
-    <Folder Include="CommandsExecutor\Controllers\Indexes\" />
     <Folder Include="Journal\" />
     <Folder Include="Journal\Models\" />
     <Folder Include="Journal\Controllers\" />
     <Folder Include="Journal\Attributes\" />
     <Folder Include="Journal\Utils\" />
     <Folder Include="Journal\Models\Logs\" />
-    <Folder Include="CommandsExecutor\Models\StateMachines\" />
     <Folder Include="Flux\" />
-    <Folder Include="CommandsExecutor\Controllers\Insert\" />
     <Folder Include="Journal\Controllers\Recovery\" />
     <Folder Include="BufferPool\Controllers\" />
     <Folder Include="Flux\Models\" />
     <Folder Include="Util\ObjectId\" />
+    <Folder Include="Commands\Executor\" />
+    <Folder Include="Commands\Executor\Controllers\" />
+    <Folder Include="Commands\Executor\Models\" />
+    <Folder Include="Commands\Validator\" />
+    <Folder Include="Commands\Validator\Validators\" />
+    <Folder Include="Storage\" />
+    <Folder Include="Storage\Adapters\" />
   </ItemGroup>
 
   <ItemGroup>

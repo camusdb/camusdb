@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Storage;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Hashes;
 using System.IO.MemoryMappedFiles;
@@ -18,8 +19,14 @@ namespace CamusDB.Core.BufferPool;
 /*
  * BufferPoolHandler
  *
- * Organizes a memory-mapped disk file in memory pages. Pages are loaded on demand
- * and are organized in the following layout:
+ * A buffer pool is an area of main memory that has been allocated by the database manager 
+ * for the purpose of caching table and index data as it is read from disk. 
+ * 
+ * When a row of data in a table is first accessed, the database manager places the page that 
+ * contains that data into a buffer pool. Pages stay in the buffer pool until the database 
+ * is shut down or until the space occupied by the page is required by another page.
+ * 
+ * Pages are loaded on demand and are organized in the following layout:
  *
  * +--------------------+
  * | version (2 bytes)  |
@@ -35,9 +42,7 @@ namespace CamusDB.Core.BufferPool;
  */
 public sealed class BufferPoolHandler : IDisposable
 {
-    private readonly MemoryMappedFile memoryFile;
-
-    private readonly MemoryMappedViewAccessor accessor;
+    private readonly StorageManager storage;
 
     private readonly Dictionary<int, BufferPage> pages = new();
 
@@ -47,10 +52,9 @@ public sealed class BufferPoolHandler : IDisposable
 
     public Dictionary<int, BufferPage> Pages => pages;
 
-    public BufferPoolHandler(MemoryMappedFile memoryFile)
+    public BufferPoolHandler(StorageManager storage)
     {
-        this.memoryFile = memoryFile;
-        this.accessor = memoryFile.CreateViewAccessor();
+        this.storage = storage;
     }
 
     public async Task Initialize()
@@ -112,7 +116,7 @@ public sealed class BufferPoolHandler : IDisposable
             page = new BufferPage(offset, new byte[Config.PageSize]);
             pages.Add(offset, page);
 
-            accessor.ReadArray<byte>(Config.PageSize * offset, page.Buffer, 0, Config.PageSize);
+            storage.Read(Config.PageSize * offset, page.Buffer, Config.PageSize);
 
             // Console.WriteLine("Page {0} read", offset);
         }
@@ -214,8 +218,8 @@ public sealed class BufferPoolHandler : IDisposable
 
     public void FlushPage(BufferPage memoryPage)
     {
-        accessor.WriteArray<byte>(Config.PageSize * memoryPage.Offset, memoryPage.Buffer, 0, Config.PageSize);
-        accessor.Flush();
+        storage.Write(Config.PageSize * memoryPage.Offset, memoryPage.Buffer, Config.PageSize);
+        storage.Flush();
     }
 
     public void WriteTableSpaceHeader(byte[] pageBuffer)
@@ -266,8 +270,8 @@ public sealed class BufferPoolHandler : IDisposable
 
             pointer = BConfig.FreePageOffset;
             Serializator.WriteInt32(pageBuffer, pageOffset + 1, ref pointer); // write new offset
-
-            accessor.WriteArray<byte>(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer, 0, Config.PageSize);
+           
+            storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer, Config.PageSize);
 
             page.Dirty = true;
         }
@@ -310,7 +314,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             //Console.WriteLine("CurrentRowId={0} NextRowId={1}", rowId, rowId + 1);
 
-            accessor.WriteArray<byte>(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer, 0, Config.PageSize);
+            storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer, Config.PageSize);
 
             page.Dirty = true;
             page.Buffer = pageBuffer;
@@ -387,7 +391,7 @@ public sealed class BufferPoolHandler : IDisposable
                 );
 
             Buffer.BlockCopy(data, startOffset, pageBuffer, pointer, length);
-            accessor.WriteArray<byte>(Config.PageSize * offset, pageBuffer, 0, Config.PageSize);
+            storage.Write(Config.PageSize * offset, pageBuffer, Config.PageSize);
 
             // Replace buffer, this helps to get readers consistent copies
             page.Buffer = pageBuffer;
@@ -428,7 +432,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             WritePageHeader(pageBuffer, 0, 0, 0, 0);
 
-            accessor.WriteArray<byte>(Config.PageSize * offset, pageBuffer, 0, Config.PageSize);
+            storage.Write(Config.PageSize * offset, pageBuffer, Config.PageSize);
 
             page.Buffer = pageBuffer;
             page.Dirty = true;
@@ -441,7 +445,7 @@ public sealed class BufferPoolHandler : IDisposable
 
     public void Flush()
     {
-        accessor.Flush();
+        storage.Flush();
     }
 
     public void Clear()
@@ -451,10 +455,6 @@ public sealed class BufferPoolHandler : IDisposable
 
     public void Dispose()
     {
-        if (accessor != null)
-            accessor.Dispose();
-
-        if (memoryFile != null)
-            memoryFile.Dispose();
+        storage.Dispose();
     }
 }

@@ -13,6 +13,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Storage;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -54,9 +55,9 @@ internal sealed class DatabaseOpener
 
             databaseDescriptor = new(
                 name: name,
-                tableSpace: new BufferPoolHandler(tablespace),
-                schemaSpace: new BufferPoolHandler(schema),
-                systemSpace: new BufferPoolHandler(system)
+                tableSpace: new BufferPoolHandler(new StorageManager(tablespace)),
+                schemaSpace: new BufferPoolHandler(new StorageManager(schema)),
+                systemSpace: new BufferPoolHandler(new StorageManager(system))
             );
 
             await Task.WhenAll(new Task[]
