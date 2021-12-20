@@ -43,21 +43,24 @@ internal sealed class DatabaseOpener
 
             if (!Directory.Exists(path))
                 throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
+                        
+            StorageManager schemaStorage = new(path, "schema");
+            StorageManager systemStorage = new(path, "system");
+            StorageManager tablespaceStorage = new(path, "tablespace");
 
-            path = Path.Combine(Config.DataDirectory, name, "tablespace0");
-            MemoryMappedFile tablespace = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
-
-            path = Path.Combine(Config.DataDirectory, name, "schema");
-            MemoryMappedFile schema = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
-
-            path = Path.Combine(Config.DataDirectory, name, "system");
-            MemoryMappedFile system = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
+            // Need to make sure tablespaces are initialized before using them
+            await Task.WhenAll(new Task[]
+            {
+                tablespaceStorage.Initialize(),
+                schemaStorage.Initialize(),
+                systemStorage.Initialize()
+            });
 
             databaseDescriptor = new(
                 name: name,
-                tableSpace: new BufferPoolHandler(new StorageManager(tablespace)),
-                schemaSpace: new BufferPoolHandler(new StorageManager(schema)),
-                systemSpace: new BufferPoolHandler(new StorageManager(system))
+                tableSpace: new BufferPoolHandler(tablespaceStorage),
+                schemaSpace: new BufferPoolHandler(schemaStorage),
+                systemSpace: new BufferPoolHandler(systemStorage)
             );
 
             await Task.WhenAll(new Task[]

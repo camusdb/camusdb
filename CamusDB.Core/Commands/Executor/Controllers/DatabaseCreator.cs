@@ -13,7 +13,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class DatabaseCreator
 {
-    public async Task Create(CreateDatabaseTicket ticket)
+    public void Create(CreateDatabaseTicket ticket)
     {
         string name = ticket.DatabaseName;
         
@@ -24,23 +24,8 @@ internal sealed class DatabaseCreator
 
         Directory.CreateDirectory(dbPath);
 
-        await InitializeDatabaseFiles(name, dbPath);
-    }
+        //await InitializeDatabaseFiles(name, dbPath);
 
-    private static async Task InitializeDatabaseFiles(string name, string dbPath)
-    {
-        byte[] initialized = new byte[Config.InitialTableSpaceSize];
-               
-        await Task.WhenAll(new Task[]
-        {
-            File.WriteAllBytesAsync(Path.Combine(dbPath, "tablespace0"), initialized),
-            File.WriteAllBytesAsync(Path.Combine(dbPath, "schema"), initialized),
-            File.WriteAllBytesAsync(Path.Combine(dbPath, "system"), initialized)
-        });
-
-        // @todo catch IO Exceptions
-        // @todo verify tablespaces were created sucessfully
-
-        Console.WriteLine("Database {0} tablespaces created at {1}", name, dbPath);
+        Console.WriteLine("Database {0} successfully created at {1}", name, dbPath);
     }
 }

@@ -10,7 +10,7 @@ using CamusDB.Core.Flux.Models;
 
 namespace CamusDB.Core.Flux;
 
-public class FluxMachine<TSteps, TState> where TSteps : Enum
+public sealed class FluxMachine<TSteps, TState> where TSteps : Enum
 {
     private int currentStep = -1;
 

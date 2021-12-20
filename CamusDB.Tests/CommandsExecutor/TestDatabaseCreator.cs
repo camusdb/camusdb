@@ -51,7 +51,7 @@ internal class TestDatabaseCreator
             Assert.IsTrue(File.Exists(Path.Combine(path, tablespaces[i])));
 
             FileInfo fi = new(Path.Combine(path, tablespaces[i]));
-            Assert.AreEqual(fi.Length, Config.InitialTableSpaceSize);
+            Assert.AreEqual(fi.Length, Config.TableSpaceSize);
         }
     }
 }

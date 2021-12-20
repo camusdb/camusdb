@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Util.IO;
 using CamusDB.Core.Journal.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.Journal.Models.Logs;
@@ -35,40 +36,21 @@ public sealed class JournalWriter
 
     private static List<FileInfo> GetJournals(string name)
     {
-        DirectoryInfo directory = new(
-            Path.Combine(Config.DataDirectory, name)
+        return DataDirectory.GetFiles(
+            Path.Combine(Config.DataDirectory, name),
+            "journal"
         );
-
-        List<FileInfo> journals = new();
-
-        FileInfo[] files = directory.GetFiles();
-
-        for (int i = 0; i < files.Length; i++)
-        {
-            FileInfo file = files[i];
-
-            if (file.Name.Length >= 7 && file.Name[..7] == "journal")
-                journals.Add(file);
-        }
-
-        //Console.WriteLine(journals.Count);
-
-        return journals;
     }
 
     private async Task RecoverJournals(CommandExecutor executor, DatabaseDescriptor database, List<FileInfo> journals)
     {
-        //Console.WriteLine("?");
-
         JournalVerifier verifier = new();
         JournalRecoverer recoverer = new();
 
         foreach (FileInfo file in journals)
         {
             if (journal is not null && file.FullName == journal.Name)
-                continue;
-
-            //Console.WriteLine("Recovered={0}", file.FullName);
+                continue;            
             
             Dictionary<uint, JournalLogGroup> groups = await verifier.Verify(file.FullName);
             if (groups.Count > 0)
@@ -80,18 +62,7 @@ public sealed class JournalWriter
 
     private int GetNextJournal(List<FileInfo> journals)
     {
-        int max = -1;
-
-        foreach (FileInfo file in journals)
-        {
-            if (int.TryParse(file.Name.Replace("journal", ""), out int journalId))
-            {
-                if (journalId > max)
-                    max = journalId;
-            }      
-        }
-
-        return max + 1;
+        return DataDirectory.GetNextFile(journals, "journal");
     }
 
     public async Task TryRecover(CommandExecutor executor, DatabaseDescriptor database)

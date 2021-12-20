@@ -12,7 +12,7 @@ public static class CamusDBConfig
 {
     public static string DataDirectory = Path.GetFullPath("Data");
 
-    public const int InitialTableSpaceSize = PageSize * TotalPages; // 4096 blocks of 512 size
+    public const int TableSpaceSize = PageSize * TotalPages; // 4096 blocks of 512 size
 
     #region bufferpool
 

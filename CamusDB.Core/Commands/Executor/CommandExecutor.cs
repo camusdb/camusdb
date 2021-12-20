@@ -55,11 +55,13 @@ public sealed class CommandExecutor : IDisposable
 
     #region database
 
-    public async Task CreateDatabase(CreateDatabaseTicket ticket)
+    public async Task<DatabaseDescriptor> CreateDatabase(CreateDatabaseTicket ticket)
     {
         validator.Validate(ticket);
 
-        await databaseCreator.Create(ticket);
+        databaseCreator.Create(ticket);
+
+        return await databaseOpener.Open(this, ticket.DatabaseName);
     }
 
     public async Task<DatabaseDescriptor> OpenDatabase(string database, bool recoveryMode = false)

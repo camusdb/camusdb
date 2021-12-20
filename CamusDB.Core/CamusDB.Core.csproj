@@ -24,7 +24,6 @@
     <None Remove="Journal\Controllers\Recovery\" />
     <None Remove="BufferPool\Controllers\" />
     <None Remove="Flux\Models\" />
-    <None Remove="Util\ObjectId\" />
     <None Remove="Commands\Executor\" />
     <None Remove="Commands\Executor\Controllers\" />
     <None Remove="Commands\Executor\Models\" />
@@ -32,6 +31,7 @@
     <None Remove="Commands\Validator\Validators\" />
     <None Remove="Storage\" />
     <None Remove="Storage\Adapters\" />
+    <None Remove="Util\IO\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Util\Hashes\" />
@@ -45,7 +45,6 @@
     <Folder Include="Journal\Controllers\Recovery\" />
     <Folder Include="BufferPool\Controllers\" />
     <Folder Include="Flux\Models\" />
-    <Folder Include="Util\ObjectId\" />
     <Folder Include="Commands\Executor\" />
     <Folder Include="Commands\Executor\Controllers\" />
     <Folder Include="Commands\Executor\Models\" />
@@ -53,6 +52,7 @@
     <Folder Include="Commands\Validator\Validators\" />
     <Folder Include="Storage\" />
     <Folder Include="Storage\Adapters\" />
+    <Folder Include="Util\IO\" />
   </ItemGroup>
 
   <ItemGroup>

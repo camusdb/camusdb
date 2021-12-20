@@ -18,7 +18,7 @@ public class TestBufferPool
     [SetUp]
     public void Setup()
     {
-        byte[] initialized = new byte[Config.InitialTableSpaceSize];
+        byte[] initialized = new byte[Config.TableSpaceSize];
         File.Delete(TableSpacePath);
         File.WriteAllBytes(TableSpacePath, initialized);
     }
