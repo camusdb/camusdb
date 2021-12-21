@@ -16,16 +16,11 @@ namespace CamusDB.Core.Util.Trees;
  */ 
 public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 {
-    // max children per B-tree node = M-1 (must be even and greater than 2)
-    public const int MaxChildren = 8;
-
-    public const int MaxChildrenHalf = MaxChildren / 2;
-
     private static int CurrentId = -1;
 
-    public int Id;
-
     public BTreeNode<TKey, TValue> root;       // root of the B-tree
+
+    public int Id;    // Unique tree id
 
     public int height;      // height of the B-tree
 
@@ -280,7 +275,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         //Console.WriteLine("Node {0} marked as dirty as child added", node.Id);
 
-        if (node.KeyCount < MaxChildren)
+        if (node.KeyCount < BTreeConfig.MaxChildren)
             return null;
 
         return Split(node, deltas);
@@ -289,19 +284,19 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     // split node in half
     private static BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, BTreeInsertDeltas<TKey, TValue> deltas)
     {
-        BTreeNode<TKey, TValue> newNode = new(MaxChildrenHalf);
+        BTreeNode<TKey, TValue> newNode = new(BTreeConfig.MaxChildrenHalf);
         deltas.Deltas.Add(newNode);
 
         //Console.WriteLine("Node {0} marked as dirty because of split", t.Id);
 
-        current.KeyCount = MaxChildrenHalf;
+        current.KeyCount = BTreeConfig.MaxChildrenHalf;
         current.Dirty = true;
         deltas.Deltas.Add(current);
 
         //Console.WriteLine("Node {0} marked as dirty because of split", current.Id);
 
-        for (int j = 0; j < MaxChildrenHalf; j++)
-            newNode.children[j] = current.children[MaxChildrenHalf + j];
+        for (int j = 0; j < BTreeConfig.MaxChildrenHalf; j++)
+            newNode.children[j] = current.children[BTreeConfig.MaxChildrenHalf + j];
 
         return newNode;
     }

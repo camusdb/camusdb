@@ -12,11 +12,13 @@ public sealed class BufferPage
 {
     public int Offset { get; }
 
-    public byte[] Buffer { get; set; }
+    public int RefCount { get; }
 
-    public DateTime LastAccessTime { get; set; }
+    public byte[] Buffer { get; set; }    
     
     public bool Dirty { get; set; }
+
+    private int refCount = 0;
 
     private SemaphoreSlim? semaphore;
 
@@ -43,5 +45,15 @@ public sealed class BufferPage
     {
         if (semaphore is not null)
             semaphore.Release();
+    }
+
+    public void IncreaseCount()
+    {
+        Interlocked.Increment(ref refCount);
+    }
+
+    public void DecreaseCount()
+    {
+        Interlocked.Decrement(ref refCount);
     }
 }

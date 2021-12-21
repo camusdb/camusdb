@@ -18,16 +18,11 @@ namespace CamusDB.Core.Util.Trees;
  */
 public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 {
-    // max children per B-tree node = M-1 (must be even and greater than 2)
-    public const int MaxChildren = 8;
-
-    public const int MaxChildrenHalf = MaxChildren / 2;
-
     private static int CurrentId = -1;
 
     public BTreeMultiNode<TKey> root;       // root of the B-tree
 
-    public int Id;
+    public int Id; // unique id
 
     public int height;      // height of the B-tree
 
@@ -229,16 +224,16 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
     {
         //Console.WriteLine("Inserting in multitree {0} {1} {2}", Id, key, value);
 
-        BTreeMultiNode<TKey>? u = Insert(root, key, value, height);
+        BTreeMultiNode<TKey>? split = Insert(root, key, value, height);
         denseSize++;
-        if (u == null) return;
+        if (split == null) return;
 
         // need to split root
         BTreeMultiNode<TKey> newRoot = new(2);
         //Console.WriteLine("Node {0} is now root", newRoot.Id);
 
         newRoot.children[0] = new BTreeMultiEntry<TKey>(root.children[0].Key, root);
-        newRoot.children[1] = new BTreeMultiEntry<TKey>(u.children[0].Key, u);
+        newRoot.children[1] = new BTreeMultiEntry<TKey>(split.children[0].Key, split);
 
         root = newRoot;
 
@@ -291,12 +286,12 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    BTreeMultiNode<TKey>? u = Insert(children[j++].Next, key, val, ht - 1);
+                    BTreeMultiNode<TKey>? split = Insert(children[j++].Next, key, val, ht - 1);
 
-                    if (u == null)
+                    if (split == null)
                         return null;
 
-                    newEntry = new(u.children[0].Key, u);
+                    newEntry = new(split.children[0].Key, split);
                     newEntry.Value = new BTree<int, int?>(-1);                    
                     break;
                 }
@@ -324,7 +319,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
         //Console.WriteLine("Node {0} marked as dirty as child added", node.Id);
 
-        if (node.KeyCount < MaxChildren)
+        if (node.KeyCount < BTreeConfig.MaxChildren)
             return null;
 
         return Split(node);
@@ -333,19 +328,19 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
     // split node in half
     private static BTreeMultiNode<TKey> Split(BTreeMultiNode<TKey> current)
     {
-        BTreeMultiNode<TKey> t = new(MaxChildrenHalf);
+        BTreeMultiNode<TKey> split = new(BTreeConfig.MaxChildrenHalf);
 
         //Console.WriteLine("Node {0} marked as dirty because of split", t.Id);
 
-        current.KeyCount = MaxChildrenHalf;
+        current.KeyCount = BTreeConfig.MaxChildrenHalf;
         current.Dirty = true;
 
         //Console.WriteLine("Node {0} marked as dirty because of split", current.Id);
 
-        for (int j = 0; j < MaxChildrenHalf; j++)
-            t.children[j] = current.children[MaxChildrenHalf + j];
+        for (int j = 0; j < BTreeConfig.MaxChildrenHalf; j++)
+            split.children[j] = current.children[BTreeConfig.MaxChildrenHalf + j];
 
-        return t;
+        return split;
     }
 
     /**

@@ -41,7 +41,7 @@ public class StorageManager : IDisposable
 
     public async Task Initialize()
     {
-        Console.WriteLine("{0} {1}", path, type);
+        // Console.WriteLine("{0} {1}", path, type);
 
         if (files.Count == 0)
             files.Add(await AddTablespace(path, type));
@@ -83,6 +83,8 @@ public class StorageManager : IDisposable
 
         // @todo initialize the tablespace in a faster way
         await File.WriteAllBytesAsync(tablespacePath, new byte[Config.TableSpaceSize]);
+
+        Console.WriteLine("Added new tablespace {0}", tablespacePath);
 
         return new(tablespacePath);
     }

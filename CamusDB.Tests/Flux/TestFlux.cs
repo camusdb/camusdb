@@ -6,12 +6,11 @@
  * file that was distributed with this source code.
  */
 
-using System.IO;
 using NUnit.Framework;
-using System.Threading.Tasks;
 using CamusDB.Core.Flux;
-using CamusDB.Tests.Flux.Fixtures;
+using System.Threading.Tasks;
 using CamusDB.Core.Flux.Models;
+using CamusDB.Tests.Flux.Fixtures;
 
 namespace CamusDB.Tests.Flux;
 
@@ -36,7 +35,7 @@ internal sealed class TestFlux
     }
 
     private FluxAction ExceptionStep(TestFluxState state)
-    {        
+    {
         throw new System.Exception("error");
     }
 

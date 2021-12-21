@@ -1,9 +1,5 @@
 ﻿
-using System.IO;
-using System.Text;
-using CamusDB.Core;
 using NUnit.Framework;
-using System.Threading.Tasks;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Tests.Indexes;
@@ -300,8 +296,8 @@ internal sealed class TestBTree
     {
         BTree<int, int?> tree = new(0);
 
-        for (int i = 0; i < 50; i++)        
-            tree.Put(i, 100 + i);        
+        for (int i = 0; i < 50; i++)
+            tree.Put(i, 100 + i);
 
         Assert.AreEqual(50, tree.Size());
         Assert.AreEqual(2, tree.Height());

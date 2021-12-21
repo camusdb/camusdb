@@ -1,22 +1,16 @@
 ﻿
 /**
- * This file is part of CamusDB  
+ * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
  */
 
-using System.IO;
 using System.Text;
 using NUnit.Framework;
-using System.Threading.Tasks;
-using CamusDB.Core.BufferPool;
-using System.IO.MemoryMappedFiles;
-using CamusDB.Core.BufferPool.Models;
-using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.Serializer;
-using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Serializer.Models;
 
 namespace CamusDB.Tests.Serialization;
 
@@ -34,7 +28,7 @@ public class TestSerializer
         pointer = 0;
         int type = Serializator.ReadType(buffer, ref pointer);
         Assert.AreEqual(pointer, SerializatorTypeSizes.TypeInteger8);
-        Assert.AreEqual(type, SerializatorTypes.TypeNull);        
+        Assert.AreEqual(type, SerializatorTypes.TypeNull);
     }
 
     [Test]
@@ -118,7 +112,7 @@ public class TestSerializer
         Assert.AreEqual(readValue, writeValue);
     }
 
-    [Test]    
+    [Test]
     [TestCase(0U)]
     [TestCase(1U)]
     [TestCase(256U)]
@@ -140,7 +134,7 @@ public class TestSerializer
         Assert.AreEqual(readValue, writeValue);
     }
 
-    [Test]    
+    [Test]
     [TestCase(true)]
     [TestCase(false)]
     public void TestSerializeBool(bool writeValue)
@@ -192,7 +186,7 @@ public class TestSerializer
     }
 
     [Test]
-    [TestCase(1639931684, -1154155741, -743207513)]    
+    [TestCase(1639931684, -1154155741, -743207513)]
     public void TestSerializeObjectId(int a, int b, int c)
     {
         byte[] buffer = new byte[12];

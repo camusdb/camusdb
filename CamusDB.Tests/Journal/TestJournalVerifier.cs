@@ -122,7 +122,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(groups.Count, 0);
@@ -145,7 +145,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(groups.Count, 0);
@@ -168,7 +168,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -192,7 +192,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -216,7 +216,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -240,7 +240,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -264,7 +264,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -288,7 +288,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -312,7 +312,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -336,7 +336,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -360,7 +360,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -384,7 +384,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );        
 
         Assert.AreEqual(1, groups.Count);
@@ -408,7 +408,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -432,7 +432,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -456,7 +456,7 @@ internal class TestJournalVerifier
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(0, groups.Count);

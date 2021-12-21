@@ -1,10 +1,17 @@
 ﻿
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.IO;
 using System.Text;
 using NUnit.Framework;
+using CamusDB.Core.Storage;
 using System.Threading.Tasks;
 using CamusDB.Core.BufferPool;
-using System.IO.MemoryMappedFiles;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
@@ -13,21 +20,22 @@ namespace CamusDB.Tests.BufferPool;
 
 public class TestBufferPool
 {
-    private const string TableSpacePath = "/tmp/tablespace0";
+    private const string TableSpacePath = "/tmp/";
 
     [SetUp]
     public void Setup()
     {
-        byte[] initialized = new byte[Config.TableSpaceSize];
-        File.Delete(TableSpacePath);
-        File.WriteAllBytes(TableSpacePath, initialized);
+        File.Delete(Path.Combine(TableSpacePath, "tablespace000"));
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestGetPage()
     {
-        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
-        using BufferPoolHandler bufferPool = new(mmf);
+        StorageManager tablespaceStorage = new(TableSpacePath, "tablespace");
+        await tablespaceStorage.Initialize();
+
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
         BufferPage page = await bufferPool.GetPage(0);
 
@@ -43,10 +51,13 @@ public class TestBufferPool
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestReadPage()
     {
-        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
-        using BufferPoolHandler bufferPool = new(mmf);
+        StorageManager tablespaceStorage = new(TableSpacePath, "tablespace");
+        await tablespaceStorage.Initialize();
+
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
         BufferPage page = await bufferPool.ReadPage(0);
 
@@ -62,10 +73,18 @@ public class TestBufferPool
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestGetFreePage()
     {
-        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
-        using BufferPoolHandler bufferPool = new(mmf);
+        StorageManager tablespaceStorage = new(TableSpacePath, "tablespace");
+        await tablespaceStorage.Initialize();
+
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);
+
+        // Initialize tablespace header
+        BufferPage page = await bufferPool.ReadPage(Config.TableSpaceHeaderPage);
+        bufferPool.WriteTableSpaceHeader(page.Buffer);
+        await bufferPool.FlushPage(page); 
 
         byte[] data = Encoding.UTF8.GetBytes("some data");
 
@@ -77,10 +96,13 @@ public class TestBufferPool
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestWriteSinglePage()
     {
-        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
-        using BufferPoolHandler bufferPool = new(mmf);
+        StorageManager tablespaceStorage = new(TableSpacePath, "tablespace");
+        await tablespaceStorage.Initialize();
+
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
         byte[] data = Encoding.UTF8.GetBytes("some data");
 
@@ -95,18 +117,24 @@ public class TestBufferPool
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestWriteDataFlushed()
     {
         byte[] data = Encoding.UTF8.GetBytes("some data");
 
-        using (var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open))
-        {
-            using BufferPoolHandler? bufferPool = new(mmf);
-            await bufferPool.WriteDataToPage(1, 0, data);
-        }
+        StorageManager tablespaceStorage = new(TableSpacePath, "tablespace");
+        await tablespaceStorage.Initialize();
 
-        using var mmf2 = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
-        using BufferPoolHandler? bufferPool2 = new(mmf2);
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);        
+
+        await bufferPool.WriteDataToPage(1, 0, data);
+
+        bufferPool.Dispose();
+
+        StorageManager tablespaceStorage2 = new(TableSpacePath, "tablespace");
+        await tablespaceStorage2.Initialize();
+
+        using BufferPoolHandler? bufferPool2 = new(tablespaceStorage2);
 
         BufferPage page = await bufferPool2.ReadPage(1);
 
@@ -115,10 +143,13 @@ public class TestBufferPool
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestWriteAndReadSinglePage()
     {
-        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
-        using BufferPoolHandler bufferPool = new(mmf);
+        StorageManager tablespaceStorage = new(TableSpacePath, "tablespace");
+        await tablespaceStorage.Initialize();
+
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
         byte[] data = Encoding.UTF8.GetBytes("some data some data");
 
@@ -131,10 +162,13 @@ public class TestBufferPool
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestWriteAndReadDataFromPage()
     {
-        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
-        using BufferPoolHandler bufferPool = new(mmf);
+        StorageManager tablespaceStorage = new(TableSpacePath, "tablespace");
+        await tablespaceStorage.Initialize();
+
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);        
 
         byte[] data = Encoding.UTF8.GetBytes("some data some data");
 
@@ -147,10 +181,13 @@ public class TestBufferPool
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestWriteLargeData()
     {
-        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
-        using BufferPoolHandler bufferPool = new(mmf);
+        StorageManager tablespaceStorage = new(TableSpacePath, "tablespace");
+        await tablespaceStorage.Initialize();
+
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);        
 
         byte[] data = Encoding.UTF8.GetBytes(new string('s', Config.PageSize));
 
@@ -166,10 +203,13 @@ public class TestBufferPool
     }
 
     [Test]
+    [NonParallelizable]
     public async Task TestMultiplePageLargeData()
     {
-        using var mmf = MemoryMappedFile.CreateFromFile(TableSpacePath, FileMode.Open);
-        using BufferPoolHandler bufferPool = new(mmf);
+        StorageManager tablespaceStorage = new(TableSpacePath, "tablespace");
+        await tablespaceStorage.Initialize();
+
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
         byte[] data = Encoding.UTF8.GetBytes(new string('s', Config.PageSize * 5));
 

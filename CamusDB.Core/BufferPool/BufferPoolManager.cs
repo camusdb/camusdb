@@ -19,13 +19,13 @@ namespace CamusDB.Core.BufferPool;
 /*
  * BufferPoolHandler
  *
- * A buffer pool is an area of main memory that has been allocated by the database manager 
- * for the purpose of caching table and index data as it is read from disk. 
- * 
- * When a row of data in a table is first accessed, the database manager places the page that 
- * contains that data into a buffer pool. Pages stay in the buffer pool until the database 
+ * A buffer pool is an area of main memory that has been allocated by the database manager
+ * for the purpose of caching table and index data as it is read from disk.
+ *
+ * When a row of data in a table is first accessed, the database manager places the page that
+ * contains that data into a buffer pool. Pages stay in the buffer pool until the database
  * is shut down or until the space occupied by the page is required by another page.
- * 
+ *
  * Pages are loaded on demand and are organized in the following layout:
  *
  * +--------------------+
@@ -60,8 +60,8 @@ public sealed class BufferPoolHandler : IDisposable
     public async Task Initialize()
     {
         // initialize pages
-        //for (int i = 0; i < Config.InitialPagesRead; i++)
-        //    await ReadPage(i);
+        for (int i = 0; i < Config.InitialPagesRead; i++)
+            await ReadPage(i);
     }
 
     // Load a page without reading its contents
@@ -294,7 +294,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             pointer = BConfig.FreePageOffset;
             Serializator.WriteInt32(pageBuffer, pageOffset + 1, ref pointer); // write new offset
-           
+
             await storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer, Config.PageSize);
 
             page.Dirty = true;

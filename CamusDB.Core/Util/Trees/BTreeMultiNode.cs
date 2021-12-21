@@ -11,7 +11,7 @@ namespace CamusDB.Core.Util.Trees;
 // helper B-tree node data type
 public sealed class BTreeMultiNode<T> where T : IComparable<T>
 {
-    public static int CurrentId = -1;
+    private static int CurrentId = -1;
 
     public int Id;
 
@@ -21,7 +21,7 @@ public sealed class BTreeMultiNode<T> where T : IComparable<T>
 
     public bool Dirty = true; // whether the node must be persisted
 
-    public BTreeMultiEntry<T>[] children = new BTreeMultiEntry<T>[BTree<int, int?>.MaxChildren];   // the array of children
+    public BTreeMultiEntry<T>[] children = new BTreeMultiEntry<T>[BTreeConfig.MaxChildren];   // the array of children
 
     // create a node with k children
     public BTreeMultiNode(int keyCount)

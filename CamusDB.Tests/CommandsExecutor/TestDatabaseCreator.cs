@@ -45,7 +45,7 @@ internal class TestDatabaseCreator
 
         Assert.IsTrue(Directory.Exists(path));
 
-        string[] tablespaces = new string[] { "tablespace0", "schema", "system" };
+        string[] tablespaces = new string[] { "tablespace000", "schema000", "system000" };
         for (int i = 0; i < tablespaces.Length; i++)
         {
             Assert.IsTrue(File.Exists(Path.Combine(path, tablespaces[i])));

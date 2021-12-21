@@ -1,15 +1,12 @@
 ﻿
 /**
- * This file is part of CamusDB  
+ * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
  */
 
-using System;
-using System.Text;
 using NUnit.Framework;
-using System.Threading.Tasks;
 using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.ObjectIds;

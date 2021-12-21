@@ -19,7 +19,6 @@ using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
-using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.Journal.Controllers;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -163,7 +162,7 @@ internal class TestJournalRecoverer
         JournalVerifier journalVerifier = new();
 
         Dictionary<uint, JournalLogGroup> groups = await journalVerifier.Verify(
-            Path.Combine(Config.DataDirectory, DatabaseName, "journal0")
+            Path.Combine(Config.DataDirectory, DatabaseName, "journal000")
         );
 
         Assert.AreEqual(1, groups.Count);
@@ -190,7 +189,7 @@ internal class TestJournalRecoverer
     [NonParallelizable]
     public async Task TestJournalRecoverInsertFailPostInsertSlots()
     {
-        await TestInsertWithSpecificFailure(JournalFailureTypes.PostInsertSlots, InsertFluxSteps.UpdateUniqueKeys);        
+        await TestInsertWithSpecificFailure(JournalFailureTypes.PostInsertSlots, InsertFluxSteps.UpdateUniqueKeys);
     }
 
     [Test]
