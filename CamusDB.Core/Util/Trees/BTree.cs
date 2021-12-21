@@ -35,7 +35,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     public int PageOffset = -1; // page offset to root node
 
-    public SemaphoreSlim WriteLock { get; } = new(1, 1);
+    public SemaphoreSlim WriteLock { get; } = new(1, 1); // global lock
 
     /**
      * Initializes an empty B-tree.

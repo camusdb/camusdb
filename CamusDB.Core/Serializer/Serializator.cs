@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using CamusDB.Core.Catalogs.Models;
@@ -17,12 +18,6 @@ namespace CamusDB.Core.Serializer;
 
 public sealed class Serializator
 {
-    public static void Serialize(byte[] buffer, TableSchema tableSchema)
-    {
-        int pointer = 0;
-        WriteInt(buffer, tableSchema.Version, ref pointer);
-    }
-
     public static byte[] Serialize(Dictionary<string, TableSchema> tableSchema)
     {
         string jsonSerialized = JsonSerializer.Serialize(tableSchema);
@@ -32,17 +27,14 @@ public sealed class Serializator
     public static byte[] Serialize(Dictionary<string, DatabaseObject> databaseObjects)
     {
         string jsonSerialized = JsonSerializer.Serialize(databaseObjects);
-        var x = Encoding.UTF8.GetBytes(jsonSerialized);
-        //Console.WriteLine(x.Length);
-        return x;
+        return Encoding.UTF8.GetBytes(jsonSerialized);
     }
 
     public static T Unserialize<T>(byte[] buffer) where T : new()
     {
-        string xp = Encoding.UTF8.GetString(buffer);
-        //Console.WriteLine(xp);
+        string str = Encoding.UTF8.GetString(buffer);
 
-        T? deserialized = JsonSerializer.Deserialize<T>(xp);
+        T? deserialized = JsonSerializer.Deserialize<T>(str);
         if (deserialized is null)
             return new T();
 
@@ -102,12 +94,14 @@ public sealed class Serializator
         buffer[pointer++] = (byte)byteType;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteInt8(byte[] buffer, int number, ref int pointer)
     {
         //CheckBufferOverflow(1);        
         buffer[pointer++] = (byte)((number >> 0) & 0xff);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteInt16(byte[] buffer, int number, ref int pointer)
     {
         short number16 = Convert.ToInt16(number);
@@ -117,6 +111,7 @@ public sealed class Serializator
         pointer += 2;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteInt32(byte[] buffer, int number, ref int pointer)
     {
         //CheckBufferOverflow(4);
@@ -127,6 +122,7 @@ public sealed class Serializator
         pointer += 4;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteUInt32(byte[] buffer, uint number, ref int pointer)
     {
         //CheckBufferOverflow(4);
@@ -137,6 +133,7 @@ public sealed class Serializator
         pointer += 4;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteObjectId(byte[] buffer, ObjectIdValue id, ref int pointer)
     {
         //CheckBufferOverflow(4);
@@ -158,6 +155,7 @@ public sealed class Serializator
         pointer += 12;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteString(byte[] buffer, string str, ref int pointer)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(str);
@@ -165,12 +163,14 @@ public sealed class Serializator
         pointer += bytes.Length;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteByteArray(byte[] buffer, byte[] bytes, ref int pointer)
     {
         Buffer.BlockCopy(bytes, 0, buffer, pointer, bytes.Length);
         pointer += bytes.Length;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteBool(byte[] buffer, bool value, ref int pointer)
     {
         int typedBool = 0;
@@ -180,6 +180,7 @@ public sealed class Serializator
         WriteInt8(buffer, typedBool, ref pointer);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int ReadType(byte[] buffer, ref int pointer)
     {
         int typeByte = buffer[pointer++];
@@ -189,11 +190,13 @@ public sealed class Serializator
         return type;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int ReadInt8(byte[] buffer, ref int pointer)
     {
         return buffer[pointer++];
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static short ReadInt16(byte[] buffer, ref int pointer)
     {
         short number = BitConverter.ToInt16(buffer, pointer);
@@ -208,21 +211,25 @@ public sealed class Serializator
         return number;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int ReadInt32(byte[] buffer, ref int pointer)
     {
-        int number = buffer[pointer++];
-        number += (buffer[pointer++] << 8);
-        number += (buffer[pointer++] << 16);
-        number += (buffer[pointer++] << 24);
+        int number = buffer[pointer];
+        number += (buffer[pointer + 1] << 8);
+        number += (buffer[pointer + 2] << 16);
+        number += (buffer[pointer + 3] << 24);
+        pointer += 4;
         return number;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint ReadUInt32(byte[] buffer, ref int pointer)
     {
-        uint number = buffer[pointer++];
-        number += (uint)(buffer[pointer++] << 8);
-        number += (uint)(buffer[pointer++] << 16);
-        number += (uint)(buffer[pointer++] << 24);
+        uint number = buffer[pointer];
+        number += (uint)(buffer[pointer + 1] << 8);
+        number += (uint)(buffer[pointer + 2] << 16);
+        number += (uint)(buffer[pointer + 3] << 24);
+        pointer += 4;
         return number;
     }
 
@@ -259,19 +266,20 @@ public sealed class Serializator
     public static byte[] ReadByteArray(byte[] buffer, int length, ref int pointer)
     {
         byte[] bytes = new byte[length];
-        Buffer.BlockCopy(buffer, pointer, bytes, 0, length);        
+        Buffer.BlockCopy(buffer, pointer, bytes, 0, length);
         pointer += length;
         return bytes;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool ReadBool(byte[] buffer, ref int pointer)
     {
         return (buffer[pointer - 1] & 0xf) == 1;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool ReadBoolAhead(byte[] buffer, ref int pointer)
     {
         return (buffer[pointer++] & 0xf) == 1;
     }
 }
-
