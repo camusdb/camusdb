@@ -61,17 +61,16 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     private static async Task SaveInternal(SaveUniqueIndexTicket ticket)
     {
-        if (ticket.Insert)
-            ticket.Index.Put(ticket.Key, ticket.Value);
+        List<BTreeNode<ColumnValue, BTreeTuple?>> deltas = ticket.Index.Put(ticket.Key, ticket.Value);
 
-        await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index);
+        await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index, deltas);
     }
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
     {
         ticket.Index.Remove(ticket.Key);
 
-        await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index);
+        await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index, new());
     }
 
     private static async Task Persist(
@@ -80,18 +79,20 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         uint sequence,
         uint subSequence,
         JournalFailureTypes failureType,
-        BTree<ColumnValue, BTreeTuple?> index
+        BTree<ColumnValue, BTreeTuple?> index,
+        List<BTreeNode<ColumnValue, BTreeTuple?>> deltas
     )
     {
-        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in index.NodesTraverse())
+        if (deltas.Count == 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Deltas cannot be null or empty"
+            );
+
+        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas)
         {
             if (node.PageOffset == -1)
-            {
-                node.Dirty = true;
                 node.PageOffset = await tablespace.GetNextFreeOffset();
-            }
-
-            //Console.WriteLine("Will save node at {0}", node.PageOffset);
         }
 
         byte[] treeBuffer = new byte[12]; // height(4 byte) + size(4 byte) + root(4 byte)
@@ -99,7 +100,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
-        Serializator.WriteInt32(treeBuffer, index.root.PageOffset, ref pointer);
+        Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);
 
         // Save node modification to journal
         WritePageLog schedule = new(sequence, subSequence, treeBuffer);
@@ -108,18 +109,16 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         // Write to buffer page
         await tablespace.WriteDataToPage(index.PageOffset, sequence, treeBuffer);
 
-        //Console.WriteLine("Will save index at {0}", index.PageOffset);
-
         //@todo update nodes concurrently
 
         int dirty = 0, noDirty = 0;
 
-        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in index.NodesTraverse())
+        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas)
         {
             if (!node.Dirty)
             {
                 noDirty++;
-                //Console.WriteLine("Node {0} at {1} is not dirty", node.Id, node.PageOffset);
+                Console.WriteLine("Node {0} in deltas but not dirty", node.Id);                
                 continue;
             }
 
@@ -148,12 +147,15 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 }
             }
 
+            // Save modified page to journal
             schedule = new(sequence, subSequence, nodeBuffer);
             await journal.Append(failureType, schedule);
 
             await tablespace.WriteDataToPage(node.PageOffset, sequence, nodeBuffer);
 
             //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);
+
+            node.Dirty = false; // no longer dirty
             dirty++;
         }
 

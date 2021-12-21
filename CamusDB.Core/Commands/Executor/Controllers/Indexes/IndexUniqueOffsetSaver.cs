@@ -56,11 +56,9 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
-        Serializator.WriteInt32(treeBuffer, index.root.PageOffset, ref pointer);
+        Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);
 
-        await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
-
-        //Console.WriteLine("Will save index at {0}", index.PageOffset);
+        await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);        
 
         //@todo update nodes concurrently
 
@@ -104,6 +102,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
             //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);
             dirty++;
+            node.Dirty = false;
         }
 
         //Console.WriteLine("Dirty={0} NoDirty={1}", dirty, noDirty);

@@ -195,14 +195,14 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         yield return node;
     }
 
-    public BTreeInsertDeltas<TKey, TValue> Put(TKey key, TValue? value)
+    public List<BTreeNode<TKey, TValue>> Put(TKey key, TValue? value)
     {
-        BTreeInsertDeltas<TKey, TValue> deltas = new();
+        List<BTreeNode<TKey, TValue>> deltas = new();
 
         if (root is null) // create root
         {
             root = new BTreeNode<TKey, TValue>(0);
-            deltas.Deltas.Add(root);
+            deltas.Add(root);
         }
 
         BTreeNode<TKey, TValue>? split = Insert(root, key, value, height, deltas);
@@ -213,7 +213,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         // need to split root
         BTreeNode<TKey, TValue> newRoot = new(2);
-        deltas.Deltas.Add(newRoot);
+        deltas.Add(newRoot);
 
         newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, default, root);
         newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, default, split);
@@ -222,15 +222,19 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         newRoot.PageOffset = root.PageOffset;
         root.PageOffset = -1;
-        root.Dirty = true;
-        deltas.Deltas.Add(newRoot);
+
+        if (root.Dirty == false)
+        {
+            root.Dirty = true;
+            deltas.Add(newRoot);
+        }
 
         height++;
 
         return deltas;
     }
 
-    private BTreeNode<TKey, TValue>? Insert(BTreeNode<TKey, TValue>? node, TKey key, TValue? val, int ht, BTreeInsertDeltas<TKey, TValue> deltas)
+    private BTreeNode<TKey, TValue>? Insert(BTreeNode<TKey, TValue>? node, TKey key, TValue? val, int ht, List<BTreeNode<TKey, TValue>> deltas)
     {
         if (node is null)
             throw new ArgumentException("node cannot be null");
@@ -276,10 +280,12 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         node.children[j] = newEntry;
         node.KeyCount++;
-        node.Dirty = true;
-        deltas.Deltas.Add(node);
 
-        //Console.WriteLine("Node {0} marked as dirty as child added", node.Id);
+        if (node.Dirty == false)
+        {
+            node.Dirty = true;
+            deltas.Add(node);
+        }
 
         if (node.KeyCount < BTreeConfig.MaxChildren)
             return null;
@@ -288,18 +294,18 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     }
 
     // split node in half
-    private static BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, BTreeInsertDeltas<TKey, TValue> deltas)
+    private static BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, List<BTreeNode<TKey, TValue>> deltas)
     {
         BTreeNode<TKey, TValue> newNode = new(BTreeConfig.MaxChildrenHalf);
-        deltas.Deltas.Add(newNode);
-
-        //Console.WriteLine("Node {0} marked as dirty because of split", t.Id);
+        deltas.Add(newNode);        
 
         current.KeyCount = BTreeConfig.MaxChildrenHalf;
-        current.Dirty = true;
-        deltas.Deltas.Add(current);
 
-        //Console.WriteLine("Node {0} marked as dirty because of split", current.Id);
+        if (current.Dirty == false)
+        {
+            current.Dirty = true;
+            deltas.Add(current);
+        }
 
         for (int j = 0; j < BTreeConfig.MaxChildrenHalf; j++)
             newNode.children[j] = current.children[BTreeConfig.MaxChildrenHalf + j];
@@ -312,17 +318,24 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
      *
      * @param  key the key
      */
-    public bool Remove(TKey key)
+    public (bool found, List<BTreeNode<TKey, TValue>> deltas) Remove(TKey key)
     {
-        bool found = Delete(root, key, height);
+        List<BTreeNode<TKey, TValue>> deltas = new();
+
+        bool found = Delete(root, key, height, deltas);
 
         if (found)
             size--;
 
-        return found;
+        return (found, deltas);
     }
 
-    private bool Delete(BTreeNode<TKey, TValue>? node, TKey key, int ht)
+    /**
+     * Delete node entries by key, it doesn't merge yet
+     * 
+     * @param node the node where to search the value
+     */
+    private bool Delete(BTreeNode<TKey, TValue>? node, TKey key, int ht, List<BTreeNode<TKey, TValue>> deltas)
     {
         if (node is null)
             return false;
@@ -350,7 +363,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                 node.children[j] = node.children[j + 1];
 
             node.KeyCount--;
-            node.Dirty = true;
+
+            if (node.Dirty == false)
+            {
+                node.Dirty = true;
+                deltas.Add(node);
+            }
+
             return true;
         }
 
@@ -360,7 +379,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             for (int j = 0; j < node.KeyCount; j++)
             {
                 if (j + 1 == node.KeyCount || Less(key, children[j + 1].Key))
-                    return Delete(children[j].Next, key, ht - 1);
+                    return Delete(children[j].Next, key, ht - 1, deltas);
             }
         }
 

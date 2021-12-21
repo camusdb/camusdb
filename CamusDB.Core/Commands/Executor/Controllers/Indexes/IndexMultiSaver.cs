@@ -154,6 +154,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
             //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);
             dirty++;
+            node.Dirty = false;
         }
 
         //Console.WriteLine("Dirty={0} NoDirty={1}", dirty, noDirty);
@@ -242,6 +243,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
             //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);
             dirty++;
+            node.Dirty = false;
         }
 
         //Console.WriteLine("Dirty={0} NoDirty={1}", dirty, noDirty);

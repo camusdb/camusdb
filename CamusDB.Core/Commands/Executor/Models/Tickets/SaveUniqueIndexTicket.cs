@@ -29,9 +29,7 @@ public sealed class SaveUniqueIndexTicket
 
     public ColumnValue Key { get; }
 
-    public BTreeTuple Value { get;  }
-
-    public bool Insert { get; } = true;
+    public BTreeTuple Value { get;  }    
 
     public SaveUniqueIndexTicket(
         BufferPoolHandler tablespace,
@@ -41,8 +39,7 @@ public sealed class SaveUniqueIndexTicket
         JournalFailureTypes failureType,
         BTree<ColumnValue, BTreeTuple?> index,
         ColumnValue key,
-        BTreeTuple value,
-        bool insert = true
+        BTreeTuple value
     )
     {
         Tablespace = tablespace;
@@ -53,7 +50,6 @@ public sealed class SaveUniqueIndexTicket
         Index = index;
         Key = key;
         Value = value;
-        Insert = insert;
     }
 }
 

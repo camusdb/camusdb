@@ -8,6 +8,7 @@
 
 using NUnit.Framework;
 using CamusDB.Core.Util.Trees;
+using System.Collections.Generic;
 
 namespace CamusDB.Tests.Indexes;
 
@@ -16,7 +17,7 @@ internal sealed class TestBTree
     [Test]
     public void TestEmpty()
     {
-        BTree<int, int?> tree = new(0);        
+        BTree<int, int?> tree = new(0);
 
         Assert.AreEqual(tree.Size(), 0);
         Assert.AreEqual(tree.Height(), 0);
@@ -122,37 +123,37 @@ internal sealed class TestBTree
     [Test]
     public void TestMultiInsertDeltas()
     {
-        BTreeInsertDeltas<int, int?> deltas;
+        List<BTreeNode<int, int?>> deltas;
 
         BTree<int, int?> tree = new(0);
 
         deltas = tree.Put(4, 100);
-        Assert.AreEqual(2, deltas.Deltas.Count);
+        Assert.AreEqual(2, deltas.Count);
 
         deltas = tree.Put(5, 100);
-        Assert.AreEqual(1, deltas.Deltas.Count);
+        Assert.AreEqual(1, deltas.Count);
 
         deltas = tree.Put(6, 101);
-        Assert.AreEqual(1, deltas.Deltas.Count);
+        Assert.AreEqual(1, deltas.Count);
 
         deltas = tree.Put(7, 102);
-        Assert.AreEqual(1, deltas.Deltas.Count);
+        Assert.AreEqual(1, deltas.Count);
 
         deltas = tree.Put(8, 103);
-        Assert.AreEqual(1, deltas.Deltas.Count);
+        Assert.AreEqual(1, deltas.Count);
 
         deltas = tree.Put(9, 104);
-        Assert.AreEqual(1, deltas.Deltas.Count);
+        Assert.AreEqual(1, deltas.Count);
 
         deltas = tree.Put(10, 105);
-        Assert.AreEqual(1, deltas.Deltas.Count);
+        Assert.AreEqual(1, deltas.Count);
 
         deltas = tree.Put(11, 105);
-        Assert.AreEqual(5, deltas.Deltas.Count);
+        Assert.AreEqual(5, deltas.Count);
 
         Assert.AreEqual(tree.Size(), 8);
         Assert.AreEqual(tree.Height(), 1);
-    }    
+    }
 
     [Test]
     public void TestBasicRemove()
@@ -160,7 +161,9 @@ internal sealed class TestBTree
         BTree<int, int?> tree = new(0);
 
         tree.Put(5, 100);
-        Assert.IsTrue(tree.Remove(5));
+
+        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(5);
+        Assert.IsTrue(result.found);
 
         Assert.AreEqual(0, tree.Size());
         Assert.AreEqual(0, tree.Height());
@@ -172,7 +175,9 @@ internal sealed class TestBTree
         BTree<int, int?> tree = new(0);
 
         tree.Put(5, 100);
-        Assert.IsFalse(tree.Remove(10));
+
+        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(10);
+        Assert.IsFalse(result.found);
 
         Assert.AreEqual(1, tree.Size());
         Assert.AreEqual(0, tree.Height());
@@ -190,7 +195,8 @@ internal sealed class TestBTree
         tree.Put(8, 103);
         tree.Put(9, 104);
 
-        Assert.IsTrue(tree.Remove(5));
+        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(5);
+        Assert.IsTrue(result.found);
 
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
@@ -208,7 +214,8 @@ internal sealed class TestBTree
         tree.Put(8, 103);
         tree.Put(9, 104);
 
-        Assert.IsTrue(tree.Remove(5));
+        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(5);
+        Assert.IsTrue(result.found);
 
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
@@ -229,7 +236,8 @@ internal sealed class TestBTree
         tree.Put(8, 103);
         tree.Put(9, 104);
 
-        Assert.IsTrue(tree.Remove(5));
+        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(5);
+        Assert.IsTrue(result.found);
 
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
@@ -270,7 +278,8 @@ internal sealed class TestBTree
         Assert.AreEqual(8, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        Assert.IsTrue(tree.Remove(5));
+        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(5);
+        Assert.IsTrue(result.found);
 
         Assert.AreEqual(7, tree.Size());
         Assert.AreEqual(1, tree.Height());
@@ -296,7 +305,8 @@ internal sealed class TestBTree
         Assert.AreEqual(8, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        Assert.IsTrue(tree.Remove(11));
+        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(11);
+        Assert.IsTrue(result.found);
 
         Assert.AreEqual(7, tree.Size());
         Assert.AreEqual(1, tree.Height());
@@ -320,7 +330,10 @@ internal sealed class TestBTree
         Assert.AreEqual(2, tree.Height());
 
         for (int i = 0; i < 50; i += 5)
-            Assert.IsTrue(tree.Remove(i));
+        {
+            (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(i);
+            Assert.IsTrue(result.found);
+        }
 
         Assert.AreEqual(40, tree.Size());
         Assert.AreEqual(2, tree.Height());
@@ -350,7 +363,10 @@ internal sealed class TestBTree
         Assert.AreEqual(2, tree.Height());
 
         for (int i = 0; i < 64; i += 8)
-            Assert.IsTrue(tree.Remove(i));
+        {
+            (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(i);
+            Assert.IsTrue(result.found);
+        }
 
         Assert.AreEqual(56, tree.Size());
         Assert.AreEqual(2, tree.Height());
@@ -379,7 +395,10 @@ internal sealed class TestBTree
         Assert.AreEqual(2, tree.Height());
 
         for (int i = 7; i < 49; i += 7)
-            Assert.IsTrue(tree.Remove(i));
+        {
+            (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(i);
+            Assert.IsTrue(result.found);
+        }
 
         Assert.AreEqual(43, tree.Size());
         Assert.AreEqual(2, tree.Height());
@@ -408,7 +427,10 @@ internal sealed class TestBTree
         Assert.AreEqual(2, tree.Height());
 
         for (int i = 0; i < 64; i++)
-            Assert.IsTrue(tree.Remove(i));
+        {
+            (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(i);
+            Assert.IsTrue(result.found);
+        }
 
         Assert.AreEqual(0, tree.Size());
         Assert.AreEqual(2, tree.Height());
