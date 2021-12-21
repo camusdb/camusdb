@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Util.IO;
 using System.IO.MemoryMappedFiles;
+using System.Runtime.CompilerServices;
 using Config = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.Storage;
@@ -22,9 +23,7 @@ public class StorageManager : IDisposable
 
     private readonly List<FileInfo> files;
 
-    private int totalspaceSize = 0;
-
-    private int numberTablespaces = 0;
+    private int totalspaceSize = 0;    
 
     private readonly SemaphoreSlim semaphore = new(1, 1);
 
@@ -56,12 +55,11 @@ public class StorageManager : IDisposable
 
         // Calculate total available space
         totalspaceSize = tablespaces.Length * Config.TableSpaceSize;
-        numberTablespaces = tablespaces.Length;
 
-        Console.WriteLine(numberTablespaces);        
+        /*Console.WriteLine(numberTablespaces);
         Console.WriteLine(totalspaceSize);
         Console.WriteLine(totalspaceSize / Config.TableSpaceSize);
-        Console.WriteLine((Config.TableSpaceSize + 1) / (float)totalspaceSize);
+        Console.WriteLine((Config.TableSpaceSize + 1) / (float)totalspaceSize);*/
 
         int index = 0;
 
@@ -89,12 +87,30 @@ public class StorageManager : IDisposable
         return new(tablespacePath);
     }
 
-    private async ValueTask<MemoryMappedViewAccessor> GetTablespace(int offset)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int GetPageOffset(int offset)
     {
-        int index = offset / totalspaceSize;
+        int index = 0;
 
-        if (index < tablespaces.Length && tablespaces[index] != null)
-            return tablespaces[index];
+        for (int i = 0; i < totalspaceSize; i += Config.TableSpaceSize)
+        {
+            if (offset >= i && offset < (i + Config.TableSpaceSize))
+                return index;
+
+            index++;
+        }
+
+        return -1;
+    }
+
+    private async ValueTask<(int, MemoryMappedViewAccessor)> GetTablespace(int offset)
+    {
+        int index = GetPageOffset(offset);
+
+        //Console.WriteLine("{0} {1} {2}", offset, index, Config.TableSpaceSize);
+
+        if (index >= 0 && index < tablespaces.Length && tablespaces[index] != null)
+            return (index * Config.TableSpaceSize, tablespaces[index]);
 
         try
         {
@@ -110,9 +126,9 @@ public class StorageManager : IDisposable
             {
                 memoryFiles[index] = memoryFile;
                 tablespaces[index] = accessor;
-            } 
+            }
 
-            return accessor;
+            return (index * Config.TableSpaceSize, accessor);
         }
         finally
         {
@@ -122,14 +138,14 @@ public class StorageManager : IDisposable
 
     public async Task Read(int offset, byte[] buffer, int length)
     {
-        MemoryMappedViewAccessor tablespace = await GetTablespace(offset);
-        tablespace.ReadArray<byte>(offset, buffer, 0, length);
+        (int, MemoryMappedViewAccessor) tablespace = await GetTablespace(offset);
+        tablespace.Item2.ReadArray<byte>(offset - tablespace.Item1, buffer, 0, length);        
     }
 
     public async Task Write(int offset, byte[] buffer, int length)
     {
-        MemoryMappedViewAccessor tablespace = await GetTablespace(offset);
-        tablespace.WriteArray<byte>(offset, buffer, 0, length);
+        (int, MemoryMappedViewAccessor) tablespace = await GetTablespace(offset);
+        tablespace.Item2.WriteArray<byte>(offset - tablespace.Item1, buffer, 0, length);        
     }
 
     public void Flush()

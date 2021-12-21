@@ -95,9 +95,8 @@ public sealed class ObjectId
 
         if ((s.Length % 2) == 1) // if s has an odd length assume an implied leading "0"
         {
-            int y;
 
-            if (!TryParseHexChar(s[i++], out y))
+            if (!TryParseHexChar(s[i++], out int y))
                 return false;
 
             buffer[j++] = (byte)y;
@@ -105,12 +104,10 @@ public sealed class ObjectId
 
         while (i < s.Length)
         {
-            int x, y;
-
-            if (!TryParseHexChar(s[i++], out x))
+            if (!TryParseHexChar(s[i++], out int x))
                 return false;
 
-            if (!TryParseHexChar(s[i++], out y))
+            if (!TryParseHexChar(s[i++], out int y))
                 return false;
 
             buffer[j++] = (byte)((x << 4) | y);
@@ -120,16 +117,14 @@ public sealed class ObjectId
         return true;
     }
 
-    public static ObjectIdValue ToValue(string s, int offset = 0)
+    public static ObjectIdValue ToValue(string s)
     {
-        byte[] bytes;
-
-        if (!TryParseHexString(s, out bytes))
+        if (!TryParseHexString(s, out byte[] bytes))
             throw new FormatException("String should contain only hexadecimal digits.");
 
-        int a = (bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3];
-        int b = (bytes[offset + 4] << 24) | (bytes[offset + 5] << 16) | (bytes[offset + 6] << 8) | bytes[offset + 7];
-        int c = (bytes[offset + 8] << 24) | (bytes[offset + 9] << 16) | (bytes[offset + 10] << 8) | bytes[offset + 11];
+        int a = (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+        int b = (bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7];
+        int c = (bytes[8] << 24) | (bytes[9] << 16) | (bytes[10] << 8) | bytes[11];
 
         return new(a, b, c);
     }

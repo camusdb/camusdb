@@ -64,6 +64,7 @@ public sealed class ObjectIdGenerator
         return machineHash;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static string GetMachineName()
     {
         return Environment.MachineName;

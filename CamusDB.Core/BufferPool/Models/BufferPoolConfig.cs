@@ -10,6 +10,8 @@ namespace CamusDB.Core.BufferPool.Models;
 
 public class BufferPoolConfig
 {
+    public const int PageLayoutOffset = 0;
+
     public const int ChecksumOffset = 2 + 4 * 0; // 2 version + 4 checksum + 4 next page + 4 data length
 
     public const int LastSequenceOffset = 2 + 4 * 1; // 2 version + 4 checksum + 4 next page + 4 data length

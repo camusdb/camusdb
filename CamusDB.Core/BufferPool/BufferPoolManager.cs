@@ -60,8 +60,8 @@ public sealed class BufferPoolHandler : IDisposable
     public async Task Initialize()
     {
         // initialize pages
-        for (int i = 0; i < Config.InitialPagesRead; i++)
-            await ReadPage(i);
+        //for (int i = 0; i < Config.InitialPagesRead; i++)
+        //    await ReadPage(i);
     }
 
     // Load a page without reading its contents
@@ -118,7 +118,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             await storage.Read(Config.PageSize * offset, page.Buffer, Config.PageSize);
 
-            // Console.WriteLine("Page {0} read", offset);
+            //Console.WriteLine("Page {0} read", offset);
         }
         finally
         {
@@ -147,7 +147,25 @@ public sealed class BufferPoolHandler : IDisposable
         } while (offset > 0);
 
         return length;
-    }    
+    }
+
+    public async Task<bool> IsInitialized(int offset)
+    {
+        if (offset < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidPageOffset,
+                "Invalid page offset"
+            );
+
+        BufferPage memoryPage = await ReadPage(offset);
+
+        byte[] pageBuffer = memoryPage.Buffer; // get a pointer to the buffer to get a consistent read
+
+        int pointer = BConfig.PageLayoutOffset;
+        short pageLayout = Serializator.ReadInt16(pageBuffer, ref pointer);
+
+        return pageLayout > 0;
+    }
 
     public async Task<byte[]> GetDataFromPage(int offset)
     {
@@ -175,6 +193,12 @@ public sealed class BufferPoolHandler : IDisposable
 
             int pointer = BConfig.LengthOffset;
             int dataLength = Serializator.ReadInt32(pageBuffer, ref pointer);
+
+            if (dataLength > (pageBuffer.Length - BConfig.DataOffset))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidPageLength,
+                    "Page has an invalid data length"
+                );
 
             pointer = BConfig.NextPageOffset;
             offset = Serializator.ReadInt32(pageBuffer, ref pointer);
@@ -397,7 +421,15 @@ public sealed class BufferPoolHandler : IDisposable
             page.Buffer = pageBuffer;
             page.Dirty = true;
 
-            //Console.WriteLine("Wrote {0} bytes to page {1} from buffer staring at {2}, remaining {3}, next page {4}", length, offset, startOffset, remaining, nextPage);
+            /*Console.WriteLine(
+                "Wrote {0} bytes to page {1}/{2} from buffer staring at {3}, remaining {4}, next page {5}",
+                length,
+                offset,
+                Config.PageSize * offset,
+                startOffset,
+                remaining,
+                nextPage
+            );*/
 
             if (nextPage > 0)
                 await WriteDataToPage(nextPage, sequence, data, startOffset + length);

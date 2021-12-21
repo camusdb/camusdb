@@ -118,9 +118,9 @@ internal sealed class DatabaseOpener
     {
         BufferPoolHandler tablespace = databaseDescriptor.TableSpace;
 
-        byte[] data = await tablespace.GetDataFromPage(Config.TableSpaceHeaderPage);
+        bool initialized = await tablespace.IsInitialized(Config.TableSpaceHeaderPage);
 
-        if (data.Length != 0) // tablespace is initialized?
+        if (initialized) // tablespace is initialized?
             return;
 
         // write tablespace header
