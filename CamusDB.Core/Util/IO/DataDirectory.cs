@@ -1,12 +1,12 @@
 ﻿
+
+
 /**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
- */
-
-namespace CamusDB.Core.Util.IO;
+ */ namespace CamusDB.Core.Util.IO;
 
 public static class DataDirectory
 {
@@ -26,12 +26,19 @@ public static class DataDirectory
 
             if (file.Name.Length >= length && file.Name[..length] == type)
                 filteredFiles.Add(file);
-        }        
+        }
 
+        filteredFiles.Sort(FileNameComparer);
+        
         return filteredFiles;
     }
 
-    public static int GetNextFile(List<FileInfo> files, string type)
+    private static int FileNameComparer(FileInfo a, FileInfo b)
+    {
+        return a.FullName.CompareTo(b.FullName);
+    }
+
+    public static string GetNextFile(List<FileInfo> files, string type)
     {
         int max = -1;
 
@@ -44,6 +51,6 @@ public static class DataDirectory
             }
         }
 
-        return max + 1;
+        return (max + 1).ToString("000");
     }
 }

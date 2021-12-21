@@ -60,7 +60,7 @@ public sealed class JournalWriter
         }
     }
 
-    private int GetNextJournal(List<FileInfo> journals)
+    private string GetNextJournal(List<FileInfo> journals)
     {
         return DataDirectory.GetNextFile(journals, "journal");
     }
@@ -74,10 +74,10 @@ public sealed class JournalWriter
     {
         List<FileInfo> journals = GetJournals(this.database);
 
-        int next = GetNextJournal(journals);
+        string next = GetNextJournal(journals);
 
         journal = new(
-            Path.Combine(Config.DataDirectory, this.database, "journal" + next.ToString()),
+            Path.Combine(Config.DataDirectory, this.database, "journal" + next),
             FileMode.Append,
             FileAccess.Write
         ); 

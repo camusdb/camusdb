@@ -63,7 +63,7 @@ public sealed class BufferPoolFlusher
             return;
         }
 
-        Console.WriteLine("Flushed {0} dirty pages, memory={1}", pagesToFlush.Count, GC.GetTotalAllocatedBytes());
+        Console.WriteLine("Flushed {0} dirty pages, memory={1}", pagesToFlush.Count, GC.GetTotalMemory(false));
 
         bufferPool.Flush();
 

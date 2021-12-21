@@ -14,73 +14,145 @@ namespace CamusDB.Core.Storage;
 
 public class StorageManager : IDisposable
 {
-	private readonly string path;
+    private const int NumberOfTablespaces = 8;
 
-	private readonly string type;
+    private readonly string path;
 
-	private readonly List<MemoryMappedFile> memoryFiles = new();
+    private readonly string type;
 
-	private readonly List<MemoryMappedViewAccessor> accessors = new();
+    private readonly List<FileInfo> files;
 
-	public StorageManager(string path, string type)
-	{
-		this.path = path;
-		this.type = type;
-	}
+    private int totalspaceSize = 0;
 
-	public async Task Initialize()
+    private int numberTablespaces = 0;
+
+    private readonly SemaphoreSlim semaphore = new(1, 1);
+
+    private MemoryMappedFile[] memoryFiles = new MemoryMappedFile[NumberOfTablespaces];
+
+    private MemoryMappedViewAccessor[] tablespaces = new MemoryMappedViewAccessor[NumberOfTablespaces];
+
+    public StorageManager(string path, string type)
     {
-		Console.WriteLine("{0} {1}", path, type);
+        this.path = path;
+        this.type = type;
 
-		List<FileInfo> files = DataDirectory.GetFiles(path, type);
+        files = DataDirectory.GetFiles(path, type);
+    }
 
-		if (files.Count == 0)
-		{
-			int next = DataDirectory.GetNextFile(files, type);
-			await File.WriteAllBytesAsync(Path.Combine(path, type + next), new byte[Config.TableSpaceSize]);
-			files = DataDirectory.GetFiles(path, type);
-		}
-
-		foreach (FileInfo file in files)
-		{
-			MemoryMappedFile memoryFile = MemoryMappedFile.CreateFromFile(file.FullName, FileMode.Open);
-			MemoryMappedViewAccessor accessor = memoryFile.CreateViewAccessor();
-
-			memoryFiles.Add(memoryFile);
-			accessors.Add(accessor);
-		}		
-	}
-
-	public void Read(int offset, byte[] buffer, int length)
+    public async Task Initialize()
     {
-		foreach (MemoryMappedViewAccessor accessor in accessors)
-			accessor.ReadArray<byte>(offset, buffer, 0, length);
-	}
+        Console.WriteLine("{0} {1}", path, type);
 
-	public void Write(int offset, byte[] buffer, int length)
+        if (files.Count == 0)
+            files.Add(await AddTablespace(path, type));
+
+        if (files.Count > memoryFiles.Length)
+        {
+            int tablespaceOffsets = files.Count + (NumberOfTablespaces - files.Count % NumberOfTablespaces);
+            Array.Resize<MemoryMappedFile>(ref memoryFiles, tablespaceOffsets);
+            Array.Resize<MemoryMappedViewAccessor>(ref tablespaces, tablespaceOffsets);
+        }
+
+        // Calculate total available space
+        totalspaceSize = tablespaces.Length * Config.TableSpaceSize;
+        numberTablespaces = tablespaces.Length;
+
+        Console.WriteLine(numberTablespaces);        
+        Console.WriteLine(totalspaceSize);
+        Console.WriteLine(totalspaceSize / Config.TableSpaceSize);
+        Console.WriteLine((Config.TableSpaceSize + 1) / (float)totalspaceSize);
+
+        int index = 0;
+
+        for (int i = 0; i < files.Count; i++)
+        {
+            FileInfo file = files[i];
+
+            MemoryMappedFile memoryFile = MemoryMappedFile.CreateFromFile(file.FullName, FileMode.Open);
+            MemoryMappedViewAccessor accessor = memoryFile.CreateViewAccessor();
+
+            memoryFiles[index] = memoryFile;
+            tablespaces[index++] = accessor;
+        }
+    }
+
+    private async Task<FileInfo> AddTablespace(string path, string type)
     {
-		foreach (MemoryMappedViewAccessor accessor in accessors)
-			accessor.WriteArray<byte>(offset, buffer, 0, length);
-	}
+        string next = DataDirectory.GetNextFile(files, type);
 
-	public void Flush()
+        string tablespacePath = Path.Combine(path, type + next);
+
+        // @todo initialize the tablespace in a faster way
+        await File.WriteAllBytesAsync(tablespacePath, new byte[Config.TableSpaceSize]);
+
+        return new(tablespacePath);
+    }
+
+    private async ValueTask<MemoryMappedViewAccessor> GetTablespace(int offset)
     {
-		foreach (MemoryMappedViewAccessor accessor in accessors)
-			accessor.Flush();
-	}
+        int index = offset / totalspaceSize;
 
-	public void Dispose()
-	{
-		foreach (MemoryMappedViewAccessor accessor in accessors)
-		{
-			if (accessor != null)
-				accessor.Dispose();
-		}
+        if (index < tablespaces.Length && tablespaces[index] != null)
+            return tablespaces[index];
 
-		foreach (MemoryMappedFile memoryFile in memoryFiles)
-		{
-			if (memoryFile != null)
-				memoryFile.Dispose();
-		}
-	}
+        try
+        {
+            await semaphore.WaitAsync();
+
+            FileInfo file = await AddTablespace(path, type);
+            files.Add(file);
+
+            MemoryMappedFile memoryFile = MemoryMappedFile.CreateFromFile(file.FullName, FileMode.Open);
+            MemoryMappedViewAccessor accessor = memoryFile.CreateViewAccessor();
+
+            if (index < tablespaces.Length)
+            {
+                memoryFiles[index] = memoryFile;
+                tablespaces[index] = accessor;
+            } 
+
+            return accessor;
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    public async Task Read(int offset, byte[] buffer, int length)
+    {
+        MemoryMappedViewAccessor tablespace = await GetTablespace(offset);
+        tablespace.ReadArray<byte>(offset, buffer, 0, length);
+    }
+
+    public async Task Write(int offset, byte[] buffer, int length)
+    {
+        MemoryMappedViewAccessor tablespace = await GetTablespace(offset);
+        tablespace.WriteArray<byte>(offset, buffer, 0, length);
+    }
+
+    public void Flush()
+    {
+        for (int i = 0; i < tablespaces.Length; i++)
+        {
+            if (tablespaces[i] != null)
+                tablespaces[i].Flush();
+        }
+    }
+
+    public void Dispose()
+    {
+        for (int i = 0; i < tablespaces.Length; i++)
+        {
+            if (tablespaces[i] != null)
+                tablespaces[i].Dispose();
+        }
+
+        foreach (MemoryMappedFile memoryFile in memoryFiles)
+        {
+            if (memoryFile != null)
+                memoryFile.Dispose();
+        }
+    }
 }
