@@ -25,7 +25,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 {
     private static int CurrentId = -1;
 
-    public BTreeNode<TKey, TValue> root;       // root of the B-tree
+    public BTreeNode<TKey, TValue>? root;  // root of the B-tree
 
     public int Id;    // unique tree id
 
@@ -42,7 +42,6 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
      */
     public BTree(int rootOffset)
     {
-        root = new BTreeNode<TKey, TValue>(0);
         PageOffset = rootOffset;
         Id = Interlocked.Increment(ref CurrentId);
 
@@ -86,6 +85,9 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
      */
     public TValue? Get(TKey key)
     {
+        if (root is null)
+            return default;
+
         return Search(root, key, height);
     }
 
@@ -158,8 +160,6 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     private static IEnumerable<BTreeNode<TKey, TValue>> NodesTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
     {
-        //Console.WriteLine("ht={0}", ht);
-
         if (node is null)
             yield break;
 
@@ -183,8 +183,6 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     private static IEnumerable<BTreeNode<TKey, TValue>> NodesReverseTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
     {
-        //Console.WriteLine("ht={0}", ht);
-
         if (node is null)
             yield break;
 
@@ -201,21 +199,24 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     {
         BTreeInsertDeltas<TKey, TValue> deltas = new();
 
-        //Console.WriteLine("Put {0} {1}\nStackTrace: '{2}'", key, value, Environment.StackTrace);
+        if (root is null) // create root
+        {
+            root = new BTreeNode<TKey, TValue>(0);
+            deltas.Deltas.Add(root);
+        }
 
-        BTreeNode<TKey, TValue>? u = Insert(root, key, value, height, deltas);
+        BTreeNode<TKey, TValue>? split = Insert(root, key, value, height, deltas);
         size++;
 
-        if (u == null)
+        if (split is null)
             return deltas;
 
         // need to split root
         BTreeNode<TKey, TValue> newRoot = new(2);
         deltas.Deltas.Add(newRoot);
-        //Console.WriteLine("Node {0} is now root", newRoot.Id);
 
         newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, default, root);
-        newRoot.children[1] = new BTreeEntry<TKey, TValue>(u.children[0].Key, default, u);
+        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, default, split);
 
         root = newRoot;
 
@@ -223,8 +224,6 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         root.PageOffset = -1;
         root.Dirty = true;
         deltas.Deltas.Add(newRoot);
-
-        //Console.WriteLine("Node {0} is now root", root.Id);
 
         height++;
 
@@ -260,13 +259,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    BTreeNode<TKey, TValue>? u = Insert(children[j++].Next, key, val, ht - 1, deltas);
+                    BTreeNode<TKey, TValue>? split = Insert(children[j++].Next, key, val, ht - 1, deltas);
 
-                    if (u == null)
+                    if (split == null)
                         return null;
 
-                    newEntry.Key = u.children[0].Key;
-                    newEntry.Next = u;
+                    newEntry.Key = split.children[0].Key;
+                    newEntry.Next = split;
                     break;
                 }
             }

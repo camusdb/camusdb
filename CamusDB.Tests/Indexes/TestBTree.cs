@@ -127,7 +127,7 @@ internal sealed class TestBTree
         BTree<int, int?> tree = new(0);
 
         deltas = tree.Put(4, 100);
-        Assert.AreEqual(1, deltas.Deltas.Count);
+        Assert.AreEqual(2, deltas.Deltas.Count);
 
         deltas = tree.Put(5, 100);
         Assert.AreEqual(1, deltas.Deltas.Count);
@@ -152,7 +152,7 @@ internal sealed class TestBTree
 
         Assert.AreEqual(tree.Size(), 8);
         Assert.AreEqual(tree.Height(), 1);
-    }
+    }    
 
     [Test]
     public void TestBasicRemove()
