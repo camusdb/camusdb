@@ -20,6 +20,8 @@ public sealed class BTreeMultiEntry<T> where T : IComparable<T>
 
     public BTreeMultiNode<T>? Next;     // helper field to iterate over array entries
 
+    public bool Lazy;
+
     public BTreeMultiEntry(T key, BTreeMultiNode<T>? next)
     {
         Key = key;        

@@ -1,4 +1,11 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.IO;
 using System.Text;
 using CamusDB.Core;
@@ -10,6 +17,16 @@ namespace CamusDB.Tests.Indexes;
 
 public class TestBTreeMulti
 {
+    [Test]
+    public void TestEmpty()
+    {
+        BTreeMulti<int> tree = new(0);
+
+        Assert.AreEqual(tree.Size(), 0);
+        Assert.AreEqual(tree.Height(), 0);
+        Assert.IsTrue(tree.IsEmpty());
+    }
+
     [Test]
     public void TestBasicInsert()
     {

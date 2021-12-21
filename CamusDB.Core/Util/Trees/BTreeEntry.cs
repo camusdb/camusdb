@@ -16,7 +16,9 @@ public sealed class BTreeEntry<TKey, TValue>
 
     public TValue? Value;
 
-    public BTreeNode<TKey, TValue>? Next;     // helper field to iterate over array entries    
+    public BTreeNode<TKey, TValue>? Next;     // helper field to iterate over array entries
+
+    public bool Lazy; // whether the "next" node is loaded from disk
 
     public BTreeEntry(TKey key, TValue? value, BTreeNode<TKey, TValue>? next)
     {

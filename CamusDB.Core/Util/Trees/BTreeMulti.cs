@@ -13,6 +13,7 @@ namespace CamusDB.Core.Util.Trees;
 
 /**
  *  B+Tree Multi is a tree of B+Trees used for multi keys
+ *  
  *  Unique values across the index point to other trees where the rowids are unique values 
  *  pointing to page offsets
  */
@@ -32,7 +33,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
     public int PageOffset = -1; // page offset to root node
 
-    public SemaphoreSlim WriteLock { get; } = new(1, 1);
+    public SemaphoreSlim WriteLock { get; } = new(1, 1); // global lock
 
     /**
      * Initializes an empty B-tree.

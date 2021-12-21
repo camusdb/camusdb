@@ -12,15 +12,22 @@ using System.Collections.Generic;
 namespace CamusDB.Core.Util.Trees;
 
 /**
- *  B+Tree structure than can be stored on disk
- */ 
+ *  B+Tree 
+ *  
+ * A B+ tree is an m-ary tree with a variable but often large number of children per node. 
+ * A B+ tree consists of a root, internal nodes and leaves. The root may be either a 
+ * leaf or a node with two or more children.
+ * 
+ * The implementation use C# generics to support any type of keys and values in an optimal way.
+ * The lazy feature allows to load/unload used/unused nodes to/from disk to save memory.
+ */
 public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 {
     private static int CurrentId = -1;
 
     public BTreeNode<TKey, TValue> root;       // root of the B-tree
 
-    public int Id;    // Unique tree id
+    public int Id;    // unique tree id
 
     public int height;      // height of the B-tree
 
