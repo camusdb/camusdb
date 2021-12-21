@@ -41,10 +41,10 @@ public class CamusStartup
 
     private async Task RecoverDatabase(string path)
     {
-        string lockPath = Path.Combine(path, "camus.lock");
+        /*string lockPath = Path.Combine(path, "camus.lock");
 
         if (!File.Exists(lockPath))
-            return;        
+            return;        */
         
         string[] parts = path.Split(Path.DirectorySeparatorChar);
         string databaseName = parts[^1];
