@@ -14,6 +14,7 @@ using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.Journal.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Serializer.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -68,9 +69,10 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
     {
-        ticket.Index.Remove(ticket.Key);
+        (bool found, List<BTreeNode<ColumnValue, BTreeTuple?>> deltas) = ticket.Index.Remove(ticket.Key);
 
-        await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index, new());
+        if (found)
+            await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index, deltas);
     }
 
     private static async Task Persist(
@@ -95,7 +97,11 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 node.PageOffset = await tablespace.GetNextFreeOffset();
         }
 
-        byte[] treeBuffer = new byte[12]; // height(4 byte) + size(4 byte) + root(4 byte)
+        byte[] treeBuffer = new byte[
+            SerializatorTypeSizes.TypeInteger32 + // height(4 byte) +
+            SerializatorTypeSizes.TypeInteger32 + // size(4 byte)
+            SerializatorTypeSizes.TypeInteger32 // root(4 byte)
+        ]; 
 
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
@@ -122,7 +128,11 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 continue;
             }
 
-            byte[] nodeBuffer = new byte[8 + GetKeySizes(node)]; // keyCount(4 byte) + pageOffset(4 byte)
+            byte[] nodeBuffer = new byte[
+                SerializatorTypeSizes.TypeInteger32 + // keyCount(4 byte) + 
+                SerializatorTypeSizes.TypeInteger32 + // pageOffset(4 byte)
+                GetKeySizes(node)
+            ]; 
 
             pointer = 0;
             Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);

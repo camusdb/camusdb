@@ -29,9 +29,9 @@ internal sealed class IndexSaver
         indexUniqueOffsetSaver = new(this);
     }
 
-    public async Task Save(BufferPoolHandler tablespace, BTree<int, int?> index, int key, int value, bool insert = true)
+    public async Task Save(SaveUniqueOffsetIndexTicket ticket)
     {
-        await indexUniqueOffsetSaver.Save(tablespace, index, key, value, insert);
+        await indexUniqueOffsetSaver.Save(ticket);
     }
 
     public async Task Save(SaveUniqueIndexTicket ticket)

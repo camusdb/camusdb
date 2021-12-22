@@ -8,6 +8,7 @@
 
 using System.Collections;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -21,7 +22,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 {
     private static int CurrentId = -1;
 
-    public BTreeMultiNode<TKey> root;       // root of the B-tree
+    public BTreeMultiNode<TKey>? root;       // root of the B-tree
 
     public int Id; // unique id
 
@@ -39,8 +40,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
      * Initializes an empty B-tree.
      */
     public BTreeMulti(int rootOffset)
-    {
-        root = new BTreeMultiNode<TKey>(0);
+    {        
         PageOffset = rootOffset;
         Id = Interlocked.Increment(ref CurrentId);
     }
@@ -216,22 +216,29 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         }
     }
 
-    public void Put(TKey key, int value)
+    public List<BTreeMultiNode<TKey>> Put(TKey key, int value)
     {
-        Put(key, new BTreeTuple(value, 0));
+        return Put(key, new BTreeTuple(value, 0));
     }
 
-    public void Put(TKey key, BTreeTuple value)
+    public List<BTreeMultiNode<TKey>> Put(TKey key, BTreeTuple value)
     {
-        //Console.WriteLine("Inserting in multitree {0} {1} {2}", Id, key, value);
+        List<BTreeMultiNode<TKey>> deltas = new();
 
-        BTreeMultiNode<TKey>? split = Insert(root, key, value, height);
+        if (root is null)
+        {
+            root = new BTreeMultiNode<TKey>(0);
+            deltas.Add(root);
+        }        
+
+        BTreeMultiNode<TKey>? split = Insert(root, key, value, height, deltas);
         denseSize++;
-        if (split == null) return;
+
+        if (split == null)
+            return deltas;
 
         // need to split root
-        BTreeMultiNode<TKey> newRoot = new(2);
-        //Console.WriteLine("Node {0} is now root", newRoot.Id);
+        BTreeMultiNode<TKey> newRoot = new(2);        
 
         newRoot.children[0] = new BTreeMultiEntry<TKey>(root.children[0].Key, root);
         newRoot.children[1] = new BTreeMultiEntry<TKey>(split.children[0].Key, split);
@@ -240,14 +247,19 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
         newRoot.PageOffset = root.PageOffset;
         root.PageOffset = -1;
-        root.Dirty = true;
 
-        //Console.WriteLine("Node {0} is now root", root.Id);
+        if (root.Dirty == false)
+        {
+            root.Dirty = true;
+            deltas.Add(root);
+        }
 
         height++;
+
+        return deltas;
     }
 
-    private BTreeMultiNode<TKey>? Insert(BTreeMultiNode<TKey>? node, TKey key, BTreeTuple val, int ht)
+    private BTreeMultiNode<TKey>? Insert(BTreeMultiNode<TKey>? node, TKey key, BTreeTuple val, int ht, List<BTreeMultiNode<TKey>> deltas)
     {
         if (node is null)
             throw new ArgumentException("node cannot be null");
@@ -287,7 +299,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    BTreeMultiNode<TKey>? split = Insert(children[j++].Next, key, val, ht - 1);
+                    BTreeMultiNode<TKey>? split = Insert(children[j++].Next, key, val, ht - 1, deltas);
 
                     if (split == null)
                         return null;
@@ -316,25 +328,35 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
         node.children[j] = newEntry;
         node.KeyCount++;
-        node.Dirty = true;
+
+        if (node.Dirty == false)
+        {
+            node.Dirty = true;
+            deltas.Add(node);
+        }
 
         //Console.WriteLine("Node {0} marked as dirty as child added", node.Id);
 
         if (node.KeyCount < BTreeConfig.MaxChildren)
             return null;
 
-        return Split(node);
+        return Split(node, deltas);
     }
 
     // split node in half
-    private static BTreeMultiNode<TKey> Split(BTreeMultiNode<TKey> current)
+    private static BTreeMultiNode<TKey> Split(BTreeMultiNode<TKey> current, List<BTreeMultiNode<TKey>> deltas)
     {
         BTreeMultiNode<TKey> split = new(BTreeConfig.MaxChildrenHalf);
 
         //Console.WriteLine("Node {0} marked as dirty because of split", t.Id);
 
         current.KeyCount = BTreeConfig.MaxChildrenHalf;
-        current.Dirty = true;
+
+        if (current.Dirty == false)
+        {
+            current.Dirty = true;
+            deltas.Add(current);
+        }
 
         //Console.WriteLine("Node {0} marked as dirty because of split", current.Id);
 
@@ -393,7 +415,12 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
                 node.children[j] = node.children[j + 1];
 
             node.KeyCount--;
-            node.Dirty = true;
+
+            if (node.Dirty == false)
+            {
+                node.Dirty = true;
+                //deltas
+            }
             return true;
         }
 
@@ -411,11 +438,13 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
     }
 
     // comparison functions - make Comparable instead of Key to avoid casts
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool Less(TKey k1, TKey k2)
     {
         return k1!.CompareTo(k2) < 0;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool Eq(TKey k1, TKey k2)
     {
         return k1.CompareTo(k2) == 0;

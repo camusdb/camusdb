@@ -158,8 +158,16 @@ internal sealed class RowInserter
         UpdateTableIndexLog indexSchedule = new(state.Sequence);
         uint updateIndexSequence = await journalWriter.Append(state.Ticket.ForceFailureType, indexSchedule);
 
+        SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
+            tablespace: tablespace,
+            index: state.Table.Rows,
+            key: state.RowTuple.SlotOne,
+            value: state.RowTuple.SlotTwo,
+            insert: true
+        );
+
         // Main table index stores rowid pointing to page offeset
-        await indexSaver.Save(tablespace, state.Table.Rows, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
+        await indexSaver.Save(saveUniqueOffsetIndex);
 
         UpdateTableIndexCheckpointLog checkpointSchedule = new(state.Sequence, updateIndexSequence);
         await journalWriter.Append(state.Ticket.ForceFailureType, checkpointSchedule);

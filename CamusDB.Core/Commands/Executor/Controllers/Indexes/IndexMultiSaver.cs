@@ -11,6 +11,7 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -58,9 +59,9 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
     private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
     {
-        index.Put(key, value);
+        List<BTreeMultiNode<ColumnValue>> deltas = index.Put(key, value);
 
-        await PersistSave(tablespace, index, value);
+        await PersistSave(tablespace, index, value, deltas);
     }
 
     private static async Task RemoveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
@@ -70,15 +71,28 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         await PersistRemove(tablespace, index);
     }
 
-    private async Task PersistSave(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, BTreeTuple value)
+    private async Task PersistSave(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, BTreeTuple value, List<BTreeMultiNode<ColumnValue>> deltas)
     {
-        foreach (BTreeMultiNode<ColumnValue> node in index.NodesTraverse())
+        List<BTreeMultiNode<ColumnValue>> dirties = new();
+
+        /*foreach (BTreeMultiNode<ColumnValue> node in index.NodesTraverse())
         {
             if (node.PageOffset == -1)
             {
                 node.Dirty = true;
                 node.PageOffset = await tablespace.GetNextFreeOffset();
             }
+
+            if (node.Dirty)
+                dirties.Add(node);
+        }
+
+        Console.WriteLine("Dirties={0} Deltas={1}", dirties.Count, deltas.Count);*/
+
+        foreach (BTreeMultiNode<ColumnValue> node in deltas)
+        {
+            if (node.PageOffset == -1)            
+                node.PageOffset = await tablespace.GetNextFreeOffset();
         }
 
         byte[] treeBuffer = new byte[SerializatorTypeSizes.TypeInteger32 * 4]; // height(4 byte) + size(4 byte) + denseSize(4 byte) + root(4 byte)
@@ -87,7 +101,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.denseSize, ref pointer);
-        Serializator.WriteInt32(treeBuffer, index.root.PageOffset, ref pointer);
+        Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);
 
         await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
 
@@ -107,7 +121,10 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
             }
 
             // @todo number entries must not be harcoded
-            byte[] nodeBuffer = new byte[SerializatorTypeSizes.TypeInteger32 * 2 + GetKeySizes(node)]; // 8 node entries + 12 int (4 byte) * nodeKeyCount
+            byte[] nodeBuffer = new byte[
+                SerializatorTypeSizes.TypeInteger32 * 2 + // 8 node entries + 12 int (4 byte) * nodeKeyCount
+                GetKeySizes(node)
+            ]; 
 
             pointer = 0;
             Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);
@@ -140,7 +157,15 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                 if (subTree.PageOffset == -1)
                     subTree.PageOffset = await tablespace.GetNextFreeOffset();
 
-                await indexSaver.Save(tablespace, subTree, value.SlotOne, value.SlotTwo, false);
+                SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
+                    tablespace: tablespace,
+                    index: subTree,
+                    key: value.SlotOne,
+                    value.SlotTwo,
+                    insert: false
+                );
+
+                await indexSaver.Save(saveUniqueOffsetIndex);
 
                 //Console.WriteLine("Write Tree={0} PageOffset={1}", subTree.Id, subTree.PageOffset);
 
@@ -168,7 +193,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
             {
                 node.Dirty = true;
                 node.PageOffset = await tablespace.GetNextFreeOffset();
-            }
+            }            
         }
 
         byte[] treeBuffer = new byte[SerializatorTypeSizes.TypeInteger32 * 3]; // height(4 byte) + size(4 byte) + root(4 byte)
@@ -176,7 +201,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
-        Serializator.WriteInt32(treeBuffer, index.root.PageOffset, ref pointer);
+        Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);
 
         await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
 

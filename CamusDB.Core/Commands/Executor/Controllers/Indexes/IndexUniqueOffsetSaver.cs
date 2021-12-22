@@ -9,6 +9,8 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Serializer.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -21,17 +23,17 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task Save(BufferPoolHandler tablespace, BTree<int, int?> index, int key, int value, bool insert = true)
+    public async Task Save(SaveUniqueOffsetIndexTicket ticket)
     {
         try
         {
-            await index.WriteLock.WaitAsync();
+            await ticket.Index.WriteLock.WaitAsync();
 
-            await SaveInternal(tablespace, index, key, value, insert);
+            await SaveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.Value, ticket.Insert);
         }
         finally
         {
-            index.WriteLock.Release();
+            ticket.Index.WriteLock.Release();
         }
     }
 
@@ -51,7 +53,11 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
             //Console.WriteLine("Will save node at {0}", node.PageOffset);
         }
 
-        byte[] treeBuffer = new byte[12]; // height + size + root
+        byte[] treeBuffer = new byte[
+            SerializatorTypeSizes.TypeInteger32 + // height(4 byte) +
+            SerializatorTypeSizes.TypeInteger32 + // size(4 byte)
+            SerializatorTypeSizes.TypeInteger32 // root(4 byte)
+        ];
 
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);

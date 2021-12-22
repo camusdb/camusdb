@@ -391,7 +391,8 @@ public class TestBTreeMulti
         Assert.AreEqual(8, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        Assert.IsTrue(tree.Remove(11));
+        (bool found, _) = tree.Remove(11);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(7, tree.Size());
         Assert.AreEqual(1, tree.Height());

@@ -19,7 +19,7 @@ async function f()
           },
           "code": {
             "type": 2, // integer
-            "value": "1235",
+            "value": parseInt(Math.random() * 20).toString(),
           },
           "name": {
             "type": 3, // string

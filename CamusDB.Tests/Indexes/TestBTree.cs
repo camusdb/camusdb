@@ -162,8 +162,8 @@ internal sealed class TestBTree
 
         tree.Put(5, 100);
 
-        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(5);
-        Assert.IsTrue(result.found);
+        (bool found, _) = tree.Remove(5);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(0, tree.Size());
         Assert.AreEqual(0, tree.Height());
@@ -176,8 +176,8 @@ internal sealed class TestBTree
 
         tree.Put(5, 100);
 
-        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(10);
-        Assert.IsFalse(result.found);
+        (bool found, _) = tree.Remove(10);
+        Assert.IsFalse(found);
 
         Assert.AreEqual(1, tree.Size());
         Assert.AreEqual(0, tree.Height());
@@ -195,8 +195,8 @@ internal sealed class TestBTree
         tree.Put(8, 103);
         tree.Put(9, 104);
 
-        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(5);
-        Assert.IsTrue(result.found);
+        (bool found, _) = tree.Remove(5);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
@@ -214,8 +214,8 @@ internal sealed class TestBTree
         tree.Put(8, 103);
         tree.Put(9, 104);
 
-        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(5);
-        Assert.IsTrue(result.found);
+        (bool found, _) = tree.Remove(5);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
@@ -236,8 +236,8 @@ internal sealed class TestBTree
         tree.Put(8, 103);
         tree.Put(9, 104);
 
-        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(5);
-        Assert.IsTrue(result.found);
+        (bool found, _) = tree.Remove(5);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
@@ -278,8 +278,8 @@ internal sealed class TestBTree
         Assert.AreEqual(8, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(5);
-        Assert.IsTrue(result.found);
+        (bool found, _) = tree.Remove(5);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(7, tree.Size());
         Assert.AreEqual(1, tree.Height());
@@ -305,8 +305,8 @@ internal sealed class TestBTree
         Assert.AreEqual(8, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(11);
-        Assert.IsTrue(result.found);
+        (bool found, _) = tree.Remove(11);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(7, tree.Size());
         Assert.AreEqual(1, tree.Height());
@@ -331,8 +331,8 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 50; i += 5)
         {
-            (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(i);
-            Assert.IsTrue(result.found);
+            (bool found, _) = tree.Remove(i);
+            Assert.IsTrue(found);
         }
 
         Assert.AreEqual(40, tree.Size());
@@ -364,8 +364,8 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 64; i += 8)
         {
-            (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(i);
-            Assert.IsTrue(result.found);
+            (bool found, _) = tree.Remove(i);
+            Assert.IsTrue(found);
         }
 
         Assert.AreEqual(56, tree.Size());
@@ -396,8 +396,8 @@ internal sealed class TestBTree
 
         for (int i = 7; i < 49; i += 7)
         {
-            (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(i);
-            Assert.IsTrue(result.found);
+            (bool found, _) = tree.Remove(i);
+            Assert.IsTrue(found);
         }
 
         Assert.AreEqual(43, tree.Size());
@@ -428,8 +428,8 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 64; i++)
         {
-            (bool found, List<BTreeNode<int, int?>> deltas) result = tree.Remove(i);
-            Assert.IsTrue(result.found);
+            (bool found, _) = tree.Remove(i);
+            Assert.IsTrue(found);
         }
 
         Assert.AreEqual(0, tree.Size());

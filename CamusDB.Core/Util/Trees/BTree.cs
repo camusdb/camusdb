@@ -8,6 +8,7 @@
 
 using System.Collections;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -387,11 +388,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     }
 
     // comparison functions - make Comparable instead of Key to avoid casts
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool Less(TKey k1, TKey k2)
     {
         return k1!.CompareTo(k2) < 0;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool Eq(TKey k1, TKey k2)
     {
         return k1.CompareTo(k2) == 0;
