@@ -203,6 +203,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (root is null) // create root
         {
             root = new BTreeNode<TKey, TValue>(0);
+            root.Dirty = true;
             deltas.Add(root);
         }
 
@@ -214,21 +215,22 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         // need to split root
         BTreeNode<TKey, TValue> newRoot = new(2);
+        newRoot.Dirty = true;
         deltas.Add(newRoot);
 
         newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, default, root);
         newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, default, split);
 
+        if (root.Dirty == false)
+        {
+            root.Dirty = true;
+            deltas.Add(root);
+        }
+
         root = newRoot;
 
         newRoot.PageOffset = root.PageOffset;
         root.PageOffset = -1;
-
-        if (root.Dirty == false)
-        {
-            root.Dirty = true;
-            deltas.Add(newRoot);
-        }
 
         height++;
 
@@ -276,6 +278,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             }
         }
 
+        //throw new Exception(node.Dirty.ToString());
+
         for (int i = node.KeyCount; i > j; i--)
             node.children[i] = node.children[i - 1];
 
@@ -298,7 +302,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     private static BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, List<BTreeNode<TKey, TValue>> deltas)
     {
         BTreeNode<TKey, TValue> newNode = new(BTreeConfig.MaxChildrenHalf);
-        deltas.Add(newNode);        
+        newNode.Dirty = true;
+        deltas.Add(newNode);
 
         current.KeyCount = BTreeConfig.MaxChildrenHalf;
 

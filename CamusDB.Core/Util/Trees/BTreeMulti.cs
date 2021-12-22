@@ -40,7 +40,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
      * Initializes an empty B-tree.
      */
     public BTreeMulti(int rootOffset)
-    {        
+    {
         PageOffset = rootOffset;
         Id = Interlocked.Increment(ref CurrentId);
     }
@@ -229,7 +229,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         {
             root = new BTreeMultiNode<TKey>(0);
             deltas.Add(new BTreeMultiDelta<TKey>(root, null));
-        }        
+        }
 
         BTreeMultiNode<TKey>? split = Insert(root, key, value, height, deltas);
         denseSize++;
@@ -238,7 +238,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             return deltas;
 
         // need to split root
-        BTreeMultiNode<TKey> newRoot = new(2);        
+        BTreeMultiNode<TKey> newRoot = new(2);
 
         newRoot.children[0] = new BTreeMultiEntry<TKey>(root.children[0].Key, root);
         newRoot.children[1] = new BTreeMultiEntry<TKey>(split.children[0].Key, split);
@@ -313,11 +313,12 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
                         return null;
 
                     newEntry = new(split.children[0].Key, split);
-                    newEntry.Value = new BTree<int, int?>(-1);                    
+                    newEntry.Value = new BTree<int, int?>(-1);
+                    //size++;
                     break;
                 }
             }
-        }        
+        }
 
         for (int i = node.KeyCount; i > j; i--)
             node.children[i] = node.children[i - 1];

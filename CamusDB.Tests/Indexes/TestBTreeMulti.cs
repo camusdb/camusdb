@@ -131,9 +131,9 @@ public class TestBTreeMulti
         tree.Put(5, 100);
         tree.Put(5, 101);
 
-        Assert.AreEqual(tree.Size(), 1);
-        Assert.AreEqual(tree.DenseSize(), 2);
-        Assert.AreEqual(tree.Height(), 0);
+        Assert.AreEqual(1, tree.Size());
+        Assert.AreEqual(2, tree.DenseSize());
+        Assert.AreEqual(0, tree.Height());
     }
 
     [Test]

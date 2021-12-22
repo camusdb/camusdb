@@ -19,7 +19,7 @@ public sealed class BTreeNode<TKey, TValue>
 
     public int PageOffset = -1;       // on-disk offset
 
-    public bool Dirty = true; // whether the node must be persisted
+    public bool Dirty = false; // whether the node must be persisted
 
     public BTreeEntry<TKey, TValue>[] children = new BTreeEntry<TKey, TValue>[BTreeConfig.MaxChildren];   // the array of children
 
