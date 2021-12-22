@@ -29,7 +29,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         {
             await ticket.Index.WriteLock.WaitAsync();
 
-            await SaveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.Value, ticket.Insert);
+            await SaveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.Value, ticket.Deltas);
         }
         finally
         {
@@ -37,20 +37,21 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         }
     }
 
-    private static async Task SaveInternal(BufferPoolHandler tablespace, BTree<int, int?> index, int key, int value, bool insert)
+    private static async Task SaveInternal(
+        BufferPoolHandler tablespace,
+        BTree<int, int?> index,
+        int key,
+        int value,
+        List<BTreeNode<int, int?>>? deltas
+    )
     {
-        if (insert)
-            index.Put(key, value);
+        if (deltas is null)
+            deltas = index.Put(key, value);
 
-        foreach (BTreeNode<int, int?> node in index.NodesTraverse())
+        foreach (BTreeNode<int, int?> node in deltas)
         {
             if (node.PageOffset == -1)
-            {
-                node.Dirty = true;
                 node.PageOffset = await tablespace.GetNextFreeOffset();
-            }
-
-            //Console.WriteLine("Will save node at {0}", node.PageOffset);
         }
 
         byte[] treeBuffer = new byte[
@@ -64,13 +65,13 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);
 
-        await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);        
+        await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
 
         //@todo update nodes concurrently
 
         int dirty = 0, noDirty = 0;
 
-        foreach (BTreeNode<int, int?> node in index.NodesTraverse())
+        foreach (BTreeNode<int, int?> node in deltas)
         {
             if (!node.Dirty)
             {
@@ -79,7 +80,11 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
                 continue;
             }
 
-            byte[] nodeBuffer = new byte[8 + 12 * node.KeyCount];
+            byte[] nodeBuffer = new byte[
+                SerializatorTypeSizes.TypeInteger32 + // key count
+                SerializatorTypeSizes.TypeInteger32 + // page offset
+                12 * node.KeyCount
+            ];
 
             pointer = 0;
             Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);

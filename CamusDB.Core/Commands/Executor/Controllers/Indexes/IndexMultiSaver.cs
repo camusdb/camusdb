@@ -59,7 +59,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
     private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
     {
-        List<BTreeMultiNode<ColumnValue>> deltas = index.Put(key, value);
+        List<BTreeMultiDelta<ColumnValue>> deltas = index.Put(key, value);
 
         await PersistSave(tablespace, index, value, deltas);
     }
@@ -71,28 +71,17 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         await PersistRemove(tablespace, index);
     }
 
-    private async Task PersistSave(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, BTreeTuple value, List<BTreeMultiNode<ColumnValue>> deltas)
+    private async Task PersistSave(
+        BufferPoolHandler tablespace,
+        BTreeMulti<ColumnValue> index,
+        BTreeTuple value,
+        List<BTreeMultiDelta<ColumnValue>> deltas
+    )
     {
-        List<BTreeMultiNode<ColumnValue>> dirties = new();
-
-        /*foreach (BTreeMultiNode<ColumnValue> node in index.NodesTraverse())
+        foreach (BTreeMultiDelta<ColumnValue> delta in deltas)
         {
-            if (node.PageOffset == -1)
-            {
-                node.Dirty = true;
-                node.PageOffset = await tablespace.GetNextFreeOffset();
-            }
-
-            if (node.Dirty)
-                dirties.Add(node);
-        }
-
-        Console.WriteLine("Dirties={0} Deltas={1}", dirties.Count, deltas.Count);*/
-
-        foreach (BTreeMultiNode<ColumnValue> node in deltas)
-        {
-            if (node.PageOffset == -1)            
-                node.PageOffset = await tablespace.GetNextFreeOffset();
+            if (delta.Node.PageOffset == -1)
+                delta.Node.PageOffset = await tablespace.GetNextFreeOffset();
         }
 
         byte[] treeBuffer = new byte[SerializatorTypeSizes.TypeInteger32 * 4]; // height(4 byte) + size(4 byte) + denseSize(4 byte) + root(4 byte)
@@ -111,8 +100,10 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
         int dirty = 0, noDirty = 0;
 
-        foreach (BTreeMultiNode<ColumnValue> node in index.NodesTraverse())
+        foreach (BTreeMultiDelta<ColumnValue> delta in deltas)
         {
+            BTreeMultiNode<ColumnValue> node = delta.Node;
+
             if (!node.Dirty)
             {
                 noDirty++;
@@ -122,8 +113,9 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
             // @todo number entries must not be harcoded
             byte[] nodeBuffer = new byte[
-                SerializatorTypeSizes.TypeInteger32 * 2 + // 8 node entries + 12 int (4 byte) * nodeKeyCount
-                GetKeySizes(node)
+                SerializatorTypeSizes.TypeInteger32 + // key count
+                SerializatorTypeSizes.TypeInteger32 + // page offset
+                GetKeySizes(node) // 12 int (4 byte) * nodeKeyCount
             ]; 
 
             pointer = 0;
@@ -162,7 +154,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                     index: subTree,
                     key: value.SlotOne,
                     value.SlotTwo,
-                    insert: false
+                    deltas: delta.InnerDeltas
                 );
 
                 await indexSaver.Save(saveUniqueOffsetIndex);
@@ -219,9 +211,12 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                 //Console.WriteLine("Node {0} at {1} is not dirty", node.Id, node.PageOffset);
                 continue;
             }
-
-            // @todo number entries must not be harcoded
-            byte[] nodeBuffer = new byte[8 + GetKeySizes(node)]; // 8 node entries + 12 int (4 byte) * nodeKeyCount
+            
+            byte[] nodeBuffer = new byte[
+                SerializatorTypeSizes.TypeInteger32 + // key count
+                SerializatorTypeSizes.TypeInteger32 + // page offset
+                GetKeySizes(node) // 12 int (4 byte) * nodeKeyCount
+            ];
 
             pointer = 0;
             Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);

@@ -10,6 +10,7 @@ async function f()
     let request = {
         databaseName: "test",
         tableName: "my_table",
+	index: "code"
     };
 
     const response = await fetch('https://localhost:7141/query', {

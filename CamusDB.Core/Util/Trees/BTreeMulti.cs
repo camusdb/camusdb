@@ -216,19 +216,19 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         }
     }
 
-    public List<BTreeMultiNode<TKey>> Put(TKey key, int value)
+    public List<BTreeMultiDelta<TKey>> Put(TKey key, int value)
     {
         return Put(key, new BTreeTuple(value, 0));
     }
 
-    public List<BTreeMultiNode<TKey>> Put(TKey key, BTreeTuple value)
+    public List<BTreeMultiDelta<TKey>> Put(TKey key, BTreeTuple value)
     {
-        List<BTreeMultiNode<TKey>> deltas = new();
+        List<BTreeMultiDelta<TKey>> deltas = new();
 
         if (root is null)
         {
             root = new BTreeMultiNode<TKey>(0);
-            deltas.Add(root);
+            deltas.Add(new BTreeMultiDelta<TKey>(root, null));
         }        
 
         BTreeMultiNode<TKey>? split = Insert(root, key, value, height, deltas);
@@ -251,7 +251,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         if (root.Dirty == false)
         {
             root.Dirty = true;
-            deltas.Add(root);
+            deltas.Add(new BTreeMultiDelta<TKey>(root, null));
         }
 
         height++;
@@ -259,7 +259,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         return deltas;
     }
 
-    private BTreeMultiNode<TKey>? Insert(BTreeMultiNode<TKey>? node, TKey key, BTreeTuple val, int ht, List<BTreeMultiNode<TKey>> deltas)
+    private BTreeMultiNode<TKey>? Insert(BTreeMultiNode<TKey>? node, TKey key, BTreeTuple val, int ht, List<BTreeMultiDelta<TKey>> deltas)
     {
         if (node is null)
             throw new ArgumentException("node cannot be null");
@@ -267,6 +267,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         int j;
         BTreeMultiEntry<TKey>? newEntry = null;
         BTreeMultiEntry<TKey>[] children = node.children;
+        List<BTreeNode<int, int?>> innerDeltas;
 
         // external node at height 0
         if (ht == 0)
@@ -281,7 +282,14 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
                 //if (val is null)
                 //    throw new ArgumentException("val cannot be null");
 
-                child.Value!.Put(val.SlotOne, val.SlotTwo);
+                innerDeltas = child.Value!.Put(val.SlotOne, val.SlotTwo);
+
+                if (node.Dirty == false)
+                {
+                    node.Dirty = true;
+                    deltas.Add(new BTreeMultiDelta<TKey>(node, innerDeltas));
+                }
+
                 return null;
             }
 
@@ -324,7 +332,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             size++;
         }
 
-        newEntry.Value!.Put(val.SlotOne, val.SlotTwo);
+        innerDeltas = newEntry.Value!.Put(val.SlotOne, val.SlotTwo);
 
         node.children[j] = newEntry;
         node.KeyCount++;
@@ -332,7 +340,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         if (node.Dirty == false)
         {
             node.Dirty = true;
-            deltas.Add(node);
+            deltas.Add(new BTreeMultiDelta<TKey>(node, innerDeltas));
         }
 
         //Console.WriteLine("Node {0} marked as dirty as child added", node.Id);
@@ -344,7 +352,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
     }
 
     // split node in half
-    private static BTreeMultiNode<TKey> Split(BTreeMultiNode<TKey> current, List<BTreeMultiNode<TKey>> deltas)
+    private static BTreeMultiNode<TKey> Split(BTreeMultiNode<TKey> current, List<BTreeMultiDelta<TKey>> deltas)
     {
         BTreeMultiNode<TKey> split = new(BTreeConfig.MaxChildrenHalf);
 
@@ -355,7 +363,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         if (current.Dirty == false)
         {
             current.Dirty = true;
-            deltas.Add(current);
+            deltas.Add(new BTreeMultiDelta<TKey>(current, null));
         }
 
         //Console.WriteLine("Node {0} marked as dirty because of split", current.Id);

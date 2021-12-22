@@ -21,17 +21,23 @@ public sealed class SaveUniqueOffsetIndexTicket
 
 	public int Key { get; }
 
-	public int Value { get; }
+	public int Value { get; }	
 
-	public bool Insert { get; }
+	public List<BTreeNode<int, int?>>? Deltas { get; }
 
-	public SaveUniqueOffsetIndexTicket(BufferPoolHandler tablespace, BTree<int, int?> index, int key, int value, bool insert = true)
+	public SaveUniqueOffsetIndexTicket(
+		BufferPoolHandler tablespace,
+		BTree<int, int?> index,
+		int key,
+		int value,		
+		List<BTreeNode<int, int?>>? deltas = null
+	)
 	{
 		Tablespace = tablespace;
 		Index = index;
 		Key = key;
 		Value = value;
-		Insert = insert;
+		Deltas = deltas;
 	}
 }
 

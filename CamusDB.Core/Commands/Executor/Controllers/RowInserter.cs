@@ -162,8 +162,7 @@ internal sealed class RowInserter
             tablespace: tablespace,
             index: state.Table.Rows,
             key: state.RowTuple.SlotOne,
-            value: state.RowTuple.SlotTwo,
-            insert: true
+            value: state.RowTuple.SlotTwo            
         );
 
         // Main table index stores rowid pointing to page offeset
