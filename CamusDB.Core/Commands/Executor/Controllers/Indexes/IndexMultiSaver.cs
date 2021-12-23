@@ -141,7 +141,9 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                     subTree.PageOffset = await tablespace.GetNextFreeOffset();
 
                 if (delta.Value.InnerDeltas is null)
-                    throw new Exception("Inner deltas cannot be null");
+                    throw new Exception("Inner deltas cannot be null on " + delta.Value.Node.Id);
+
+                Console.WriteLine("Saved deltas for {0} {1}", delta.Value.Node.Id, subTree.Id);
 
                 SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
                     tablespace: tablespace,

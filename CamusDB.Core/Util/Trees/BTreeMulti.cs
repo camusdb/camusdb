@@ -102,14 +102,14 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
      * @return the value associated with the given key if the key is in the symbol table
      *         and {@code null} if the key is not in the symbol table
      */
-    public IEnumerable<int> GetAll(TKey key)
+    public async IAsyncEnumerable<int> GetAll(TKey key)
     {
         BTree<int, int?>? subTree = Search(root, key, height);
 
         if (subTree is null)
             yield break;
 
-        foreach (BTreeEntry<int, int?> subTreeEntry in subTree.EntriesTraverse())
+        await foreach (BTreeEntry<int, int?> subTreeEntry in subTree.EntriesTraverse())
             yield return subTreeEntry.Key;
     }
 
@@ -242,17 +242,18 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
         // need to split root
         BTreeMultiNode<TKey> newRoot = new(2);
+        deltas.Add(newRoot.Id, new BTreeMultiDelta<TKey>(newRoot, null));
 
         newRoot.children[0] = new BTreeMultiEntry<TKey>(root.children[0].Key, root);
         newRoot.children[1] = new BTreeMultiEntry<TKey>(split.children[0].Key, split);
+
+        if (!deltas.ContainsKey(root.Id))
+            deltas.Add(root.Id, new BTreeMultiDelta<TKey>(root, null));
 
         root = newRoot;
 
         newRoot.PageOffset = root.PageOffset;
         root.PageOffset = -1;
-
-        if (!deltas.ContainsKey(root.Id))
-            deltas.Add(root.Id, new BTreeMultiDelta<TKey>(root, null));
 
         height++;
 
@@ -262,7 +263,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
     private async Task<BTreeMultiNode<TKey>?> Insert(BTreeMultiNode<TKey>? node, TKey key, BTreeTuple val, int ht, Dictionary<int, BTreeMultiDelta<TKey>> deltas)
     {
         if (node is null)
-            throw new ArgumentException("node cannot be null " + ht);
+            throw new ArgumentException("node cannot be null " + ht + " " + (root is null ? "null" : "no null"));
 
         int j;
         BTreeMultiDelta<TKey>? multiDelta;
@@ -341,7 +342,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         if (!deltas.TryGetValue(node.Id, out multiDelta))
             deltas.Add(node.Id, new BTreeMultiDelta<TKey>(node, innerDeltas));
         else
-            deltas[node.Id].InnerDeltas = innerDeltas;        
+            deltas[node.Id].InnerDeltas = innerDeltas;
 
         //Console.WriteLine("Node {0} marked as dirty as child added", node.Id);
 
@@ -355,6 +356,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
     private static BTreeMultiNode<TKey> Split(BTreeMultiNode<TKey> current, Dictionary<int, BTreeMultiDelta<TKey>> deltas)
     {
         BTreeMultiNode<TKey> split = new(BTreeConfig.MaxChildrenHalf);
+        deltas.Add(split.Id, new BTreeMultiDelta<TKey>(split, null));
 
         //Console.WriteLine("Node {0} marked as dirty because of split", t.Id);
 
@@ -421,7 +423,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             for (int j = position; j < node.KeyCount; j++)
                 node.children[j] = node.children[j + 1];
 
-            node.KeyCount--;            
+            node.KeyCount--;
             return true;
         }
 

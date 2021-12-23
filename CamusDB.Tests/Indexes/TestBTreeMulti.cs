@@ -212,7 +212,7 @@ public class TestBTreeMulti
 
         int index = 0;
 
-        foreach (int value in tree.GetAll(5))
+        await foreach (int value in tree.GetAll(5))
         {
             Assert.AreEqual(100 + index, value);
             index++;
@@ -234,7 +234,7 @@ public class TestBTreeMulti
 
         int index = 0;
 
-        foreach (int value in tree.GetAll(5))
+        await foreach (int value in tree.GetAll(5))
         {
             Assert.AreEqual(100 + index, value);
             index++;

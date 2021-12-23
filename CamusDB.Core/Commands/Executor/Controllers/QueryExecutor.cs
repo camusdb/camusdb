@@ -32,7 +32,7 @@ internal sealed class QueryExecutor
 
         List<Dictionary<string, ColumnValue>> rows = new();
 
-        foreach (BTreeEntry<int, int?> entry in table.Rows.EntriesTraverse())
+        await foreach (BTreeEntry<int, int?> entry in table.Rows.EntriesTraverse())
         {
             if (entry.Value is null)
             {
@@ -59,7 +59,7 @@ internal sealed class QueryExecutor
 
         List<Dictionary<string, ColumnValue>> rows = new();
 
-        foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse())
+        await foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse())
         {
             if (entry.Value is null)
             {
@@ -90,7 +90,7 @@ internal sealed class QueryExecutor
         {
             //Console.WriteLine("MultiTree={0} Key={0} PageOffset={1}", index.Id, entry.Key, entry.Value!.Size());
 
-            foreach (BTreeEntry<int, int?> subEntry in entry.Value!.EntriesTraverse())
+            await foreach (BTreeEntry<int, int?> subEntry in entry.Value!.EntriesTraverse())
             {
                 //Console.WriteLine(" > Index Key={0} PageOffset={1}", subEntry.Key, subEntry.Value);
 

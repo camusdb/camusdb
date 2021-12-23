@@ -136,13 +136,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return default;
     }
 
-    public IEnumerable<BTreeEntry<TKey, TValue>> EntriesTraverse()
+    public async IAsyncEnumerable<BTreeEntry<TKey, TValue>> EntriesTraverse()
     {
-        foreach (BTreeEntry<TKey, TValue> entry in EntriesTraverseInternal(root, height))
+        await foreach (BTreeEntry<TKey, TValue> entry in EntriesTraverseInternal(root, height))
             yield return entry;
     }
 
-    private static IEnumerable<BTreeEntry<TKey, TValue>> EntriesTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
+    private static async IAsyncEnumerable<BTreeEntry<TKey, TValue>> EntriesTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
     {
         if (node is null)
             yield break;
@@ -161,19 +161,19 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             for (int j = 0; j < node.KeyCount; j++)
             {
-                foreach (BTreeEntry<TKey, TValue> entry in EntriesTraverseInternal(children[j].Next, ht - 1))
+                await foreach (BTreeEntry<TKey, TValue> entry in EntriesTraverseInternal(children[j].Next, ht - 1))
                     yield return entry;
             }
         }
     }
 
-    public IEnumerable<BTreeNode<TKey, TValue>> NodesTraverse()
+    public async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesTraverse()
     {
-        foreach (BTreeNode<TKey, TValue> node in NodesTraverseInternal(root, height))
+        await foreach (BTreeNode<TKey, TValue> node in NodesTraverseInternal(root, height))
             yield return node;
     }
 
-    private static IEnumerable<BTreeNode<TKey, TValue>> NodesTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
+    private static async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
     {
         if (node is null)
             yield break;
@@ -185,25 +185,25 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         for (int j = 0; j < node.KeyCount; j++)
         {
-            foreach (BTreeNode<TKey, TValue> childNode in NodesTraverseInternal(node.children[j].Next, ht - 1))
+            await foreach (BTreeNode<TKey, TValue> childNode in NodesTraverseInternal(node.children[j].Next, ht - 1))
                 yield return childNode;
         }
     }
 
-    public IEnumerable<BTreeNode<TKey, TValue>> NodesReverseTraverse()
+    public async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesReverseTraverse()
     {
-        foreach (BTreeNode<TKey, TValue> node in NodesReverseTraverseInternal(root, height))
+        await foreach (BTreeNode<TKey, TValue> node in NodesReverseTraverseInternal(root, height))
             yield return node;
     }
 
-    private static IEnumerable<BTreeNode<TKey, TValue>> NodesReverseTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
+    private static async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesReverseTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
     {
         if (node is null)
             yield break;
 
         for (int j = node.KeyCount; j >= 0; j--)
         {
-            foreach (BTreeNode<TKey, TValue> childNode in NodesReverseTraverseInternal(node.children[j].Next, ht - 1))
+            await foreach (BTreeNode<TKey, TValue> childNode in NodesReverseTraverseInternal(node.children[j].Next, ht - 1))
                 yield return childNode;
         }
 
@@ -242,7 +242,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         newRoot.PageOffset = root.PageOffset;
         root.PageOffset = -1;
 
-        height++;        
+        height++;
 
         return deltas;
     }
@@ -276,16 +276,18 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    if (children[j].Next is null && children[j].NextPageOffset > 0)
+                    BTreeEntry<TKey, TValue> entry = children[j++];
+
+                    if (entry.Next is null && entry.NextPageOffset > 0)
                     {
                         if (Reader is null)
                             throw new Exception("Cannot read lazy node because reader is null");
 
-                        children[j].Next = await Reader.GetNode(children[j].NextPageOffset);
+                        entry.Next = await Reader.GetNode(entry.NextPageOffset);
                         loaded++;
                     }
 
-                    BTreeNode<TKey, TValue>? split = await Insert(children[j++].Next, key, val, ht - 1, deltas);
+                    BTreeNode<TKey, TValue>? split = await Insert(entry.Next, key, val, ht - 1, deltas);
 
                     if (split == null)
                         return null;

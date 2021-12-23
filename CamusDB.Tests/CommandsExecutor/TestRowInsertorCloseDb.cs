@@ -11,6 +11,7 @@ using NUnit.Framework;
 using CamusDB.Tests.Utils;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
+using CamusDB.Core.Util.ObjectIds;
 using System.Collections.Generic;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
@@ -164,5 +165,70 @@ internal sealed class TestRowInsertorCloseDb
 
         Assert.AreEqual(row[3].Type, ColumnType.Bool);
         Assert.AreEqual(row[3].Value, "false");*/
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCheckSuccessfulMultiInsert()
+    {
+        int i;
+        var executor = await SetupMultiIndexTable();
+
+        string[] userIds = new string[5];
+        for (i = 0; i < 5; i++)
+            userIds[i] = ObjectIdGenerator.Generate().ToString();
+            
+        List<string> objectIds = new();
+
+        for (i = 0; i < 50; i++)
+        {
+            string objectId = ObjectIdGenerator.Generate().ToString();
+            objectIds.Add(objectId);
+
+            InsertTicket insertTicket = new(
+                database: "factory",
+                name: "user_robots",
+                values: new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, objectId) },
+                    { "usersId", new ColumnValue(ColumnType.Id, userIds[i % 5]) },
+                    { "amount", new ColumnValue(ColumnType.Integer, "50") },
+                }
+            );
+
+            await executor.Insert(insertTicket);
+
+            if ((i + 1) % 5 == 0)
+            {
+                CloseDatabaseTicket closeTicket = new("factory");
+                await executor.CloseDatabase(closeTicket);
+            }
+        }
+
+        /*i = 0;
+
+        foreach (string objectId in objectIds)
+        {
+            QueryByIdTicket queryTicket = new(
+                database: "factory",
+                name: "robots",
+                id: objectId
+            );
+
+            List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
+
+            Dictionary<string, ColumnValue> row = result[0];
+
+            Assert.AreEqual(ColumnType.Id, row["id"].Type);
+            Assert.AreEqual(24, row["id"].Value.Length);
+
+            Assert.AreEqual(ColumnType.String, row["name"].Type);
+            Assert.AreEqual("some name " + i, row["name"].Value);
+
+            Assert.AreEqual(ColumnType.Integer, row["year"].Type);
+            Assert.AreEqual((i * 1000).ToString(), row["year"].Value);
+
+            i++;
+        }*/
     }
 }
