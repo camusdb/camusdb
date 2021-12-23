@@ -278,8 +278,6 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             }
         }
 
-        //throw new Exception(node.Dirty.ToString());
-
         for (int i = node.KeyCount; i > j; i--)
             node.children[i] = node.children[i - 1];
 

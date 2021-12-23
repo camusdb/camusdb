@@ -289,6 +289,10 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
                     node.Dirty = true;
                     deltas.Add(new BTreeMultiDelta<TKey>(node, innerDeltas));
                 }
+                else
+                {
+                    Console.WriteLine("Node {0} already dirty but inner deltas must be added", node.Id);
+                }
 
                 return null;
             }
@@ -342,6 +346,10 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         {
             node.Dirty = true;
             deltas.Add(new BTreeMultiDelta<TKey>(node, innerDeltas));
+        }
+        else
+        {
+            Console.WriteLine("Node {0} already dirty but inner deltas must be added", node.Id);
         }
 
         //Console.WriteLine("Node {0} marked as dirty as child added", node.Id);
