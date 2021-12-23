@@ -46,7 +46,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     )
     {
         if (deltas is null)
-            deltas = index.Put(key, value);
+            deltas = await index.Put(key, value);
 
         foreach (BTreeNode<int, int?> node in deltas)
         {

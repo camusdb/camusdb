@@ -20,7 +20,7 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
 {
     private readonly IndexSaver indexSaver = new();    
 
-    private static ColumnValue CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue, BTreeTuple?> uniqueIndex, InsertTicket ticket, string name)
+    private static async Task<ColumnValue> CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue, BTreeTuple?> uniqueIndex, InsertTicket ticket, string name)
     {
         ColumnValue? uniqueValue = GetColumnValue(table, ticket, name);
 
@@ -30,7 +30,7 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
                 "Cannot retrieve unique key for table " + table.Name
             );
 
-        BTreeTuple? rowTuple = uniqueIndex.Get(uniqueValue);
+        BTreeTuple? rowTuple = await uniqueIndex.Get(uniqueValue);
 
         if (rowTuple is not null)
             throw new CamusDBException(
@@ -41,7 +41,7 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
         return uniqueValue;
     }
 
-    public void CheckUniqueKeys(TableDescriptor table, InsertTicket ticket)
+    public async Task CheckUniqueKeys(TableDescriptor table, InsertTicket ticket)
     {
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
@@ -56,7 +56,7 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
                     "A unique index tree wasn't found"
                 );
 
-            CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
+            await CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
         }
     }
 

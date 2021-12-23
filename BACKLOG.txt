@@ -1,9 +1,9 @@
 Indexes
-- Return modified nodes in BTree.Put to avoid full traversal on insert/update/delete ops
 - Read indexes in parallel
 - Block table to read indexes
 - Destroy internal subtrees in multi index after delete
 - Version b+trees on disk
+- Lazy read of b+tree nodes
 
 BufferPool/Storage
 - Support more than 8 tablespaces per type

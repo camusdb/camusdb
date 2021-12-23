@@ -62,14 +62,14 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     private static async Task SaveInternal(SaveUniqueIndexTicket ticket)
     {
-        HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas = ticket.Index.Put(ticket.Key, ticket.Value);
+        HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas = await ticket.Index.Put(ticket.Key, ticket.Value);
 
         await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index, deltas);
     }
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
     {
-        (bool found, HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas) = ticket.Index.Remove(ticket.Key);
+        (bool found, HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas) = await ticket.Index.Remove(ticket.Key);
 
         if (found)
             await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index, deltas);

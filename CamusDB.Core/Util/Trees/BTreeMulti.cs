@@ -34,14 +34,17 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
     public int PageOffset = -1; // page offset to root node
 
+    public readonly IBTreeNodeReader<int, int?>? SubTreeReader; // lazy node sub-tree reader
+
     public SemaphoreSlim WriteLock { get; } = new(1, 1); // global lock
 
     /**
      * Initializes an empty B-tree.
      */
-    public BTreeMulti(int rootOffset)
+    public BTreeMulti(int rootOffset, IBTreeNodeReader<int, int?>? subTreeReader = null)
     {
         PageOffset = rootOffset;
+        SubTreeReader = subTreeReader;
         Id = Interlocked.Increment(ref CurrentId);
     }
 
@@ -216,12 +219,12 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         }
     }
 
-    public Dictionary<int, BTreeMultiDelta<TKey>> Put(TKey key, int value)
+    public async Task<Dictionary<int, BTreeMultiDelta<TKey>>> Put(TKey key, int value)
     {
-        return Put(key, new BTreeTuple(value, 0));
+        return await Put(key, new BTreeTuple(value, 0));
     }
 
-    public Dictionary<int, BTreeMultiDelta<TKey>> Put(TKey key, BTreeTuple value)
+    public async Task<Dictionary<int, BTreeMultiDelta<TKey>>> Put(TKey key, BTreeTuple value)
     {
         Dictionary<int, BTreeMultiDelta<TKey>> deltas = new();
 
@@ -231,7 +234,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             deltas.Add(root.Id, new BTreeMultiDelta<TKey>(root, null));
         }
 
-        BTreeMultiNode<TKey>? split = Insert(root, key, value, height, deltas);
+        BTreeMultiNode<TKey>? split = await Insert(root, key, value, height, deltas);
         denseSize++;
 
         if (split == null)
@@ -256,13 +259,13 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         return deltas;
     }
 
-    private BTreeMultiNode<TKey>? Insert(BTreeMultiNode<TKey>? node, TKey key, BTreeTuple val, int ht, Dictionary<int, BTreeMultiDelta<TKey>> deltas)
+    private async Task<BTreeMultiNode<TKey>?> Insert(BTreeMultiNode<TKey>? node, TKey key, BTreeTuple val, int ht, Dictionary<int, BTreeMultiDelta<TKey>> deltas)
     {
         if (node is null)
-            throw new ArgumentException("node cannot be null");
+            throw new ArgumentException("node cannot be null " + ht);
 
         int j;
-        BTreeMultiDelta<TKey>? multiDelta = null;
+        BTreeMultiDelta<TKey>? multiDelta;
         BTreeMultiEntry<TKey>? newEntry = null;
         BTreeMultiEntry<TKey>[] children = node.children;
         HashSet<BTreeNode<int, int?>> innerDeltas;
@@ -280,7 +283,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
                 //if (val is null)
                 //    throw new ArgumentException("val cannot be null");
 
-                innerDeltas = child.Value!.Put(val.SlotOne, val.SlotTwo);
+                innerDeltas = await child.Value!.Put(val.SlotOne, val.SlotTwo);
 
                 if (!deltas.TryGetValue(node.Id, out multiDelta))
                     deltas.Add(node.Id, new BTreeMultiDelta<TKey>(node, innerDeltas));
@@ -304,13 +307,13 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    BTreeMultiNode<TKey>? split = Insert(children[j++].Next, key, val, ht - 1, deltas);
+                    BTreeMultiNode<TKey>? split = await Insert(children[j++].Next, key, val, ht - 1, deltas);
 
                     if (split == null)
                         return null;
 
                     newEntry = new(split.children[0].Key, split);
-                    newEntry.Value = new BTree<int, int?>(-1);
+                    newEntry.Value = new BTree<int, int?>(-1, SubTreeReader);
                     //size++;
                     break;
                 }
@@ -326,11 +329,11 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         if (newEntry is null)
         {
             newEntry = new(key, null);
-            newEntry.Value = new BTree<int, int?>(-1);
+            newEntry.Value = new BTree<int, int?>(-1, SubTreeReader);
             size++;
         }
 
-        innerDeltas = newEntry.Value!.Put(val.SlotOne, val.SlotTwo);
+        innerDeltas = await newEntry.Value!.Put(val.SlotOne, val.SlotTwo);
 
         node.children[j] = newEntry;
         node.KeyCount++;
@@ -418,9 +421,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             for (int j = position; j < node.KeyCount; j++)
                 node.children[j] = node.children[j + 1];
 
-            node.KeyCount--;
-
-            
+            node.KeyCount--;            
             return true;
         }
 

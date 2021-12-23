@@ -35,7 +35,7 @@ internal sealed class TableOpener
             await database.DescriptorsSemaphore.WaitAsync(); // @todo block per table
 
             if (database.TableDescriptors.TryGetValue(tableName, out tableDescriptor))
-                return tableDescriptor;
+                return tableDescriptor;            
 
             BufferPoolHandler tablespace = database.TableSpace!;
 

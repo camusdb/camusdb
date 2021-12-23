@@ -59,7 +59,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
     private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
     {
-        Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas = index.Put(key, value);
+        Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas = await index.Put(key, value);
 
         await PersistSave(tablespace, index, value, deltas);
     }

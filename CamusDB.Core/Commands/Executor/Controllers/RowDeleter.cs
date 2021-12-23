@@ -115,7 +115,7 @@ internal sealed class RowDeleter
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id.ToString());
 
-        BTreeTuple? pageOffset = index.UniqueRows.Get(columnId);
+        BTreeTuple? pageOffset = await index.UniqueRows.Get(columnId);
 
         if (pageOffset is null)
         {
@@ -140,7 +140,7 @@ internal sealed class RowDeleter
 
         await DeleteMultiIndexes(database, table, columnValues);
 
-        (bool found, HashSet<BTreeNode<int, int?>> deltas) = table.Rows.Remove(pageOffset.SlotOne);
+        (bool found, HashSet<BTreeNode<int, int?>> deltas) = await table.Rows.Remove(pageOffset.SlotOne);
 
         if (found)
         {

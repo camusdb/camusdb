@@ -17,7 +17,7 @@ public sealed class BTreeNode<TKey, TValue>
 
     public int KeyCount;         // number of children
 
-    public int PageOffset = -1;       // on-disk offset
+    public int PageOffset = -1;       // on-disk offset    
 
     public BTreeEntry<TKey, TValue>[] children = new BTreeEntry<TKey, TValue>[BTreeConfig.MaxChildren];   // the array of children
 

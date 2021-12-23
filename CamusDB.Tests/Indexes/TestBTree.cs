@@ -9,6 +9,7 @@
 using NUnit.Framework;
 using CamusDB.Core.Util.Trees;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 namespace CamusDB.Tests.Indexes;
 
@@ -25,58 +26,58 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public void TestBasicInsert()
+    public async Task TestBasicInsert()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(5, 100);
+        await tree.Put(5, 100);
 
         Assert.AreEqual(tree.Size(), 1);
         Assert.AreEqual(tree.Height(), 0);
     }
 
     [Test]
-    public void TestMultiInsertNoSplit()
+    public async Task TestMultiInsertNoSplit()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(4, 100);
-        tree.Put(5, 100);
-        tree.Put(6, 101);
-        tree.Put(7, 102);
-        tree.Put(8, 103);
-        tree.Put(9, 104);
+        await tree.Put(4, 100);
+        await tree.Put(5, 100);
+        await tree.Put(6, 101);
+        await tree.Put(7, 102);
+        await tree.Put(8, 103);
+        await tree.Put(9, 104);
 
         Assert.AreEqual(tree.Size(), 6);
         Assert.AreEqual(tree.Height(), 0);
     }
 
     [Test]
-    public void TestMultiInsertSplit()
+    public async Task TestMultiInsertSplit()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(0, 100);
-        tree.Put(1, 100);
-        tree.Put(4, 100);
-        tree.Put(5, 100);
-        tree.Put(6, 101);
-        tree.Put(7, 102);
-        tree.Put(8, 103);
-        tree.Put(9, 104);
+        await tree.Put(0, 100);
+        await tree.Put(1, 100);
+        await tree.Put(4, 100);
+        await tree.Put(5, 100);
+        await tree.Put(6, 101);
+        await tree.Put(7, 102);
+        await tree.Put(8, 103);
+        await tree.Put(9, 104);
 
         Assert.AreEqual(tree.Size(), 8);
         Assert.AreEqual(tree.Height(), 1);
     }
 
     [Test]
-    public void TestBasicGet()
+    public async Task TestBasicGet()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(5, 100);
+        await tree.Put(5, 100);
 
-        int? values = tree.Get(5);
+        int? values = await tree.Get(5);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
@@ -84,36 +85,36 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public void TestBasicNullGet()
+    public async Task TestBasicNullGet()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(5, 100);
+        await tree.Put(5, 100);
 
-        int? values = tree.Get(11);
+        int? values = await tree.Get(11);
 
         Assert.Null(values);
     }
 
     [Test]
-    public void TestMultiInsertGet()
+    public async Task TestMultiInsertGet()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(4, 100);
-        tree.Put(5, 100);
-        tree.Put(6, 101);
-        tree.Put(7, 102);
-        tree.Put(8, 103);
-        tree.Put(9, 104);
+        await tree.Put(4, 100);
+        await tree.Put(5, 100);
+        await tree.Put(6, 101);
+        await tree.Put(7, 102);
+        await tree.Put(8, 103);
+        await tree.Put(9, 104);
 
-        int? values = tree.Get(5);
+        int? values = await tree.Get(5);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
         //Assert.AreEqual(values[0], 100);
 
-        values = tree.Get(7);
+        values = await tree.Get(7);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
@@ -121,34 +122,34 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public void TestMultiInsertDeltas()
+    public async Task TestMultiInsertDeltas()
     {
         HashSet<BTreeNode<int, int?>> deltas;
 
         BTree<int, int?> tree = new(0);
 
-        deltas = tree.Put(4, 100);
+        deltas = await tree.Put(4, 100);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = tree.Put(5, 100);
+        deltas = await tree.Put(5, 100);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = tree.Put(6, 101);
+        deltas = await tree.Put(6, 101);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = tree.Put(7, 102);
+        deltas = await tree.Put(7, 102);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = tree.Put(8, 103);
+        deltas = await tree.Put(8, 103);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = tree.Put(9, 104);
+        deltas = await tree.Put(9, 104);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = tree.Put(10, 105);
+        deltas = await tree.Put(10, 105);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = tree.Put(11, 105);
+        deltas = await tree.Put(11, 105);
         Assert.AreEqual(3, deltas.Count);        
 
         Assert.AreEqual(tree.Size(), 8);
@@ -156,13 +157,13 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public void TestBasicRemove()
+    public async Task TestBasicRemove()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(5, 100);
+        await tree.Put(5, 100);
 
-        (bool found, _) = tree.Remove(5);
+        (bool found, _) = await tree.Remove(5);
         Assert.IsTrue(found);
 
         Assert.AreEqual(0, tree.Size());
@@ -170,13 +171,13 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public void TestRemoveUnknownKey()
+    public async Task TestRemoveUnknownKey()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(5, 100);
+        await tree.Put(5, 100);
 
-        (bool found, _) = tree.Remove(10);
+        (bool found, _) = await tree.Remove(10);
         Assert.IsFalse(found);
 
         Assert.AreEqual(1, tree.Size());
@@ -184,18 +185,18 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public void TestMultiInsertRemove()
+    public async Task TestMultiInsertRemove()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(4, 100);
-        tree.Put(5, 100);
-        tree.Put(6, 101);
-        tree.Put(7, 102);
-        tree.Put(8, 103);
-        tree.Put(9, 104);
+        await tree.Put(4, 100);
+        await tree.Put(5, 100);
+        await tree.Put(6, 101);
+        await tree.Put(7, 102);
+        await tree.Put(8, 103);
+        await tree.Put(9, 104);
 
-        (bool found, _) = tree.Remove(5);
+        (bool found, _) = await tree.Remove(5);
         Assert.IsTrue(found);
 
         Assert.AreEqual(tree.Size(), 5);
@@ -203,168 +204,168 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public void TestMultiInsertRemoveCheck()
+    public async Task TestMultiInsertRemoveCheck()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(4, 100);
-        tree.Put(5, 100);
-        tree.Put(6, 101);
-        tree.Put(7, 102);
-        tree.Put(8, 103);
-        tree.Put(9, 104);
+        await tree.Put(4, 100);
+        await tree.Put(5, 100);
+        await tree.Put(6, 101);
+        await tree.Put(7, 102);
+        await tree.Put(8, 103);
+        await tree.Put(9, 104);
 
-        (bool found, _) = tree.Remove(5);
+        (bool found, _) = await tree.Remove(5);
         Assert.IsTrue(found);
 
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
 
-        int? search = tree.Get(5);
+        int? search = await tree.Get(5);
         Assert.IsNull(search);
     }
 
     [Test]
-    public void TestMultiInsertRemoveCheck2()
+    public async Task TestMultiInsertRemoveCheck2()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(4, 100);
-        tree.Put(5, 100);
-        tree.Put(6, 101);
-        tree.Put(7, 102);
-        tree.Put(8, 103);
-        tree.Put(9, 104);
+        await tree.Put(4, 100);
+        await tree.Put(5, 100);
+        await tree.Put(6, 101);
+        await tree.Put(7, 102);
+        await tree.Put(8, 103);
+        await tree.Put(9, 104);
 
-        (bool found, _) = tree.Remove(5);
+        (bool found, _) = await tree.Remove(5);
         Assert.IsTrue(found);
 
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
 
-        int? search = tree.Get(5);
+        int? search = await tree.Get(5);
         Assert.IsNull(search);
 
-        search = tree.Get(4);
+        search = await tree.Get(4);
         Assert.IsNotNull(search);
 
-        search = tree.Get(6);
+        search = await tree.Get(6);
         Assert.IsNotNull(search);
 
-        search = tree.Get(7);
+        search = await tree.Get(7);
         Assert.IsNotNull(search);
 
-        search = tree.Get(8);
+        search = await tree.Get(8);
         Assert.IsNotNull(search);
 
-        search = tree.Get(9);
+        search = await tree.Get(9);
         Assert.IsNotNull(search);
     }
 
     [Test]
-    public void TestMultiInsertSplitRemoveCheck()
+    public async Task TestMultiInsertSplitRemoveCheck()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(4, 100);
-        tree.Put(5, 100);
-        tree.Put(6, 101);
-        tree.Put(7, 102);
-        tree.Put(8, 103);
-        tree.Put(9, 104);
-        tree.Put(10, 105);
-        tree.Put(11, 106);
+        await tree.Put(4, 100);
+        await tree.Put(5, 100);
+        await tree.Put(6, 101);
+        await tree.Put(7, 102);
+        await tree.Put(8, 103);
+        await tree.Put(9, 104);
+        await tree.Put(10, 105);
+        await tree.Put(11, 106);
 
         Assert.AreEqual(8, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        (bool found, _) = tree.Remove(5);
+        (bool found, _) = await tree.Remove(5);
         Assert.IsTrue(found);
 
         Assert.AreEqual(7, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        int? search = tree.Get(5);
+        int? search = await tree.Get(5);
         Assert.IsNull(search);
     }
 
     [Test]
-    public void TestMultiInsertSplitRemoveCheck2()
+    public async Task TestMultiInsertSplitRemoveCheck2()
     {
         BTree<int, int?> tree = new(0);
 
-        tree.Put(4, 100);
-        tree.Put(5, 100);
-        tree.Put(6, 101);
-        tree.Put(7, 102);
-        tree.Put(8, 103);
-        tree.Put(9, 104);
-        tree.Put(10, 105);
-        tree.Put(11, 106);
+        await tree.Put(4, 100);
+        await tree.Put(5, 100);
+        await tree.Put(6, 101);
+        await tree.Put(7, 102);
+        await tree.Put(8, 103);
+        await tree.Put(9, 104);
+        await tree.Put(10, 105);
+        await tree.Put(11, 106);
 
         Assert.AreEqual(8, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        (bool found, _) = tree.Remove(11);
+        (bool found, _) = await tree.Remove(11);
         Assert.IsTrue(found);
 
         Assert.AreEqual(7, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        int? search = tree.Get(11);
+        int? search = await tree.Get(11);
         Assert.IsNull(search);
 
-        search = tree.Get(10);
+        search = await tree.Get(10);
         Assert.IsNotNull(search);
     }
 
     [Test]
-    public void TestMultiInsertSplitRemoveCheck3()
+    public async Task TestMultiInsertSplitRemoveCheck3()
     {
         BTree<int, int?> tree = new(0);
 
         for (int i = 0; i < 50; i++)
-            tree.Put(i, 100 + i);
+            await tree.Put(i, 100 + i);
 
         Assert.AreEqual(50, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
         for (int i = 0; i < 50; i += 5)
         {
-            (bool found, _) = tree.Remove(i);
+            (bool found, _) = await tree.Remove(i);
             Assert.IsTrue(found);
         }
 
         Assert.AreEqual(40, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
-        int? search = tree.Get(5);
+        int? search = await tree.Get(5);
         Assert.IsNull(search);
 
-        search = tree.Get(7);
+        search = await tree.Get(7);
         Assert.IsNotNull(search);
 
-        search = tree.Get(41);
+        search = await tree.Get(41);
         Assert.IsNotNull(search);
 
-        search = tree.Get(49);
+        search = await tree.Get(49);
         Assert.IsNotNull(search);
     }
 
     [Test]
-    public void TestMultiInsertSplitRemoveCheck4()
+    public async Task TestMultiInsertSplitRemoveCheck4()
     {
         BTree<int, int?> tree = new(0);
 
         for (int i = 0; i < 64; i++)
-            tree.Put(i, 100 + i);
+            await tree.Put(i, 100 + i);
 
         Assert.AreEqual(64, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
         for (int i = 0; i < 64; i += 8)
         {
-            (bool found, _) = tree.Remove(i);
+            (bool found, _) = await tree.Remove(i);
             Assert.IsTrue(found);
         }
 
@@ -375,7 +376,7 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 64; i++)
         {
-            int? search = tree.Get(i);
+            int? search = await tree.Get(i);
             if (search is not null)
                 count++;
         }
@@ -384,19 +385,19 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public void TestMultiInsertSplitRemoveCheck5()
+    public async Task TestMultiInsertSplitRemoveCheck5()
     {
         BTree<int, int?> tree = new(0);
 
         for (int i = 0; i < 49; i++)
-            tree.Put(i, 100 + i);
+            await tree.Put(i, 100 + i);
 
         Assert.AreEqual(49, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
         for (int i = 7; i < 49; i += 7)
         {
-            (bool found, _) = tree.Remove(i);
+            (bool found, _) = await tree.Remove(i);
             Assert.IsTrue(found);
         }
 
@@ -407,7 +408,7 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 49; i++)
         {
-            int? search = tree.Get(i);
+            int? search = await tree.Get(i);
             if (search is not null)
                 count++;
         }
@@ -416,19 +417,19 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public void TestMultiInsertSplitRemoveCheckEmpty()
+    public async Task TestMultiInsertSplitRemoveCheckEmpty()
     {
         BTree<int, int?> tree = new(0);
 
         for (int i = 0; i < 64; i++)
-            tree.Put(i, 100 + i);
+            await tree.Put(i, 100 + i);
 
         Assert.AreEqual(64, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
         for (int i = 0; i < 64; i++)
         {
-            (bool found, _) = tree.Remove(i);
+            (bool found, _) = await tree.Remove(i);
             Assert.IsTrue(found);
         }
 
@@ -439,7 +440,7 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 64; i++)
         {
-            int? search = tree.Get(i);
+            int? search = await tree.Get(i);
             if (search is not null)
                 count++;
         }

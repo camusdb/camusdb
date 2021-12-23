@@ -85,9 +85,9 @@ internal sealed class RowInserter
     /**
      * Second step is check for unique key violations
      */
-    private FluxAction CheckUniqueKeysStep(InsertFluxState state)
+    private async Task<FluxAction> CheckUniqueKeysStep(InsertFluxState state)
     {
-        insertUniqueKeySaver.CheckUniqueKeys(state.Table, state.Ticket);
+        await insertUniqueKeySaver.CheckUniqueKeys(state.Table, state.Ticket);
         return FluxAction.Continue;
     }
 
@@ -164,6 +164,8 @@ internal sealed class RowInserter
             key: state.RowTuple.SlotOne,
             value: state.RowTuple.SlotTwo            
         );
+
+        Console.WriteLine("{0}", state.Table.Rows.loaded);
 
         // Main table index stores rowid pointing to page offeset
         await indexSaver.Save(saveUniqueOffsetIndex);

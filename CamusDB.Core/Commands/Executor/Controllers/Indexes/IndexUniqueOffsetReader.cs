@@ -21,13 +21,15 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
         this.indexReader = indexReader;
     }
 
-    public async Task<BTree<int, int?>> ReadOffsets(BufferPoolHandler tablespace, int offset)
+    public async Task<BTree<int, int?>> ReadOffsets(BufferPoolHandler bufferpool, int offset)
     {
         //Console.WriteLine("***");
 
-        BTree<int, int?> index = new(offset);
+        IndexUniqueOffsetNodeReader reader = new(bufferpool);
 
-        byte[] data = await tablespace.GetDataFromPage(offset);
+        BTree<int, int?> index = new(offset, reader);
+
+        byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
             return index;
 
@@ -42,9 +44,12 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
 
         if (rootPageOffset > -1)
         {
-            BTreeNode<int, int?>? node = await GetUniqueOffsetNode(tablespace, rootPageOffset);
+            BTreeNode<int, int?>? node = await reader.GetNode(rootPageOffset);
             if (node is not null)
+            {
                 index.root = node;
+                index.loaded++;
+            }
         }
 
         /*foreach (Entry entry in index.EntriesTraverse())
@@ -54,40 +59,9 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
 
         //Console.WriteLine("***");
 
+        Console.WriteLine("Loaded index of size {0} {1}", index.size, index.loaded);
+
         return index;
-    }
-
-    private async Task<BTreeNode<int, int?>?> GetUniqueOffsetNode(BufferPoolHandler tablespace, int offset)
-    {
-        byte[] data = await tablespace.GetDataFromPage(offset);
-        if (data.Length == 0)
-            return null;
-
-        BTreeNode<int, int?> node = new(-1);
-
-        int pointer = 0;
-        node.KeyCount = Serializator.ReadInt32(data, ref pointer);
-        node.PageOffset = Serializator.ReadInt32(data, ref pointer);
-
-        //Console.WriteLine("KeyCount={0} PageOffset={1}", node.KeyCount, node.PageOffset);
-
-        for (int i = 0; i < node.KeyCount; i++)
-        {
-            BTreeEntry<int, int?> entry = new(0, null, null);
-
-            entry.Key = Serializator.ReadInt32(data, ref pointer);
-            entry.Value = Serializator.ReadInt32(data, ref pointer);
-
-            int nextPageOffset = Serializator.ReadInt32(data, ref pointer);
-            //Console.WriteLine("Children={0} Key={1} Value={2} NextOffset={3}", i, entry.Key, entry.Value, nextPageOffset);
-
-            if (nextPageOffset > -1)
-                entry.Next = await GetUniqueOffsetNode(tablespace, nextPageOffset);
-
-            node.children[i] = entry;
-        }
-
-        return node;
     }
 }
 

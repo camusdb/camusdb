@@ -30,23 +30,26 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     public int Id;    // unique tree id
 
-    public int height;      // height of the B-tree
+    public int height;   // height of the B-tree
 
-    public int size;           // number of key-value pairs in the B-tree
+    public int size;     // number of key-value pairs in the B-tree
+
+    public int loaded;   // number of loaded nodes
 
     public int PageOffset = -1; // page offset to root node
+
+    public readonly IBTreeNodeReader<TKey, TValue>? Reader; // lazy node reader
 
     public SemaphoreSlim WriteLock { get; } = new(1, 1); // global lock
 
     /**
      * Initializes an empty B-tree.
      */
-    public BTree(int rootOffset)
+    public BTree(int rootOffset, IBTreeNodeReader<TKey, TValue>? reader = null)
     {
+        Reader = reader;
         PageOffset = rootOffset;
         Id = Interlocked.Increment(ref CurrentId);
-
-        //Console.WriteLine("Tree={0}", Id);        
     }
 
     /**
@@ -84,15 +87,15 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
      * @return the value associated with the given key if the key is in the symbol table
      *         and {@code null} if the key is not in the symbol table     
      */
-    public TValue? Get(TKey key)
+    public async Task<TValue?> Get(TKey key)
     {
         if (root is null)
             return default;
 
-        return Search(root, key, height);
+        return await Search(root, key, height);
     }
 
-    private TValue? Search(BTreeNode<TKey, TValue>? node, TKey key, int ht)
+    private async Task<TValue?> Search(BTreeNode<TKey, TValue>? node, TKey key, int ht)
     {
         if (node is null)
             return default;
@@ -115,7 +118,18 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             for (int j = 0; j < node.KeyCount; j++)
             {
                 if (j + 1 == node.KeyCount || Less(key, children[j + 1].Key))
-                    return Search(children[j].Next, key, ht - 1);
+                {
+                    if (children[j].Next is null && children[j].NextPageOffset > 0)
+                    {
+                        if (Reader is null)
+                            throw new Exception("Cannot read lazy node because reader is null");
+
+                        children[j].Next = await Reader.GetNode(children[j].NextPageOffset);
+                        loaded++;
+                    }
+
+                    return await Search(children[j].Next, key, ht - 1);
+                }
             }
         }
 
@@ -196,7 +210,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         yield return node;
     }
 
-    public HashSet<BTreeNode<TKey, TValue>> Put(TKey key, TValue? value)
+    public async Task<HashSet<BTreeNode<TKey, TValue>>> Put(TKey key, TValue? value)
     {
         HashSet<BTreeNode<TKey, TValue>> deltas = new();
 
@@ -204,9 +218,10 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             root = new BTreeNode<TKey, TValue>(0);
             deltas.Add(root);
+            loaded++;
         }
 
-        BTreeNode<TKey, TValue>? split = Insert(root, key, value, height, deltas);
+        BTreeNode<TKey, TValue>? split = await Insert(root, key, value, height, deltas);
         size++;
 
         if (split is null)
@@ -215,6 +230,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         // need to split root
         BTreeNode<TKey, TValue> newRoot = new(2);
         deltas.Add(newRoot);
+        loaded++;
 
         newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, default, root);
         newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, default, split);
@@ -226,12 +242,12 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         newRoot.PageOffset = root.PageOffset;
         root.PageOffset = -1;
 
-        height++;
+        height++;        
 
         return deltas;
     }
 
-    private BTreeNode<TKey, TValue>? Insert(BTreeNode<TKey, TValue>? node, TKey key, TValue? val, int ht, HashSet<BTreeNode<TKey, TValue>> deltas)
+    private async Task<BTreeNode<TKey, TValue>?> Insert(BTreeNode<TKey, TValue>? node, TKey key, TValue? val, int ht, HashSet<BTreeNode<TKey, TValue>> deltas)
     {
         if (node is null)
             throw new ArgumentException("node cannot be null");
@@ -260,7 +276,16 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    BTreeNode<TKey, TValue>? split = Insert(children[j++].Next, key, val, ht - 1, deltas);
+                    if (children[j].Next is null && children[j].NextPageOffset > 0)
+                    {
+                        if (Reader is null)
+                            throw new Exception("Cannot read lazy node because reader is null");
+
+                        children[j].Next = await Reader.GetNode(children[j].NextPageOffset);
+                        loaded++;
+                    }
+
+                    BTreeNode<TKey, TValue>? split = await Insert(children[j++].Next, key, val, ht - 1, deltas);
 
                     if (split == null)
                         return null;
@@ -287,10 +312,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     }
 
     // split node in half
-    private static BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, HashSet<BTreeNode<TKey, TValue>> deltas)
+    private BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, HashSet<BTreeNode<TKey, TValue>> deltas)
     {
         BTreeNode<TKey, TValue> newNode = new(BTreeConfig.MaxChildrenHalf);
         deltas.Add(newNode);
+        loaded++;
 
         current.KeyCount = BTreeConfig.MaxChildrenHalf;
         deltas.Add(current);
@@ -306,11 +332,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
      *
      * @param  key the key
      */
-    public (bool found, HashSet<BTreeNode<TKey, TValue>> deltas) Remove(TKey key)
+    public async Task<(bool found, HashSet<BTreeNode<TKey, TValue>> deltas)> Remove(TKey key)
     {
         HashSet<BTreeNode<TKey, TValue>> deltas = new();
 
-        bool found = Delete(root, key, height, deltas);
+        bool found = await Delete(root, key, height, deltas);
 
         if (found)
             size--;
@@ -323,7 +349,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
      * 
      * @param node the node where to search the value
      */
-    private bool Delete(BTreeNode<TKey, TValue>? node, TKey key, int ht, HashSet<BTreeNode<TKey, TValue>> deltas)
+    private async Task<bool> Delete(BTreeNode<TKey, TValue>? node, TKey key, int ht, HashSet<BTreeNode<TKey, TValue>> deltas)
     {
         if (node is null)
             return false;
@@ -362,7 +388,18 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             for (int j = 0; j < node.KeyCount; j++)
             {
                 if (j + 1 == node.KeyCount || Less(key, children[j + 1].Key))
-                    return Delete(children[j].Next, key, ht - 1, deltas);
+                {
+                    if (children[j].Next is null && children[j].NextPageOffset > 0)
+                    {
+                        if (Reader is null)
+                            throw new Exception("Cannot read lazy node because reader is null");
+
+                        children[j].Next = await Reader.GetNode(children[j].NextPageOffset);
+                        loaded++;
+                    }
+
+                    return await Delete(children[j].Next, key, ht - 1, deltas);
+                }
             }
         }
 
