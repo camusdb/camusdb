@@ -66,8 +66,6 @@ internal sealed class IndexUniqueReader : IndexBaseReader
 
         BTreeNode<ColumnValue, BTreeTuple?> node = new(-1);
 
-        node.Dirty = false; // read nodes from disk must be not persisted
-
         int pointer = 0;
         node.KeyCount = Serializator.ReadInt32(data, ref pointer);
         node.PageOffset = Serializator.ReadInt32(data, ref pointer);

@@ -140,7 +140,7 @@ internal sealed class RowDeleter
 
         await DeleteMultiIndexes(database, table, columnValues);
 
-        (bool found, List<BTreeNode<int, int?>> deltas) = table.Rows.Remove(pageOffset.SlotOne);
+        (bool found, HashSet<BTreeNode<int, int?>> deltas) = table.Rows.Remove(pageOffset.SlotOne);
 
         if (found)
         {

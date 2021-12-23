@@ -196,14 +196,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         yield return node;
     }
 
-    public List<BTreeNode<TKey, TValue>> Put(TKey key, TValue? value)
+    public HashSet<BTreeNode<TKey, TValue>> Put(TKey key, TValue? value)
     {
-        List<BTreeNode<TKey, TValue>> deltas = new();
+        HashSet<BTreeNode<TKey, TValue>> deltas = new();
 
         if (root is null) // create root
         {
             root = new BTreeNode<TKey, TValue>(0);
-            root.Dirty = true;
             deltas.Add(root);
         }
 
@@ -215,17 +214,12 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         // need to split root
         BTreeNode<TKey, TValue> newRoot = new(2);
-        newRoot.Dirty = true;
         deltas.Add(newRoot);
 
         newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, default, root);
         newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, default, split);
 
-        if (root.Dirty == false)
-        {
-            root.Dirty = true;
-            deltas.Add(root);
-        }
+        deltas.Add(root);
 
         root = newRoot;
 
@@ -237,7 +231,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return deltas;
     }
 
-    private BTreeNode<TKey, TValue>? Insert(BTreeNode<TKey, TValue>? node, TKey key, TValue? val, int ht, List<BTreeNode<TKey, TValue>> deltas)
+    private BTreeNode<TKey, TValue>? Insert(BTreeNode<TKey, TValue>? node, TKey key, TValue? val, int ht, HashSet<BTreeNode<TKey, TValue>> deltas)
     {
         if (node is null)
             throw new ArgumentException("node cannot be null");
@@ -284,11 +278,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         node.children[j] = newEntry;
         node.KeyCount++;
 
-        if (node.Dirty == false)
-        {
-            node.Dirty = true;
-            deltas.Add(node);
-        }
+        deltas.Add(node);
 
         if (node.KeyCount < BTreeConfig.MaxChildren)
             return null;
@@ -297,19 +287,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     }
 
     // split node in half
-    private static BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, List<BTreeNode<TKey, TValue>> deltas)
+    private static BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, HashSet<BTreeNode<TKey, TValue>> deltas)
     {
         BTreeNode<TKey, TValue> newNode = new(BTreeConfig.MaxChildrenHalf);
-        newNode.Dirty = true;
         deltas.Add(newNode);
 
         current.KeyCount = BTreeConfig.MaxChildrenHalf;
-
-        if (current.Dirty == false)
-        {
-            current.Dirty = true;
-            deltas.Add(current);
-        }
+        deltas.Add(current);
 
         for (int j = 0; j < BTreeConfig.MaxChildrenHalf; j++)
             newNode.children[j] = current.children[BTreeConfig.MaxChildrenHalf + j];
@@ -322,9 +306,9 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
      *
      * @param  key the key
      */
-    public (bool found, List<BTreeNode<TKey, TValue>> deltas) Remove(TKey key)
+    public (bool found, HashSet<BTreeNode<TKey, TValue>> deltas) Remove(TKey key)
     {
-        List<BTreeNode<TKey, TValue>> deltas = new();
+        HashSet<BTreeNode<TKey, TValue>> deltas = new();
 
         bool found = Delete(root, key, height, deltas);
 
@@ -339,7 +323,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
      * 
      * @param node the node where to search the value
      */
-    private bool Delete(BTreeNode<TKey, TValue>? node, TKey key, int ht, List<BTreeNode<TKey, TValue>> deltas)
+    private bool Delete(BTreeNode<TKey, TValue>? node, TKey key, int ht, HashSet<BTreeNode<TKey, TValue>> deltas)
     {
         if (node is null)
             return false;
@@ -367,12 +351,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                 node.children[j] = node.children[j + 1];
 
             node.KeyCount--;
-
-            if (node.Dirty == false)
-            {
-                node.Dirty = true;
-                deltas.Add(node);
-            }
+            deltas.Add(node);
 
             return true;
         }

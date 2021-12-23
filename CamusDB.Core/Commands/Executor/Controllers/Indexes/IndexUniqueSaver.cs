@@ -10,11 +10,11 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Journal.Models;
+using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.Journal.Models.Logs;
 using CamusDB.Core.Journal.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Serializer.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -62,14 +62,14 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     private static async Task SaveInternal(SaveUniqueIndexTicket ticket)
     {
-        List<BTreeNode<ColumnValue, BTreeTuple?>> deltas = ticket.Index.Put(ticket.Key, ticket.Value);
+        HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas = ticket.Index.Put(ticket.Key, ticket.Value);
 
         await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index, deltas);
     }
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
     {
-        (bool found, List<BTreeNode<ColumnValue, BTreeTuple?>> deltas) = ticket.Index.Remove(ticket.Key);
+        (bool found, HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas) = ticket.Index.Remove(ticket.Key);
 
         if (found)
             await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index, deltas);
@@ -82,7 +82,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         uint subSequence,
         JournalFailureTypes failureType,
         BTree<ColumnValue, BTreeTuple?> index,
-        List<BTreeNode<ColumnValue, BTreeTuple?>> deltas
+        HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas
     )
     {
         if (deltas.Count == 0)
@@ -117,17 +117,8 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
         //@todo update nodes concurrently
 
-        int dirty = 0, noDirty = 0;
-
         foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas)
         {
-            if (!node.Dirty)
-            {
-                noDirty++;
-                Console.WriteLine("Node {0} in deltas but not dirty", node.Id);                
-                continue;
-            }
-
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // keyCount(4 byte) + 
                 SerializatorTypeSizes.TypeInteger32 + // pageOffset(4 byte)
@@ -163,12 +154,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
             await tablespace.WriteDataToPage(node.PageOffset, sequence, nodeBuffer);
 
-            //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);
-
-            node.Dirty = false; // no longer dirty
-            dirty++;
+            //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);            
         }
-
-        //Console.WriteLine("Dirty={0} NoDirty={1}", dirty, noDirty);
     }
 }

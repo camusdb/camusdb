@@ -42,7 +42,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         BTree<int, int?> index,
         int key,
         int value,
-        List<BTreeNode<int, int?>>? deltas
+        HashSet<BTreeNode<int, int?>>? deltas
     )
     {
         if (deltas is null)
@@ -67,23 +67,14 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
         await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
 
-        //@todo update nodes concurrently
-
-        int dirty = 0, noDirty = 0;
+        //@todo update nodes concurrently        
 
         foreach (BTreeNode<int, int?> node in deltas)
-        {
-            if (!node.Dirty)
-            {
-                noDirty++;
-                //Console.WriteLine("Node {0} at {1} is not dirty", node.Id, node.PageOffset);
-                continue;
-            }
-
+        {            
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // key count
                 SerializatorTypeSizes.TypeInteger32 + // page offset
-                12 * node.KeyCount
+                12 * node.KeyCount // 12 bytes * node (key + value + next)
             ];
 
             pointer = 0;
@@ -112,10 +103,6 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
             await tablespace.WriteDataToPage(node.PageOffset, 0, nodeBuffer);
 
             //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);
-            dirty++;
-            node.Dirty = false;
         }
-
-        //Console.WriteLine("Dirty={0} NoDirty={1}", dirty, noDirty);
     }
 }

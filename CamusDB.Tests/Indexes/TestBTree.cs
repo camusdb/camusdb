@@ -123,41 +123,33 @@ internal sealed class TestBTree
     [Test]
     public void TestMultiInsertDeltas()
     {
-        List<BTreeNode<int, int?>> deltas;
+        HashSet<BTreeNode<int, int?>> deltas;
 
         BTree<int, int?> tree = new(0);
 
         deltas = tree.Put(4, 100);
-        Assert.AreEqual(1, deltas.Count);
-        deltas.ForEach(x => x.Dirty = false);
+        Assert.AreEqual(1, deltas.Count);        
 
         deltas = tree.Put(5, 100);
-        Assert.AreEqual(1, deltas.Count);
-        deltas.ForEach(x => x.Dirty = false);
+        Assert.AreEqual(1, deltas.Count);        
 
         deltas = tree.Put(6, 101);
-        Assert.AreEqual(1, deltas.Count);
-        deltas.ForEach(x => x.Dirty = false);
+        Assert.AreEqual(1, deltas.Count);        
 
         deltas = tree.Put(7, 102);
-        Assert.AreEqual(1, deltas.Count);
-        deltas.ForEach(x => x.Dirty = false);
+        Assert.AreEqual(1, deltas.Count);        
 
         deltas = tree.Put(8, 103);
-        Assert.AreEqual(1, deltas.Count);
-        deltas.ForEach(x => x.Dirty = false);
+        Assert.AreEqual(1, deltas.Count);        
 
         deltas = tree.Put(9, 104);
-        Assert.AreEqual(1, deltas.Count);
-        deltas.ForEach(x => x.Dirty = false);
+        Assert.AreEqual(1, deltas.Count);        
 
         deltas = tree.Put(10, 105);
-        Assert.AreEqual(1, deltas.Count);
-        deltas.ForEach(x => x.Dirty = false);
+        Assert.AreEqual(1, deltas.Count);        
 
         deltas = tree.Put(11, 105);
-        Assert.AreEqual(3, deltas.Count);
-        deltas.ForEach(x => x.Dirty = false);
+        Assert.AreEqual(3, deltas.Count);        
 
         Assert.AreEqual(tree.Size(), 8);
         Assert.AreEqual(tree.Height(), 1);

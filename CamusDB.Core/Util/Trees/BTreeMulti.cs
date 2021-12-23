@@ -265,7 +265,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         BTreeMultiDelta<TKey>? multiDelta = null;
         BTreeMultiEntry<TKey>? newEntry = null;
         BTreeMultiEntry<TKey>[] children = node.children;
-        List<BTreeNode<int, int?>> innerDeltas;
+        HashSet<BTreeNode<int, int?>> innerDeltas;
 
         // external node at height 0
         if (ht == 0)
@@ -373,9 +373,9 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
      *
      * @param  key the key
      */
-    public (bool found, List<BTreeMultiNode<TKey>> deltas) Remove(TKey key)
+    public (bool found, HashSet<BTreeMultiNode<TKey>> deltas) Remove(TKey key)
     {
-        List<BTreeMultiNode<TKey>> deltas = new();
+        HashSet<BTreeMultiNode<TKey>> deltas = new();
 
         bool found = Delete(root, key, height);
 

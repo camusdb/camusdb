@@ -23,14 +23,14 @@ public sealed class SaveUniqueOffsetIndexTicket
 
 	public int Value { get; }	
 
-	public List<BTreeNode<int, int?>>? Deltas { get; }
+	public HashSet<BTreeNode<int, int?>>? Deltas { get; }
 
 	public SaveUniqueOffsetIndexTicket(
 		BufferPoolHandler tablespace,
 		BTree<int, int?> index,
 		int key,
-		int value,		
-		List<BTreeNode<int, int?>>? deltas = null
+		int value,
+		HashSet<BTreeNode<int, int?>>? deltas = null
 	)
 	{
 		Tablespace = tablespace;
