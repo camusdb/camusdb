@@ -274,7 +274,9 @@ public class TestBTreeMulti
         BTreeMulti<int> tree = new(0);
 
         tree.Put(5, 100);
-        Assert.IsTrue(tree.Remove(5));
+
+        (bool found, _) = tree.Remove(5);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(0, tree.Size());
         Assert.AreEqual(0, tree.Height());
@@ -286,7 +288,9 @@ public class TestBTreeMulti
         BTreeMulti<int> tree = new(0);
 
         tree.Put(5, 100);
-        Assert.IsFalse(tree.Remove(10));
+
+        (bool found, _) = tree.Remove(10);
+        Assert.IsFalse(found);
 
         Assert.AreEqual(1, tree.Size());
         Assert.AreEqual(0, tree.Height());
@@ -304,7 +308,8 @@ public class TestBTreeMulti
         tree.Put(8, 103);
         tree.Put(9, 104);
 
-        Assert.IsTrue(tree.Remove(5));
+        (bool found, _) = tree.Remove(5);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(5, tree.Size());
         Assert.AreEqual(5, tree.DenseSize());
@@ -323,7 +328,8 @@ public class TestBTreeMulti
         tree.Put(7, 101);
         tree.Put(7, 102);
 
-        Assert.IsTrue(tree.Remove(5));
+        (bool found, _) = tree.Remove(5);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(1, tree.Size());
         Assert.AreEqual(3, tree.DenseSize());
@@ -342,7 +348,8 @@ public class TestBTreeMulti
         tree.Put(7, 101);
         tree.Put(7, 102);
 
-        Assert.IsTrue(tree.Remove(5));
+        (bool found, _) = tree.Remove(5);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(1, tree.Size());
         Assert.AreEqual(3, tree.DenseSize());
@@ -364,7 +371,8 @@ public class TestBTreeMulti
         tree.Put(7, 101);
         tree.Put(7, 102);
 
-        Assert.IsTrue(tree.Remove(5));
+        (bool found, _) = tree.Remove(5);
+        Assert.IsTrue(found);
 
         Assert.AreEqual(1, tree.Size());
         Assert.AreEqual(3, tree.DenseSize());
@@ -420,7 +428,10 @@ public class TestBTreeMulti
         Assert.AreEqual(2, tree.Height());
 
         for (int i = 0; i < 50; i += 5)
-            Assert.IsTrue(tree.Remove(i));
+        {
+            (bool found, _) = tree.Remove(i);
+            Assert.IsTrue(found);
+        }
 
         Assert.AreEqual(40, tree.Size());
         Assert.AreEqual(2000, tree.DenseSize());
@@ -455,7 +466,10 @@ public class TestBTreeMulti
         Assert.AreEqual(2, tree.Height());
 
         for (int i = 0; i < 64; i += 8)
-            Assert.IsTrue(tree.Remove(i));
+        {
+            (bool found, _) = tree.Remove(i);
+            Assert.IsTrue(found);
+        }
 
         Assert.AreEqual(56, tree.Size());
         Assert.AreEqual(3584, tree.DenseSize());
@@ -489,7 +503,10 @@ public class TestBTreeMulti
         Assert.AreEqual(2, tree.Height());
 
         for (int i = 7; i < 49; i += 7)
-            Assert.IsTrue(tree.Remove(i));
+        {
+            (bool found, _) = tree.Remove(i);
+            Assert.IsTrue(found);
+        }
 
         Assert.AreEqual(43, tree.Size());
         Assert.AreEqual(2107, tree.DenseSize());

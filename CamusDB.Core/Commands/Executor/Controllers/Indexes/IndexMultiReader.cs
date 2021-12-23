@@ -30,7 +30,7 @@ internal sealed class IndexMultiReader : IndexBaseReader
 
         byte[] data = await tablespace.GetDataFromPage(offset);
         if (data.Length == 0)
-            return index;        
+            return index;
 
         int pointer = 0;
 
@@ -66,8 +66,6 @@ internal sealed class IndexMultiReader : IndexBaseReader
             return null;
 
         BTreeMultiNode<ColumnValue> node = new(-1);
-
-        node.Dirty = false; // read nodes from disk must be not persisted
 
         int pointer = 0;
         node.KeyCount = Serializator.ReadInt32(data, ref pointer);
