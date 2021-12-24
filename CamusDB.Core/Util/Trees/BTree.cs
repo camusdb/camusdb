@@ -119,16 +119,18 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 if (j + 1 == node.KeyCount || Less(key, children[j + 1].Key))
                 {
-                    if (children[j].Next is null && children[j].NextPageOffset > 0)
+                    BTreeEntry<TKey, TValue> entry = children[j];
+
+                    if (entry.Next is null && entry.NextPageOffset > 0)
                     {
                         if (Reader is null)
                             throw new Exception("Cannot read lazy node because reader is null");
 
-                        children[j].Next = await Reader.GetNode(children[j].NextPageOffset);
+                        entry.Next = await Reader.GetNode(entry.NextPageOffset);
                         loaded++;
                     }
 
-                    return await Search(children[j].Next, key, ht - 1);
+                    return await Search(entry.Next, key, ht - 1);
                 }
             }
         }
@@ -142,7 +144,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             yield return entry;
     }
 
-    private static async IAsyncEnumerable<BTreeEntry<TKey, TValue>> EntriesTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
+    private async IAsyncEnumerable<BTreeEntry<TKey, TValue>> EntriesTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
     {
         if (node is null)
             yield break;
@@ -161,8 +163,19 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             for (int j = 0; j < node.KeyCount; j++)
             {
-                await foreach (BTreeEntry<TKey, TValue> entry in EntriesTraverseInternal(children[j].Next, ht - 1))
-                    yield return entry;
+                BTreeEntry<TKey, TValue> entry = children[j];
+
+                if (entry.Next is null && entry.NextPageOffset > 0)
+                {
+                    if (Reader is null)
+                        throw new Exception("Cannot read lazy node because reader is null");
+
+                    entry.Next = await Reader.GetNode(entry.NextPageOffset);
+                    loaded++;
+                }
+
+                await foreach (BTreeEntry<TKey, TValue> childEntry in EntriesTraverseInternal(entry.Next, ht - 1))
+                    yield return childEntry;
             }
         }
     }
@@ -173,7 +186,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             yield return node;
     }
 
-    private static async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
+    private async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
     {
         if (node is null)
             yield break;
@@ -185,7 +198,18 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         for (int j = 0; j < node.KeyCount; j++)
         {
-            await foreach (BTreeNode<TKey, TValue> childNode in NodesTraverseInternal(node.children[j].Next, ht - 1))
+            BTreeEntry<TKey, TValue> entry = node.children[j];
+
+            if (entry.Next is null && entry.NextPageOffset > 0)
+            {
+                if (Reader is null)
+                    throw new Exception("Cannot read lazy node because reader is null");
+
+                entry.Next = await Reader.GetNode(entry.NextPageOffset);
+                loaded++;
+            }
+
+            await foreach (BTreeNode<TKey, TValue> childNode in NodesTraverseInternal(entry.Next, ht - 1))
                 yield return childNode;
         }
     }
@@ -196,14 +220,25 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             yield return node;
     }
 
-    private static async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesReverseTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
+    private async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesReverseTraverseInternal(BTreeNode<TKey, TValue>? node, int ht)
     {
         if (node is null)
             yield break;
 
         for (int j = node.KeyCount; j >= 0; j--)
         {
-            await foreach (BTreeNode<TKey, TValue> childNode in NodesReverseTraverseInternal(node.children[j].Next, ht - 1))
+            BTreeEntry<TKey, TValue> entry = node.children[j];
+
+            if (entry.Next is null && entry.NextPageOffset > 0)
+            {
+                if (Reader is null)
+                    throw new Exception("Cannot read lazy node because reader is null");
+
+                entry.Next = await Reader.GetNode(entry.NextPageOffset);
+                loaded++;
+            }
+
+            await foreach (BTreeNode<TKey, TValue> childNode in NodesReverseTraverseInternal(entry.Next, ht - 1))
                 yield return childNode;
         }
 
@@ -227,7 +262,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (split is null)
             return deltas;
 
-        Console.WriteLine("need to split root");
+        //Console.WriteLine("need to split root");
 
         // need to split root
         BTreeNode<TKey, TValue> newRoot = new(2);

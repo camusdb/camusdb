@@ -59,7 +59,7 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
 
         //Console.WriteLine("***");
 
-        Console.WriteLine("Loaded index of size {0} {1}", index.size, index.loaded);
+        //Console.WriteLine("Loaded index of size {0} {1}", index.size, index.loaded);
 
         return index;
     }

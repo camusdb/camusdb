@@ -27,6 +27,6 @@ public sealed class BTreeMultiNode<T> where T : IComparable<T>
         Id = Interlocked.Increment(ref CurrentId);
         KeyCount = keyCount;
 
-        Console.WriteLine("Allocated new node {0}", Id);
+        //Console.WriteLine("Allocated new node {0}", Id);
     }
 }

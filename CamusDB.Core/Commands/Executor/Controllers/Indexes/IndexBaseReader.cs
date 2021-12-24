@@ -18,7 +18,7 @@ internal abstract class IndexBaseReader
 {
     protected static ColumnValue UnserializeKey(byte[] nodeBuffer, ref int pointer)
     {
-        ColumnType type = (ColumnType) Serializator.ReadInt16(nodeBuffer, ref pointer);
+        ColumnType type = (ColumnType)Serializator.ReadInt16(nodeBuffer, ref pointer);
 
         switch (type)
         {
@@ -43,16 +43,5 @@ internal abstract class IndexBaseReader
             default:
                 throw new Exception("Can't use this type as index");
         }
-    }
-
-    protected static BTreeTuple? UnserializeTuple(byte[] nodeBuffer, ref int pointer)
-    {
-        int slotOne = Serializator.ReadInt32(nodeBuffer, ref pointer);
-        int slotTwo = Serializator.ReadInt32(nodeBuffer, ref pointer);
-
-        if (slotOne == 0 && slotTwo == 0)
-            return null;
-
-        return new BTreeTuple(slotOne, slotTwo);
     }
 }

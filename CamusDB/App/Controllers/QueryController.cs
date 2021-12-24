@@ -31,8 +31,8 @@ public sealed class QueryController : CommandsController
         {
             QueryTicket ticket = new(
                 database: "test",
-                name: "my_table",
-                index: "code"
+                name: "my_table"
+            //index: "code"
             );
 
             List<Dictionary<string, ColumnValue>> rows = await executor.Query(ticket);

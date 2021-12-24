@@ -17,17 +17,15 @@ public sealed class IndexUniqueOffsetNodeReader : IBTreeNodeReader<int, int?>
     private readonly BufferPoolHandler bufferpool;
 
     public IndexUniqueOffsetNodeReader(BufferPoolHandler bufferpool)
-	{
+    {
         this.bufferpool = bufferpool;
-	}
+    }
 
     public async Task<BTreeNode<int, int?>?> GetNode(int offset)
-    {                
+    {
         byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
             return null;
-
-        Console.WriteLine("Load tree node at {0}", offset);
 
         BTreeNode<int, int?> node = new(-1);
 
@@ -44,8 +42,8 @@ public sealed class IndexUniqueOffsetNodeReader : IBTreeNodeReader<int, int?>
                 value: Serializator.ReadInt32(data, ref pointer),
                 next: null
             );
-            
-            entry.NextPageOffset = Serializator.ReadInt32(data, ref pointer);                                                   
+
+            entry.NextPageOffset = Serializator.ReadInt32(data, ref pointer);
 
             node.children[i] = entry;
         }
