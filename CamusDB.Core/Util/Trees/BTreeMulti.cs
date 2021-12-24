@@ -336,10 +336,13 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
         innerDeltas = await newEntry.Value!.Put(val.SlotOne, val.SlotTwo);
 
+        if (innerDeltas is null)
+            throw new Exception("inner deltas cannot be null");
+
         node.children[j] = newEntry;
         node.KeyCount++;
 
-        if (!deltas.TryGetValue(node.Id, out multiDelta))
+        if (!deltas.ContainsKey(node.Id))
             deltas.Add(node.Id, new BTreeMultiDelta<TKey>(node, innerDeltas));
         else
             deltas[node.Id].InnerDeltas = innerDeltas;
@@ -355,6 +358,8 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
     // split node in half
     private static BTreeMultiNode<TKey> Split(BTreeMultiNode<TKey> current, Dictionary<int, BTreeMultiDelta<TKey>> deltas)
     {
+        Console.WriteLine("split node");
+
         BTreeMultiNode<TKey> split = new(BTreeConfig.MaxChildrenHalf);
         deltas.Add(split.Id, new BTreeMultiDelta<TKey>(split, null));
 
@@ -368,7 +373,13 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         //Console.WriteLine("Node {0} marked as dirty because of split", current.Id);
 
         for (int j = 0; j < BTreeConfig.MaxChildrenHalf; j++)
+        {
+            Console.WriteLine("Assigning child {0} from {1} to {2} at {3}", BTreeConfig.MaxChildrenHalf + j, current.Id, split.Id, j);
+
             split.children[j] = current.children[BTreeConfig.MaxChildrenHalf + j];
+        }
+
+        Console.WriteLine("end split node {0} {1}", current.KeyCount, split.KeyCount);
 
         return split;
     }

@@ -227,6 +227,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (split is null)
             return deltas;
 
+        Console.WriteLine("need to split root");
+
         // need to split root
         BTreeNode<TKey, TValue> newRoot = new(2);
         deltas.Add(newRoot);

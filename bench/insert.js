@@ -51,5 +51,6 @@ async function f()
 
     //for (let i = 0; i < 100; i++)
 //		  await Promise.all([f(), f(), f(), f(), f(), f(), f(), f(), f()]);
- await f();
+    for (let i = 0; i < 9; i++)
+ 	await f();
 })();

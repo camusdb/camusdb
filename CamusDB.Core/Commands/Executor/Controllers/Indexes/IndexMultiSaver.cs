@@ -135,25 +135,28 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                     continue;
                 }
 
-                //Console.WriteLine("Read Tree={0} PageOffset={1}", subTree.Id, subTree.PageOffset);
+                if (delta.Value.InnerDeltas is not null)
+                {
+                    //Console.WriteLine("Read Tree={0} PageOffset={1}", subTree.Id, subTree.PageOffset);
 
-                if (subTree.PageOffset == -1)
-                    subTree.PageOffset = await tablespace.GetNextFreeOffset();
+                    if (subTree.PageOffset == -1)
+                        subTree.PageOffset = await tablespace.GetNextFreeOffset();
 
-                if (delta.Value.InnerDeltas is null)
-                    throw new Exception("Inner deltas cannot be null on " + delta.Value.Node.Id);
+                    if (delta.Value.InnerDeltas is null)
+                        throw new Exception("Inner deltas cannot be null on " + delta.Value.Node.Id + " " + i + " " + subTree.Size());
 
-                Console.WriteLine("Saved deltas for {0} {1}", delta.Value.Node.Id, subTree.Id);
+                    Console.WriteLine("Saved deltas for {0} {1}", delta.Value.Node.Id, subTree.Id);
 
-                SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
-                    tablespace: tablespace,
-                    index: subTree,
-                    key: value.SlotOne,
-                    value.SlotTwo,
-                    deltas: delta.Value.InnerDeltas
-                );
+                    SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
+                        tablespace: tablespace,
+                        index: subTree,
+                        key: value.SlotOne,
+                        value.SlotTwo,
+                        deltas: delta.Value.InnerDeltas
+                    );
 
-                await indexSaver.Save(saveUniqueOffsetIndex);
+                    await indexSaver.Save(saveUniqueOffsetIndex);
+                }
 
                 //Console.WriteLine("Write Tree={0} PageOffset={1}", subTree.Id, subTree.PageOffset);
 
