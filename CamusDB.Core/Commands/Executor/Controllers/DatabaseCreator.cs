@@ -22,7 +22,7 @@ internal sealed class DatabaseCreator
         if (Directory.Exists(dbPath))
             throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Database already exists");
 
-        Directory.CreateDirectory(dbPath);
+        //Directory.CreateDirectory(dbPath);
 
         //await InitializeDatabaseFiles(name, dbPath);
 

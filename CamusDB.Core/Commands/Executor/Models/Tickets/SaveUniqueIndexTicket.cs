@@ -8,22 +8,16 @@
 
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Journal.Models;
-using CamusDB.Core.Journal.Controllers;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public sealed class SaveUniqueIndexTicket
 {
-    public BufferPoolHandler Tablespace { get; }
-
-    public JournalWriter Journal { get; }
+    public BufferPoolHandler Tablespace { get; }    
 
     public uint Sequence { get; }
 
-    public uint SubSequence { get; }
-
-    public JournalFailureTypes FailureType { get; }
+    public uint SubSequence { get; }    
 
     public BTree<ColumnValue, BTreeTuple?> Index { get; }
 
@@ -32,21 +26,17 @@ public sealed class SaveUniqueIndexTicket
     public BTreeTuple Value { get;  }    
 
     public SaveUniqueIndexTicket(
-        BufferPoolHandler tablespace,
-        JournalWriter journal,
+        BufferPoolHandler tablespace,        
         uint sequence,
-        uint subSequence,
-        JournalFailureTypes failureType,
+        uint subSequence,        
         BTree<ColumnValue, BTreeTuple?> index,
         ColumnValue key,
         BTreeTuple value
     )
     {
-        Tablespace = tablespace;
-        Journal = journal;
+        Tablespace = tablespace;        
         Sequence = sequence;
-        SubSequence = subSequence;
-        FailureType = failureType;
+        SubSequence = subSequence;        
         Index = index;
         Key = key;
         Value = value;

@@ -28,30 +28,32 @@ public class TestRowDeletor
     [SetUp]
     public void Setup()
     {
-        SetupDb.Remove("factory");
+        //SetupDb.Remove("factory");
     }
 
-    private async Task<CommandExecutor> SetupDatabase()
+    private async Task<(string, CommandExecutor)> SetupDatabase()
     {
+        string dbname = System.Guid.NewGuid().ToString("n");
+
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
         CommandExecutor executor = new(validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
-            name: "factory"
+            name: dbname
         );
 
         await executor.CreateDatabase(databaseTicket);
 
-        return executor;
+        return (dbname, executor);
     }
 
     private async Task<CommandExecutor> SetupBasicTable()
     {
-        var executor = await SetupDatabase();
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
-            database: "factory",
+            database: dbname,
             name: "robots",
             new ColumnInfo[]
             {
@@ -67,7 +69,7 @@ public class TestRowDeletor
         for (int i = 0; i < 25; i++)
         {
             InsertTicket ticket = new(
-                database: "factory",
+                database: dbname,
                 name: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
@@ -82,15 +84,15 @@ public class TestRowDeletor
         }
 
         return executor;
-    }    
+    }
 
-    [Test]
+    /*[Test]
     [NonParallelizable]
     public async Task TestInvalidDatabase()
     {
         var executor = await SetupBasicTable();
 
-        /*InsertTicket ticket = new(
+        InsertTicket ticket = new(
             database: "another_factory",
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
@@ -103,8 +105,8 @@ public class TestRowDeletor
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
-        Assert.AreEqual("Database doesn't exist", e!.Message);*/
-    }
+        Assert.AreEqual("Database doesn't exist", e!.Message);
+    }*/
 
     [Test]
     [NonParallelizable]
@@ -126,7 +128,7 @@ public class TestRowDeletor
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
         Assert.AreEqual("Table 'unknown_table' doesn't exist", e!.Message);*/
-    }    
+    }
 
     [Test]
     [NonParallelizable]

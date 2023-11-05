@@ -26,7 +26,7 @@ public sealed class CreateTableController : CommandsController
 
     }
 
-    private ColumnType GetColumnType(string? name)
+    private static ColumnType GetColumnType(string? name)
     {
         if (string.IsNullOrEmpty(name))
             throw new Exception("Invalid type");
@@ -46,7 +46,7 @@ public sealed class CreateTableController : CommandsController
         throw new Exception("Unknown type " + name);
     }
 
-    private IndexType GetIndexType(string? type)
+    private static IndexType GetIndexType(string? type)
     {
         if (string.IsNullOrEmpty(type))
             return IndexType.None;
@@ -60,7 +60,7 @@ public sealed class CreateTableController : CommandsController
         throw new Exception("Unknown index type " + type);
     }
 
-    private ColumnInfo[] GetColumnInfos(CreateTableColumn[]? columns)
+    private static ColumnInfo[] GetColumnInfos(CreateTableColumn[]? columns)
     {
         if (columns is null)
             return Array.Empty<ColumnInfo>();

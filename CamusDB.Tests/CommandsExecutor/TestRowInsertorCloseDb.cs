@@ -6,9 +6,7 @@
  * file that was distributed with this source code.
  */
 
-using System.IO;
 using NUnit.Framework;
-using CamusDB.Tests.Utils;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
 using CamusDB.Core.Util.ObjectIds;
@@ -16,7 +14,6 @@ using System.Collections.Generic;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
-using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -27,30 +24,32 @@ internal sealed class TestRowInsertorCloseDb
     [SetUp]
     public void Setup()
     {
-        SetupDb.Remove("factory");
+        //SetupDb.Remove("factory");
     }
 
-    private async Task<CommandExecutor> SetupDatabase()
+    private async Task<(string, CommandExecutor)> SetupDatabase()
     {
+        string dbname = System.Guid.NewGuid().ToString("n");
+
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
         CommandExecutor executor = new(validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
-            name: "factory"
+            name: dbname
         );
 
         await executor.CreateDatabase(databaseTicket);
 
-        return executor;
+        return (dbname, executor);
     }
 
-    private async Task<CommandExecutor> SetupMultiIndexTable()
+    private async Task<(string, CommandExecutor)> SetupMultiIndexTable()
     {
-        var executor = await SetupDatabase();
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
-            database: "factory",
+            database: dbname,
             name: "user_robots",
             new ColumnInfo[]
             {
@@ -62,17 +61,17 @@ internal sealed class TestRowInsertorCloseDb
 
         await executor.CreateTable(tableTicket);
 
-        return executor;
+        return (dbname, executor);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestBasicInsert()
     {
-        var executor = await SetupMultiIndexTable();
+        (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
 
         InsertTicket ticket = new(
-            database: "factory",
+            database: dbname,
             name: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
@@ -89,10 +88,10 @@ internal sealed class TestRowInsertorCloseDb
     [NonParallelizable]
     public async Task TestSuccessfulTwoMultiParallelInserts()
     {
-        var executor = await SetupMultiIndexTable();
+        (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
 
         InsertTicket ticket = new(
-            database: "factory",
+            database: dbname,
             name: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
@@ -103,7 +102,7 @@ internal sealed class TestRowInsertorCloseDb
         );
 
         InsertTicket ticket2 = new(
-            database: "factory",
+            database: dbname,
             name: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
@@ -119,16 +118,17 @@ internal sealed class TestRowInsertorCloseDb
             executor.Insert(ticket2)
         });
 
-        CloseDatabaseTicket closeTicket = new("factory");
+        CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
 
         QueryByIdTicket queryTicket = new(
-            database: "factory",
+            database: dbname,
             name: "user_robots",
             id: "507f191e810c19729de860ea"
         );
 
         List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
+        Assert.AreEqual(1, result.Count);
 
         Dictionary<string, ColumnValue> row = result[0];
 
@@ -145,7 +145,7 @@ internal sealed class TestRowInsertorCloseDb
         Assert.AreEqual(row[3].Value, "true");*/
 
         QueryByIdTicket queryTicket2 = new(
-            database: "factory",
+            database: dbname,
             name: "user_robots",
             id: "507f1f77bcf86cd799439011"
         );
@@ -172,7 +172,7 @@ internal sealed class TestRowInsertorCloseDb
     public async Task TestCheckSuccessfulMultiInsert()
     {
         int i;
-        var executor = await SetupMultiIndexTable();
+        (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
 
         string[] userIds = new string[5];
         for (i = 0; i < 5; i++)
@@ -186,7 +186,7 @@ internal sealed class TestRowInsertorCloseDb
             objectIds.Add(objectId);
 
             InsertTicket insertTicket = new(
-                database: "factory",
+                database: dbname,
                 name: "user_robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
@@ -200,7 +200,7 @@ internal sealed class TestRowInsertorCloseDb
 
             if ((i + 1) % 5 == 0)
             {
-                CloseDatabaseTicket closeTicket = new("factory");
+                CloseDatabaseTicket closeTicket = new(dbname);
                 await executor.CloseDatabase(closeTicket);
             }
         }

@@ -1,19 +1,11 @@
 ﻿
-using System.IO;
-using System.Text;
-using CamusDB.Core;
 using NUnit.Framework;
-using CamusDB.Tests.Utils;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
-using CamusDB.Core.BufferPool;
 using System.Collections.Generic;
-using System.IO.MemoryMappedFiles;
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
-using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
@@ -25,30 +17,32 @@ internal sealed class TestRowMultiInsertor
     [SetUp]
     public void Setup()
     {
-        SetupDb.Remove("factory");
+        //SetupDb.Remove("factory");
     }
 
-    private async Task<CommandExecutor> SetupDatabase()
+    private async Task<(string, CommandExecutor)> SetupDatabase()
     {
+        string dbname = System.Guid.NewGuid().ToString("n");
+
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
         CommandExecutor executor = new(validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
-            name: "factory"
+            name: dbname
         );
 
         await executor.CreateDatabase(databaseTicket);
 
-        return executor;
+        return (dbname, executor);
     }
 
-    private async Task<CommandExecutor> SetupMultiIndexTable()
-    {
-        var executor = await SetupDatabase();
+    private async Task<(string, CommandExecutor)> SetupMultiIndexTable()
+    {        
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
-            database: "factory",
+            database: dbname,
             name: "user_robots",
             new ColumnInfo[]
             {
@@ -60,7 +54,7 @@ internal sealed class TestRowMultiInsertor
 
         await executor.CreateTable(tableTicket);
 
-        return executor;
+        return (dbname, executor);
     }
 
     [Test]
@@ -68,10 +62,10 @@ internal sealed class TestRowMultiInsertor
     [NonParallelizable]
     public async Task TestBasicInsert()
     {
-        var executor = await SetupMultiIndexTable();
+        (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
 
         InsertTicket ticket = new(
-            database: "factory",
+            database: dbname,
             name: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
@@ -89,12 +83,12 @@ internal sealed class TestRowMultiInsertor
     [NonParallelizable]
     public async Task TestCheckSuccessfulMultiInsertWithQueryIndex()
     {
-        var executor = await SetupMultiIndexTable();
+        (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
 
         for (int i = 0; i < 10; i++)
         {
             InsertTicket insertTicket = new(
-                database: "factory",
+                database: dbname,
                 name: "user_robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
@@ -108,7 +102,7 @@ internal sealed class TestRowMultiInsertor
         }
 
         QueryTicket queryTicket = new(
-            database: "factory",
+            database: dbname,
             name: "user_robots",
             index: "robots_id"
         );
@@ -136,12 +130,12 @@ internal sealed class TestRowMultiInsertor
     [NonParallelizable]
     public async Task TestSameKeyMultiInsertWithQueryIndex()
     {
-        var executor = await SetupMultiIndexTable();
+        (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
 
         for (int i = 0; i < 10; i++)
         {
             InsertTicket insertTicket = new(
-                database: "factory",
+                database: dbname,
                 name: "user_robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
@@ -155,12 +149,13 @@ internal sealed class TestRowMultiInsertor
         }
 
         QueryTicket queryTicket = new(
-            database: "factory",
+            database: dbname,
             name: "user_robots",
             index: "robots_id"
         );
 
         List<Dictionary<string, ColumnValue>> result = await executor.Query(queryTicket);
+        Assert.AreEqual(10, result.Count);
 
         for (int i = 0; i < 10; i++)
         {

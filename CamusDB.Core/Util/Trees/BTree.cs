@@ -6,14 +6,12 @@
  * file that was distributed with this source code.
  */
 
-using System.Collections;
-using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
 namespace CamusDB.Core.Util.Trees;
 
 /**
- *  B+Tree 
+ * B+Tree 
  *  
  * A B+ tree is an m-ary tree with a variable but often large number of children per node. 
  * A B+ tree consists of a root, internal nodes and leaves. The root may be either a 
@@ -28,7 +26,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     public BTreeNode<TKey, TValue>? root;  // root of the B-tree
 
-    public int Id;    // unique tree id
+    public int Id;       // unique tree id
 
     public int height;   // height of the B-tree
 

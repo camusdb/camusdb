@@ -14,8 +14,8 @@ public sealed class BufferPage
 
     public int RefCount { get; }
 
-    public byte[] Buffer { get; set; }    
-    
+    public byte[] Buffer { get; set; }
+
     public bool Dirty { get; set; }
 
     private int refCount = 0;

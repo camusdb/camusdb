@@ -6,10 +6,7 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Journal;
-using CamusDB.Core.Journal.Models;
 using CamusDB.Core.BufferPool.Models;
-using CamusDB.Core.Journal.Models.Logs;
 using Config = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.BufferPool.Controllers;
@@ -27,12 +24,11 @@ public sealed class BufferPoolFlusher
 
     private readonly BufferPoolHandler bufferPool;
 
-    private readonly JournalManager journal;
+    //private readonly JournalManager journal;
 
-    public BufferPoolFlusher(BufferPoolHandler bufferPool, JournalManager journal)
+    public BufferPoolFlusher(BufferPoolHandler bufferPool)
     {
-        this.bufferPool = bufferPool;
-        this.journal = journal;
+        this.bufferPool = bufferPool;        
     }
 
     public async Task PeriodicallyFlush()
@@ -46,6 +42,8 @@ public sealed class BufferPoolFlusher
 
     public async Task FlushPages()
     {
+        await Task.Yield();
+
         List<BufferPage> pagesToFlush = new();
 
         foreach (KeyValuePair<int, BufferPage> keyValuePair in bufferPool.Pages)
@@ -59,7 +57,7 @@ public sealed class BufferPoolFlusher
 
         if (pagesToFlush.Count == 0)
         {
-            await journal.Writer.Flush();
+            //await journal.Writer.Flush();
             return;
         }
 
@@ -72,12 +70,12 @@ public sealed class BufferPoolFlusher
 
         bufferPool.Flush();
 
-        foreach (BufferPage page in pagesToFlush)
+        /*foreach (BufferPage page in pagesToFlush)
         {
             await journal.Writer.Append(JournalFailureTypes.None, new FlushedPagesLog(0));
         }
 
-        await journal.Writer.Flush();
+        await journal.Writer.Flush();*/
     }
 
     public void Dispose()

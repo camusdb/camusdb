@@ -16,7 +16,7 @@ internal sealed class DatabaseCloser : IDisposable
 
     public DatabaseCloser(DatabaseDescriptors databaseDescriptors)
     {
-        this.databaseDescriptors = databaseDescriptors;        
+        this.databaseDescriptors = databaseDescriptors;
     }
 
     public async ValueTask Close(string name)
@@ -27,25 +27,13 @@ internal sealed class DatabaseCloser : IDisposable
         try
         {
             await databaseDescriptors.Semaphore.WaitAsync();
-            
-            await databaseDescriptor.Journal.Writer.Flush();
-
-            if (databaseDescriptor.TableSpaceFlusher is not null)
-                databaseDescriptor.TableSpaceFlusher.Dispose();
 
             if (databaseDescriptor.TableSpace is not null)
                 databaseDescriptor.TableSpace.Dispose();
 
-            if (databaseDescriptor.SchemaSpace is not null)
-                databaseDescriptor.SchemaSpace.Dispose();
-
-            if (databaseDescriptor.SystemSpace is not null)
-                databaseDescriptor.SystemSpace.Dispose();
+            databaseDescriptor.DbHandler.Dispose();
 
             databaseDescriptors.Descriptors.Remove(name);
-
-            string path = Path.Combine(CamusDBConfig.DataDirectory, name, "camus.lock");
-            File.Delete(path);
 
             Console.WriteLine("Database {0} closed", name);
         }

@@ -23,7 +23,6 @@
     <None Remove="Indexes\" />
     <None Remove="Fixtures\" />
     <None Remove="Serializator\" />
-    <None Remove="Journal\" />
     <None Remove="Utils\" />
     <None Remove="Flux\" />
     <None Remove="Flux\Fixtures\" />
@@ -35,7 +34,6 @@
     <Folder Include="Indexes\" />
     <Folder Include="Fixtures\" />
     <Folder Include="Serialization\" />
-    <Folder Include="Journal\" />
     <Folder Include="Utils\" />
     <Folder Include="Flux\" />
     <Folder Include="Flux\Fixtures\" />

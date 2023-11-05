@@ -11,17 +11,10 @@
   <ItemGroup>
     <None Remove="Util\Hashes\" />
     <None Remove="CommandsExecutor\Controllers\Indexes\" />
-    <None Remove="Journal\" />
-    <None Remove="Journal\Models\" />
-    <None Remove="Journal\Controllers\" />
     <None Remove="Journal\Controllers\Reader\" />
-    <None Remove="Journal\Attributes\" />
-    <None Remove="Journal\Utils\" />
-    <None Remove="Journal\Models\Logs\" />
     <None Remove="CommandsExecutor\Models\StateMachines\" />
     <None Remove="Machines\" />
     <None Remove="CommandsExecutor\Controllers\Insert\" />
-    <None Remove="Journal\Controllers\Recovery\" />
     <None Remove="BufferPool\Controllers\" />
     <None Remove="Flux\Models\" />
     <None Remove="Commands\Executor\" />
@@ -35,14 +28,7 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Util\Hashes\" />
-    <Folder Include="Journal\" />
-    <Folder Include="Journal\Models\" />
-    <Folder Include="Journal\Controllers\" />
-    <Folder Include="Journal\Attributes\" />
-    <Folder Include="Journal\Utils\" />
-    <Folder Include="Journal\Models\Logs\" />
     <Folder Include="Flux\" />
-    <Folder Include="Journal\Controllers\Recovery\" />
     <Folder Include="BufferPool\Controllers\" />
     <Folder Include="Flux\Models\" />
     <Folder Include="Commands\Executor\" />
@@ -64,5 +50,6 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <PackageReference Include="RocksDb" Version="8.1.1.38647" />
   </ItemGroup>
 </Project>

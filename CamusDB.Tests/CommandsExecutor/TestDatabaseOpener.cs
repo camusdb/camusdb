@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.IO;
 using NUnit.Framework;
 using System.Threading.Tasks;
 
@@ -15,7 +14,6 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
-using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -26,29 +24,29 @@ public class TestDatabaseOpener
     [SetUp]
     public void Setup()
     {
-        SetupDb.Remove("test");
+        //SetupDb.Remove("test");
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestOpenDatabase()
     {
+        string dbname = System.Guid.NewGuid().ToString("n");
+
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
         CommandExecutor executor = new(validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
-            name: "test"
+            name: dbname
         );
 
         await executor.CreateDatabase(databaseTicket);
 
-        DatabaseDescriptor database = await executor.OpenDatabase("test");
+        DatabaseDescriptor database = await executor.OpenDatabase(dbname);
 
-        Assert.AreEqual("test", database.Name);
-
-        Assert.IsInstanceOf<BufferPoolHandler>(database.SchemaSpace);
-        Assert.IsInstanceOf<BufferPoolHandler>(database.SystemSpace);
+        Assert.AreEqual(dbname, database.Name);
+        
         Assert.IsInstanceOf<BufferPoolHandler>(database.TableSpace);
 
         Assert.IsInstanceOf<SystemSchema>(database.SystemSchema);

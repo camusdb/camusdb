@@ -6,10 +6,7 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.BufferPool;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Journal.Models;
-using CamusDB.Core.Journal.Controllers;
 using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;

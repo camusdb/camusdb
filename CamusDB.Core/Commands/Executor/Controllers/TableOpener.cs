@@ -35,17 +35,21 @@ internal sealed class TableOpener
             await database.DescriptorsSemaphore.WaitAsync(); // @todo block per table
 
             if (database.TableDescriptors.TryGetValue(tableName, out tableDescriptor))
-                return tableDescriptor;            
+                return tableDescriptor;
 
             BufferPoolHandler tablespace = database.TableSpace!;
 
             TableSchema tableSchema = Catalogs.GetTableSchema(database, tableName);
             DatabaseObject systemObject = GetSystemObject(database, tableName);
 
-            tableDescriptor = new();
-            tableDescriptor.Name = tableName;
-            tableDescriptor.Schema = tableSchema;
-            tableDescriptor.Rows = await indexReader.ReadOffsets(tablespace, systemObject.StartOffset);
+            Console.WriteLine(systemObject.StartOffset);
+
+            tableDescriptor = new()
+            {
+                Name = tableName,
+                Schema = tableSchema,
+                Rows = await indexReader.ReadOffsets(tablespace, systemObject.StartOffset)
+            };
 
             // @todo read indexes in parallel
 
@@ -96,7 +100,7 @@ internal sealed class TableOpener
 
     private static DatabaseObject GetSystemObject(DatabaseDescriptor database, string tableName)
     {
-        var objects = database.SystemSchema.Objects;
+        Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
 
         if (!objects.TryGetValue(tableName, out DatabaseObject? databaseObject))
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Table system data is corrupt");

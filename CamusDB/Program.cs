@@ -11,6 +11,8 @@ using CamusDB.Core.Util;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
+using System.IO;
+using RocksDbSharp;
 
 //Console.WriteLine(UInt32.MaxValue);
 

@@ -8,12 +8,12 @@
 
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
-using System.IO.MemoryMappedFiles;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage;
+using RocksDbSharp;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -41,26 +41,23 @@ internal sealed class DatabaseOpener
 
             string path = Path.Combine(Config.DataDirectory, name);
 
-            if (!Directory.Exists(path))
-                throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
-                        
-            StorageManager schemaStorage = new(path, "schema");
-            StorageManager systemStorage = new(path, "system");
-            StorageManager tablespaceStorage = new(path, "tablespace");
+            DbOptions options = new DbOptions()
+                                    .SetCreateIfMissing(true)
+                                    .SetWalDir(path) // using WAL
+                                    .SetWalRecoveryMode(Recovery.AbsoluteConsistency) // setting recovery mode to Absolute Consistency
+                                    .SetAllowConcurrentMemtableWrite(true);
 
-            // Need to make sure tablespaces are initialized before using them
-            await Task.WhenAll(new Task[]
-            {
-                tablespaceStorage.Initialize(),
-                schemaStorage.Initialize(),
-                systemStorage.Initialize()
-            });
+            RocksDb dbHandler = RocksDb.Open(options, path);
+
+            //if (!Directory.Exists(path))
+            //    throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
+            
+            StorageManager tablespaceStorage = new(dbHandler);
 
             databaseDescriptor = new(
                 name: name,
-                tableSpace: new BufferPoolHandler(tablespaceStorage),
-                schemaSpace: new BufferPoolHandler(schemaStorage),
-                systemSpace: new BufferPoolHandler(systemStorage)
+                dbHandler,
+                tableSpace: new BufferPoolHandler(tablespaceStorage)
             );
 
             await Task.WhenAll(new Task[]
@@ -70,27 +67,15 @@ internal sealed class DatabaseOpener
                 LoadDatabaseTableSpace(databaseDescriptor)
             });
 
-            // Create this file when the database is open, remove it when closed
-            // If the file exists when the server starts up then it might crashed
-            path = Path.Combine(Config.DataDirectory, name, "camus.lock");
-
             await Task.WhenAll(new Task[]
             {
-                databaseDescriptor.TableSpace.Initialize(),
-                File.WriteAllBytesAsync(path, Array.Empty<byte>())
+                databaseDescriptor.TableSpace.Initialize()
             });
 
             Console.WriteLine("Database {0} opened", name);
 
             // Only the data table space has a concurrent dirty page flusher
-            _ = Task.Factory.StartNew(databaseDescriptor.TableSpaceFlusher.PeriodicallyFlush);
-
-            // Initialize a new journal
-            databaseDescriptor.Journal.Writer.Initialize();
-
-            // Check journal for recovery
-            if (recoveryMode)
-                await databaseDescriptor.Journal.Writer.TryRecover(executor, databaseDescriptor);            
+            //_ = Task.Factory.StartNew(databaseDescriptor.TableSpaceFlusher.PeriodicallyFlush);                        
 
             databaseDescriptors.Descriptors.Add(name, databaseDescriptor);
         }
@@ -102,16 +87,32 @@ internal sealed class DatabaseOpener
         return databaseDescriptor;
     }
 
-    private static async Task LoadDatabaseSchema(DatabaseDescriptor databaseDescriptor)
-    {
-        byte[] data = await databaseDescriptor.SchemaSpace!.GetDataFromPage(Config.SchemaHeaderPage);
+    private static Task LoadDatabaseSchema(DatabaseDescriptor database)
+    {        
+        byte[]? data = database.DbHandler.Get(Config.SchemaKey); //SchemaSpace!.GetDataFromPage(Config.SchemaHeaderPage);
 
-        if (data.Length > 0)
-            databaseDescriptor.Schema.Tables = Serializator.Unserialize<Dictionary<string, TableSchema>>(data);
+        if (data is not null && data.Length > 0)
+            database.Schema.Tables = Serializator.Unserialize<Dictionary<string, TableSchema>>(data);
         else
-            databaseDescriptor.Schema.Tables = new();
+            database.Schema.Tables = new();
 
-        Console.WriteLine("Schema tablespaces read");
+        Console.WriteLine("Schema tablespaces read. Loaded {0} tables", database.Schema.Tables.Count);
+
+        return Task.CompletedTask;
+    }
+
+    private static Task LoadDatabaseSystemSpace(DatabaseDescriptor database)
+    {
+        byte[]? data = database.DbHandler.Get(Config.SystemKey);
+
+        if (data is not null && data.Length > 0)
+            database.SystemSchema.Objects = Serializator.Unserialize<Dictionary<string, DatabaseObject>>(data);
+        else
+            database.SystemSchema.Objects = new();
+
+        Console.WriteLine("System tablespaces read. Found {0} objects", database.SystemSchema.Objects.Count);
+
+        return Task.CompletedTask;
     }
 
     private static async Task LoadDatabaseTableSpace(DatabaseDescriptor databaseDescriptor)
@@ -127,20 +128,8 @@ internal sealed class DatabaseOpener
         BufferPage page = await databaseDescriptor.TableSpace.ReadPage(Config.TableSpaceHeaderPage);
 
         tablespace.WriteTableSpaceHeader(page.Buffer);
-        await tablespace.FlushPage(page); // @todo make this atomic
+        tablespace.FlushPage(page); // @todo make this atomic
 
         Console.WriteLine("Data tablespaces initialized");
-    }
-
-    private static async Task LoadDatabaseSystemSpace(DatabaseDescriptor database)
-    {
-        byte[] data = await database.SystemSpace!.GetDataFromPage(Config.SystemHeaderPage);
-
-        if (data.Length > 0)
-            database.SystemSchema.Objects = Serializator.Unserialize<Dictionary<string, DatabaseObject>>(data);
-        else
-            database.SystemSchema.Objects = new();
-
-        Console.WriteLine("System tablespaces read");
     }
 }

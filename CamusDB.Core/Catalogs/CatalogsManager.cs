@@ -22,13 +22,14 @@ public sealed class CatalogsManager
             await database.Schema.Semaphore.WaitAsync();
 
             if (database.Schema.Tables.ContainsKey(ticket.TableName))
-                throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, "Table '" + ticket.TableName + "' already exists");
+                throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{ticket.TableName}' already exists");
 
-            TableSchema tableSchema = new();
-            tableSchema.Version = 0;
-            tableSchema.Name = ticket.TableName;
-
-            tableSchema.Columns = new();
+            TableSchema tableSchema = new()
+            {
+                Version = 0,
+                Name = ticket.TableName,
+                Columns = new()
+            };
 
             foreach (ColumnInfo column in ticket.Columns)
             {
@@ -43,9 +44,9 @@ public sealed class CatalogsManager
                 );
             }            
 
-            database.Schema.Tables.Add(ticket.TableName, tableSchema);
+            database.Schema.Tables.Add(ticket.TableName, tableSchema);            
 
-            await database.SchemaSpace!.WriteDataToPage(CamusDBConfig.SchemaHeaderPage, 0, Serializator.Serialize(database.Schema.Tables));
+            database.DbHandler.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
 
             Console.WriteLine("Added table {0} to schema", ticket.TableName);
 
@@ -62,6 +63,6 @@ public sealed class CatalogsManager
         if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema))
             return tableSchema;
 
-        throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, "Table '" + tableName + "' doesn't exist");
+        throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{tableName}' doesn't exist");
     }
 }

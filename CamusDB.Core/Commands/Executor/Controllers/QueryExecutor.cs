@@ -27,7 +27,7 @@ internal sealed class QueryExecutor
     }
 
     private async Task<List<Dictionary<string, ColumnValue>>> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
-    {
+    {        
         BufferPoolHandler tablespace = database.TableSpace!;
 
         List<Dictionary<string, ColumnValue>> rows = new();

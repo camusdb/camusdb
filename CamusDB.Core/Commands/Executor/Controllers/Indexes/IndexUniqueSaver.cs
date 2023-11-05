@@ -9,10 +9,7 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Journal.Models;
 using CamusDB.Core.Serializer.Models;
-using CamusDB.Core.Journal.Models.Logs;
-using CamusDB.Core.Journal.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -64,7 +61,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
     {
         HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas = await ticket.Index.Put(ticket.Key, ticket.Value);
 
-        await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index, deltas);
+        await Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, deltas);
     }
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
@@ -72,15 +69,13 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         (bool found, HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas) = await ticket.Index.Remove(ticket.Key);
 
         if (found)
-            await Persist(ticket.Tablespace, ticket.Journal, ticket.Sequence, ticket.SubSequence, ticket.FailureType, ticket.Index, deltas);
+            await Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, deltas);
     }
 
     private static async Task Persist(
-        BufferPoolHandler tablespace,
-        JournalWriter journal,
+        BufferPoolHandler tablespace,        
         uint sequence,
-        uint subSequence,
-        JournalFailureTypes failureType,
+        uint subSequence,        
         BTree<ColumnValue, BTreeTuple?> index,
         HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas
     )
@@ -106,11 +101,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
-        Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);
-
-        // Save node modification to journal
-        WritePageLog schedule = new(sequence, subSequence, treeBuffer);
-        await journal.Append(failureType, schedule);
+        Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);        
 
         // Write to buffer page
         await tablespace.WriteDataToPage(index.PageOffset, sequence, treeBuffer);
@@ -147,10 +138,6 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                     Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
                 }
             }
-
-            // Save modified page to journal
-            schedule = new(sequence, subSequence, nodeBuffer);
-            await journal.Append(failureType, schedule);
 
             await tablespace.WriteDataToPage(node.PageOffset, sequence, nodeBuffer);
 

@@ -27,7 +27,7 @@ public class CamusStartup
 
     public async Task Initialize()
     {
-        await CheckRecovery();
+        //await CheckRecovery();
     }
 
     private async Task CheckRecovery()

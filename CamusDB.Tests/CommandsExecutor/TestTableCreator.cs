@@ -1,14 +1,12 @@
 ﻿
-using System.IO;
-using CamusDB.Core;
 using NUnit.Framework;
+using CamusDB.Core;
 using CamusDB.Tests.Utils;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
-using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -19,32 +17,34 @@ internal sealed class TestTableCreator
     [SetUp]
     public void Setup()
     {
-        SetupDb.Remove("test");
+        //SetupDb.Remove("test");
     }
 
-    private async Task<CommandExecutor> SetupDatabase()
+    private async Task<(string, CommandExecutor)> SetupDatabase()
     {
+        string dbname = System.Guid.NewGuid().ToString("n");
+
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
         CommandExecutor executor = new(validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
-            name: "test"
+            name: dbname
         );
 
         await executor.CreateDatabase(databaseTicket);
 
-        return executor;
+        return (dbname, executor);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestCreateTable()
     {
-        CommandExecutor executor = await SetupDatabase();
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: "test",
+            database: dbname,
             name: "my_table",
             new ColumnInfo[]
             {
@@ -62,10 +62,10 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableNoColumns()
     {
-        CommandExecutor executor = await SetupDatabase();
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: "test",
+            database: dbname,
             name: "my_table",
             new ColumnInfo[] { }
         );
@@ -78,7 +78,7 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableNoDatabase()
     {
-        CommandExecutor executor = await SetupDatabase();
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: "",
@@ -97,10 +97,10 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableNoTableName()
     {
-        CommandExecutor executor = await SetupDatabase();
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: "test",
+            database: dbname,
             name: "",
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -116,10 +116,10 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableDuplicateColumn()
     {
-        CommandExecutor executor = await SetupDatabase();
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: "test",
+            database: dbname,
             name: "my_table",
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -135,10 +135,10 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableDuplicatePrimaryKey()
     {
-        CommandExecutor executor = await SetupDatabase();
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: "test",
+            database: dbname,
             name: "my_table",
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -154,10 +154,10 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableInvalidTableName()
     {
-        CommandExecutor executor = await SetupDatabase();
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: "test",
+            database: dbname,
             name: new string('a', 300),
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -173,10 +173,10 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableInvalidTableNameCharacters()
     {
-        CommandExecutor executor = await SetupDatabase();
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: "test",
+            database: dbname,
             name: "my_täble",
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -192,10 +192,10 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableTwice()
     {
-        CommandExecutor executor = await SetupDatabase();
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: "test",
+            database: dbname,
             name: "my_table",
             new ColumnInfo[]
             {

@@ -24,35 +24,28 @@ internal class TestDatabaseCreator
     [SetUp]
     public void Setup()
     {
-        SetupDb.Remove("test");
+        //SetupDb.Remove("test");
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestCreateDatabase()
     {
+        string dbname = System.Guid.NewGuid().ToString("n");
+
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
         CommandExecutor executor = new(validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
-            name: "test"
+            name: dbname
         );
 
         await executor.CreateDatabase(databaseTicket);
 
-        string path = Path.Combine(Config.DataDirectory, "test");
+        string path = Path.Combine(Config.DataDirectory, dbname);
 
         Assert.IsTrue(Directory.Exists(path));
-
-        string[] tablespaces = new string[] { "tablespace000", "schema000", "system000" };
-        for (int i = 0; i < tablespaces.Length; i++)
-        {
-            Assert.IsTrue(File.Exists(Path.Combine(path, tablespaces[i])));
-
-            FileInfo fi = new(Path.Combine(path, tablespaces[i]));
-            Assert.AreEqual(fi.Length, Config.TableSpaceSize);
-        }
     }
 }
 

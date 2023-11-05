@@ -9,7 +9,6 @@
 using CamusDB.Core.Storage;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Hashes;
-using System.IO.MemoryMappedFiles;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
@@ -113,10 +112,8 @@ public sealed class BufferPoolHandler : IDisposable
             if (pages.TryGetValue(offset, out page))
                 return page;
 
-            page = new BufferPage(offset, new byte[Config.PageSize]);
-            pages.Add(offset, page);
-
-            await storage.Read(Config.PageSize * offset, page.Buffer, Config.PageSize);
+            page = new BufferPage(offset, storage.Read(Config.PageSize * offset));
+            pages.Add(offset, page);            
 
             //Console.WriteLine("Page {0} read", offset);
         }
@@ -240,10 +237,9 @@ public sealed class BufferPoolHandler : IDisposable
         return Serializator.ReadUInt32(pageBuffer, ref pointer);
     }
 
-    public async Task FlushPage(BufferPage memoryPage)
+    public void FlushPage(BufferPage memoryPage)
     {
-        await storage.Write(Config.PageSize * memoryPage.Offset, memoryPage.Buffer, Config.PageSize);
-        storage.Flush();
+        storage.Write(Config.PageSize * memoryPage.Offset, memoryPage.Buffer);
     }
 
     public void WriteTableSpaceHeader(byte[] pageBuffer)
@@ -295,7 +291,7 @@ public sealed class BufferPoolHandler : IDisposable
             pointer = BConfig.FreePageOffset;
             Serializator.WriteInt32(pageBuffer, pageOffset + 1, ref pointer); // write new offset
 
-            await storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer, Config.PageSize);
+            storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer);
 
             page.Dirty = true;
         }
@@ -338,7 +334,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             //Console.WriteLine("CurrentRowId={0} NextRowId={1}", rowId, rowId + 1);
 
-            await storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer, Config.PageSize);
+            storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer);
 
             page.Dirty = true;
             page.Buffer = pageBuffer;
@@ -415,7 +411,7 @@ public sealed class BufferPoolHandler : IDisposable
                 );
 
             Buffer.BlockCopy(data, startOffset, pageBuffer, pointer, length);
-            await storage.Write(Config.PageSize * offset, pageBuffer, Config.PageSize);
+            storage.Write(Config.PageSize * offset, pageBuffer);
 
             // Replace buffer, this helps to get readers consistent copies
             page.Buffer = pageBuffer;
@@ -464,7 +460,7 @@ public sealed class BufferPoolHandler : IDisposable
 
             WritePageHeader(pageBuffer, 0, 0, 0, 0);
 
-            await storage.Write(Config.PageSize * offset, pageBuffer, Config.PageSize);
+            storage.Write(Config.PageSize * offset, pageBuffer);
 
             page.Buffer = pageBuffer;
             page.Dirty = true;
@@ -477,7 +473,7 @@ public sealed class BufferPoolHandler : IDisposable
 
     public void Flush()
     {
-        storage.Flush();
+       // storage.Flush();
     }
 
     public void Clear()
@@ -487,6 +483,6 @@ public sealed class BufferPoolHandler : IDisposable
 
     public void Dispose()
     {
-        storage.Dispose();
+        //storage.Dispose();
     }
 }

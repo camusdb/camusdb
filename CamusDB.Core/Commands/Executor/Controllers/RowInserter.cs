@@ -8,12 +8,9 @@
 
 using CamusDB.Core.Flux;
 using System.Diagnostics;
-using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.Journal.Models.Logs;
-using CamusDB.Core.Journal.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
@@ -70,17 +67,7 @@ internal sealed class RowInserter
         }
 
         return indexState;
-    }
-
-    /**
-     * First step is schedule the insert operation in the WAL
-     */
-    private async Task<FluxAction> InitializeStep(InsertFluxState state)
-    {
-        InsertLog schedule = new(0, state.Ticket.TableName, state.Ticket.Values);
-        state.Sequence = await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, schedule);        
-        return FluxAction.Continue;
-    }
+    }    
 
     /**
      * Second step is check for unique key violations
@@ -96,15 +83,10 @@ internal sealed class RowInserter
      */
     private async Task<FluxAction> AllocateInsertTuple(InsertFluxState state)
     {
-        BufferPoolHandler tablespace = state.Database.TableSpace;
-        JournalWriter journalWriter = state.Database.Journal.Writer;
+        BufferPoolHandler tablespace = state.Database.TableSpace;        
 
         state.RowTuple.SlotOne = await tablespace.GetNextRowId();
         state.RowTuple.SlotTwo = await tablespace.GetNextFreeOffset();
-
-        // save page + rowid to journal
-        InsertSlotsLog schedule = new(state.Sequence, state.RowTuple);
-        await journalWriter.Append(state.Ticket.ForceFailureType, schedule);
 
         return FluxAction.Continue;
     }
@@ -135,10 +117,7 @@ internal sealed class RowInserter
     {
         BufferPoolHandler tablespace = state.Database.TableSpace;
 
-        byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket, state.RowTuple.SlotOne);
-
-        WritePageLog writeSchedule = new(state.Sequence, 0, rowBuffer);
-        await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, writeSchedule);
+        byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket, state.RowTuple.SlotOne);        
 
         // Insert data to the page offset
         await tablespace.WriteDataToPage(state.RowTuple.SlotTwo, state.Sequence, rowBuffer);
@@ -152,11 +131,7 @@ internal sealed class RowInserter
      */
     private async Task<FluxAction> UpdateTableIndex(InsertFluxState state)
     {
-        BufferPoolHandler tablespace = state.Database.TableSpace;
-        JournalWriter journalWriter = state.Database.Journal.Writer;
-
-        UpdateTableIndexLog indexSchedule = new(state.Sequence);
-        uint updateIndexSequence = await journalWriter.Append(state.Ticket.ForceFailureType, indexSchedule);
+        BufferPoolHandler tablespace = state.Database.TableSpace;        
 
         SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
             tablespace: tablespace,
@@ -170,9 +145,6 @@ internal sealed class RowInserter
         // Main table index stores rowid pointing to page offeset
         await indexSaver.Save(saveUniqueOffsetIndex);
 
-        UpdateTableIndexCheckpointLog checkpointSchedule = new(state.Sequence, updateIndexSequence);
-        await journalWriter.Append(state.Ticket.ForceFailureType, checkpointSchedule);
-
         return FluxAction.Continue;
     }
 
@@ -183,17 +155,7 @@ internal sealed class RowInserter
     {
         await insertMultiKeySaver.UpdateMultiKeys(state.Database, state.Table, state.Ticket, state.RowTuple);
         return FluxAction.Continue;
-    }
-
-    /**
-     * Finally we checkpoint the insert to the WAL
-     */
-    private async Task<FluxAction> CheckpointInsert(InsertFluxState state)
-    {
-        InsertCheckpointLog insertCheckpoint = new(state.Sequence);
-        await state.Database.Journal.Writer.Append(state.Ticket.ForceFailureType, insertCheckpoint);
-        return FluxAction.Completed;
-    }
+    }    
 
     public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
@@ -220,17 +182,15 @@ internal sealed class RowInserter
     {
         Stopwatch timer = new();
         timer.Start();
-
-        machine.When(InsertFluxSteps.NotInitialized, InitializeStep);
+        
         machine.When(InsertFluxSteps.CheckUniqueKeys, CheckUniqueKeysStep);
         machine.When(InsertFluxSteps.UpdateUniqueKeys, UpdateUniqueKeysStep);
         machine.When(InsertFluxSteps.AllocateInsertTuple, AllocateInsertTuple);
         machine.When(InsertFluxSteps.InsertToPage, InsertToPageStep);
         machine.When(InsertFluxSteps.UpdateTableIndex, UpdateTableIndex);
-        machine.When(InsertFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
-        machine.When(InsertFluxSteps.CheckpointInsert, CheckpointInsert);
+        machine.When(InsertFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);        
 
-        machine.WhenAbort(CheckpointInsert);
+        //machine.WhenAbort(CheckpointInsert);
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());

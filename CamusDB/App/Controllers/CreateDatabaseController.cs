@@ -29,7 +29,7 @@ public sealed class CreateDatabaseController : CommandsController
     {
         try
         {
-            using var reader = new StreamReader(Request.Body);
+            using StreamReader reader = new StreamReader(Request.Body);
             var body = await reader.ReadToEndAsync();
 
             CreateDatabaseRequest? request = JsonSerializer.Deserialize<CreateDatabaseRequest>(body, jsonOptions);

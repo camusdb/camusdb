@@ -1,16 +1,18 @@
 ﻿
-/**
- * This file is part of CamusDB  
- *
- * For the full copyright and license information, please view the LICENSE.txt
- * file that was distributed with this source code.
- */
 
+
+using System.Text;
+/**
+* This file is part of CamusDB  
+*
+* For the full copyright and license information, please view the LICENSE.txt
+* file that was distributed with this source code.
+*/
 namespace CamusDB.Core;
 
 public static class CamusDBConfig
 {
-    public static string DataDirectory = Path.GetFullPath("Data");
+    public readonly static string DataDirectory = Path.GetFullPath("Data");
 
     public const int TableSpaceSize = PageSize * TotalPages; // 4096 blocks of 512 size
 
@@ -48,5 +50,11 @@ public static class CamusDBConfig
 
     public const int JournalFlushInterval = 1000;
 
+    #endregion
+
+    #region keys
+    public readonly static byte[] SchemaKey = Encoding.UTF8.GetBytes("schema");
+
+    public readonly static byte[] SystemKey = Encoding.UTF8.GetBytes("system");
     #endregion
 }

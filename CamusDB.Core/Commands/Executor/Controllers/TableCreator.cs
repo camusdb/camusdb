@@ -37,23 +37,23 @@ internal sealed class TableCreator
     {
         try
         {
-            var objects = database.SystemSchema.Objects;
-
-            BufferPoolHandler tablespace = database.TableSpace!;
-            BufferPoolHandler systemTablespace = database.SystemSpace!;
-
-            string tableName = tableSchema.Name!;
-
             await database.SystemSchema.Semaphore.WaitAsync();
+
+            Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
+
+            BufferPoolHandler tablespace = database.TableSpace!;            
+
+            string tableName = tableSchema.Name!;            
 
             int pageOffset = await tablespace.GetNextFreeOffset();
 
-            DatabaseObject databaseObject = new();
-            databaseObject.Type = DatabaseObjectType.Table;
-            databaseObject.Name = tableName;
-            databaseObject.StartOffset = pageOffset;
-
-            databaseObject.Indexes = new();
+            DatabaseObject databaseObject = new()
+            {
+                Type = DatabaseObjectType.Table,
+                Name = tableName,
+                StartOffset = pageOffset,
+                Indexes = new()
+            };
 
             foreach (TableColumnSchema column in tableSchema.Columns!)
             {
@@ -86,11 +86,13 @@ internal sealed class TableCreator
 
             objects.Add(tableName, databaseObject);
 
-            await systemTablespace.WriteDataToPage(
+            /*await systemTablespace.WriteDataToPage(
                 CamusDBConfig.SystemHeaderPage,
                 0,
                 Serializator.Serialize(database.SystemSchema.Objects)
-            );
+            );*/
+
+            database.DbHandler.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema.Objects));
 
             Console.WriteLine("Added table {0} to system, data table staring at {1}", tableName, pageOffset);
         }
