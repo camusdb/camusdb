@@ -44,7 +44,7 @@ public sealed class BufferPoolFlusher
     {
         await Task.Yield();
 
-        List<BufferPage> pagesToFlush = new();
+        /*List<BufferPage> pagesToFlush = new();
 
         foreach (KeyValuePair<int, BufferPage> keyValuePair in bufferPool.Pages)
         {
@@ -68,14 +68,7 @@ public sealed class BufferPoolFlusher
             GC.GetTotalMemory(false)
         );
 
-        bufferPool.Flush();
-
-        /*foreach (BufferPage page in pagesToFlush)
-        {
-            await journal.Writer.Append(JournalFailureTypes.None, new FlushedPagesLog(0));
-        }
-
-        await journal.Writer.Flush();*/
+        bufferPool.Flush();*/        
     }
 
     public void Dispose()

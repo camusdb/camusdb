@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using Nito.AsyncEx;
+
 namespace CamusDB.Core.BufferPool.Models;
 
 public sealed class BufferPage
@@ -14,46 +16,25 @@ public sealed class BufferPage
 
     public int RefCount { get; }
 
-    public byte[] Buffer { get; set; }
+    public Lazy<byte[]> Buffer { get; set; }
 
     public bool Dirty { get; set; }
 
-    private int refCount = 0;
+    private readonly AsyncReaderWriterLock semaphore = new();
 
-    private SemaphoreSlim? semaphore;
-
-    private readonly object semaphoreLock = new();
-
-    public BufferPage(int offset, byte[] buffer)
+    public BufferPage(int offset, Lazy<byte[]> buffer)
     {
         Offset = offset;
         Buffer = buffer;
     }
 
-    public async Task LockAsync()
+    public async Task<IDisposable> ReaderLockAsync()
     {
-        lock (semaphoreLock)
-        {
-            if (semaphore is null)
-                semaphore = new(1, 1);
-        }
-
-        await semaphore.WaitAsync();
+        return await semaphore.ReaderLockAsync();
     }
 
-    public void Unlock()
+    public async Task<IDisposable> WriterLockAsync()
     {
-        if (semaphore is not null)
-            semaphore.Release();
-    }
-
-    public void IncreaseCount()
-    {
-        Interlocked.Increment(ref refCount);
-    }
-
-    public void DecreaseCount()
-    {
-        Interlocked.Decrement(ref refCount);
+        return await semaphore.WriterLockAsync();
     }
 }
