@@ -141,7 +141,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
             await tablespace.WriteDataToPage(node.PageOffset, sequence, nodeBuffer);
 
-            Console.WriteLine("Node {0}/{1} at {2} Length={3}", node.Id, node.KeyCount, node.PageOffset, nodeBuffer.Length);
+            //Console.WriteLine("Node {0}/{1} at {2} Length={3}", node.Id, node.KeyCount, node.PageOffset, nodeBuffer.Length);
         }
     }
 }

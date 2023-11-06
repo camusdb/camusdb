@@ -24,25 +24,15 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task Save(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
+    public async Task Save(SaveMultiKeyIndexTicket ticket)
     {
-        try
-        {
-            await index.WriteLock.WaitAsync();
+        await ticket.Index.WriteLock.WaitAsync();
 
-            await SaveInternal(tablespace, index, key, value);
-        }
-        finally
-        {
-            index.WriteLock.Release();
-        }
+        ticket.Locks.Add(ticket.Index.WriteLock);
+
+        await SaveInternal(ticket.Tablespace, ticket.Index, ticket.MultiKeyValue, ticket.RowTuple, ticket.Locks);        
     }
-
-    public async Task NoLockingSave(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
-    {
-        await SaveInternal(tablespace, index, key, value);
-    }
-
+    
     public async Task Remove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
     {
         try
@@ -57,11 +47,11 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         }
     }
 
-    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
+    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value, List<SemaphoreSlim> locks)
     {
         Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas = await index.Put(key, value);
 
-        await PersistSave(tablespace, index, value, deltas);
+        await PersistSave(tablespace, index, value, locks, deltas);
     }
 
     private static async Task RemoveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
@@ -75,6 +65,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         BufferPoolHandler tablespace,
         BTreeMulti<ColumnValue> index,
         BTreeTuple value,
+        List<SemaphoreSlim> locks,
         Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas
     )
     {
@@ -152,6 +143,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                         index: subTree,
                         key: value.SlotOne,
                         value.SlotTwo,
+                        locks: locks,
                         deltas: delta.Value.InnerDeltas
                     );
 

@@ -16,7 +16,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Insert;
 
 internal sealed class InsertUniqueKeySaver : InsertKeyBase
 {
-    private readonly IndexSaver indexSaver = new();    
+    private readonly IndexSaver indexSaver = new();
 
     private static async Task<ColumnValue> CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue, BTreeTuple?> uniqueIndex, InsertTicket ticket, string name)
     {
@@ -61,7 +61,7 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
     public async Task<BTreeTuple> UpdateUniqueKeys(UpdateUniqueIndexTicket ticket)
     {
         InsertTicket insertTicket = ticket.InsertTicket;
-        BufferPoolHandler tablespace = ticket.Database.TableSpace;        
+        BufferPoolHandler tablespace = ticket.Database.TableSpace;
 
         foreach (TableIndexSchema index in ticket.Indexes)
         {
@@ -73,35 +73,30 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
                     "A unique index tree wasn't found"
                 );
 
-            try
-            {
-                await uniqueIndex.WriteLock.WaitAsync();
+            await uniqueIndex.WriteLock.WaitAsync();
 
-                ColumnValue? uniqueKeyValue = GetColumnValue(ticket.Table, insertTicket, index.Column);
+            ticket.Locks.Add(uniqueIndex.WriteLock);
 
-                if (uniqueKeyValue is null)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInternalOperation,
-                        "A null value was found for unique key field " + index.Column
-                    );
+            ColumnValue? uniqueKeyValue = GetColumnValue(ticket.Table, insertTicket, index.Column);
 
-                // save index save to journal                
-
-                SaveUniqueIndexTicket saveUniqueIndexTicket = new(
-                    tablespace: tablespace,                    
-                    sequence: ticket.Sequence,
-                    subSequence: 0,                    
-                    index: uniqueIndex,
-                    key: uniqueKeyValue,
-                    value: ticket.RowTuple
+            if (uniqueKeyValue is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for unique key field " + index.Column
                 );
 
-                await indexSaver.NoLockingSave(saveUniqueIndexTicket);                
-            }
-            finally
-            {
-                uniqueIndex.WriteLock.Release();
-            }
+            // save index save to journal                
+
+            SaveUniqueIndexTicket saveUniqueIndexTicket = new(
+                tablespace: tablespace,
+                sequence: ticket.Sequence,
+                subSequence: 0,
+                index: uniqueIndex,
+                key: uniqueKeyValue,
+                value: ticket.RowTuple
+            );
+
+            await indexSaver.NoLockingSave(saveUniqueIndexTicket);
         }
 
         return ticket.RowTuple;

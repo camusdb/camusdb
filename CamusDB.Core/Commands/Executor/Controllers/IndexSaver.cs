@@ -39,9 +39,9 @@ internal sealed class IndexSaver
         await indexUniqueSaver.Save(ticket);
     }
 
-    public async Task Save(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
-    {
-        await indexMultiSaver.Save(tablespace, index, key, value);
+    public async Task Save(SaveMultiKeyIndexTicket ticket)
+    {        
+        await indexMultiSaver.Save(ticket);
     }
 
     public async Task NoLockingSave(SaveUniqueIndexTicket ticket)
@@ -49,14 +49,9 @@ internal sealed class IndexSaver
         await indexUniqueSaver.NoLockingSave(ticket);
     }
 
-    public async Task NoLockingSave(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value)
-    {
-        await indexMultiSaver.NoLockingSave(tablespace, index, key, value);
-    }
-
     public async Task Remove(RemoveUniqueIndexTicket ticket)
     {
-        await indexUniqueSaver.Remove(ticket);
+        await indexUniqueSaver.Remove(ticket);        
     }
 
     public async Task Remove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)

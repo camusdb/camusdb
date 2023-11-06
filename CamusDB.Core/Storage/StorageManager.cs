@@ -38,5 +38,10 @@ public sealed class StorageManager
         //tablespace.Item2.WriteArray<byte>(offset - tablespace.Item1, buffer, 0, length);
 
         dbHandler.Put(BitConverter.GetBytes(offset), buffer);
-    }        
+    }
+
+    internal void Dispose()
+    {
+        //throw new NotImplementedException();
+    }
 }

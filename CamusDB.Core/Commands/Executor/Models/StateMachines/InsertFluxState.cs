@@ -25,6 +25,8 @@ public sealed class InsertFluxState
 
     public InsertFluxIndexState Indexes { get; }
 
+    public List<SemaphoreSlim> Locks { get; } = new();
+
     public InsertFluxState(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, InsertFluxIndexState indexes)
     {
         Database = database;

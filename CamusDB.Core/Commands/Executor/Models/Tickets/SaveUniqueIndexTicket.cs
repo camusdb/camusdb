@@ -11,35 +11,34 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public sealed class SaveUniqueIndexTicket
+public readonly struct SaveUniqueIndexTicket
 {
-    public BufferPoolHandler Tablespace { get; }    
+    public BufferPoolHandler Tablespace { get; }
 
     public uint Sequence { get; }
 
-    public uint SubSequence { get; }    
+    public uint SubSequence { get; }
 
     public BTree<ColumnValue, BTreeTuple?> Index { get; }
 
     public ColumnValue Key { get; }
 
-    public BTreeTuple Value { get;  }    
+    public BTreeTuple Value { get; }
 
     public SaveUniqueIndexTicket(
-        BufferPoolHandler tablespace,        
+        BufferPoolHandler tablespace,
         uint sequence,
-        uint subSequence,        
+        uint subSequence,
         BTree<ColumnValue, BTreeTuple?> index,
         ColumnValue key,
         BTreeTuple value
     )
     {
-        Tablespace = tablespace;        
+        Tablespace = tablespace;
         Sequence = sequence;
-        SubSequence = subSequence;        
+        SubSequence = subSequence;
         Index = index;
         Key = key;
         Value = value;
     }
 }
-

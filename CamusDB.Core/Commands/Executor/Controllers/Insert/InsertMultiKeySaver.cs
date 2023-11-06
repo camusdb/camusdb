@@ -16,13 +16,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Insert;
 
 internal sealed class InsertMultiKeySaver : InsertKeyBase
 {
-    private readonly IndexSaver indexSaver = new();
+    private readonly IndexSaver indexSaver = new();    
 
-    public async Task UpdateMultiKeys(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, BTreeTuple rowTuple)
+    public async Task UpdateMultiKeys(SaveMultiKeysIndexTicket saveMultiKeysIndex)
     {
-        BufferPoolHandler tablespace = database.TableSpace;
+        BufferPoolHandler tablespace = saveMultiKeysIndex.Database.TableSpace;
 
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        foreach (KeyValuePair<string, TableIndexSchema> index in saveMultiKeysIndex.Table.Indexes)
         {
             if (index.Value.Type != IndexType.Multi)
                 continue;
@@ -35,11 +35,19 @@ internal sealed class InsertMultiKeySaver : InsertKeyBase
 
             BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
 
-            ColumnValue? multiKeyValue = GetColumnValue(table, ticket, index.Value.Column);
+            ColumnValue? multiKeyValue = GetColumnValue(saveMultiKeysIndex.Table, saveMultiKeysIndex.Ticket, index.Value.Column);
             if (multiKeyValue is null)
                 continue;
 
-            await indexSaver.Save(tablespace, multiIndex, multiKeyValue, rowTuple);
+            SaveMultiKeyIndexTicket multiKeyTicket = new(
+                tablespace,
+                multiIndex,
+                multiKeyValue,
+                saveMultiKeysIndex.RowTuple,
+                locks: saveMultiKeysIndex.Locks
+            );
+
+            await indexSaver.Save(multiKeyTicket);
         }
     }
 }

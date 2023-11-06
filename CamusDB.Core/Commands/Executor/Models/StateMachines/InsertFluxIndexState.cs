@@ -6,13 +6,11 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
-public class InsertFluxIndexState
+public sealed class InsertFluxIndexState
 {
 	public List<TableIndexSchema> UniqueIndexes { get; } = new();
 

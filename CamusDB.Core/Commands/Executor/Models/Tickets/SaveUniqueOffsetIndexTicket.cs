@@ -11,7 +11,7 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public sealed class SaveUniqueOffsetIndexTicket
+public readonly struct SaveUniqueOffsetIndexTicket
 {
 	public BufferPoolHandler Tablespace { get; }
 
@@ -23,11 +23,14 @@ public sealed class SaveUniqueOffsetIndexTicket
 
 	public HashSet<BTreeNode<int, int?>>? Deltas { get; }
 
-	public SaveUniqueOffsetIndexTicket(
+    public List<SemaphoreSlim> Locks { get; } = new();
+
+    public SaveUniqueOffsetIndexTicket(
 		BufferPoolHandler tablespace,
 		BTree<int, int?> index,
 		int key,
 		int value,
+        List<SemaphoreSlim> locks,
 		HashSet<BTreeNode<int, int?>>? deltas = null
 	)
 	{
@@ -35,6 +38,7 @@ public sealed class SaveUniqueOffsetIndexTicket
 		Index = index;
 		Key = key;
 		Value = value;
+		Locks = locks;
 		Deltas = deltas;
 	}
 }

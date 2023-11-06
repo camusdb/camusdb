@@ -8,7 +8,7 @@
 
 namespace CamusDB.Core.Catalogs.Models;
 
-public class TableSchema
+public sealed class TableSchema
 {
     public int Version { get; set; }
 

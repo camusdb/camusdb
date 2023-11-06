@@ -12,6 +12,7 @@ using CamusDB.Core.Util.Hashes;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
+using System.Threading.Channels;
 
 namespace CamusDB.Core.BufferPool;
 
@@ -47,20 +48,56 @@ public sealed class BufferPoolHandler : IDisposable
 
     private readonly SemaphoreSlim semaphore = new(1, 1);
 
+    private readonly ChannelWriter<NextRowIdOffsetUpdate> offsetUpdaterWriter;
+
+    private readonly ChannelReader<NextRowIdOffsetUpdate> offsetUpdaterReader;
+
     public int NumberPages => pages.Count;
 
     public Dictionary<int, BufferPage> Pages => pages;
 
+    private int nextRowId;
+
+    private int nextFreeOffset;
+
     public BufferPoolHandler(StorageManager storage)
     {
         this.storage = storage;
+
+        Channel<NextRowIdOffsetUpdate> channel = Channel.CreateUnbounded<NextRowIdOffsetUpdate>(new UnboundedChannelOptions
+        {
+            SingleWriter = false,
+            SingleReader = true,
+            AllowSynchronousContinuations = true
+        });
+
+        offsetUpdaterReader = channel.Reader;
+        offsetUpdaterWriter = channel.Writer;
     }
 
     public async Task Initialize()
     {
-        // initialize pages
-        for (int i = 0; i < Config.InitialPagesRead; i++)
-            await ReadPage(i);
+        nextRowId = await GetNextRowIdFromPage();
+        nextFreeOffset = await GetNextFreeOffsetFromPage();
+
+        _ = Task.Run(ConsumeUpdateNextOffsetId);
+    }
+
+    private async ValueTask ConsumeUpdateNextOffsetId()
+    {
+        while (await offsetUpdaterReader.WaitToReadAsync())
+        {
+            while (offsetUpdaterReader.TryRead(out NextRowIdOffsetUpdate operation))
+            {
+                if (operation.Type == NextRowIdOffsetUpdateType.NextId)
+                    await WriteNextRowId(operation.Value);
+
+                if (operation.Type == NextRowIdOffsetUpdateType.NextOffset)
+                    await WriteNextFreeOffset(operation.Value);
+
+                Console.WriteLine(operation.Value);
+            }
+        }
     }
 
     // Load a page without reading its contents
@@ -113,7 +150,7 @@ public sealed class BufferPoolHandler : IDisposable
                 return page;
 
             page = new BufferPage(offset, storage.Read(Config.PageSize * offset));
-            pages.Add(offset, page);            
+            pages.Add(offset, page);
 
             //Console.WriteLine("Page {0} read", offset);
         }
@@ -265,6 +302,15 @@ public sealed class BufferPoolHandler : IDisposable
 
     public async Task<int> GetNextFreeOffset()
     {
+        //int newFreeOffset = Interlocked.Increment(ref nextFreeOffset);
+        //await offsetUpdaterWriter.WriteAsync(new NextRowIdOffsetUpdate(NextRowIdOffsetUpdateType.NextOffset, newFreeOffset));
+        //return newFreeOffset;
+
+        return await GetNextFreeOffsetFromPage();
+    }
+
+    public async Task<int> GetNextFreeOffsetFromPage()
+    {
         BufferPage page = await ReadPage(Config.TableSpaceHeaderPage);
 
         int pointer = BConfig.FreePageOffset - 4, pageOffset = 1;
@@ -305,7 +351,54 @@ public sealed class BufferPoolHandler : IDisposable
         return pageOffset;
     }
 
+    public async Task WriteNextFreeOffset(int pageOffset)
+    {
+        BufferPage page = await ReadPage(Config.TableSpaceHeaderPage);
+
+        int pointer = BConfig.FreePageOffset - 4;
+
+        try
+        {
+            await page.LockAsync();
+
+            byte[] pageBuffer = page.Buffer; // get a pointer to the buffer to get a consistent read
+
+            int length = Serializator.ReadInt32(pageBuffer, ref pointer);
+
+            if (length == 0)
+            {
+                // tablespace is not initialized ?
+                WriteTableSpaceHeader(pageBuffer);
+            }
+            else
+            {
+                pointer = BConfig.FreePageOffset;
+                pageOffset = Serializator.ReadInt32(pageBuffer, ref pointer); // retrieve existing offset
+            }
+
+            pointer = BConfig.FreePageOffset;
+            Serializator.WriteInt32(pageBuffer, pageOffset, ref pointer); // write new offset
+
+            storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer);
+
+            page.Dirty = true;
+        }
+        finally
+        {
+            page.Unlock();
+        }
+    }
+
     public async Task<int> GetNextRowId()
+    {
+        //int newRowId = Interlocked.Increment(ref nextRowId);
+        //await offsetUpdaterWriter.WriteAsync(new NextRowIdOffsetUpdate(NextRowIdOffsetUpdateType.NextId, newRowId));
+        //return newRowId;
+
+        return await GetNextRowIdFromPage();
+    }
+
+    public async Task<int> GetNextRowIdFromPage()
     {
         BufferPage page = await ReadPage(Config.TableSpaceHeaderPage);
 
@@ -340,6 +433,38 @@ public sealed class BufferPoolHandler : IDisposable
             page.Buffer = pageBuffer;
 
             return rowId;
+        }
+        finally
+        {
+            page.Unlock();
+        }
+    }
+
+    public async Task WriteNextRowId(int rowId)
+    {
+        BufferPage page = await ReadPage(Config.TableSpaceHeaderPage);
+
+        try
+        {
+            await page.LockAsync();
+
+            byte[] pageBuffer = page.Buffer; // get a pointer to the buffer to get a consistent read
+
+            int pointer = BConfig.FreePageOffset - 4;
+            int length = Serializator.ReadInt32(pageBuffer, ref pointer);
+
+            if (length == 0) // tablespace is not initialized ?
+                WriteTableSpaceHeader(pageBuffer);
+
+            pointer = BConfig.RowIdOffset;
+            Serializator.WriteInt32(pageBuffer, rowId, ref pointer); // write new row id
+
+            //Console.WriteLine("CurrentRowId={0} NextRowId={1}", rowId, rowId + 1);
+
+            storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer);
+
+            page.Dirty = true;
+            page.Buffer = pageBuffer;
         }
         finally
         {
@@ -473,7 +598,7 @@ public sealed class BufferPoolHandler : IDisposable
 
     public void Flush()
     {
-       // storage.Flush();
+        // storage.Flush();
     }
 
     public void Clear()
@@ -483,6 +608,6 @@ public sealed class BufferPoolHandler : IDisposable
 
     public void Dispose()
     {
-        //storage.Dispose();
+        offsetUpdaterWriter.Complete();
     }
 }

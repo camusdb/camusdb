@@ -25,16 +25,11 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
     public async Task Save(SaveUniqueOffsetIndexTicket ticket)
     {
-        try
-        {
-            await ticket.Index.WriteLock.WaitAsync();
+        await ticket.Index.WriteLock.WaitAsync();
 
-            await SaveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.Value, ticket.Deltas);
-        }
-        finally
-        {
-            ticket.Index.WriteLock.Release();
-        }
+        ticket.Locks.Add(ticket.Index.WriteLock);
+
+        await SaveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.Value, ticket.Deltas);
     }
 
     private static async Task SaveInternal(
@@ -70,7 +65,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         //@todo update nodes concurrently        
 
         foreach (BTreeNode<int, int?> node in deltas)
-        {            
+        {
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // key count
                 SerializatorTypeSizes.TypeInteger32 + // page offset

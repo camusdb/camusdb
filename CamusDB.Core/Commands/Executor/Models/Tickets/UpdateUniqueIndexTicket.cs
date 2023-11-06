@@ -11,7 +11,7 @@ using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public sealed class UpdateUniqueIndexTicket
+public readonly struct UpdateUniqueIndexTicket
 {
 	public DatabaseDescriptor Database { get; }
 
@@ -25,13 +25,16 @@ public sealed class UpdateUniqueIndexTicket
 
 	public List<TableIndexSchema> Indexes { get; }
 
-	public UpdateUniqueIndexTicket(
+    public List<SemaphoreSlim> Locks { get; }
+
+    public UpdateUniqueIndexTicket(
 		DatabaseDescriptor database,
 		TableDescriptor table,
 		uint sequence,
 		BTreeTuple rowTuple,
 		InsertTicket ticket,
-		List<TableIndexSchema> indexes
+		List<TableIndexSchema> indexes,
+		List<SemaphoreSlim> locks
 	)
 	{
 		Database = database;
@@ -40,5 +43,6 @@ public sealed class UpdateUniqueIndexTicket
 		RowTuple = rowTuple;
 		InsertTicket = ticket;
 		Indexes = indexes;
+		Locks = locks;
 	}
 }

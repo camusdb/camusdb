@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.Insert;
+using System.Collections.Generic;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -67,7 +68,7 @@ internal sealed class RowInserter
         }
 
         return indexState;
-    }    
+    }
 
     /**
      * Second step is check for unique key violations
@@ -83,7 +84,7 @@ internal sealed class RowInserter
      */
     private async Task<FluxAction> AllocateInsertTuple(InsertFluxState state)
     {
-        BufferPoolHandler tablespace = state.Database.TableSpace;        
+        BufferPoolHandler tablespace = state.Database.TableSpace;
 
         state.RowTuple.SlotOne = await tablespace.GetNextRowId();
         state.RowTuple.SlotTwo = await tablespace.GetNextFreeOffset();
@@ -102,7 +103,8 @@ internal sealed class RowInserter
             sequence: state.Sequence,
             rowTuple: state.RowTuple,
             ticket: state.Ticket,
-            indexes: state.Indexes.UniqueIndexes
+            indexes: state.Indexes.UniqueIndexes,
+            locks: state.Locks
         );
 
         await insertUniqueKeySaver.UpdateUniqueKeys(ticket);
@@ -110,14 +112,16 @@ internal sealed class RowInserter
         return FluxAction.Continue;
     }
 
-    /**
-     * Allocate a new page in the buffer pool and insert the serializated row into it
-     */
+    /// <summary>
+    /// Allocate a new page in the buffer pool and insert the serializated row into it
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private async Task<FluxAction> InsertToPageStep(InsertFluxState state)
     {
         BufferPoolHandler tablespace = state.Database.TableSpace;
 
-        byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket, state.RowTuple.SlotOne);        
+        byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket, state.RowTuple.SlotOne);
 
         // Insert data to the page offset
         await tablespace.WriteDataToPage(state.RowTuple.SlotTwo, state.Sequence, rowBuffer);
@@ -125,22 +129,25 @@ internal sealed class RowInserter
         return FluxAction.Continue;
     }
 
-    /**
-     * Every table has a B+Tree index where the data can be easily located by rowid
-     * We take the page created in the previous step and insert it in the tree
-     */
+    /// <summary>
+    /// Every table has a B+Tree index where the data can be easily located by rowid
+    /// We take the page created in the previous step and insert it in the tree
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private async Task<FluxAction> UpdateTableIndex(InsertFluxState state)
     {
-        BufferPoolHandler tablespace = state.Database.TableSpace;        
+        BufferPoolHandler tablespace = state.Database.TableSpace;
 
         SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
             tablespace: tablespace,
             index: state.Table.Rows,
             key: state.RowTuple.SlotOne,
-            value: state.RowTuple.SlotTwo            
+            value: state.RowTuple.SlotTwo,
+            locks: state.Locks
         );
 
-        Console.WriteLine("{0}", state.Table.Rows.loaded);
+        //Console.WriteLine("{0}", state.Table.Rows.loaded);
 
         // Main table index stores rowid pointing to page offeset
         await indexSaver.Save(saveUniqueOffsetIndex);
@@ -153,9 +160,18 @@ internal sealed class RowInserter
      */
     private async Task<FluxAction> UpdateMultiIndexes(InsertFluxState state)
     {
-        await insertMultiKeySaver.UpdateMultiKeys(state.Database, state.Table, state.Ticket, state.RowTuple);
+        SaveMultiKeysIndexTicket saveMultiKeysIndex = new(
+            database: state.Database,
+            table: state.Table,
+            ticket: state.Ticket,
+            rowTuple: state.RowTuple,
+            locks: state.Locks
+        );
+
+        await insertMultiKeySaver.UpdateMultiKeys(saveMultiKeysIndex);
+
         return FluxAction.Continue;
-    }    
+    }
 
     public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
@@ -178,24 +194,30 @@ internal sealed class RowInserter
         await InsertInternal(machine, state);
     }
 
+    private Task<FluxAction> ReleaseLocks(InsertFluxState state)
+    {
+        foreach (SemaphoreSlim lockSem in state.Locks)
+            lockSem.Release();
+
+        return Task.FromResult(FluxAction.Continue);
+    }
+
     private async Task InsertInternal(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
     {
-        Stopwatch timer = new();
-        timer.Start();
-        
+        Stopwatch timer = Stopwatch.StartNew();
+
         machine.When(InsertFluxSteps.CheckUniqueKeys, CheckUniqueKeysStep);
         machine.When(InsertFluxSteps.UpdateUniqueKeys, UpdateUniqueKeysStep);
         machine.When(InsertFluxSteps.AllocateInsertTuple, AllocateInsertTuple);
         machine.When(InsertFluxSteps.InsertToPage, InsertToPageStep);
         machine.When(InsertFluxSteps.UpdateTableIndex, UpdateTableIndex);
-        machine.When(InsertFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);        
+        machine.When(InsertFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
+        machine.When(InsertFluxSteps.ReleaseLocks, ReleaseLocks);
 
-        //machine.WhenAbort(CheckpointInsert);
+        machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep());
-
-        timer.Stop();
+            await machine.RunStep(machine.NextStep());        
 
         TimeSpan timeTaken = timer.Elapsed;
 
