@@ -10,7 +10,7 @@ using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public sealed class DatabaseIndexObject
+public sealed record DatabaseIndexObject
 {
     public string Column { get; }
 

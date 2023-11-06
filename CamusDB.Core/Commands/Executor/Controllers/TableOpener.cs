@@ -42,7 +42,7 @@ internal sealed class TableOpener
             TableSchema tableSchema = Catalogs.GetTableSchema(database, tableName);
             DatabaseObject systemObject = GetSystemObject(database, tableName);
 
-            Console.WriteLine(systemObject.StartOffset);
+            //Console.WriteLine(systemObject.StartOffset);
 
             tableDescriptor = new()
             {

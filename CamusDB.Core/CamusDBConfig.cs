@@ -12,17 +12,13 @@ namespace CamusDB.Core;
 
 public static class CamusDBConfig
 {
-    public readonly static string DataDirectory = Path.GetFullPath("Data");
-
-    public const int TableSpaceSize = PageSize * TotalPages; // 4096 blocks of 512 size
+    public readonly static string DataDirectory = Path.GetFullPath("Data");    
 
     #region bufferpool
 
     public const int PageLayoutVersion = 1;
 
-    public const int PageSize = 512;
-
-    public const int TotalPages = 4096;
+    public const int PageSize = 4096;    
 
     public const int InitialPagesRead = 1024;
 
@@ -34,23 +30,9 @@ public static class CamusDBConfig
 
     #region system schema
 
-    public const int SystemHeaderPage = 1;
-
     public const string PrimaryKeyInternalName = "~pk";
 
-    #endregion
-
-    #region system schema
-
-    public const int SchemaHeaderPage = 1;
-
-    #endregion
-
-    #region journal
-
-    public const int JournalFlushInterval = 1000;
-
-    #endregion
+    #endregion   
 
     #region keys
     public readonly static byte[] SchemaKey = Encoding.UTF8.GetBytes("schema");

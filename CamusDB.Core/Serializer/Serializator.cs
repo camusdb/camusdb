@@ -6,9 +6,10 @@
  * file that was distributed with this source code.
  */
 
-using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Runtime.CompilerServices;
+
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer.Models;

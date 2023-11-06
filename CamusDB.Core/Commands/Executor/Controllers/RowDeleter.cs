@@ -6,8 +6,12 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics;
+using CamusDB.Core.BufferPool;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -27,7 +31,7 @@ internal sealed class RowDeleter
 
     private async Task DeleteUniqueIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
-        /*BufferPoolHandler tablespace = database.TableSpace!;
+        BufferPoolHandler tablespace = database.TableSpace!;
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
         {
@@ -48,21 +52,19 @@ internal sealed class RowDeleter
 
             RemoveUniqueIndexTicket ticket = new(
                 tablespace: tablespace,
-                journal: database.Journal.Writer,
                 sequence: 0,
                 subSequence: 0,
-                failureType: JournalFailureTypes.None,
                 index: uniqueIndex,
                 key: columnKey
             );
 
             await indexSaver.Remove(ticket);
-        }*/
+        }
     }
 
     private async Task DeleteMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
-        /*BufferPoolHandler tablespace = database.TableSpace!;
+        BufferPoolHandler tablespace = database.TableSpace!;
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
         {
@@ -82,12 +84,12 @@ internal sealed class RowDeleter
             BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
 
             await indexSaver.Remove(tablespace, multiIndex, columnValue);
-        }*/
+        }
     }
 
     public async Task DeleteById(DatabaseDescriptor database, TableDescriptor table, DeleteByIdTicket ticket)
     {
-        /*Stopwatch timer = new();
+        Stopwatch timer = new();
         timer.Start();
 
         BufferPoolHandler tablespace = database.TableSpace!;
@@ -148,6 +150,6 @@ internal sealed class RowDeleter
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        Console.WriteLine("Row pk {0} with id {1} deleted from page {2}, Time taken: {3}", ticket.Id, pageOffset.SlotOne, pageOffset.SlotTwo, timeTaken.ToString(@"m\:ss\.fff"));*/
+        Console.WriteLine("Row pk {0} with id {1} deleted from page {2}, Time taken: {3}", ticket.Id, pageOffset.SlotOne, pageOffset.SlotTwo, timeTaken.ToString(@"m\:ss\.fff"));
     }
 }

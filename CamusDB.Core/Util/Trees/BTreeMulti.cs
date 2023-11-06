@@ -358,7 +358,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
     // split node in half
     private static BTreeMultiNode<TKey> Split(BTreeMultiNode<TKey> current, Dictionary<int, BTreeMultiDelta<TKey>> deltas)
     {
-        Console.WriteLine("split node");
+        //Console.WriteLine("split node");
 
         BTreeMultiNode<TKey> split = new(BTreeConfig.MaxChildrenHalf);
         deltas.Add(split.Id, new BTreeMultiDelta<TKey>(split, null));
@@ -374,12 +374,12 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
         for (int j = 0; j < BTreeConfig.MaxChildrenHalf; j++)
         {
-            Console.WriteLine("Assigning child {0} from {1} to {2} at {3}", BTreeConfig.MaxChildrenHalf + j, current.Id, split.Id, j);
+            //Console.WriteLine("Assigning child {0} from {1} to {2} at {3}", BTreeConfig.MaxChildrenHalf + j, current.Id, split.Id, j);
 
             split.children[j] = current.children[BTreeConfig.MaxChildrenHalf + j];
         }
 
-        Console.WriteLine("end split node {0} {1}", current.KeyCount, split.KeyCount);
+        //Console.WriteLine("end split node {0} {1}", current.KeyCount, split.KeyCount);
 
         return split;
     }

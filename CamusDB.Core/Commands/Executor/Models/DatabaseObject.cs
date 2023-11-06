@@ -8,7 +8,7 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public sealed class DatabaseObject
+public sealed record DatabaseObject
 {
     public DatabaseObjectType Type { get; set; }
 

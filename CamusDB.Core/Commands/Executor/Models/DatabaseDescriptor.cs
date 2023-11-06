@@ -11,7 +11,7 @@ using RocksDbSharp;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public sealed class DatabaseDescriptor
+public sealed record DatabaseDescriptor
 {
     public string Name { get; }
 

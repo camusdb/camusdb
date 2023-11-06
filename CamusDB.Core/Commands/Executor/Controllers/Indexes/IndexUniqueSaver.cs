@@ -73,9 +73,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
     }
 
     private static async Task Persist(
-        BufferPoolHandler tablespace,        
+        BufferPoolHandler tablespace,
         uint sequence,
-        uint subSequence,        
+        uint subSequence,
         BTree<ColumnValue, BTreeTuple?> index,
         HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas
     )
@@ -96,12 +96,12 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
             SerializatorTypeSizes.TypeInteger32 + // height(4 byte) +
             SerializatorTypeSizes.TypeInteger32 + // size(4 byte)
             SerializatorTypeSizes.TypeInteger32 // root(4 byte)
-        ]; 
+        ];
 
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
-        Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);        
+        Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);
 
         // Write to buffer page
         await tablespace.WriteDataToPage(index.PageOffset, sequence, treeBuffer);
@@ -114,7 +114,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 SerializatorTypeSizes.TypeInteger32 + // keyCount(4 byte) + 
                 SerializatorTypeSizes.TypeInteger32 + // pageOffset(4 byte)
                 GetKeySizes(node)
-            ]; 
+            ];
 
             pointer = 0;
             Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);
@@ -141,7 +141,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
             await tablespace.WriteDataToPage(node.PageOffset, sequence, nodeBuffer);
 
-            //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);            
+            Console.WriteLine("Node {0}/{1} at {2} Length={3}", node.Id, node.KeyCount, node.PageOffset, nodeBuffer.Length);
         }
     }
 }

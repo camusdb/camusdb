@@ -24,7 +24,6 @@
     <None Remove="Commands\Validator\Validators\" />
     <None Remove="Storage\" />
     <None Remove="Storage\Adapters\" />
-    <None Remove="Util\IO\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Util\Hashes\" />
@@ -38,7 +37,6 @@
     <Folder Include="Commands\Validator\Validators\" />
     <Folder Include="Storage\" />
     <Folder Include="Storage\Adapters\" />
-    <Folder Include="Util\IO\" />
   </ItemGroup>
 
   <ItemGroup>

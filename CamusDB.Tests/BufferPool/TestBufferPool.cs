@@ -6,8 +6,9 @@
  * file that was distributed with this source code.
  */
 
-using System.IO;
+using System;
 using System.Text;
+using RocksDbSharp;
 using NUnit.Framework;
 using CamusDB.Core.Storage;
 using System.Threading.Tasks;
@@ -15,8 +16,6 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
-using RocksDbSharp;
-using System;
 
 namespace CamusDB.Tests.BufferPool;
 
@@ -50,7 +49,7 @@ public class TestBufferPool
 
         BufferPage page = await bufferPool.GetPage(0);
 
-        Assert.AreEqual(page.Buffer.Length, Config.PageSize);
+        Assert.AreEqual(page.Buffer.Length, 0);
         Assert.AreEqual(page.Offset, 0);
 
         page = await bufferPool.ReadPage(100);

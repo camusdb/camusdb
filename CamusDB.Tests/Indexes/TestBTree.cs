@@ -57,16 +57,10 @@ internal sealed class TestBTree
     {
         BTree<int, int?> tree = new(0);
 
-        await tree.Put(0, 100);
-        await tree.Put(1, 100);
-        await tree.Put(4, 100);
-        await tree.Put(5, 100);
-        await tree.Put(6, 101);
-        await tree.Put(7, 102);
-        await tree.Put(8, 103);
-        await tree.Put(9, 104);
+        for (int i = 0; i < 65; i++)
+            await tree.Put(i, 100 + i);
 
-        Assert.AreEqual(tree.Size(), 8);
+        Assert.AreEqual(tree.Size(), 65);
         Assert.AreEqual(tree.Height(), 1);
     }
 
@@ -150,10 +144,10 @@ internal sealed class TestBTree
         Assert.AreEqual(1, deltas.Count);        
 
         deltas = await tree.Put(11, 105);
-        Assert.AreEqual(3, deltas.Count);        
+        Assert.AreEqual(1, deltas.Count);        
 
         Assert.AreEqual(tree.Size(), 8);
-        Assert.AreEqual(tree.Height(), 1);
+        Assert.AreEqual(tree.Height(), 0);
     }
 
     [Test]
@@ -267,22 +261,16 @@ internal sealed class TestBTree
     {
         BTree<int, int?> tree = new(0);
 
-        await tree.Put(4, 100);
-        await tree.Put(5, 100);
-        await tree.Put(6, 101);
-        await tree.Put(7, 102);
-        await tree.Put(8, 103);
-        await tree.Put(9, 104);
-        await tree.Put(10, 105);
-        await tree.Put(11, 106);
+        for (int i = 0; i < 65; i++)
+            await tree.Put(i, 100 + i);
 
-        Assert.AreEqual(8, tree.Size());
+        Assert.AreEqual(65, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
         (bool found, _) = await tree.Remove(5);
         Assert.IsTrue(found);
 
-        Assert.AreEqual(7, tree.Size());
+        Assert.AreEqual(64, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
         int? search = await tree.Get(5);
@@ -294,28 +282,22 @@ internal sealed class TestBTree
     {
         BTree<int, int?> tree = new(0);
 
-        await tree.Put(4, 100);
-        await tree.Put(5, 100);
-        await tree.Put(6, 101);
-        await tree.Put(7, 102);
-        await tree.Put(8, 103);
-        await tree.Put(9, 104);
-        await tree.Put(10, 105);
-        await tree.Put(11, 106);
+        for (int i = 0; i < 65; i++)
+            await tree.Put(i, 100 + i);
 
-        Assert.AreEqual(8, tree.Size());
+        Assert.AreEqual(65, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        (bool found, _) = await tree.Remove(11);
+        (bool found, _) = await tree.Remove(64);
         Assert.IsTrue(found);
 
-        Assert.AreEqual(7, tree.Size());
+        Assert.AreEqual(64, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        int? search = await tree.Get(11);
+        int? search = await tree.Get(64);
         Assert.IsNull(search);
 
-        search = await tree.Get(10);
+        search = await tree.Get(63);
         Assert.IsNotNull(search);
     }
 
@@ -324,22 +306,22 @@ internal sealed class TestBTree
     {
         BTree<int, int?> tree = new(0);
 
-        for (int i = 0; i < 50; i++)
+        for (int i = 0; i < 8192; i++)
             await tree.Put(i, 100 + i);
 
-        Assert.AreEqual(50, tree.Size());
+        Assert.AreEqual(8192, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
-        for (int i = 0; i < 50; i += 5)
+        for (int i = 0; i < 8192; i += 4)
         {
             (bool found, _) = await tree.Remove(i);
             Assert.IsTrue(found);
         }
 
-        Assert.AreEqual(40, tree.Size());
+        Assert.AreEqual(6144, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
-        int? search = await tree.Get(5);
+        int? search = await tree.Get(4);
         Assert.IsNull(search);
 
         search = await tree.Get(7);
@@ -350,6 +332,9 @@ internal sealed class TestBTree
 
         search = await tree.Get(49);
         Assert.IsNotNull(search);
+
+        search = await tree.Get(256);
+        Assert.IsNull(search);
     }
 
     [Test]
@@ -357,31 +342,31 @@ internal sealed class TestBTree
     {
         BTree<int, int?> tree = new(0);
 
-        for (int i = 0; i < 64; i++)
+        for (int i = 0; i < 8192; i++)
             await tree.Put(i, 100 + i);
 
-        Assert.AreEqual(64, tree.Size());
+        Assert.AreEqual(8192, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
-        for (int i = 0; i < 64; i += 8)
+        for (int i = 0; i < 8192; i += 8)
         {
             (bool found, _) = await tree.Remove(i);
             Assert.IsTrue(found);
         }
 
-        Assert.AreEqual(56, tree.Size());
+        Assert.AreEqual(7168, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
         int count = 0;
 
-        for (int i = 0; i < 64; i++)
+        for (int i = 0; i < 8192; i++)
         {
             int? search = await tree.Get(i);
             if (search is not null)
                 count++;
         }
 
-        Assert.AreEqual(56, count);
+        Assert.AreEqual(7168, count);
     }
 
     [Test]
@@ -389,31 +374,31 @@ internal sealed class TestBTree
     {
         BTree<int, int?> tree = new(0);
 
-        for (int i = 0; i < 49; i++)
+        for (int i = 0; i < 8100; i++)
             await tree.Put(i, 100 + i);
 
-        Assert.AreEqual(49, tree.Size());
+        Assert.AreEqual(8100, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
-        for (int i = 7; i < 49; i += 7)
+        for (int i = 7; i < 8100; i += 7)
         {
             (bool found, _) = await tree.Remove(i);
             Assert.IsTrue(found);
         }
 
-        Assert.AreEqual(43, tree.Size());
+        Assert.AreEqual(6943, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
         int count = 0;
 
-        for (int i = 0; i < 49; i++)
+        for (int i = 0; i < 8100; i++)
         {
             int? search = await tree.Get(i);
             if (search is not null)
                 count++;
         }
 
-        Assert.AreEqual(43, count);
+        Assert.AreEqual(6943, count);
     }
 
     [Test]
@@ -421,13 +406,13 @@ internal sealed class TestBTree
     {
         BTree<int, int?> tree = new(0);
 
-        for (int i = 0; i < 64; i++)
+        for (int i = 0; i < 8192; i++)
             await tree.Put(i, 100 + i);
 
-        Assert.AreEqual(64, tree.Size());
+        Assert.AreEqual(8192, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
-        for (int i = 0; i < 64; i++)
+        for (int i = 0; i < 8192; i++)
         {
             (bool found, _) = await tree.Remove(i);
             Assert.IsTrue(found);
@@ -438,7 +423,7 @@ internal sealed class TestBTree
 
         int count = 0;
 
-        for (int i = 0; i < 64; i++)
+        for (int i = 0; i < 8192; i++)
         {
             int? search = await tree.Get(i);
             if (search is not null)

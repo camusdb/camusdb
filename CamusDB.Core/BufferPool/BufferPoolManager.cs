@@ -82,7 +82,7 @@ public sealed class BufferPoolHandler : IDisposable
             if (pages.TryGetValue(offset, out page))
                 return page;
 
-            page = new BufferPage(offset, new byte[Config.PageSize]);
+            page = new BufferPage(offset, Array.Empty<byte>());
             pages.Add(offset, page);
 
             return page;
