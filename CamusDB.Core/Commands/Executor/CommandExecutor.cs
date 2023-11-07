@@ -16,7 +16,7 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 namespace CamusDB.Core.CommandsExecutor;
 
-public sealed class CommandExecutor : IDisposable
+public sealed class CommandExecutor : IAsyncDisposable
 {
     private readonly DatabaseOpener databaseOpener;
 
@@ -150,8 +150,8 @@ public sealed class CommandExecutor : IDisposable
 
     #endregion    
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
-        databaseCloser.Dispose();
+        await databaseCloser.DisposeAsync();
     }
 }

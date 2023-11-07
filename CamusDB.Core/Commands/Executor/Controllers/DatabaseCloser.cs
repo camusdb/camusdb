@@ -10,7 +10,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-internal sealed class DatabaseCloser : IDisposable
+internal sealed class DatabaseCloser : IAsyncDisposable
 {
     private readonly DatabaseDescriptors databaseDescriptors;
 
@@ -43,9 +43,9 @@ internal sealed class DatabaseCloser : IDisposable
         }
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         foreach (KeyValuePair<string, DatabaseDescriptor> keyValuePair in databaseDescriptors.Descriptors)
-            Close(keyValuePair.Key).AsTask().Wait();
+            await Close(keyValuePair.Key);
     }
 }

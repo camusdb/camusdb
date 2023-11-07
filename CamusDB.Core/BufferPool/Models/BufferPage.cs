@@ -14,13 +14,11 @@ public sealed class BufferPage
 {
     public int Offset { get; }
 
-    public int RefCount { get; }
-
     public Lazy<byte[]> Buffer { get; set; }
 
     public bool Dirty { get; set; }
 
-    private readonly AsyncReaderWriterLock semaphore = new();
+    private readonly AsyncReaderWriterLock readerWriterLock = new();
 
     public BufferPage(int offset, Lazy<byte[]> buffer)
     {
@@ -30,11 +28,11 @@ public sealed class BufferPage
 
     public async Task<IDisposable> ReaderLockAsync()
     {
-        return await semaphore.ReaderLockAsync();
+        return await readerWriterLock.ReaderLockAsync();
     }
 
     public async Task<IDisposable> WriterLockAsync()
     {
-        return await semaphore.WriterLockAsync();
+        return await readerWriterLock.WriterLockAsync();
     }
 }

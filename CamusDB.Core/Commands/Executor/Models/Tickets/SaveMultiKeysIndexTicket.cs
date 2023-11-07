@@ -20,14 +20,14 @@ public readonly struct SaveMultiKeysIndexTicket
 
     public BTreeTuple RowTuple { get; }
 
-    public List<SemaphoreSlim> Locks { get; }
+    public List<IDisposable> Locks { get; }
 
     public SaveMultiKeysIndexTicket(
         DatabaseDescriptor database,
         TableDescriptor table,
         InsertTicket ticket,
         BTreeTuple rowTuple,
-        List<SemaphoreSlim> locks)
+        List<IDisposable> locks)
     {
         Database = database;
         Table = table;

@@ -24,8 +24,8 @@ public sealed class BTreeEntry<TKey, TValue>
 
     public BTreeEntry(TKey key, TValue? value, BTreeNode<TKey, TValue>? next)
     {
-        this.Key = key;
-        this.Value = value;
-        this.Next = next;
+        Key = key;
+        Value = value;
+        Next = next;
     }
 }

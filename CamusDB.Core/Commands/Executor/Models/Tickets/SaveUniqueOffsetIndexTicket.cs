@@ -23,14 +23,14 @@ public readonly struct SaveUniqueOffsetIndexTicket
 
 	public HashSet<BTreeNode<int, int?>>? Deltas { get; }
 
-    public List<SemaphoreSlim> Locks { get; } = new();
+    public List<IDisposable> Locks { get; } = new();
 
     public SaveUniqueOffsetIndexTicket(
 		BufferPoolHandler tablespace,
 		BTree<int, int?> index,
 		int key,
 		int value,
-        List<SemaphoreSlim> locks,
+        List<IDisposable> locks,
 		HashSet<BTreeNode<int, int?>>? deltas = null
 	)
 	{

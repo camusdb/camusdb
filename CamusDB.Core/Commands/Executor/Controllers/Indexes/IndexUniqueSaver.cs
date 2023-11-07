@@ -26,16 +26,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     public async Task Save(SaveUniqueIndexTicket ticket)
     {
-        try
-        {
-            await ticket.Index.WriteLock.WaitAsync();
+        using IDisposable writerLock = await ticket.Index.ReaderWriterLock.WriterLockAsync();
 
-            await SaveInternal(ticket);
-        }
-        finally
-        {
-            ticket.Index.WriteLock.Release();
-        }
+        await SaveInternal(ticket);
     }
 
     public async Task NoLockingSave(SaveUniqueIndexTicket ticket)
@@ -45,16 +38,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     public async Task Remove(RemoveUniqueIndexTicket ticket)
     {
-        try
-        {
-            await ticket.Index.WriteLock.WaitAsync();
+        using IDisposable writerLock = await ticket.Index.ReaderWriterLock.WriterLockAsync();
 
-            await RemoveInternal(ticket);
-        }
-        finally
-        {
-            ticket.Index.WriteLock.Release();
-        }
+        await RemoveInternal(ticket);
     }
 
     private static async Task SaveInternal(SaveUniqueIndexTicket ticket)

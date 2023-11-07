@@ -25,7 +25,7 @@ public readonly struct UpdateUniqueIndexTicket
 
 	public List<TableIndexSchema> Indexes { get; }
 
-    public List<SemaphoreSlim> Locks { get; }
+    public List<IDisposable> Locks { get; }
 
     public UpdateUniqueIndexTicket(
 		DatabaseDescriptor database,
@@ -34,7 +34,7 @@ public readonly struct UpdateUniqueIndexTicket
 		BTreeTuple rowTuple,
 		InsertTicket ticket,
 		List<TableIndexSchema> indexes,
-		List<SemaphoreSlim> locks
+		List<IDisposable> locks
 	)
 	{
 		Database = database;

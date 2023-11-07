@@ -73,9 +73,7 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
                     "A unique index tree wasn't found"
                 );
 
-            await uniqueIndex.WriteLock.WaitAsync();
-
-            ticket.Locks.Add(uniqueIndex.WriteLock);
+            ticket.Locks.Add(await uniqueIndex.ReaderWriterLock.WriterLockAsync());
 
             ColumnValue? uniqueKeyValue = GetColumnValue(ticket.Table, insertTicket, index.Column);
 

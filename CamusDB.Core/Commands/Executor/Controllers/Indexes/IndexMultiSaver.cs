@@ -26,28 +26,19 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
     public async Task Save(SaveMultiKeyIndexTicket ticket)
     {
-        await ticket.Index.WriteLock.WaitAsync();
-
-        ticket.Locks.Add(ticket.Index.WriteLock);
+        ticket.Locks.Add(await ticket.Index.ReaderWriterLock.WriterLockAsync());
 
         await SaveInternal(ticket.Tablespace, ticket.Index, ticket.MultiKeyValue, ticket.RowTuple, ticket.Locks);        
     }
     
     public async Task Remove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
-    {
-        try
-        {
-            await index.WriteLock.WaitAsync();
+    {        
+        using IDisposable writerLock = await index.ReaderWriterLock.WriterLockAsync();
 
-            await RemoveInternal(tablespace, index, key);
-        }
-        finally
-        {
-            index.WriteLock.Release();
-        }
+        await RemoveInternal(tablespace, index, key);        
     }
 
-    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value, List<SemaphoreSlim> locks)
+    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value, List<IDisposable> locks)
     {
         Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas = await index.Put(key, value);
 
@@ -65,7 +56,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         BufferPoolHandler tablespace,
         BTreeMulti<ColumnValue> index,
         BTreeTuple value,
-        List<SemaphoreSlim> locks,
+        List<IDisposable> locks,
         Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas
     )
     {

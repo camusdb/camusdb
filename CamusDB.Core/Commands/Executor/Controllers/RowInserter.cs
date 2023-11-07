@@ -196,8 +196,8 @@ internal sealed class RowInserter
 
     private Task<FluxAction> ReleaseLocks(InsertFluxState state)
     {
-        foreach (SemaphoreSlim lockSem in state.Locks)
-            lockSem.Release();
+        foreach (IDisposable disposable in state.Locks)
+            disposable.Dispose();
 
         return Task.FromResult(FluxAction.Continue);
     }

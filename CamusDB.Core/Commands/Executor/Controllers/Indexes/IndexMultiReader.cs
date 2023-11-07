@@ -30,6 +30,8 @@ internal sealed class IndexMultiReader : IndexBaseReader
 
         BTreeMulti<ColumnValue> index = new(offset, subTreeReader);
 
+        using IDisposable readerLock = await index.ReaderWriterLock.ReaderLockAsync();
+
         byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
             return index;

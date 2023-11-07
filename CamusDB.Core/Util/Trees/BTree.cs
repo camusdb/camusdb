@@ -7,6 +7,7 @@
  */
 
 using System.Runtime.CompilerServices;
+using Nito.AsyncEx;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -36,9 +37,9 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     public int PageOffset = -1; // page offset to root node
 
-    public readonly IBTreeNodeReader<TKey, TValue>? Reader; // lazy node reader
+    public readonly IBTreeNodeReader<TKey, TValue>? Reader; // lazy node reader    
 
-    public SemaphoreSlim WriteLock { get; } = new(1, 1); // global lock
+    public AsyncReaderWriterLock ReaderWriterLock { get; } = new();
 
     /**
      * Initializes an empty B-tree.

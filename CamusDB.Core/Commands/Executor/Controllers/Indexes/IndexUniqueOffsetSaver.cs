@@ -25,9 +25,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
     public async Task Save(SaveUniqueOffsetIndexTicket ticket)
     {
-        await ticket.Index.WriteLock.WaitAsync();
-
-        ticket.Locks.Add(ticket.Index.WriteLock);
+        ticket.Locks.Add(await ticket.Index.ReaderWriterLock.WriterLockAsync());
 
         await SaveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.Value, ticket.Deltas);
     }

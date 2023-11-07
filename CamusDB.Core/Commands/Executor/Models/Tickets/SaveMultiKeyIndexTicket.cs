@@ -14,14 +14,14 @@ public readonly struct SaveMultiKeyIndexTicket
 
     public BTreeTuple RowTuple { get; }
 
-    public List<SemaphoreSlim> Locks { get; }
+    public List<IDisposable> Locks { get; }
 
     public SaveMultiKeyIndexTicket(
         BufferPoolHandler tablespace,
         BTreeMulti<ColumnValue> multiIndex,
         ColumnValue multiKeyValue,
         BTreeTuple rowTuple,
-        List<SemaphoreSlim> locks
+        List<IDisposable> locks
     )
     {
         Tablespace = tablespace;
