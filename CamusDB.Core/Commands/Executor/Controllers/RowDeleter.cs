@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
+using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -234,7 +235,7 @@ internal sealed class RowDeleter
         BufferPoolHandler tablespace = state.Database.TableSpace!;
         TableDescriptor table = state.Table;
 
-        (bool found, HashSet<BTreeNode<int, int?>> deltas) = await table.Rows.Remove(state.RowTuple.SlotOne);
+        (bool found, HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>> deltas) = await table.Rows.Remove(state.RowTuple.SlotOne);
 
         if (found)
         {

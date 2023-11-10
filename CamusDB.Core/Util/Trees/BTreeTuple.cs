@@ -6,15 +6,17 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Util.ObjectIds;
+
 namespace CamusDB.Core.Util.Trees;
 
 public sealed class BTreeTuple
 {
-    public int SlotOne { get; set; }
+    public ObjectIdValue SlotOne { get; set; }
 
-    public int SlotTwo { get; set; }
+    public ObjectIdValue SlotTwo { get; set; }
 
-    public BTreeTuple(int slotOne, int slotTwo)
+    public BTreeTuple(ObjectIdValue slotOne, ObjectIdValue slotTwo)
     {
         SlotOne = slotOne;
         SlotTwo = slotTwo;

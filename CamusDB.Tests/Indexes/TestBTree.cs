@@ -18,7 +18,7 @@ internal sealed class TestBTree
     [Test]
     public void TestEmpty()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         Assert.AreEqual(tree.Size(), 0);
         Assert.AreEqual(tree.Height(), 0);
@@ -28,7 +28,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestBasicInsert()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         await tree.Put(5, 100);
 
@@ -39,7 +39,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertNoSplit()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         await tree.Put(4, 100);
         await tree.Put(5, 100);
@@ -55,7 +55,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertSplit()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 65; i++)
             await tree.Put(i, 100 + i);
@@ -67,7 +67,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestBasicGet()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         await tree.Put(5, 100);
 
@@ -81,7 +81,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestBasicNullGet()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         await tree.Put(5, 100);
 
@@ -93,7 +93,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertGet()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         await tree.Put(4, 100);
         await tree.Put(5, 100);
@@ -120,7 +120,7 @@ internal sealed class TestBTree
     {
         HashSet<BTreeNode<int, int?>> deltas;
 
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         deltas = await tree.Put(4, 100);
         Assert.AreEqual(1, deltas.Count);        
@@ -153,7 +153,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestBasicRemove()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         await tree.Put(5, 100);
 
@@ -167,7 +167,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestRemoveUnknownKey()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         await tree.Put(5, 100);
 
@@ -181,7 +181,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertRemove()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         await tree.Put(4, 100);
         await tree.Put(5, 100);
@@ -200,7 +200,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertRemoveCheck()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         await tree.Put(4, 100);
         await tree.Put(5, 100);
@@ -222,7 +222,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertRemoveCheck2()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         await tree.Put(4, 100);
         await tree.Put(5, 100);
@@ -259,7 +259,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertSplitRemoveCheck()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 65; i++)
             await tree.Put(i, 100 + i);
@@ -280,7 +280,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertSplitRemoveCheck2()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 65; i++)
             await tree.Put(i, 100 + i);
@@ -304,7 +304,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertSplitRemoveCheck3()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 8192; i++)
             await tree.Put(i, 100 + i);
@@ -340,7 +340,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertSplitRemoveCheck4()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 8192; i++)
             await tree.Put(i, 100 + i);
@@ -372,7 +372,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertSplitRemoveCheck5()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 8100; i++)
             await tree.Put(i, 100 + i);
@@ -404,7 +404,7 @@ internal sealed class TestBTree
     [Test]
     public async Task TestMultiInsertSplitRemoveCheckEmpty()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 8192; i++)
             await tree.Put(i, 100 + i);

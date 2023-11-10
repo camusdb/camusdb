@@ -16,6 +16,7 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.BufferPool.Models;
 using Config = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.BufferPool;
 
@@ -47,15 +48,19 @@ public class TestBufferPool
 
         using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
-        BufferPage page = bufferPool.GetPage(0);
+        ObjectIdValue offset = ObjectIdGenerator.Generate();
+
+        BufferPage page = bufferPool.GetPage(offset);
 
         Assert.AreEqual(page.Buffer.Value.Length, 4096);
-        Assert.AreEqual(page.Offset, 0);
+        Assert.AreEqual(page.Offset, offset);
 
-        page = bufferPool.ReadPage(100);
+        offset = ObjectIdGenerator.Generate();
+
+        page = bufferPool.ReadPage(offset);
 
         Assert.AreEqual(page.Buffer.Value.Length, Config.PageSize);
-        Assert.AreEqual(page.Offset, 100);
+        Assert.AreEqual(page.Offset, offset);
 
         Assert.AreEqual(bufferPool.NumberPages, 2);
     }
@@ -66,46 +71,26 @@ public class TestBufferPool
     {
         using RocksDb storage = GetTempRocksDb();
 
-        StorageManager tablespaceStorage = new(storage);        
+        StorageManager tablespaceStorage = new(storage);
 
         using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
-        BufferPage page = bufferPool.ReadPage(0);
+        ObjectIdValue offset = ObjectIdGenerator.Generate();
+
+        BufferPage page = bufferPool.ReadPage(offset);
 
         Assert.AreEqual(page.Buffer.Value.Length, Config.PageSize);
-        Assert.AreEqual(page.Offset, 0);
+        Assert.AreEqual(page.Offset, offset);
 
-        page = bufferPool.ReadPage(100);
+        offset = ObjectIdGenerator.Generate();
+
+        page = bufferPool.ReadPage(offset);
 
         Assert.AreEqual(page.Buffer.Value.Length, Config.PageSize);
-        Assert.AreEqual(page.Offset, 100);
+        Assert.AreEqual(page.Offset, offset);
 
         Assert.AreEqual(bufferPool.NumberPages, 2);
-    }
-
-    [Test]
-    [NonParallelizable]
-    public async Task TestGetFreePage()
-    {
-        using RocksDb storage = GetTempRocksDb();
-
-        StorageManager tablespaceStorage = new(storage);        
-
-        using BufferPoolHandler bufferPool = new(tablespaceStorage);
-
-        // Initialize tablespace header
-        BufferPage page = bufferPool.ReadPage(Config.TableSpaceHeaderPage);
-        bufferPool.WriteTableSpaceHeader(page.Buffer.Value);
-        bufferPool.FlushPage(page); 
-
-        byte[] data = Encoding.UTF8.GetBytes("some data");
-
-        for (int i = 0; i < 10; i++)
-        {
-            int freeOffset = await bufferPool.GetNextFreeOffset();
-            Assert.AreEqual(i + 1, freeOffset);
-        }
-    }
+    }    
 
     [Test]
     [NonParallelizable]
@@ -113,18 +98,20 @@ public class TestBufferPool
     {
         using RocksDb storage = GetTempRocksDb();
 
-        StorageManager tablespaceStorage = new(storage);        
+        StorageManager tablespaceStorage = new(storage);
 
         using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
+        ObjectIdValue offset = ObjectIdGenerator.Generate();
+
         byte[] data = Encoding.UTF8.GetBytes("some data");
 
-        await bufferPool.WriteDataToPage(1, 0, data);
+        await bufferPool.WriteDataToPage(offset, 0, data);
 
-        BufferPage page = bufferPool.ReadPage(1);
+        BufferPage page = bufferPool.ReadPage(offset);
 
         Assert.AreEqual(page.Buffer.Value.Length, Config.PageSize);
-        Assert.AreEqual(page.Offset, 1);
+        Assert.AreEqual(page.Offset, offset);
 
         Assert.AreEqual(bufferPool.NumberPages, 1); // page #1
     }
@@ -140,9 +127,11 @@ public class TestBufferPool
         StorageManager tablespaceStorage = new(storage);
         //await tablespaceStorage.Initialize();
 
-        using BufferPoolHandler bufferPool = new(tablespaceStorage);        
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
-        await bufferPool.WriteDataToPage(1, 0, data);
+        ObjectIdValue offset = ObjectIdGenerator.Generate();
+
+        await bufferPool.WriteDataToPage(offset, 0, data);
 
         bufferPool.Dispose();
 
@@ -151,7 +140,7 @@ public class TestBufferPool
 
         using BufferPoolHandler? bufferPool2 = new(tablespaceStorage2);
 
-        BufferPage page = bufferPool2.ReadPage(1);
+        BufferPage page = bufferPool2.ReadPage(offset);
 
         for (int i = 0; i < data.Length; i++)
             Assert.AreEqual(page.Buffer.Value[BConfig.DataOffset + i], data[i]);
@@ -170,9 +159,11 @@ public class TestBufferPool
 
         byte[] data = Encoding.UTF8.GetBytes("some data some data");
 
-        await bufferPool.WriteDataToPage(1, 0, data);
+        ObjectIdValue offset = ObjectIdGenerator.Generate();
 
-        BufferPage page = bufferPool.ReadPage(1);
+        await bufferPool.WriteDataToPage(offset, 0, data);
+
+        BufferPage page = bufferPool.ReadPage(offset);
 
         for (int i = 0; i < data.Length; i++)
             Assert.AreEqual(page.Buffer.Value[BConfig.DataOffset + i], data[i]);
@@ -184,15 +175,17 @@ public class TestBufferPool
     {
         using RocksDb storage = GetTempRocksDb();
 
-        StorageManager tablespaceStorage = new(storage);        
+        StorageManager tablespaceStorage = new(storage);
 
-        using BufferPoolHandler bufferPool = new(tablespaceStorage);        
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);
+
+        ObjectIdValue offset = ObjectIdGenerator.Generate();
 
         byte[] data = Encoding.UTF8.GetBytes("some data some data");
 
-        await bufferPool.WriteDataToPage(1, 0, data);
+        await bufferPool.WriteDataToPage(offset, 0, data);
 
-        byte[] readData = await bufferPool.GetDataFromPage(1);
+        byte[] readData = await bufferPool.GetDataFromPage(offset);
 
         for (int i = 0; i < data.Length; i++)
             Assert.AreEqual(readData[i], data[i]);
@@ -204,17 +197,17 @@ public class TestBufferPool
     {
         using RocksDb storage = GetTempRocksDb();
 
-        StorageManager tablespaceStorage = new(storage);        
+        StorageManager tablespaceStorage = new(storage);
 
-        using BufferPoolHandler bufferPool = new(tablespaceStorage);        
+        using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
         byte[] data = Encoding.UTF8.GetBytes(new string('s', Config.PageSize));
 
-        int pageOffset = await bufferPool.WriteDataToFreePage(data);
+        ObjectIdValue pageOffset = await bufferPool.WriteDataToFreePage(data);
 
         byte[] readData = await bufferPool.GetDataFromPage(pageOffset);
 
-        Assert.AreEqual(readData.Length, Config.PageSize);
+        Assert.AreEqual(Config.PageSize, readData.Length);
         Assert.AreEqual(data.Length, readData.Length);
 
         for (int i = 0; i < data.Length; i++)
@@ -227,13 +220,13 @@ public class TestBufferPool
     {
         using RocksDb storage = GetTempRocksDb();
 
-        StorageManager tablespaceStorage = new(storage);        
+        StorageManager tablespaceStorage = new(storage);
 
         using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
         byte[] data = Encoding.UTF8.GetBytes(new string('s', Config.PageSize * 5));
 
-        int pageOffset = await bufferPool.WriteDataToFreePage(data);
+        ObjectIdValue pageOffset = await bufferPool.WriteDataToFreePage(data);
 
         byte[] readData = await bufferPool.GetDataFromPage(pageOffset);
 

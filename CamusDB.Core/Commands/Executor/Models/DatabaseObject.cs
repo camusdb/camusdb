@@ -14,7 +14,7 @@ public sealed record DatabaseObject
 
     public string? Name { get; set; }
 
-    public int StartOffset { get; set; }
+    public string? StartOffset { get; set; }
 
     public Dictionary<string, DatabaseIndexObject>? Indexes { get; set; }
 }

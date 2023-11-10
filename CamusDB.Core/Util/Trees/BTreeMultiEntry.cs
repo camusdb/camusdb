@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Util.ObjectIds;
+
 namespace CamusDB.Core.Util.Trees;
 
 // internal nodes: only use key and next
@@ -14,7 +16,7 @@ public sealed class BTreeMultiEntry<T> where T : IComparable<T>
 {
     public T Key;
 
-    public BTree<int, int?>? Value;
+    public BTree<ObjectIdValue, ObjectIdValue>? Value;
 
     public BTreeMultiNode<T>? Next;     // helper field to iterate over array entries
 

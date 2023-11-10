@@ -19,7 +19,7 @@ internal sealed class RowSerializer
 {
     private int CalculateBufferLength(TableDescriptor table, InsertTicket ticket)
     {
-        int length = 10; // 1 type + 4 schemaVersion + 1 type + 4 rowId
+        int length = 20; // 1 type + 4 schemaVersion + 1 type + 12 rowId
 
         List<TableColumnSchema> tableColumns = table.Schema!.Columns!;
 
@@ -42,7 +42,7 @@ internal sealed class RowSerializer
             length += columnValue.Type switch
             {
                 // type 1 byte + 3 * 4 byte int
-                ColumnType.Id => SerializatorTypeSizes.TypeInteger8 + (SerializatorTypeSizes.TypeInteger32 * 3),
+                ColumnType.Id => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeObjectId,
 
                 // type 1 byte + 4 byte int
                 ColumnType.Integer => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32,
@@ -60,7 +60,7 @@ internal sealed class RowSerializer
         return length;
     }
 
-    public byte[] Serialize(TableDescriptor table, InsertTicket ticket, int rowId)
+    public byte[] Serialize(TableDescriptor table, InsertTicket ticket, ObjectIdValue rowId)
     {
         int length = CalculateBufferLength(table, ticket);
 
@@ -74,7 +74,7 @@ internal sealed class RowSerializer
         Serializator.WriteInt32(rowBuffer, table.Schema!.Version, ref pointer); // schema version
 
         Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
-        Serializator.WriteInt32(rowBuffer, rowId, ref pointer); // row Id
+        Serializator.WriteObjectId(rowBuffer, rowId, ref pointer); // row Id
 
         List<TableColumnSchema> columns = table.Schema.Columns!;
 

@@ -6,12 +6,10 @@
  * file that was distributed with this source code.
  */
 
-using System.IO;
-using System.Text;
-using CamusDB.Core;
 using NUnit.Framework;
 using System.Threading.Tasks;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.Indexes;
 
@@ -20,7 +18,7 @@ public class TestBTreeMulti
     [Test]
     public void TestEmpty()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
         Assert.AreEqual(tree.Size(), 0);
         Assert.AreEqual(tree.Height(), 0);
@@ -30,9 +28,9 @@ public class TestBTreeMulti
     [Test]
     public async Task TestBasicInsert()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
+        await tree.Put(5, ObjectIdGenerator.Generate());
 
         Assert.AreEqual(tree.Size(), 1);
         Assert.AreEqual(tree.Height(), 0);
@@ -41,14 +39,14 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiInsertNoSplit()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(ObjectIdGenerator.Generate());
 
-        await tree.Put(4, 100);
-        await tree.Put(5, 100);
-        await tree.Put(6, 101);
-        await tree.Put(7, 102);
-        await tree.Put(8, 103);
-        await tree.Put(9, 104);
+        await tree.Put(4, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(6, ObjectIdGenerator.Generate());
+        await tree.Put(7, ObjectIdGenerator.Generate());
+        await tree.Put(8, ObjectIdGenerator.Generate());
+        await tree.Put(9, ObjectIdGenerator.Generate());
 
         Assert.AreEqual(tree.Size(), 6);
         Assert.AreEqual(tree.Height(), 0);
@@ -57,10 +55,10 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiInsertSplit()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(ObjectIdGenerator.Generate());
 
         for (int i = 0; i < 256; i++)
-            await tree.Put(i, i + 100);
+            await tree.Put(i, ObjectIdGenerator.Generate());
 
         Assert.AreEqual(tree.Size(), 256);
         Assert.AreEqual(tree.Height(), 1);
@@ -69,11 +67,11 @@ public class TestBTreeMulti
     [Test]
     public async Task TestBasicGet()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
+        await tree.Put(5, ObjectIdGenerator.Generate());
 
-        BTree<int, int?>? values = tree.Get(5);
+        BTree<ObjectIdValue, ObjectIdValue>? values = tree.Get(5);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
@@ -83,11 +81,11 @@ public class TestBTreeMulti
     [Test]
     public async Task TestBasicNullGet()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
+        await tree.Put(5, ObjectIdGenerator.Generate());
 
-        BTree<int, int?>? values = tree.Get(11);
+        BTree<ObjectIdValue, ObjectIdValue>? values = tree.Get(11);
 
         Assert.Null(values);
     }
@@ -95,16 +93,16 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiInsertGet()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(4, 100);
-        await tree.Put(5, 100);
-        await tree.Put(6, 101);
-        await tree.Put(7, 102);
-        await tree.Put(8, 103);
-        await tree.Put(9, 104);
+        await tree.Put(4, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(6, ObjectIdGenerator.Generate());
+        await tree.Put(7, ObjectIdGenerator.Generate());
+        await tree.Put(8, ObjectIdGenerator.Generate());
+        await tree.Put(9, ObjectIdGenerator.Generate());
 
-        BTree<int, int?>? values = tree.Get(5);
+        BTree<ObjectIdValue, ObjectIdValue>? values = tree.Get(5);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
@@ -120,10 +118,10 @@ public class TestBTreeMulti
     [Test]
     public async Task TestBasicSameKeyInsert()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
-        await tree.Put(5, 101);
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
 
         Assert.AreEqual(1, tree.Size());
         Assert.AreEqual(2, tree.DenseSize());
@@ -133,15 +131,15 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiSameKeyInsert()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
-        await tree.Put(5, 101);
-        await tree.Put(5, 103);
-        await tree.Put(5, 104);
-        await tree.Put(5, 105);
-        await tree.Put(5, 106);
-        await tree.Put(5, 107);
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
 
         Assert.AreEqual(tree.Size(), 1);
         Assert.AreEqual(tree.DenseSize(), 7);
@@ -151,17 +149,17 @@ public class TestBTreeMulti
     [Test]
     public async Task TestSameKeyInsertBasicGet()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
-        await tree.Put(5, 101);
-        await tree.Put(5, 103);
-        await tree.Put(5, 104);
-        await tree.Put(5, 105);
-        await tree.Put(5, 106);
-        await tree.Put(5, 107);
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
 
-        BTree<int, int?>? values = tree.Get(5);
+        BTree<ObjectIdValue, ObjectIdValue>? values = tree.Get(5);
 
         Assert.NotNull(values);
         Assert.AreEqual(values!.Size(), 7);
@@ -170,18 +168,18 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiSameKeyInsertSplit()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
-        await tree.Put(5, 101);
-        await tree.Put(5, 103);
-        await tree.Put(5, 104);
-        await tree.Put(5, 105);
-        await tree.Put(5, 106);
-        await tree.Put(5, 107);
-        await tree.Put(5, 108);
-        await tree.Put(5, 109);
-        await tree.Put(5, 110);
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
 
         Assert.AreEqual(1, tree.Size());
         Assert.AreEqual(10, tree.DenseSize());
@@ -191,24 +189,24 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiSameKeyInsertTraverse()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
-        await tree.Put(5, 101);
-        await tree.Put(5, 102);
-        await tree.Put(5, 103);
-        await tree.Put(5, 104);
-        await tree.Put(5, 105);
-        await tree.Put(5, 106);
-        await tree.Put(5, 107);
-        await tree.Put(5, 108);
-        await tree.Put(5, 109);
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
 
         int index = 0;
 
-        await foreach (int value in tree.GetAll(5))
+        await foreach (ObjectIdValue value in tree.GetAll(5))
         {
-            Assert.AreEqual(100 + index, value);
+            Assert.AreEqual(24, value.ToString().Length);
             index++;
         }
 
@@ -218,19 +216,19 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiTwoKeysTraverse()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
         for (int i = 0; i < 10; i++)
-            await tree.Put(5, 100 + i);
+            await tree.Put(5, ObjectIdGenerator.Generate());
 
         for (int i = 0; i < 10; i++)
-            await tree.Put(7, 100 + i);
+            await tree.Put(7, ObjectIdGenerator.Generate());
 
         int index = 0;
 
-        await foreach (int value in tree.GetAll(5))
+        await foreach (ObjectIdValue value in tree.GetAll(5))
         {
-            Assert.AreEqual(100 + index, value);
+            Assert.AreEqual(24, value.ToString().Length);
             index++;
         }
 
@@ -240,10 +238,10 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiInsertString()
     {
-        BTreeMulti<string> tree = new(0);
+        BTreeMulti<string> tree = new(new());
 
         for (int i = 0; i < 10; i++)
-            await tree.Put("aaa", 100 + i);
+            await tree.Put("aaa", ObjectIdGenerator.Generate());
 
         Assert.AreEqual(tree.Size(), 1);
         Assert.AreEqual(tree.DenseSize(), 10);
@@ -253,10 +251,10 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiInsertStringSplit()
     {
-        BTreeMulti<string> tree = new(0);
+        BTreeMulti<string> tree = new(new());
 
         for (int i = 0; i < 256; i++)
-            await tree.Put("aaa" + i, 100);
+            await tree.Put("aaa" + i, ObjectIdGenerator.Generate());
 
         Assert.AreEqual(tree.Size(), 256);
         Assert.AreEqual(tree.Height(), 1);
@@ -265,9 +263,9 @@ public class TestBTreeMulti
     [Test]
     public async Task TestBasicRemove()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
+        await tree.Put(5, ObjectIdGenerator.Generate());
 
         (bool found, _) = tree.Remove(5);
         Assert.IsTrue(found);
@@ -279,9 +277,9 @@ public class TestBTreeMulti
     [Test]
     public async Task TestRemoveUnknownKey()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
+        await tree.Put(5, ObjectIdGenerator.Generate());
 
         (bool found, _) = tree.Remove(10);
         Assert.IsFalse(found);
@@ -293,14 +291,14 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiInsertRemove()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(4, 100);
-        await tree.Put(5, 100);
-        await tree.Put(6, 101);
-        await tree.Put(7, 102);
-        await tree.Put(8, 103);
-        await tree.Put(9, 104);
+        await tree.Put(4, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(6, ObjectIdGenerator.Generate());
+        await tree.Put(7, ObjectIdGenerator.Generate());
+        await tree.Put(8, ObjectIdGenerator.Generate());
+        await tree.Put(9, ObjectIdGenerator.Generate());
 
         (bool found, _) = tree.Remove(5);
         Assert.IsTrue(found);
@@ -313,14 +311,14 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiKeyInsertRemove()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
-        await tree.Put(5, 101);
-        await tree.Put(5, 102);
-        await tree.Put(7, 100);
-        await tree.Put(7, 101);
-        await tree.Put(7, 102);
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(7, ObjectIdGenerator.Generate());
+        await tree.Put(7, ObjectIdGenerator.Generate());
+        await tree.Put(7, ObjectIdGenerator.Generate());
 
         (bool found, _) = tree.Remove(5);
         Assert.IsTrue(found);
@@ -333,14 +331,14 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiInsertRemoveCheck()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
-        await tree.Put(5, 100);
-        await tree.Put(5, 101);
-        await tree.Put(5, 102);
-        await tree.Put(7, 100);
-        await tree.Put(7, 101);
-        await tree.Put(7, 102);
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(5, ObjectIdGenerator.Generate());
+        await tree.Put(7, ObjectIdGenerator.Generate());
+        await tree.Put(7, ObjectIdGenerator.Generate());
+        await tree.Put(7, ObjectIdGenerator.Generate());
 
         (bool found, _) = tree.Remove(5);
         Assert.IsTrue(found);
@@ -349,17 +347,17 @@ public class TestBTreeMulti
         Assert.AreEqual(3, tree.DenseSize());
         Assert.AreEqual(0, tree.Height());
 
-        BTree<int, int?>? search = tree.Get(5);
+        BTree<ObjectIdValue, ObjectIdValue>? search = tree.Get(5);
         Assert.IsNull(search);
     }
 
     [Test]
     public async Task TestMultiInsertRemoveCheck2()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
         for (int i = 0; i < 256; i++)
-            await tree.Put(i, i + 100);
+            await tree.Put(i, ObjectIdGenerator.Generate());
 
         (bool found, _) = tree.Remove(5);
         Assert.IsTrue(found);
@@ -368,14 +366,14 @@ public class TestBTreeMulti
         Assert.AreEqual(255, tree.DenseSize());
         Assert.AreEqual(1, tree.Height());
 
-        BTree<int, int?>? search = tree.Get(7);
+        BTree<ObjectIdValue, ObjectIdValue>? search = tree.Get(7);
         Assert.IsNotNull(search);
     }
 
     [Test]
     public async Task TestMultiInsertSplitRemoveCheck2()
     {
-        BTree<int, int?> tree = new(0);
+        BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 256; i++)
             await tree.Put(i, i + 100);
@@ -399,12 +397,12 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiInsertSplitRemoveCheck3()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
         for (int i = 0; i < 8192; i++)
         {
             for (int j = 0; j < 64; j++)
-                await tree.Put(i, j);
+                await tree.Put(i, ObjectIdGenerator.Generate());
         }
 
         Assert.AreEqual(8192, tree.Size());
@@ -421,7 +419,7 @@ public class TestBTreeMulti
         Assert.AreEqual(393216, tree.DenseSize());
         Assert.AreEqual(2, tree.Height());
 
-        BTree<int, int?>? search = tree.Get(4);
+        BTree<ObjectIdValue, ObjectIdValue>? search = tree.Get(4);
         Assert.IsNull(search);
 
         search = tree.Get(7);
@@ -437,12 +435,12 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiInsertSplitRemoveCheck4()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
         for (int i = 0; i < 8192; i++)
         {
             for (int j = 0; j < 64; j++)
-                await tree.Put(i, j);
+                await tree.Put(i, ObjectIdGenerator.Generate());
         }
 
         Assert.AreEqual(8192, tree.Size());
@@ -463,7 +461,7 @@ public class TestBTreeMulti
 
         for (int i = 0; i < 8192; i++)
         {
-            BTree<int, int?>? search = tree.Get(i);
+            BTree<ObjectIdValue, ObjectIdValue>? search = tree.Get(i);
             if (search is not null)
                 count++;
         }
@@ -474,12 +472,12 @@ public class TestBTreeMulti
     [Test]
     public async Task TestMultiInsertSplitRemoveCheck5()
     {
-        BTreeMulti<int> tree = new(0);
+        BTreeMulti<int> tree = new(new());
 
         for (int i = 0; i < 8100; i++)
         {
             for (int j = 0; j < 64; j++)
-                await tree.Put(i, j);
+                await tree.Put(i, ObjectIdGenerator.Generate());
         }
 
         Assert.AreEqual(8100, tree.Size());
@@ -500,7 +498,7 @@ public class TestBTreeMulti
 
         for (int i = 0; i < 8192; i++)
         {
-            BTree<int, int?>? search = tree.Get(i);
+            BTree<ObjectIdValue, ObjectIdValue>? search = tree.Get(i);
             if (search is not null)
                 count++;
         }

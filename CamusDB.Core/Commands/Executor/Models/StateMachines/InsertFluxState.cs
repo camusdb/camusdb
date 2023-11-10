@@ -21,7 +21,7 @@ public sealed class InsertFluxState
 
     public uint Sequence { get; set; }
 
-    public BTreeTuple RowTuple { get; set; } = new(-1, -1);
+    public BTreeTuple RowTuple { get; set; } = new(new(), new());
 
     public InsertFluxIndexState Indexes { get; }
 

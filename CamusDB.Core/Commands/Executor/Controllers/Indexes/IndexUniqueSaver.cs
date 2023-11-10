@@ -68,6 +68,8 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas
     )
     {
+        await Task.Yield();
+
         if (deltas.Count == 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
@@ -76,24 +78,24 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
         foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas)
         {
-            if (node.PageOffset == -1)
-                node.PageOffset = await tablespace.GetNextFreeOffset();
+            if (node.PageOffset.IsNull())
+                node.PageOffset = tablespace.GetNextFreeOffset();
         }
 
         byte[] treeBuffer = new byte[
             SerializatorTypeSizes.TypeInteger32 + // height(4 byte) +
             SerializatorTypeSizes.TypeInteger32 + // size(4 byte)
-            SerializatorTypeSizes.TypeInteger32 // root(4 byte)
+            SerializatorTypeSizes.TypeObjectId    // root(4 byte)
         ];
 
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
-        Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);
+        Serializator.WriteObjectId(treeBuffer, index.root!.PageOffset, ref pointer);
 
         // Write to buffer page
         //await tablespace.WriteDataToPage(index.PageOffset, sequence, treeBuffer);
-        modifiedPages.Add(new InsertModifiedPage(index.PageOffset, sequence, treeBuffer));
+        modifiedPages.Add(new InsertModifiedPage(index.PageOffset, sequence, treeBuffer));      
 
         //@todo update nodes concurrently
 
@@ -101,13 +103,13 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         {
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // keyCount(4 byte) + 
-                SerializatorTypeSizes.TypeInteger32 + // pageOffset(4 byte)
+                SerializatorTypeSizes.TypeObjectId +  // pageOffset(4 byte)
                 GetKeySizes(node)
             ];
 
             pointer = 0;
             Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);
-            Serializator.WriteInt32(nodeBuffer, node.PageOffset, ref pointer);
+            Serializator.WriteObjectId(nodeBuffer, node.PageOffset, ref pointer);
 
             for (int i = 0; i < node.KeyCount; i++)
             {
@@ -117,21 +119,21 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 {
                     SerializeKey(nodeBuffer, entry.Key, ref pointer);
                     SerializeTuple(nodeBuffer, entry.Value, ref pointer);
-                    Serializator.WriteInt32(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : -1, ref pointer);
+                    Serializator.WriteObjectId(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : new(), ref pointer);
                 }
                 else
                 {
                     Serializator.WriteInt8(nodeBuffer, 0, ref pointer);
-                    Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
-                    Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
-                    Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
+                    Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
+                    Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
+                    Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
                 }
             }
 
             //await tablespace.WriteDataToPage(node.PageOffset, sequence, nodeBuffer);
             modifiedPages.Add(new InsertModifiedPage(node.PageOffset, sequence, nodeBuffer));
 
-            //Console.WriteLine("Node {0}/{1} at {2} Length={3}", node.Id, node.KeyCount, node.PageOffset, nodeBuffer.Length);
+            //Console.WriteLine("Node {0}/{1} at {2} Length={3}", node.Id, node.KeyCount, node.PageOffset, nodeBuffer.Length);            
         }
     }
 }

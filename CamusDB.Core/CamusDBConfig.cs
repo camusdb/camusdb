@@ -2,6 +2,7 @@
 
 
 using System.Text;
+using CamusDB.Core.Util.ObjectIds;
 /**
 * This file is part of CamusDB  
 *
@@ -22,7 +23,7 @@ public static class CamusDBConfig
 
     public const int InitialPagesRead = 1024;
 
-    public const int TableSpaceHeaderPage = 0;
+    public readonly static ObjectIdValue TableSpaceHeaderPage = new(1, 1, 1);
 
     public const int FlushToDiskInterval = 1000;
 
