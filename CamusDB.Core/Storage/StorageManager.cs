@@ -6,18 +6,20 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.BufferPool.Models;
 using RocksDbSharp;
+using System;
 using Config = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.Storage;
 
 public sealed class StorageManager
-{   
-    private readonly RocksDb dbHandler;    
+{
+    private readonly RocksDb dbHandler;
 
     public StorageManager(RocksDb dbHandler)
     {
-        this.dbHandler = dbHandler;        
+        this.dbHandler = dbHandler;
     }
 
     public byte[] Read(int offset)
@@ -43,5 +45,15 @@ public sealed class StorageManager
     internal void Dispose()
     {
         //throw new NotImplementedException();
+    }
+
+    internal void WriteBatch(List<PageToWrite> pagesToWrite)
+    {
+        using var batch = new WriteBatch();
+
+        foreach (PageToWrite page in pagesToWrite)
+            batch.Put(BitConverter.GetBytes(page.Offset), page.Buffer);
+
+        dbHandler.Write(batch);
     }
 }

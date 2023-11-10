@@ -12,34 +12,38 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public sealed class RemoveUniqueIndexTicket
+public readonly struct RemoveUniqueIndexTicket
 {
     public BufferPoolHandler Tablespace { get; }
 
     public uint Sequence { get; }
 
-    public uint SubSequence { get; }    
+    public uint SubSequence { get; }
 
     public BTree<ColumnValue, BTreeTuple?> Index { get; }
 
     public ColumnValue Key { get; }
 
+    public List<IDisposable> Locks { get; }
+
     public List<InsertModifiedPage> ModifiedPages { get; }
 
     public RemoveUniqueIndexTicket(
-        BufferPoolHandler tablespace,        
+        BufferPoolHandler tablespace,
         uint sequence,
         uint subSequence,
         BTree<ColumnValue, BTreeTuple?> index,
         ColumnValue key,
+        List<IDisposable> locks,
         List<InsertModifiedPage> modifiedPages
     )
     {
-        Tablespace = tablespace;        
+        Tablespace = tablespace;
         Sequence = sequence;
         SubSequence = subSequence;
         Index = index;
         Key = key;
+        Locks = locks;
         ModifiedPages = modifiedPages;
     }
 }

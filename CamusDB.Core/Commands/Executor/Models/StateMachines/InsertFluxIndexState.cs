@@ -10,11 +10,11 @@ using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
-public sealed class InsertFluxIndexState
+public readonly struct InsertFluxIndexState
 {
 	public List<TableIndexSchema> UniqueIndexes { get; } = new();
 
-	public List<TableIndexSchema>? multiIndexes;
+	public List<TableIndexSchema>? multiIndexes { get; } = null;
 
 	public InsertFluxIndexState()
 	{

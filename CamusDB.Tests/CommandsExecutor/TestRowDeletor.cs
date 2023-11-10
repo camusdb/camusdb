@@ -6,17 +6,14 @@
  * file that was distributed with this source code.
  */
 
-using System.IO;
 using CamusDB.Core;
 using NUnit.Framework;
-using CamusDB.Tests.Utils;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
-using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
@@ -48,7 +45,7 @@ public class TestRowDeletor
         return (dbname, executor);
     }
 
-    private async Task<CommandExecutor> SetupBasicTable()
+    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
     {
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
@@ -66,14 +63,18 @@ public class TestRowDeletor
 
         await executor.CreateTable(tableTicket);
 
+        List<string> objectsId = new(25);
+
         for (int i = 0; i < 25; i++)
         {
+            string objectId = ObjectIdGenerator.Generate().ToString();
+
             InsertTicket ticket = new(
                 database: dbname,
                 name: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
                     { "year", new ColumnValue(ColumnType.Integer, (2000 + i).ToString()) },
                     { "enabled", new ColumnValue(ColumnType.Bool, "FALSE") },
@@ -81,9 +82,11 @@ public class TestRowDeletor
             );
 
             await executor.Insert(ticket);
+
+            objectsId.Add(objectId);
         }
 
-        return executor;
+        return (dbname, executor, objectsId);
     }
 
     /*[Test]
@@ -112,326 +115,63 @@ public class TestRowDeletor
     [NonParallelizable]
     public async Task TestInvalidTable()
     {
-        var executor = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
-        /*InsertTicket ticket = new(
-            database: "factory",
+        DeleteByIdTicket ticket = new(
+            database: dbname,
             name: "unknown_table",
-            values: new Dictionary<string, ColumnValue>()
-            {
-                { "id", new ColumnValue(ColumnType.Integer, "1") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "true") },
-            }
+            id: objectsId[0]
         );
 
-        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
-        Assert.AreEqual("Table 'unknown_table' doesn't exist", e!.Message);*/
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.DeleteById(ticket));
+        Assert.AreEqual("Table 'unknown_table' doesn't exist", e!.Message);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestBasicDelete()
     {
-        var executor = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
-        /*InsertTicket ticket = new(
-            database: "factory",
+        DeleteByIdTicket ticket = new(
+            database: dbname,
             name: "robots",
-            values: new Dictionary<string, ColumnValue>()
-            {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
-            }
+            id: objectsId[0]
         );
 
-        await executor.Insert(ticket);*/
-    }
-
-    /*[Test]
-    [NonParallelizable]
-    public async Task TestTwoInserts()
-    {
-        var executor = await SetupBasicTable();
-
-        InsertTicket ticket = new(
-            database: "factory",
-            name: "robots",
-            values: new Dictionary<string, ColumnValue>()
-            {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
-            }
-        );
-
-        await executor.Insert(ticket);
-
-        ticket = new(
-            database: "factory",
-            name: "robots",
-            values: new Dictionary<string, ColumnValue>()
-            {
-                { "id", new ColumnValue(ColumnType.Id, "2") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "true") },
-            }
-        );
-
-        await executor.Insert(ticket);
+        await executor.DeleteById(ticket);
     }
 
     [Test]
     [NonParallelizable]
-    public async Task TestTwoInsertsParallel()
+    public async Task TestDeleteUnknownRow()
     {
-        var executor = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
-        InsertTicket ticket = new(
-            database: "factory",
+        DeleteByIdTicket ticket = new(
+            database: dbname,
             name: "robots",
-            values: new Dictionary<string, ColumnValue>()
-            {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
-            }
+            id: "---"
         );
 
-        InsertTicket ticket2 = new(
-            database: "factory",
-            name: "robots",
-            values: new Dictionary<string, ColumnValue>()
-            {
-                { "id", new ColumnValue(ColumnType.Id, "2") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "true") },
-            }
-        );
+        await executor.DeleteById(ticket);
+    }
 
-        await Task.WhenAll(new Task[]
+    [Test]
+    [NonParallelizable]
+    public async Task TestMultiDelete()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        foreach (string objectId in objectsId)
         {
-            executor.Insert(ticket),
-            executor.Insert(ticket2)
-        });
-    }
-
-    [Test]
-    [NonParallelizable]
-    public async Task TestCheckSuccessfulInsert()
-    {
-        var executor = await SetupBasicTable();
-
-        InsertTicket insertTicket = new(
-            database: "factory",
-            name: "robots",
-            values: new Dictionary<string, ColumnValue>()
-            {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
-            }
-        );
-
-        await executor.Insert(insertTicket);
-
-        QueryByIdTicket queryTicket = new(
-            database: "factory",
-            name: "robots",
-            id: 1
-        );
-
-        List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
-
-        Dictionary<string, ColumnValue> row = result[0];
-
-        Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "1");
-
-        Assert.AreEqual(row["name"].Type, ColumnType.String);
-        Assert.AreEqual(row["name"].Value, "some name");
-
-        Assert.AreEqual(row["year"].Type, ColumnType.Integer);
-        Assert.AreEqual(row["year"].Value, "1234");
-    }
-
-    [Test]
-    [NonParallelizable]
-    public async Task TestSuccessfulTwoParallelInserts()
-    {
-        var executor = await SetupBasicTable();
-
-        InsertTicket ticket = new(
-            database: "factory",
-            name: "robots",
-            values: new Dictionary<string, ColumnValue>()
-            {
-                { "id", new ColumnValue(ColumnType.Id, "1") },
-                { "name", new ColumnValue(ColumnType.String, "some name 1") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
-            }
-        );
-
-        InsertTicket ticket2 = new(
-            database: "factory",
-            name: "robots",
-            values: new Dictionary<string, ColumnValue>()
-            {
-                { "id", new ColumnValue(ColumnType.Id, "2") },
-                { "name", new ColumnValue(ColumnType.String, "some name 2") },
-                { "year", new ColumnValue(ColumnType.Integer, "4567") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "true") },
-            }
-        );
-
-        await Task.WhenAll(new Task[]
-        {
-            executor.Insert(ticket),
-            executor.Insert(ticket2)
-        });
-
-        QueryByIdTicket queryTicket = new(
-            database: "factory",
-            name: "robots",
-            id: 2
-        );
-
-        List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
-
-        Dictionary<string, ColumnValue> row = result[0];
-
-        Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "2");
-
-        Assert.AreEqual(row["name"].Type, ColumnType.String);
-        Assert.AreEqual(row["name"].Value, "some name 2");
-
-        Assert.AreEqual(row["year"].Type, ColumnType.Integer);
-        Assert.AreEqual(row["year"].Value, "4567");
-
-        Assert.AreEqual(row["enabled"].Type, ColumnType.Bool);
-        Assert.AreEqual(row["enabled"].Value, "true");
-
-        QueryByIdTicket queryTicket2 = new(
-            database: "factory",
-            name: "robots",
-            id: 1
-        );
-
-        result = await executor.QueryById(queryTicket2);
-
-        row = result[0];
-
-        Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "1");
-
-        Assert.AreEqual(row["name"].Type, ColumnType.String);
-        Assert.AreEqual(row["name"].Value, "some name 1");
-
-        Assert.AreEqual(row["year"].Type, ColumnType.Integer);
-        Assert.AreEqual(row["year"].Value, "1234");
-
-        Assert.AreEqual(row["enabled"].Type, ColumnType.Bool);
-        Assert.AreEqual(row["enabled"].Value, "false");
-    }
-
-    [Test]
-    [NonParallelizable]
-    public async Task TestCheckSuccessfulMultiInsert()
-    {
-        var executor = await SetupBasicTable();
-
-        for (int i = 0; i < 50; i++)
-        {
-            InsertTicket insertTicket = new(
-                database: "factory",
+            DeleteByIdTicket ticket = new(
+                database: dbname,
                 name: "robots",
-                values: new Dictionary<string, ColumnValue>()
-                {
-                    { "id", new ColumnValue(ColumnType.Id, i.ToString()) },
-                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, "false") },
-                }
+                id: objectId
             );
 
-            await executor.Insert(insertTicket);
-        }
-
-        for (int i = 0; i < 50; i++)
-        {
-            QueryByIdTicket queryTicket = new(
-                database: "factory",
-                name: "robots",
-                id: i
-            );
-
-            List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
-
-            Dictionary<string, ColumnValue> row = result[0];
-
-            Assert.AreEqual(row["id"].Type, ColumnType.Id);
-            Assert.AreEqual(row["id"].Value, i.ToString());
-
-            Assert.AreEqual(row["name"].Type, ColumnType.String);
-            Assert.AreEqual(row["name"].Value, "some name " + i);
-
-            Assert.AreEqual(row["year"].Type, ColumnType.Integer);
-            Assert.AreEqual(row["year"].Value, (i * 1000).ToString());
-        }
+            await executor.DeleteById(ticket);
+        }        
     }
-
-    [Test]
-    [NonParallelizable]
-    public async Task TestCheckSuccessfulMultiInsertWithQuery()
-    {
-        var executor = await SetupBasicTable();
-
-        for (int i = 0; i < 50; i++)
-        {
-            InsertTicket insertTicket = new(
-                database: "factory",
-                name: "robots",
-                values: new Dictionary<string, ColumnValue>()
-                {
-                    { "id", new ColumnValue(ColumnType.Id, i.ToString()) },
-                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, "false") },
-                }
-            );
-
-            await executor.Insert(insertTicket);
-        }
-
-        QueryTicket queryTicket = new(
-            database: "factory",
-            name: "robots"
-        );
-
-        List<Dictionary<string, ColumnValue>> result = await executor.Query(queryTicket);
-
-        for (int i = 0; i < 50; i++)
-        {
-            Dictionary<string, ColumnValue> row = result[i];
-
-            Assert.AreEqual(row["id"].Type, ColumnType.Id);
-            Assert.AreEqual(row["id"].Value, i.ToString());
-
-            Assert.AreEqual(row["name"].Type, ColumnType.String);
-            Assert.AreEqual(row["name"].Value, "some name " + i);
-
-            Assert.AreEqual(row["year"].Type, ColumnType.Integer);
-            Assert.AreEqual(row["year"].Value, (i * 1000).ToString());
-        }
-    }*/
 }

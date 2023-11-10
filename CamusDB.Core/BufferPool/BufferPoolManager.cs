@@ -14,6 +14,7 @@ using Config = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
 using System.Threading.Channels;
 using System.Collections.Concurrent;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 namespace CamusDB.Core.BufferPool;
 
@@ -440,7 +441,7 @@ public sealed class BufferPoolHandler : IDisposable
         return freeOffset;
     }
 
-    public async Task WriteDataToPage(int offset, uint sequence, byte[] data, int startOffset = 0)
+    public async Task WriteDataToPage(int offset, uint sequence, byte[] data, int startOffset = 0, List<PageToWrite>? pagesToWrite = null)
     {
         if (offset < 0)
             throw new CamusDBException(
@@ -513,6 +514,94 @@ public sealed class BufferPoolHandler : IDisposable
 
         if (nextPage > 0)
             await WriteDataToPage(nextPage, sequence, data, startOffset + length);
+    }
+
+    public async Task WriteDataToPages(List<InsertModifiedPage> modifiedPages)
+    {
+        List<PageToWrite> pagesToWrite = new(modifiedPages.Count);
+
+        foreach (InsertModifiedPage modifiedPage in modifiedPages)        
+            await WriteDataToPageBatch(pagesToWrite, modifiedPage.Offset, modifiedPage.Sequence, modifiedPage.Buffer);
+
+        Console.WriteLine("Wrote {0} pages in the batch", pagesToWrite.Count);
+
+        storage.WriteBatch(pagesToWrite);
+    }
+
+    public async Task WriteDataToPageBatch(List<PageToWrite> pagesToWrite, int offset, uint sequence, byte[] data, int startOffset = 0)
+    {
+        if (offset < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidPageOffset,
+                "Invalid page offset"
+            );
+
+        if (offset == Config.TableSpaceHeaderPage)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Cannot write to tablespace header page"
+            );
+
+        if (startOffset < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidPageOffset,
+                "Start offset can't be negative"
+            );
+
+        BufferPage page = GetPage(offset);
+
+        using IDisposable writeLock = await page.WriterLockAsync();
+
+        int nextPage = 0, length;
+
+        // Calculate remaining data length less the page's header
+        if (((data.Length - startOffset) + BConfig.DataOffset) < Config.PageSize)
+            length = data.Length - startOffset;
+        else
+            length = Config.PageSize - BConfig.DataOffset;
+
+        int remaining = (data.Length - startOffset) - length;
+
+        if (remaining > 0)
+            nextPage = await GetNextFreeOffset();
+
+        // Create a buffer to calculate the checksum
+        byte[] pageData = new byte[length];
+        Buffer.BlockCopy(data, startOffset, pageData, 0, length);
+
+        uint checksum = XXHash.Compute(pageData, 0, length);
+
+        // Create a new page buffer to replace the existing one
+        byte[] pageBuffer = new byte[Config.PageSize];
+
+        int pointer = WritePageHeader(pageBuffer, checksum, sequence, nextPage, length);
+
+        if (nextPage > 0 && nextPage == offset)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Cannot write recursively to the same page"
+            );
+
+        Buffer.BlockCopy(data, startOffset, pageBuffer, pointer, length);
+        //storage.Write(Config.PageSize * offset, pageBuffer);
+        pagesToWrite.Add(new PageToWrite(Config.PageSize * offset, pageBuffer));
+
+        // Replace buffer, this helps to get readers consistent copies
+        page.Dirty = true;
+        page.Buffer = new Lazy<byte[]>(pageBuffer);
+
+        /*Console.WriteLine(
+            "Wrote {0} bytes to page {1}/{2} from buffer staring at {3}, remaining {4}, next page {5}",
+            length,
+            offset,
+            Config.PageSize * offset,
+            startOffset,
+            remaining,
+            nextPage
+        );*/
+
+        if (nextPage > 0)
+            await WriteDataToPageBatch(pagesToWrite, nextPage, sequence, data, startOffset + length);
     }
 
     public async Task CleanPage(int offset)

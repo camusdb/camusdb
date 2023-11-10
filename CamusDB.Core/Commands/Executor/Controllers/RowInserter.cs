@@ -28,6 +28,12 @@ internal sealed class RowInserter
 
     private readonly InsertUniqueKeySaver insertUniqueKeySaver = new();
 
+    /// <summary>
+    /// Validates that all columns and values in the insert statement are valid
+    /// </summary>
+    /// <param name="table"></param>
+    /// <param name="ticket"></param>
+    /// <exception cref="CamusDBException"></exception>
     private static void Validate(TableDescriptor table, InsertTicket ticket) // @todo optimize this
     {
         List<TableColumnSchema> columns = table.Schema!.Columns!;
@@ -54,6 +60,13 @@ internal sealed class RowInserter
         }
     }
 
+    /// <summary>
+    /// Schedules a new insert operation
+    /// </summary>
+    /// <param name="database"></param>
+    /// <param name="table"></param>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
     public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
         Validate(table, ticket);
@@ -70,11 +83,22 @@ internal sealed class RowInserter
         await InsertInternal(machine, state);
     }
 
+    /// <summary>
+    /// Schedules a new insert operation by passing the flux state directly
+    /// </summary>
+    /// <param name="machine"></param>
+    /// <param name="state"></param>
+    /// <returns></returns>
     public async Task InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
     {
         await InsertInternal(machine, state);
     }
 
+    /// <summary>
+    /// Step #1. Creates a new insert plan for the table defining which unique indexes will be updated
+    /// </summary>
+    /// <param name="table"></param>
+    /// <returns></returns>
     private static InsertFluxIndexState GetIndexInsertPlan(TableDescriptor table)
     {
         InsertFluxIndexState indexState = new();
@@ -90,18 +114,22 @@ internal sealed class RowInserter
         return indexState;
     }
 
-    /**
-     * Second step is check for unique key violations
-     */
+    /// <summary>
+    /// Second step is check for unique key violations
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private async Task<FluxAction> CheckUniqueKeysStep(InsertFluxState state)
     {
         await insertUniqueKeySaver.CheckUniqueKeys(state.Table, state.Ticket);
         return FluxAction.Continue;
     }
 
-    /**
-     * If there are no unique key violations we can allocate a tuple to insert the row
-     */
+    /// <summary>
+    /// If there are no unique key violations we can allocate a tuple to insert the row
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private async Task<FluxAction> AllocateInsertTuple(InsertFluxState state)
     {
         BufferPoolHandler tablespace = state.Database.TableSpace;
@@ -150,7 +178,7 @@ internal sealed class RowInserter
 
     /// <summary>
     /// Every table has a B+Tree index where the data can be easily located by rowid
-    /// We take the page created in the previous step and insert it in the tree
+    /// We take the page created in the previous step and insert it into the tree
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
@@ -175,9 +203,11 @@ internal sealed class RowInserter
         return FluxAction.Continue;
     }
 
-    /**
-     * In the last step multi indexes are updated
-     */
+    /// <summary>
+    /// In the last step multi indexes are updated
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private async Task<FluxAction> UpdateMultiIndexes(InsertFluxState state)
     {
         SaveMultiKeysIndexTicket saveMultiKeysIndex = new(
@@ -194,6 +224,11 @@ internal sealed class RowInserter
         return FluxAction.Continue;
     }    
 
+    /// <summary>
+    /// All locks are released once the operation is successful
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private Task<FluxAction> ReleaseLocks(InsertFluxState state)
     {
         foreach (IDisposable disposable in state.Locks)
@@ -202,6 +237,12 @@ internal sealed class RowInserter
         return Task.FromResult(FluxAction.Continue);
     }
 
+    /// <summary>
+    /// Creates a new flux machine and runs all steps in order
+    /// </summary>
+    /// <param name="machine"></param>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private async Task InsertInternal(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
     {
         Stopwatch timer = Stopwatch.StartNew();
@@ -219,8 +260,7 @@ internal sealed class RowInserter
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());
 
-        foreach (var modifiedPage in state.ModifiedPages)
-            await state.Database.TableSpace.WriteDataToPage(modifiedPage.Offset, modifiedPage.Sequence, modifiedPage.Buffer);
+        await state.Database.TableSpace.WriteDataToPages(state.ModifiedPages);
 
         TimeSpan timeTaken = timer.Elapsed;
 

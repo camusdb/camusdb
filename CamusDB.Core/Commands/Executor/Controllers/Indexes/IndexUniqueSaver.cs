@@ -39,7 +39,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     public async Task Remove(RemoveUniqueIndexTicket ticket)
     {
-        using IDisposable writerLock = await ticket.Index.ReaderWriterLock.WriterLockAsync();
+        ticket.Locks.Add(await ticket.Index.ReaderWriterLock.WriterLockAsync());
 
         await RemoveInternal(ticket);
     }

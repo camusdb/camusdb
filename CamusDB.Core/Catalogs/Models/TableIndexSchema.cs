@@ -17,7 +17,7 @@ public sealed class TableIndexSchema
 
     public IndexType Type { get; }
 
-    public BTree<ColumnValue, BTreeTuple?>? UniqueRows { get; }
+    public BTree<ColumnValue, BTreeTuple?>? UniqueRows { get; } // Represents the table index to locate rows
 
     public BTreeMulti<ColumnValue>? MultiRows { get; }
 

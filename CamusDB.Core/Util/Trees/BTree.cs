@@ -6,8 +6,8 @@
  * file that was distributed with this source code.
  */
 
-using System.Runtime.CompilerServices;
 using Nito.AsyncEx;
+using System.Runtime.CompilerServices;
 
 namespace CamusDB.Core.Util.Trees;
 

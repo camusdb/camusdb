@@ -8,15 +8,15 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public sealed class DeleteByIdTicket
+public readonly struct DeleteByIdTicket
 {
     public string DatabaseName { get; }
 
     public string TableName { get; }
 
-    public int Id { get; }
+    public string Id { get; }
 
-    public DeleteByIdTicket(string database, string name, int id)
+    public DeleteByIdTicket(string database, string name, string id)
     {
         DatabaseName = database;
         TableName = name;

@@ -6,8 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Collections;
-using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using Nito.AsyncEx;
 
@@ -287,10 +285,10 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
                 innerDeltas = await child.Value!.Put(val.SlotOne, val.SlotTwo);
 
-                if (!deltas.TryGetValue(node.Id, out multiDelta))
-                    deltas.Add(node.Id, new BTreeMultiDelta<TKey>(node, innerDeltas));
+                if (deltas.TryGetValue(node.Id, out multiDelta))
+                    multiDelta.InnerDeltas = innerDeltas;
                 else
-                    deltas[node.Id].InnerDeltas = innerDeltas;
+                    deltas.Add(node.Id, new BTreeMultiDelta<TKey>(node, innerDeltas));
 
                 return null;
             }
@@ -330,8 +328,10 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
         if (newEntry is null)
         {
-            newEntry = new(key, null);
-            newEntry.Value = new BTree<int, int?>(-1, SubTreeReader);
+            newEntry = new(key, null)
+            {
+                Value = new BTree<int, int?>(-1, SubTreeReader)
+            };
             size++;
         }
 

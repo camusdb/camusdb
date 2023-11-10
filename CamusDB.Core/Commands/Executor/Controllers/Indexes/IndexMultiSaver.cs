@@ -48,7 +48,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
     private static async Task RemoveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
     {
-        index.Remove(key);
+        (bool found, HashSet<BTreeMultiNode<ColumnValue>>? deltas) = index.Remove(key);
 
         await PersistRemove(tablespace, index);
     }

@@ -16,6 +16,9 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 namespace CamusDB.Core.CommandsExecutor;
 
+/// <summary>
+/// Facade for executing commands on the database and tables
+/// </summary>
 public sealed class CommandExecutor : IAsyncDisposable
 {
     private readonly DatabaseOpener databaseOpener;
@@ -139,6 +142,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         return queryExecutor.Query(database, table, ticket);
     }
 
+    /// <summary>
+    /// Queries a table by the row's id
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
     public async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> QueryById(QueryByIdTicket ticket)
     {
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
