@@ -1,7 +1,6 @@
 ﻿
 using NUnit.Framework;
 using CamusDB.Core;
-using CamusDB.Tests.Utils;
 using CamusDB.Core.Catalogs;
 using System.Threading.Tasks;
 using CamusDB.Core.Catalogs.Models;

@@ -10,7 +10,7 @@ using CamusDB.Core.CommandsExecutor;
 
 namespace CamusDB.Core;
 
-public class CamusStartup
+public sealed class CamusStartup
 {
     private CommandExecutor executor;
 

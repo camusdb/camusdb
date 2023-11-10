@@ -13,19 +13,13 @@ namespace CamusDB.Core;
 
 public static class CamusDBConfig
 {
-    public readonly static string DataDirectory = Path.GetFullPath("Data");    
+    public readonly static string DataDirectory = Path.GetFullPath("Data");
 
     #region bufferpool
 
     public const int PageLayoutVersion = 1;
 
-    public const int PageSize = 4096;    
-
-    public const int InitialPagesRead = 1024;
-
-    public readonly static ObjectIdValue TableSpaceHeaderPage = new(1, 1, 1);
-
-    public const int FlushToDiskInterval = 1000;
+    public const int PageSize = 4096;
 
     #endregion
 
