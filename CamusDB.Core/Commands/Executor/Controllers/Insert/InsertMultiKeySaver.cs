@@ -44,7 +44,8 @@ internal sealed class InsertMultiKeySaver : InsertKeyBase
                 multiIndex,
                 multiKeyValue,
                 saveMultiKeysIndex.RowTuple,
-                locks: saveMultiKeysIndex.Locks
+                locks: saveMultiKeysIndex.Locks,
+                modifiedPages: saveMultiKeysIndex.ModifiedPages
             );
 
             await indexSaver.Save(multiKeyTicket);

@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.BufferPool;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -19,11 +20,13 @@ public readonly struct SaveUniqueOffsetIndexTicket
 
 	public int Key { get; }
 
-	public int Value { get; }	
-
-	public HashSet<BTreeNode<int, int?>>? Deltas { get; }
+	public int Value { get; }
 
     public List<IDisposable> Locks { get; } = new();
+
+    public List<InsertModifiedPage> ModifiedPages { get; }
+
+    public HashSet<BTreeNode<int, int?>>? Deltas { get; }    
 
     public SaveUniqueOffsetIndexTicket(
 		BufferPoolHandler tablespace,
@@ -31,14 +34,15 @@ public readonly struct SaveUniqueOffsetIndexTicket
 		int key,
 		int value,
         List<IDisposable> locks,
-		HashSet<BTreeNode<int, int?>>? deltas = null
-	)
+        List<InsertModifiedPage> modifiedPages,
+        HashSet<BTreeNode<int, int?>>? deltas = null)
 	{
 		Tablespace = tablespace;
 		Index = index;
 		Key = key;
 		Value = value;
 		Locks = locks;
+		ModifiedPages = modifiedPages;
 		Deltas = deltas;
 	}
 }

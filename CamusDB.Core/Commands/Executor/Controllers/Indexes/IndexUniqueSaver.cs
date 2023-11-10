@@ -12,6 +12,7 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -47,7 +48,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
     {
         HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas = await ticket.Index.Put(ticket.Key, ticket.Value);
 
-        await Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, deltas);
+        await Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
@@ -55,7 +56,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         (bool found, HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas) = await ticket.Index.Remove(ticket.Key);
 
         if (found)
-            await Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, deltas);
+            await Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
     private static async Task Persist(
@@ -63,6 +64,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         uint sequence,
         uint subSequence,
         BTree<ColumnValue, BTreeTuple?> index,
+        List<InsertModifiedPage> modifiedPages,
         HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas
     )
     {
@@ -90,7 +92,8 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);
 
         // Write to buffer page
-        await tablespace.WriteDataToPage(index.PageOffset, sequence, treeBuffer);
+        //await tablespace.WriteDataToPage(index.PageOffset, sequence, treeBuffer);
+        modifiedPages.Add(new InsertModifiedPage(index.PageOffset, sequence, treeBuffer));
 
         //@todo update nodes concurrently
 
@@ -125,7 +128,8 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 }
             }
 
-            await tablespace.WriteDataToPage(node.PageOffset, sequence, nodeBuffer);
+            //await tablespace.WriteDataToPage(node.PageOffset, sequence, nodeBuffer);
+            modifiedPages.Add(new InsertModifiedPage(node.PageOffset, sequence, nodeBuffer));
 
             //Console.WriteLine("Node {0}/{1} at {2} Length={3}", node.Id, node.KeyCount, node.PageOffset, nodeBuffer.Length);
         }

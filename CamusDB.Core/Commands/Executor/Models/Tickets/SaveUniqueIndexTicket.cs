@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.BufferPool;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -25,13 +26,16 @@ public readonly struct SaveUniqueIndexTicket
 
     public BTreeTuple Value { get; }
 
+    public List<InsertModifiedPage> ModifiedPages { get; }
+
     public SaveUniqueIndexTicket(
         BufferPoolHandler tablespace,
         uint sequence,
         uint subSequence,
         BTree<ColumnValue, BTreeTuple?> index,
         ColumnValue key,
-        BTreeTuple value
+        BTreeTuple value,
+        List<InsertModifiedPage> modifiedPages
     )
     {
         Tablespace = tablespace;
@@ -40,5 +44,6 @@ public readonly struct SaveUniqueIndexTicket
         Index = index;
         Key = key;
         Value = value;
+        ModifiedPages = modifiedPages;
     }
 }

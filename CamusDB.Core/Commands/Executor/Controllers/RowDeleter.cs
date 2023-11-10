@@ -10,6 +10,7 @@ using System.Diagnostics;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.Trees;
 
@@ -29,7 +30,7 @@ internal sealed class RowDeleter
         return null;
     }
 
-    private async Task DeleteUniqueIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
+    private async Task DeleteUniqueIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues, List<InsertModifiedPage> modifiedPages)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
@@ -55,7 +56,8 @@ internal sealed class RowDeleter
                 sequence: 0,
                 subSequence: 0,
                 index: uniqueIndex,
-                key: columnKey
+                key: columnKey,
+                modifiedPages: modifiedPages
             );
 
             await indexSaver.Remove(ticket);
@@ -89,8 +91,7 @@ internal sealed class RowDeleter
 
     public async Task DeleteById(DatabaseDescriptor database, TableDescriptor table, DeleteByIdTicket ticket)
     {
-        Stopwatch timer = new();
-        timer.Start();
+        Stopwatch timer = Stopwatch.StartNew();
 
         BufferPoolHandler tablespace = database.TableSpace!;
 
@@ -132,8 +133,9 @@ internal sealed class RowDeleter
         Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, pageOffset.SlotTwo);
 
         // @make all of this atomic
+        List<InsertModifiedPage> modifiedPages = new();
 
-        await DeleteUniqueIndexes(database, table, columnValues);
+        await DeleteUniqueIndexes(database, table, columnValues, modifiedPages);
 
         await DeleteMultiIndexes(database, table, columnValues);
 
@@ -145,6 +147,9 @@ internal sealed class RowDeleter
         }
 
         await tablespace.CleanPage(pageOffset.SlotTwo);
+
+        foreach (var modifiedPage in modifiedPages)
+            await database.TableSpace.WriteDataToPage(modifiedPage.Offset, modifiedPage.Sequence, modifiedPage.Buffer);
 
         timer.Stop();
 

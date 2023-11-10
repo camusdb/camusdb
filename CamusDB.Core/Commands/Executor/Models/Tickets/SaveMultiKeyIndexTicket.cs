@@ -1,5 +1,6 @@
 ﻿
 using CamusDB.Core.BufferPool;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -16,12 +17,15 @@ public readonly struct SaveMultiKeyIndexTicket
 
     public List<IDisposable> Locks { get; }
 
+    public List<InsertModifiedPage> ModifiedPages { get; }
+
     public SaveMultiKeyIndexTicket(
         BufferPoolHandler tablespace,
         BTreeMulti<ColumnValue> multiIndex,
         ColumnValue multiKeyValue,
         BTreeTuple rowTuple,
-        List<IDisposable> locks
+        List<IDisposable> locks,
+        List<InsertModifiedPage> modifiedPages
     )
     {
         Tablespace = tablespace;
@@ -29,6 +33,7 @@ public readonly struct SaveMultiKeyIndexTicket
         MultiKeyValue = multiKeyValue;
         RowTuple = rowTuple;
         Locks = locks;
+        ModifiedPages = modifiedPages;
     }
 }
 

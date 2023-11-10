@@ -15,7 +15,6 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.Insert;
-using System.Collections.Generic;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -53,6 +52,27 @@ internal sealed class RowInserter
                     "Unknown column '" + columnValue.Key + "' in column list"
                 );
         }
+    }
+
+    public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
+    {
+        Validate(table, ticket);
+
+        InsertFluxState state = new(
+            database: database,
+            table: table,
+            ticket: ticket,
+            indexes: GetIndexInsertPlan(table)
+        );
+
+        FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
+
+        await InsertInternal(machine, state);
+    }
+
+    public async Task InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
+    {
+        await InsertInternal(machine, state);
     }
 
     private static InsertFluxIndexState GetIndexInsertPlan(TableDescriptor table)
@@ -104,7 +124,8 @@ internal sealed class RowInserter
             rowTuple: state.RowTuple,
             ticket: state.Ticket,
             indexes: state.Indexes.UniqueIndexes,
-            locks: state.Locks
+            locks: state.Locks,
+            modifiedPages: state.ModifiedPages
         );
 
         await insertUniqueKeySaver.UpdateUniqueKeys(ticket);
@@ -117,16 +138,14 @@ internal sealed class RowInserter
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task<FluxAction> InsertToPageStep(InsertFluxState state)
+    private Task<FluxAction> InsertToPageStep(InsertFluxState state)
     {
-        BufferPoolHandler tablespace = state.Database.TableSpace;
-
         byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket, state.RowTuple.SlotOne);
 
         // Insert data to the page offset
-        await tablespace.WriteDataToPage(state.RowTuple.SlotTwo, state.Sequence, rowBuffer);
+        state.ModifiedPages.Add(new InsertModifiedPage(state.RowTuple.SlotTwo, state.Sequence, rowBuffer));
 
-        return FluxAction.Continue;
+        return Task.FromResult(FluxAction.Continue);
     }
 
     /// <summary>
@@ -144,7 +163,8 @@ internal sealed class RowInserter
             index: state.Table.Rows,
             key: state.RowTuple.SlotOne,
             value: state.RowTuple.SlotTwo,
-            locks: state.Locks
+            locks: state.Locks,
+            modifiedPages: state.ModifiedPages
         );
 
         //Console.WriteLine("{0}", state.Table.Rows.loaded);
@@ -165,34 +185,14 @@ internal sealed class RowInserter
             table: state.Table,
             ticket: state.Ticket,
             rowTuple: state.RowTuple,
-            locks: state.Locks
+            locks: state.Locks,
+            modifiedPages: state.ModifiedPages
         );
 
         await insertMultiKeySaver.UpdateMultiKeys(saveMultiKeysIndex);
 
         return FluxAction.Continue;
-    }
-
-    public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
-    {
-        Validate(table, ticket);
-
-        InsertFluxState state = new(
-            database: database,
-            table: table,
-            ticket: ticket,
-            indexes: GetIndexInsertPlan(table)
-        );
-
-        FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
-
-        await InsertInternal(machine, state);
-    }
-
-    public async Task InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
-    {
-        await InsertInternal(machine, state);
-    }
+    }    
 
     private Task<FluxAction> ReleaseLocks(InsertFluxState state)
     {
@@ -217,7 +217,10 @@ internal sealed class RowInserter
         machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep());        
+            await machine.RunStep(machine.NextStep());
+
+        foreach (var modifiedPage in state.ModifiedPages)
+            await state.Database.TableSpace.WriteDataToPage(modifiedPage.Offset, modifiedPage.Sequence, modifiedPage.Buffer);
 
         TimeSpan timeTaken = timer.Elapsed;
 

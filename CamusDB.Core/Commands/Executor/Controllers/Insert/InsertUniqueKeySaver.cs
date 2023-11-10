@@ -91,7 +91,8 @@ internal sealed class InsertUniqueKeySaver : InsertKeyBase
                 subSequence: 0,
                 index: uniqueIndex,
                 key: uniqueKeyValue,
-                value: ticket.RowTuple
+                value: ticket.RowTuple,
+                modifiedPages: ticket.ModifiedPages
             );
 
             await indexSaver.NoLockingSave(saveUniqueIndexTicket);

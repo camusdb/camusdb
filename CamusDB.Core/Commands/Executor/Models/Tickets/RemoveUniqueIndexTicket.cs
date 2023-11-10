@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.BufferPool;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -23,12 +24,15 @@ public sealed class RemoveUniqueIndexTicket
 
     public ColumnValue Key { get; }
 
+    public List<InsertModifiedPage> ModifiedPages { get; }
+
     public RemoveUniqueIndexTicket(
         BufferPoolHandler tablespace,        
         uint sequence,
         uint subSequence,
         BTree<ColumnValue, BTreeTuple?> index,
-        ColumnValue key
+        ColumnValue key,
+        List<InsertModifiedPage> modifiedPages
     )
     {
         Tablespace = tablespace;        
@@ -36,6 +40,7 @@ public sealed class RemoveUniqueIndexTicket
         SubSequence = subSequence;
         Index = index;
         Key = key;
+        ModifiedPages = modifiedPages;
     }
 }
 

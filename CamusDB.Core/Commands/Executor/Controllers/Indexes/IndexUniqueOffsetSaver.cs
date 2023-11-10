@@ -11,6 +11,7 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -27,7 +28,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     {
         ticket.Locks.Add(await ticket.Index.ReaderWriterLock.WriterLockAsync());
 
-        await SaveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.Value, ticket.Deltas);
+        await SaveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.Value, ticket.ModifiedPages, ticket.Deltas);
     }
 
     private static async Task SaveInternal(
@@ -35,6 +36,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         BTree<int, int?> index,
         int key,
         int value,
+        List<InsertModifiedPage> modifiedPages,
         HashSet<BTreeNode<int, int?>>? deltas
     )
     {
@@ -58,7 +60,8 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);
 
-        await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
+        //await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
+        modifiedPages.Add(new InsertModifiedPage(index.PageOffset, 0, treeBuffer));
 
         //@todo update nodes concurrently        
 
@@ -93,7 +96,8 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
                 }
             }
 
-            await tablespace.WriteDataToPage(node.PageOffset, 0, nodeBuffer);
+            //await tablespace.WriteDataToPage(node.PageOffset, 0, nodeBuffer);
+            modifiedPages.Add(new InsertModifiedPage(node.PageOffset, 0, nodeBuffer));
 
             //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);
         }

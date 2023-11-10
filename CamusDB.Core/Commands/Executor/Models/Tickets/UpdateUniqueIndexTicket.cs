@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -27,6 +28,8 @@ public readonly struct UpdateUniqueIndexTicket
 
     public List<IDisposable> Locks { get; }
 
+    public List<InsertModifiedPage> ModifiedPages { get; }
+
     public UpdateUniqueIndexTicket(
 		DatabaseDescriptor database,
 		TableDescriptor table,
@@ -34,8 +37,9 @@ public readonly struct UpdateUniqueIndexTicket
 		BTreeTuple rowTuple,
 		InsertTicket ticket,
 		List<TableIndexSchema> indexes,
-		List<IDisposable> locks
-	)
+		List<IDisposable> locks,
+        List<InsertModifiedPage> modifiedPages
+    )
 	{
 		Database = database;
 		Table = table;
@@ -44,5 +48,6 @@ public readonly struct UpdateUniqueIndexTicket
 		InsertTicket = ticket;
 		Indexes = indexes;
 		Locks = locks;
+		ModifiedPages = modifiedPages;
 	}
 }

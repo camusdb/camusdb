@@ -12,6 +12,7 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -28,7 +29,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
     {
         ticket.Locks.Add(await ticket.Index.ReaderWriterLock.WriterLockAsync());
 
-        await SaveInternal(ticket.Tablespace, ticket.Index, ticket.MultiKeyValue, ticket.RowTuple, ticket.Locks);        
+        await SaveInternal(ticket.Tablespace, ticket.Index, ticket.MultiKeyValue, ticket.RowTuple, ticket.Locks, ticket.ModifiedPages);
     }
     
     public async Task Remove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
@@ -38,11 +39,11 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         await RemoveInternal(tablespace, index, key);        
     }
 
-    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value, List<IDisposable> locks)
+    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value, List<IDisposable> locks, List<InsertModifiedPage> modifiedPages)
     {
         Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas = await index.Put(key, value);
 
-        await PersistSave(tablespace, index, value, locks, deltas);
+        await PersistSave(tablespace, index, value, locks, modifiedPages, deltas);
     }
 
     private static async Task RemoveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
@@ -57,6 +58,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         BTreeMulti<ColumnValue> index,
         BTreeTuple value,
         List<IDisposable> locks,
+        List<InsertModifiedPage> modifiedPages,
         Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas
     )
     {
@@ -74,7 +76,8 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         Serializator.WriteInt32(treeBuffer, index.denseSize, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.root!.PageOffset, ref pointer);
 
-        await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
+        //await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
+        modifiedPages.Add(new InsertModifiedPage(index.PageOffset, 0, treeBuffer));
 
         //Console.WriteLine("Will save index at {0}", index.PageOffset);
 
@@ -135,6 +138,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                         key: value.SlotOne,
                         value.SlotTwo,
                         locks: locks,
+                        modifiedPages: modifiedPages,
                         deltas: delta.Value.InnerDeltas
                     );
 
@@ -149,7 +153,8 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                 Serializator.WriteInt32(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : -1, ref pointer);
             }
 
-            await tablespace.WriteDataToPage(node.PageOffset, 0, nodeBuffer);
+            //await tablespace.WriteDataToPage(node.PageOffset, 0, nodeBuffer);
+            modifiedPages.Add(new InsertModifiedPage(node.PageOffset, 0, nodeBuffer));
 
             //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);            
         }
