@@ -46,5 +46,6 @@
   <ItemGroup>
     <PackageReference Include="RocksDb" Version="8.1.1.38647" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
+    <PackageReference Include="System.Linq.Async" Version="6.0.1" />
   </ItemGroup>
 </Project>

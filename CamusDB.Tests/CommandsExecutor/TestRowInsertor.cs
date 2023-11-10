@@ -19,6 +19,7 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using System.Linq;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -319,7 +320,7 @@ internal sealed class TestRowInsertor
             id: "507f1f77bcf86cd799439011"
         );
 
-        List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
+        List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryTicket)).ToListAsync();
 
         Dictionary<string, ColumnValue> row = result[0];
 
@@ -375,7 +376,7 @@ internal sealed class TestRowInsertor
             id: "507f191e810c19729de860ea"
         );
 
-        List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
+        List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryTicket)).ToListAsync();
 
         Dictionary<string, ColumnValue> row = result[0];
 
@@ -397,7 +398,7 @@ internal sealed class TestRowInsertor
             id: "507f1f77bcf86cd799439011"
         );
 
-        result = await executor.QueryById(queryTicket2);
+        result = await (await executor.QueryById(queryTicket2)).ToListAsync();
 
         row = result[0];
 
@@ -453,7 +454,7 @@ internal sealed class TestRowInsertor
                 id: objectId
             );
 
-            List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
+            List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryTicket)).ToListAsync();
 
             Dictionary<string, ColumnValue> row = result[0];
 
@@ -498,7 +499,7 @@ internal sealed class TestRowInsertor
             name: "robots"
         );
 
-        List<Dictionary<string, ColumnValue>> result = await executor.Query(queryTicket);
+        List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
 
         for (int i = 0; i < 50; i++)
         {

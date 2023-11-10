@@ -11,7 +11,6 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using System;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -19,21 +18,19 @@ internal sealed class QueryExecutor
 {
     private readonly RowDeserializer rowDeserializer = new();
 
-    public async Task<List<Dictionary<string, ColumnValue>>> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    public IAsyncEnumerable<Dictionary<string, ColumnValue>> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
         if (string.IsNullOrEmpty(ticket.IndexName))
-            return await QueryUsingTableIndex(database, table, ticket);
+            return QueryUsingTableIndex(database, table, ticket);
 
-        return await QueryUsingIndex(database, table, ticket);
+        return QueryUsingIndex(database, table, ticket);
     }
 
-    private async Task<List<Dictionary<string, ColumnValue>>> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
-    {        
+    private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    {
         BufferPoolHandler tablespace = database.TableSpace!;
 
         using IDisposable readerLock = await table.Rows.ReaderWriterLock.ReaderLockAsync();
-
-        List<Dictionary<string, ColumnValue>> rows = new();
 
         await foreach (BTreeEntry<int, int?> entry in table.Rows.EntriesTraverse())
         {
@@ -50,19 +47,15 @@ internal sealed class QueryExecutor
                 continue;
             }
 
-            rows.Add(rowDeserializer.Deserialize(table.Schema!, data));
+            yield return rowDeserializer.Deserialize(table.Schema!, data);
         }
-
-        return rows;
     }
 
-    private async Task<List<Dictionary<string, ColumnValue>>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue,BTreeTuple?> index)
+    private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue, BTreeTuple?> index)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
         using IDisposable readerLock = await index.ReaderWriterLock.ReaderLockAsync();
-
-        List<Dictionary<string, ColumnValue>> rows = new();
 
         await foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse())
         {
@@ -79,19 +72,15 @@ internal sealed class QueryExecutor
                 continue;
             }
 
-            rows.Add(rowDeserializer.Deserialize(table.Schema!, data));
+            yield return rowDeserializer.Deserialize(table.Schema!, data);
         }
-
-        return rows;
     }
 
-    private async Task<List<Dictionary<string, ColumnValue>>> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
+    private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
     {
-        BufferPoolHandler tablespace = database.TableSpace;        
+        BufferPoolHandler tablespace = database.TableSpace;
 
         using IDisposable readerLock = await index.ReaderWriterLock.ReaderLockAsync();
-
-        List<Dictionary<string, ColumnValue>> rows = new();
 
         foreach (BTreeMultiEntry<ColumnValue> entry in index.EntriesTraverse())
         {
@@ -114,14 +103,12 @@ internal sealed class QueryExecutor
                     continue;
                 }
 
-                rows.Add(rowDeserializer.Deserialize(table.Schema!, data));
+                yield return rowDeserializer.Deserialize(table.Schema!, data);
             }
         }
-
-        return rows;
     }
 
-    private async Task<List<Dictionary<string, ColumnValue>>> QueryUsingIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    private IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
         if (!table.Indexes.TryGetValue(ticket.IndexName!, out TableIndexSchema? index))
         {
@@ -132,16 +119,14 @@ internal sealed class QueryExecutor
         }
 
         if (index.Type == IndexType.Unique)
-            return await QueryUsingUniqueIndex(database, table, index.UniqueRows!);
+            return QueryUsingUniqueIndex(database, table, index.UniqueRows!);
 
-        return await QueryUsingMultiIndex(database, table, index.MultiRows!);
+        return QueryUsingMultiIndex(database, table, index.MultiRows!);
     }
 
-    public async Task<List<Dictionary<string, ColumnValue>>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
+    public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
     {
         BufferPoolHandler tablespace = database.TableSpace!;
-
-        List<Dictionary<string, ColumnValue>> rows = new();
 
         if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
         {
@@ -168,20 +153,18 @@ internal sealed class QueryExecutor
         if (pageOffset is null)
         {
             Console.WriteLine("Index Pk={0} has an empty page data", ticket.Id);
-            return rows;
+            yield break;
         }
 
         byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo);
         if (data.Length == 0)
         {
             Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
-            return rows;
+            yield break;
         }
 
         Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
 
-        rows.Add(rowDeserializer.Deserialize(table.Schema!, data));
-
-        return rows;
+        yield return rowDeserializer.Deserialize(table.Schema!, data);
     }
 }

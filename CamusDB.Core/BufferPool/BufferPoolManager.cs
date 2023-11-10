@@ -159,7 +159,7 @@ public sealed class BufferPoolHandler : IDisposable
 
     private async Task<(int, List<BufferPage>, List<IDisposable>)> GetDataLength(int offset)
     {
-        int length = 0;        
+        int length = 0;
         List<BufferPage> pages = new();
         List<IDisposable> disposables = new();
 
@@ -178,12 +178,12 @@ public sealed class BufferPoolHandler : IDisposable
             length += Serializator.ReadInt32(pageBuffer, ref pointer);
 
             pointer = BConfig.NextPageOffset;
-            offset = Serializator.ReadInt32(pageBuffer, ref pointer);            
+            offset = Serializator.ReadInt32(pageBuffer, ref pointer);
 
-        } while (offset > 0);        
+        } while (offset > 0);
 
         return (length, pages, disposables);
-    }    
+    }
 
     public async Task<byte[]> GetDataFromPage(int offset)
     {
@@ -195,60 +195,60 @@ public sealed class BufferPoolHandler : IDisposable
 
         (int length, List<BufferPage> pages, List<IDisposable> disposables) = await GetDataLength(offset); // @todo calculated length of page can be different to the read page
 
-        if (length == 0)
+        try
+        {
+            if (length == 0)
+                return Array.Empty<byte>();
+
+            byte[] data = new byte[length];
+
+            uint checksum;
+            int bufferOffset = 0;
+
+            foreach (BufferPage memoryPage in pages)
+            {
+                byte[] pageBuffer = memoryPage.Buffer.Value; // get a pointer to the buffer to get a consistent read
+
+                int pointer = BConfig.LengthOffset;
+                int dataLength = Serializator.ReadInt32(pageBuffer, ref pointer);
+
+                if (dataLength > (pageBuffer.Length - BConfig.DataOffset))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidPageLength,
+                        "Page has an invalid data length"
+                    );
+
+                pointer = BConfig.NextPageOffset;
+                offset = Serializator.ReadInt32(pageBuffer, ref pointer);
+
+                pointer = BConfig.ChecksumOffset;
+                checksum = Serializator.ReadUInt32(pageBuffer, ref pointer);
+
+                /*if (checksum > 0) // check checksum only if available
+                {
+                    byte[] pageData = new byte[dataLength]; // @todo avoid this allocation
+                    Buffer.BlockCopy(pageBuffer, BConfig.DataOffset, pageData, 0, dataLength);
+
+                    uint dataChecksum = XXHash.Compute(pageData, 0, dataLength);
+
+                    if (dataChecksum != checksum)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidPageChecksum,
+                            "Page has an invalid data checksum"
+                        );
+                }*/
+
+                Buffer.BlockCopy(pageBuffer, BConfig.DataOffset, data, bufferOffset, dataLength);
+                bufferOffset += dataLength;
+            }
+
+            return data;
+        }
+        finally
         {
             foreach (IDisposable disposable in disposables)
                 disposable.Dispose();
-
-            return Array.Empty<byte>();
         }
-
-        byte[] data = new byte[length];
-
-        uint checksum;
-        int bufferOffset = 0;
-
-        foreach (BufferPage memoryPage in pages)
-        {         
-            byte[] pageBuffer = memoryPage.Buffer.Value; // get a pointer to the buffer to get a consistent read
-
-            int pointer = BConfig.LengthOffset;
-            int dataLength = Serializator.ReadInt32(pageBuffer, ref pointer);
-
-            if (dataLength > (pageBuffer.Length - BConfig.DataOffset))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidPageLength,
-                    "Page has an invalid data length"
-                );
-
-            pointer = BConfig.NextPageOffset;
-            offset = Serializator.ReadInt32(pageBuffer, ref pointer);
-
-            pointer = BConfig.ChecksumOffset;
-            checksum = Serializator.ReadUInt32(pageBuffer, ref pointer);
-
-            /*if (checksum > 0) // check checksum only if available
-            {
-                byte[] pageData = new byte[dataLength]; // @todo avoid this allocation
-                Buffer.BlockCopy(pageBuffer, BConfig.DataOffset, pageData, 0, dataLength);
-
-                uint dataChecksum = XXHash.Compute(pageData, 0, dataLength);
-
-                if (dataChecksum != checksum)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidPageChecksum,
-                        "Page has an invalid data checksum"
-                    );
-            }*/
-
-            Buffer.BlockCopy(pageBuffer, BConfig.DataOffset, data, bufferOffset, dataLength);
-            bufferOffset += dataLength;         
-        }
-
-        foreach (IDisposable disposable in disposables)
-            disposable.Dispose();
-
-        return data;
     }
 
     public async Task<uint> GetSequenceFromPage(int offset)
@@ -499,7 +499,7 @@ public sealed class BufferPoolHandler : IDisposable
 
         // Replace buffer, this helps to get readers consistent copies
         page.Dirty = true;
-        page.Buffer = new Lazy<byte[]>(pageBuffer);        
+        page.Buffer = new Lazy<byte[]>(pageBuffer);
 
         /*Console.WriteLine(
             "Wrote {0} bytes to page {1}/{2} from buffer staring at {3}, remaining {4}, next page {5}",

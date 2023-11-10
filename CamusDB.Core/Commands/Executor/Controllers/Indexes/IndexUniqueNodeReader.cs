@@ -83,9 +83,10 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
             ColumnValue key = UnserializeKey(data, ref pointer);
             BTreeTuple? tuple = UnserializeTuple(data, ref pointer);
 
-            BTreeEntry<ColumnValue, BTreeTuple?> entry = new(key, tuple, null);
-
-            entry.NextPageOffset = Serializator.ReadInt32(data, ref pointer);
+            BTreeEntry<ColumnValue, BTreeTuple?> entry = new(key, tuple, null)
+            {
+                NextPageOffset = Serializator.ReadInt32(data, ref pointer)
+            };
 
             node.children[i] = entry;
         }

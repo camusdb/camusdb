@@ -9,6 +9,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using System.Linq;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -107,7 +108,7 @@ internal sealed class TestRowMultiInsertor
             index: "robots_id"
         );
 
-        List<Dictionary<string, ColumnValue>> result = await executor.Query(queryTicket);
+        List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
 
         for (int i = 0; i < 10; i++)
         {
@@ -154,7 +155,7 @@ internal sealed class TestRowMultiInsertor
             index: "robots_id"
         );
 
-        List<Dictionary<string, ColumnValue>> result = await executor.Query(queryTicket);
+        List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.AreEqual(10, result.Count);
 
         for (int i = 0; i < 10; i++)

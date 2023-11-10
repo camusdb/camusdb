@@ -57,8 +57,8 @@ public sealed class QueryController : CommandsController
     {
         try
         {
-            using var reader = new StreamReader(Request.Body);
-            var body = await reader.ReadToEndAsync();
+            using StreamReader reader = new StreamReader(Request.Body);
+            string body = await reader.ReadToEndAsync();
 
             QueryByIdRequest? request = JsonSerializer.Deserialize<QueryByIdRequest>(body, jsonOptions);
             if (request == null)
@@ -70,7 +70,10 @@ public sealed class QueryController : CommandsController
                 id: request.Id ?? ""
             );
 
-            List<Dictionary<string, ColumnValue>> rows = await executor.QueryById(ticket);
+            List<Dictionary<string, ColumnValue>> rows = new();
+
+            await foreach (Dictionary<string, ColumnValue> row in await executor.QueryById(ticket))
+                rows.Add(row);
 
             return new JsonResult(new QueryResponse("ok", rows));
         }

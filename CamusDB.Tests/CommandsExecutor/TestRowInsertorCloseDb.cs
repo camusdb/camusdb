@@ -16,6 +16,7 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using System.Linq;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -127,7 +128,7 @@ internal sealed class TestRowInsertorCloseDb
             id: "507f191e810c19729de860ea"
         );
 
-        List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
+        List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryTicket)).ToListAsync();
         Assert.AreEqual(1, result.Count);
 
         Dictionary<string, ColumnValue> row = result[0];
@@ -150,7 +151,7 @@ internal sealed class TestRowInsertorCloseDb
             id: "507f1f77bcf86cd799439011"
         );
 
-        result = await executor.QueryById(queryTicket2);
+        result = await (await executor.QueryById(queryTicket2)).ToListAsync();
 
         row = result[0];
 

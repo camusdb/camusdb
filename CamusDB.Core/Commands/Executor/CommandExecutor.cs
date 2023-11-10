@@ -130,22 +130,22 @@ public sealed class CommandExecutor : IAsyncDisposable
         await rowDeleter.DeleteById(database, table, ticket);
     }
 
-    public async Task<List<Dictionary<string, ColumnValue>>> Query(QueryTicket ticket)
+    public async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> Query(QueryTicket ticket)
     {
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
-        return await queryExecutor.Query(database, table, ticket);
+        return queryExecutor.Query(database, table, ticket);
     }
 
-    public async Task<List<Dictionary<string, ColumnValue>>> QueryById(QueryByIdTicket ticket)
+    public async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> QueryById(QueryByIdTicket ticket)
     {
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
-        return await queryExecutor.QueryById(database, table, ticket);
+        return queryExecutor.QueryById(database, table, ticket);
     }
 
     #endregion    
