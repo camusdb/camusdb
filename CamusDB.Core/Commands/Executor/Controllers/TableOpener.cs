@@ -43,14 +43,11 @@ internal sealed class TableOpener
             TableSchema tableSchema = Catalogs.GetTableSchema(database, tableName);
             DatabaseObject systemObject = GetSystemObject(database, tableName);
 
-            //Console.WriteLine(systemObject.StartOffset);
-
-            tableDescriptor = new()
-            {
-                Name = tableName,
-                Schema = tableSchema,
-                Rows = await indexReader.ReadOffsets(tablespace, ObjectId.ToValue(systemObject.StartOffset ?? ""))
-            };
+            tableDescriptor = new(
+                tableName,
+                tableSchema,
+                await indexReader.ReadOffsets(tablespace, ObjectId.ToValue(systemObject.StartOffset ?? ""))
+            );
 
             // @todo read indexes in parallel
 

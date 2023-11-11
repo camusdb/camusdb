@@ -31,8 +31,6 @@ internal sealed class IndexUniqueReader : IndexBaseReader
 
         BTree<ColumnValue, BTreeTuple?> index = new(offset, reader);
 
-        using IDisposable readerLock = await index.ReaderWriterLock.ReaderLockAsync();
-
         byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
             return index;

@@ -28,16 +28,12 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
     public async Task Save(SaveMultiKeyIndexTicket ticket)
     {
-        ticket.Locks.Add(await ticket.Index.ReaderWriterLock.WriterLockAsync());
-
         await SaveInternal(ticket.Tablespace, ticket.Index, ticket.MultiKeyValue, ticket.RowTuple, ticket.Locks, ticket.ModifiedPages);
     }
-    
-    public async Task Remove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
-    {        
-        using IDisposable writerLock = await index.ReaderWriterLock.WriterLockAsync();
 
-        await RemoveInternal(tablespace, index, key);        
+    public async Task Remove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
+    {
+        await RemoveInternal(tablespace, index, key);
     }
 
     private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value, List<IDisposable> locks, List<InsertModifiedPage> modifiedPages)
@@ -51,7 +47,8 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
     {
         (bool found, HashSet<BTreeMultiNode<ColumnValue>>? deltas) = index.Remove(key);
 
-        await PersistRemove(tablespace, index);
+        if (found)
+            await PersistRemove(tablespace, index, deltas);
     }
 
     private async Task PersistSave(
@@ -70,7 +67,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         }
 
         // height(4 byte) + size(4 byte) + denseSize(4 byte) + root(4 byte)
-        byte[] treeBuffer = new byte[SerializatorTypeSizes.TypeInteger32 * 3 + SerializatorTypeSizes.TypeObjectId]; 
+        byte[] treeBuffer = new byte[SerializatorTypeSizes.TypeInteger32 * 3 + SerializatorTypeSizes.TypeObjectId];
 
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
@@ -164,7 +161,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         }
     }
 
-    private static async Task PersistRemove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index)
+    private static async Task PersistRemove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, HashSet<BTreeMultiNode<ColumnValue>> deltas)
     {
         foreach (BTreeMultiNode<ColumnValue> node in index.NodesTraverse())
         {

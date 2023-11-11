@@ -30,8 +30,6 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
 
         BTree<ObjectIdValue, ObjectIdValue> index = new(offset, reader);
 
-        using IDisposable readerLock = await index.ReaderWriterLock.ReaderLockAsync();
-
         byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
             return index;

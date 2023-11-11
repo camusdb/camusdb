@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using Nito.AsyncEx;
 using CamusDB.Core.Util.ObjectIds;
 using System.Runtime.CompilerServices;
 
@@ -38,9 +37,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     public ObjectIdValue PageOffset; // page offset to root node
 
-    public readonly IBTreeNodeReader<TKey, TValue>? Reader; // lazy node reader    
-
-    public AsyncReaderWriterLock ReaderWriterLock { get; } = new();
+    public readonly IBTreeNodeReader<TKey, TValue>? Reader; // lazy node reader
 
     /**
      * Initializes an empty B-tree.

@@ -19,8 +19,10 @@ internal sealed class QueryExecutor
 {
     private readonly RowDeserializer rowDeserializer = new();
 
-    public IAsyncEnumerable<Dictionary<string, ColumnValue>> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    public async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
+        using IDisposable readerLock = await table.ReaderWriterLock.ReaderLockAsync();
+
         if (string.IsNullOrEmpty(ticket.IndexName))
             return QueryUsingTableIndex(database, table, ticket);
 
@@ -29,9 +31,7 @@ internal sealed class QueryExecutor
 
     private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
-        BufferPoolHandler tablespace = database.TableSpace!;
-
-        using IDisposable readerLock = await table.Rows.ReaderWriterLock.ReaderLockAsync();
+        BufferPoolHandler tablespace = database.TableSpace!;        
 
         await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse())
         {
@@ -56,8 +56,6 @@ internal sealed class QueryExecutor
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
-        using IDisposable readerLock = await index.ReaderWriterLock.ReaderLockAsync();
-
         await foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse())
         {
             if (entry.Value is null)
@@ -80,8 +78,6 @@ internal sealed class QueryExecutor
     private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
     {
         BufferPoolHandler tablespace = database.TableSpace;
-
-        using IDisposable readerLock = await index.ReaderWriterLock.ReaderLockAsync();
 
         foreach (BTreeMultiEntry<ColumnValue> entry in index.EntriesTraverse())
         {
@@ -129,6 +125,8 @@ internal sealed class QueryExecutor
     {
         BufferPoolHandler tablespace = database.TableSpace!;
 
+        using IDisposable disposable = await table.ReaderWriterLock.ReaderLockAsync();
+
         if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
         {
             throw new CamusDBException(
@@ -145,9 +143,7 @@ internal sealed class QueryExecutor
             );
         }
 
-        ColumnValue columnId = new(ColumnType.Id, ticket.Id);
-
-        using IDisposable readerLock = await index.UniqueRows.ReaderWriterLock.ReaderLockAsync();
+        ColumnValue columnId = new(ColumnType.Id, ticket.Id);        
 
         BTreeTuple? pageOffset = await index.UniqueRows.Get(columnId);
 

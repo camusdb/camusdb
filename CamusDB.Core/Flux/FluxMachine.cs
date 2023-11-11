@@ -10,6 +10,11 @@ using CamusDB.Core.Flux.Models;
 
 namespace CamusDB.Core.Flux;
 
+/// <summary>
+/// Cheap state machine
+/// </summary>
+/// <typeparam name="TSteps"></typeparam>
+/// <typeparam name="TState"></typeparam>
 public sealed class FluxMachine<TSteps, TState> where TSteps : Enum
 {
     private int currentStep = -1;

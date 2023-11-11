@@ -26,9 +26,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
     }
 
     public async Task Save(SaveUniqueIndexTicket ticket)
-    {
-        using IDisposable writerLock = await ticket.Index.ReaderWriterLock.WriterLockAsync();
-
+    {        
         await SaveInternal(ticket);
     }
 
@@ -38,9 +36,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
     }
 
     public async Task Remove(RemoveUniqueIndexTicket ticket)
-    {
-        ticket.Locks.Add(await ticket.Index.ReaderWriterLock.WriterLockAsync());
-
+    {        
         await RemoveInternal(ticket);
     }
 
@@ -48,7 +44,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
     {
         HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas = await ticket.Index.Put(ticket.Key, ticket.Value);
 
-        await Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, ticket.ModifiedPages, deltas);
+        Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
@@ -56,10 +52,10 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         (bool found, HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas) = await ticket.Index.Remove(ticket.Key);
 
         if (found)
-            await Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, ticket.ModifiedPages, deltas);
+            Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
-    private static async Task Persist(
+    private static void Persist(
         BufferPoolHandler tablespace,
         uint sequence,
         uint subSequence,
@@ -68,8 +64,6 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas
     )
     {
-        await Task.Yield();
-
         if (deltas.Count == 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,

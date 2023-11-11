@@ -14,11 +14,13 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
-using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
+/// <summary>
+/// 
+/// </summary>
 internal sealed class RowDeleter
 {
     private readonly IndexSaver indexSaver = new();
@@ -46,12 +48,29 @@ internal sealed class RowDeleter
         return await DeleteByIdInternal(machine, state);
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="columnValues"></param>
+    /// <param name="name"></param>
+    /// <returns></returns>
     private static ColumnValue? GetColumnValue(Dictionary<string, ColumnValue> columnValues, string name)
     {
         if (columnValues.TryGetValue(name, out ColumnValue? columnValue))
             return columnValue;
 
         return null;
+    }
+
+    /// <summary>
+    /// Adquire locks
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private async Task<FluxAction> AdquireLocks(DeleteByIdFluxState state)
+    {
+        state.Locks.Add(await state.Table.ReaderWriterLock.WriterLockAsync());
+        return FluxAction.Continue;
     }
 
     /// <summary>
@@ -80,8 +99,6 @@ internal sealed class RowDeleter
                 "Table doesn't have a primary key index"
             );
         }
-
-        using IDisposable readerLock = await index.UniqueRows.ReaderWriterLock.ReaderLockAsync();
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
@@ -228,7 +245,7 @@ internal sealed class RowDeleter
     {
         if (state.RowTuple is null)
         {
-            Console.WriteLine("Invalid row to delete", state.Ticket.Id);
+            Console.WriteLine("Invalid row to delete {0}", state.Ticket.Id);
             return FluxAction.Abort;
         }
 
@@ -272,6 +289,7 @@ internal sealed class RowDeleter
 
         Stopwatch timer = Stopwatch.StartNew();
 
+        machine.When(DeleteByIdFluxSteps.AdquireLocks, AdquireLocks);
         machine.When(DeleteByIdFluxSteps.LocateTupleToDelete, LocateTupleToDelete);
         machine.When(DeleteByIdFluxSteps.DeleteUniqueIndexes, DeleteUniqueIndexes);
         machine.When(DeleteByIdFluxSteps.DeleteMultiIndexes, DeleteMultiIndexes);

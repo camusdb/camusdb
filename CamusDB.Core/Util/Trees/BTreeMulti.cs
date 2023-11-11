@@ -34,9 +34,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
     public ObjectIdValue PageOffset; // page offset to root node
 
-    public readonly IBTreeNodeReader<ObjectIdValue, ObjectIdValue>? SubTreeReader; // lazy node sub-tree reader    
-
-    public AsyncReaderWriterLock ReaderWriterLock { get; } = new();
+    public readonly IBTreeNodeReader<ObjectIdValue, ObjectIdValue>? SubTreeReader; // lazy node sub-tree reader
 
     /// <summary>
     /// Initializes an empty B-tree.

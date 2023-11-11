@@ -186,4 +186,34 @@ public class TestRowDeletor
             Assert.AreEqual(1, await executor.DeleteById(ticket));
         }        
     }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestMultiDeleteParallel()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        List<Task> tasks = new();
+
+        foreach (string objectId in objectsId)
+        {
+            DeleteByIdTicket ticket = new(
+                database: dbname,
+                name: "robots",
+                id: objectId
+            );
+
+            tasks.Add(executor.DeleteById(ticket));
+        }
+
+        await Task.WhenAll(tasks);
+
+        QueryTicket queryTicket = new(
+           database: dbname,
+           name: "robots"
+       );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
+    }
 }

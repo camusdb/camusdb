@@ -139,7 +139,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
-        return queryExecutor.Query(database, table, ticket);
+        return await queryExecutor.Query(database, table, ticket);
     }
 
     /// <summary>

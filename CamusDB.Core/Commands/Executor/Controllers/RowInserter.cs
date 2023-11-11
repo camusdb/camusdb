@@ -126,6 +126,17 @@ internal sealed class RowInserter
     }
 
     /// <summary>
+    /// Adquire locks
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private async Task<FluxAction> AdquireLocks(InsertFluxState state)
+    {
+        state.Locks.Add(await state.Table.ReaderWriterLock.WriterLockAsync());
+        return FluxAction.Continue;
+    }
+
+    /// <summary>
     /// If there are no unique key violations we can allocate a tuple to insert the row
     /// </summary>
     /// <param name="state"></param>
@@ -224,7 +235,7 @@ internal sealed class RowInserter
         await insertMultiKeySaver.UpdateMultiKeys(saveMultiKeysIndex);
 
         return FluxAction.Continue;
-    }    
+    }
 
     /// <summary>
     /// All locks are released once the operation is successful
@@ -250,6 +261,7 @@ internal sealed class RowInserter
         Stopwatch timer = Stopwatch.StartNew();
 
         machine.When(InsertFluxSteps.CheckUniqueKeys, CheckUniqueKeysStep);
+        machine.When(InsertFluxSteps.AdquireLocks, AdquireLocks);
         machine.When(InsertFluxSteps.UpdateUniqueKeys, UpdateUniqueKeysStep);
         machine.When(InsertFluxSteps.AllocateInsertTuple, AllocateInsertTuple);
         machine.When(InsertFluxSteps.InsertToPage, InsertToPageStep);
@@ -273,6 +285,8 @@ internal sealed class RowInserter
             timeTaken.ToString(@"m\:ss\.fff")
         );
     }
+
+
 }
 
 /*foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)

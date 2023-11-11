@@ -16,10 +16,11 @@ public enum InsertFluxSteps
 {
     NotInitialized = 0,
     CheckUniqueKeys = 1,
-    AllocateInsertTuple = 2,
-    UpdateUniqueKeys = 3,
-    InsertToPage = 4,
-    UpdateTableIndex = 5,
-    UpdateMultiIndexes = 6,
-    ReleaseLocks = 7
+    AdquireLocks = 2,
+    AllocateInsertTuple = 3,
+    UpdateUniqueKeys = 4,
+    InsertToPage = 5,
+    UpdateTableIndex = 6,
+    UpdateMultiIndexes = 7,
+    ReleaseLocks = 8
 }

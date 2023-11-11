@@ -15,9 +15,10 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 public enum DeleteByIdFluxSteps
 {
     NotInitialized = 0,
-    LocateTupleToDelete = 1,
-    DeleteUniqueIndexes = 2,
-    DeleteMultiIndexes = 3,
-    DeleteRow = 4,
-    ReleaseLocks = 5
+    AdquireLocks = 1,
+    LocateTupleToDelete = 2,
+    DeleteUniqueIndexes = 3,
+    DeleteMultiIndexes = 4,
+    DeleteRow = 5,
+    ReleaseLocks = 6
 }

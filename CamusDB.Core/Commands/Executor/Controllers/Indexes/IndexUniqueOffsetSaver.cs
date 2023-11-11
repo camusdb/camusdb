@@ -26,16 +26,12 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     }
 
     public async Task Save(SaveUniqueOffsetIndexTicket ticket)
-    {
-        ticket.Locks.Add(await ticket.Index.ReaderWriterLock.WriterLockAsync());
-
+    {        
         await SaveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.Value, ticket.ModifiedPages, ticket.Deltas);
     }
 
     public async Task Remove(RemoveUniqueOffsetIndexTicket ticket)
-    {
-        ticket.Locks.Add(await ticket.Index.ReaderWriterLock.WriterLockAsync());
-
+    {        
         await RemoveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.ModifiedPages, ticket.Deltas);
     }
 
