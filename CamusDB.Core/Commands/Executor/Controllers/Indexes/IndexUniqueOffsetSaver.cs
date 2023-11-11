@@ -32,6 +32,13 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         await SaveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.Value, ticket.ModifiedPages, ticket.Deltas);
     }
 
+    public async Task Remove(RemoveUniqueOffsetIndexTicket ticket)
+    {
+        ticket.Locks.Add(await ticket.Index.ReaderWriterLock.WriterLockAsync());
+
+        await RemoveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.ModifiedPages, ticket.Deltas);
+    }
+
     private static async Task SaveInternal(
         BufferPoolHandler tablespace,
         BTree<ObjectIdValue, ObjectIdValue> index,
@@ -42,8 +49,37 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     )
     {
         if (deltas is null)
+        {
             deltas = await index.Put(key, value);
 
+            Persist(tablespace, index, modifiedPages, deltas);
+        }
+    }
+
+    private static async Task RemoveInternal(
+        BufferPoolHandler tablespace,
+        BTree<ObjectIdValue, ObjectIdValue> index,
+        ObjectIdValue key,        
+        List<InsertModifiedPage> modifiedPages,
+        HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>>? deltas
+    )
+    {
+        if (deltas is null)
+        {
+            (bool found, HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>> newDeltas) = await index.Remove(key);
+
+            if (found)
+                Persist(tablespace, index, modifiedPages, newDeltas);
+        }
+    }
+
+    private static void Persist(
+        BufferPoolHandler tablespace,
+        BTree<ObjectIdValue, ObjectIdValue> index,
+        List<InsertModifiedPage> modifiedPages,
+        HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>> deltas
+    )
+    {
         foreach (BTreeNode<ObjectIdValue, ObjectIdValue> node in deltas)
         {
             if (node.PageOffset.IsNull())
@@ -71,7 +107,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // key count
                 SerializatorTypeSizes.TypeObjectId + // page offset
-                36 * node.KeyCount // 12 bytes * node (key + value + next)
+                36 * node.KeyCount // 36 bytes * node (key + value + next)
             ];
 
             pointer = 0;

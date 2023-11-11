@@ -153,7 +153,7 @@ internal sealed class QueryExecutor
 
         if (pageOffset is null)
         {
-            Console.WriteLine("Index Pk={0} has an empty page data", ticket.Id);
+            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
             yield break;
         }
 

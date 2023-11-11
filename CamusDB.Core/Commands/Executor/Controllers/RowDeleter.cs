@@ -235,12 +235,22 @@ internal sealed class RowDeleter
         BufferPoolHandler tablespace = state.Database.TableSpace!;
         TableDescriptor table = state.Table;
 
-        (bool found, HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>> deltas) = await table.Rows.Remove(state.RowTuple.SlotOne);
+        /*(bool found, HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>> deltas) = await table.Rows.Remove(state.RowTuple.SlotOne);
 
         if (found)
         {
             // @todo persist index?
-        }
+        }*/
+
+        RemoveUniqueOffsetIndexTicket ticket = new(
+            tablespace: tablespace,
+            index: table.Rows,
+            key: state.RowTuple.SlotOne,
+            locks: state.Locks,
+            modifiedPages: state.ModifiedPages
+        );
+
+        await indexSaver.Remove(ticket);
 
         await tablespace.DeletePage(state.RowTuple.SlotOne);
 
