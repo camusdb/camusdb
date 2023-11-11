@@ -7,6 +7,7 @@
  */
 
 using Nito.AsyncEx;
+using CamusDB.Core.Util.ObjectIds;
 using System.Runtime.CompilerServices;
 
 namespace CamusDB.Core.Util.Trees;
@@ -35,7 +36,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     public int loaded;   // number of loaded nodes
 
-    public int PageOffset = -1; // page offset to root node
+    public ObjectIdValue PageOffset; // page offset to root node
 
     public readonly IBTreeNodeReader<TKey, TValue>? Reader; // lazy node reader    
 
@@ -44,7 +45,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /**
      * Initializes an empty B-tree.
      */
-    public BTree(int rootOffset, IBTreeNodeReader<TKey, TValue>? reader = null)
+    public BTree(ObjectIdValue rootOffset, IBTreeNodeReader<TKey, TValue>? reader = null)
     {
         Reader = reader;
         PageOffset = rootOffset;
@@ -120,7 +121,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                 {
                     BTreeEntry<TKey, TValue> entry = children[j];
 
-                    if (entry.Next is null && entry.NextPageOffset > 0)
+                    if (entry.Next is null && !entry.NextPageOffset.IsNull())
                     {
                         if (Reader is null)
                             throw new Exception("Cannot read lazy node because reader is null");
@@ -164,7 +165,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 BTreeEntry<TKey, TValue> entry = children[j];
 
-                if (entry.Next is null && entry.NextPageOffset > 0)
+                if (entry.Next is null && !entry.NextPageOffset.IsNull())
                 {
                     if (Reader is null)
                         throw new Exception("Cannot read lazy node because reader is null");
@@ -199,7 +200,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             BTreeEntry<TKey, TValue> entry = node.children[j];
 
-            if (entry.Next is null && entry.NextPageOffset > 0)
+            if (entry.Next is null && !entry.NextPageOffset.IsNull())
             {
                 if (Reader is null)
                     throw new Exception("Cannot read lazy node because reader is null");
@@ -228,7 +229,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             BTreeEntry<TKey, TValue> entry = node.children[j];
 
-            if (entry.Next is null && entry.NextPageOffset > 0)
+            if (entry.Next is null && !entry.NextPageOffset.IsNull())
             {
                 if (Reader is null)
                     throw new Exception("Cannot read lazy node because reader is null");
@@ -276,7 +277,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         root = newRoot;
 
         newRoot.PageOffset = root.PageOffset;
-        root.PageOffset = -1;
+        root.PageOffset = new();
 
         height++;
 
@@ -314,7 +315,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                 {
                     BTreeEntry<TKey, TValue> entry = children[j++];
 
-                    if (entry.Next is null && entry.NextPageOffset > 0)
+                    if (entry.Next is null && !entry.NextPageOffset.IsNull())
                     {
                         if (Reader is null)
                             throw new Exception("Cannot read lazy node because reader is null");
@@ -427,7 +428,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 if (j + 1 == node.KeyCount || Less(key, children[j + 1].Key))
                 {
-                    if (children[j].Next is null && children[j].NextPageOffset > 0)
+                    if (children[j].Next is null && !children[j].NextPageOffset.IsNull())
                     {
                         if (Reader is null)
                             throw new Exception("Cannot read lazy node because reader is null");

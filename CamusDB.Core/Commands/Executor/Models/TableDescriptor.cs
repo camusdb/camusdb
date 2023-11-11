@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
@@ -17,7 +18,7 @@ public sealed class TableDescriptor
 
     public TableSchema? Schema { get; set; }
 
-    public BTree<int, int?> Rows { get; set; } = new(-1);
+    public BTree<ObjectIdValue, ObjectIdValue> Rows { get; set; } = new(new ObjectIdValue(), null);
 
     public Dictionary<string, TableIndexSchema> Indexes { get; set; } = new();
 

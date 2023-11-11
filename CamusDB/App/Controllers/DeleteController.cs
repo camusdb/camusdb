@@ -11,7 +11,6 @@ using System.Text.Json;
 using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
-using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.App.Controllers;
@@ -30,8 +29,8 @@ public sealed class DeleteController : CommandsController
     {
         try
         {
-            using var reader = new StreamReader(Request.Body);
-            var body = await reader.ReadToEndAsync();
+            using StreamReader reader = new StreamReader(Request.Body);
+            string body = await reader.ReadToEndAsync();
 
             DeleteByIdRequest? request = JsonSerializer.Deserialize<DeleteByIdRequest>(body, jsonOptions);
             if (request == null)
@@ -40,7 +39,7 @@ public sealed class DeleteController : CommandsController
             DeleteByIdTicket ticket = new(
                 database: request.DatabaseName ?? "",
                 name: request.TableName ?? "",
-                id: request.Id
+                id: request.Id ?? ""
             );
 
             await executor.DeleteById(ticket);

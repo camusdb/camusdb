@@ -130,19 +130,21 @@ internal sealed class RowInserter
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task<FluxAction> AllocateInsertTuple(InsertFluxState state)
+    private Task<FluxAction> AllocateInsertTuple(InsertFluxState state)
     {
         BufferPoolHandler tablespace = state.Database.TableSpace;
 
-        state.RowTuple.SlotOne = await tablespace.GetNextRowId();
-        state.RowTuple.SlotTwo = await tablespace.GetNextFreeOffset();
+        state.RowTuple.SlotOne = tablespace.GetNextRowId();
+        state.RowTuple.SlotTwo = tablespace.GetNextFreeOffset();
 
-        return FluxAction.Continue;
+        return Task.FromResult(FluxAction.Continue);
     }
 
-    /**
-     * Unique keys after updated before inserting the actual row
-     */
+    /// <summary>
+    /// Unique keys after updated before inserting the actual row
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private async Task<FluxAction> UpdateUniqueKeysStep(InsertFluxState state)
     {
         UpdateUniqueIndexTicket ticket = new(

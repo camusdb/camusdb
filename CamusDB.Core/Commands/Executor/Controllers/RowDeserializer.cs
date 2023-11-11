@@ -37,7 +37,7 @@ internal sealed class RowDeserializer
         Serializator.ReadInt32(data, ref pointer); // schema
 
         Serializator.ReadType(data, ref pointer); // type
-        Serializator.ReadInt32(data, ref pointer); // row id
+        Serializator.ReadObjectId(data, ref pointer); // row id
 
         Dictionary<string, ColumnValue> columnValues = new();
 
@@ -99,8 +99,7 @@ internal sealed class RowDeserializer
 
                 default:
                     throw new CamusDBException(
-                        CamusDBErrorCodes.UnknownType,
-                        "Unknown type " + column.Type
+                        CamusDBErrorCodes.UnknownType, "Unknown type " + column.Type
                     );
             }
         }

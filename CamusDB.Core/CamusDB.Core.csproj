@@ -15,7 +15,6 @@
     <None Remove="CommandsExecutor\Models\StateMachines\" />
     <None Remove="Machines\" />
     <None Remove="CommandsExecutor\Controllers\Insert\" />
-    <None Remove="BufferPool\Controllers\" />
     <None Remove="Flux\Models\" />
     <None Remove="Commands\Executor\" />
     <None Remove="Commands\Executor\Controllers\" />
@@ -23,18 +22,15 @@
     <None Remove="Commands\Validator\" />
     <None Remove="Commands\Validator\Validators\" />
     <None Remove="Storage\" />
-    <None Remove="Storage\Adapters\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Util\Hashes\" />
     <Folder Include="Flux\" />
-    <Folder Include="BufferPool\Controllers\" />
     <Folder Include="Flux\Models\" />
     <Folder Include="Commands\Executor\Controllers\" />
     <Folder Include="Commands\Validator\" />
     <Folder Include="Commands\Validator\Validators\" />
     <Folder Include="Storage\" />
-    <Folder Include="Storage\Adapters\" />
   </ItemGroup>
 
   <ItemGroup>

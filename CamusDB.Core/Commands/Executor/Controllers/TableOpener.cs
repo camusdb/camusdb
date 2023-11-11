@@ -11,6 +11,7 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -48,7 +49,7 @@ internal sealed class TableOpener
             {
                 Name = tableName,
                 Schema = tableSchema,
-                Rows = await indexReader.ReadOffsets(tablespace, systemObject.StartOffset)
+                Rows = await indexReader.ReadOffsets(tablespace, ObjectId.ToValue(systemObject.StartOffset ?? ""))
             };
 
             // @todo read indexes in parallel
@@ -61,7 +62,7 @@ internal sealed class TableOpener
                     {
                         case IndexType.Unique:
                             {
-                                BTree<ColumnValue, BTreeTuple?> rows = await indexReader.ReadUnique(tablespace, index.Value.StartOffset);
+                                BTree<ColumnValue, BTreeTuple?> rows = await indexReader.ReadUnique(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
 
                                 tableDescriptor.Indexes.Add(
                                     index.Key,
@@ -72,7 +73,7 @@ internal sealed class TableOpener
 
                         case IndexType.Multi:
                             {
-                                BTreeMulti<ColumnValue> rows = await indexReader.ReadMulti(tablespace, index.Value.StartOffset);
+                                BTreeMulti<ColumnValue> rows = await indexReader.ReadMulti(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
 
                                 tableDescriptor.Indexes.Add(
                                     index.Key,

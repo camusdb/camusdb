@@ -10,6 +10,7 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -22,7 +23,7 @@ internal sealed class IndexMultiReader : IndexBaseReader
         this.indexReader = indexReader;
     }
 
-    public async Task<BTreeMulti<ColumnValue>> ReadMulti(BufferPoolHandler bufferpool, int offset)
+    public async Task<BTreeMulti<ColumnValue>> ReadMulti(BufferPoolHandler bufferpool, ObjectIdValue offset)
     {
         //Console.WriteLine("***");
 
@@ -42,11 +43,11 @@ internal sealed class IndexMultiReader : IndexBaseReader
         index.size = Serializator.ReadInt32(data, ref pointer);
         index.denseSize = Serializator.ReadInt32(data, ref pointer);
 
-        int rootPageOffset = Serializator.ReadInt32(data, ref pointer);
+        ObjectIdValue rootPageOffset = Serializator.ReadObjectId(data, ref pointer);
 
         //Console.WriteLine("NumberNodes={0} PageOffset={1} RootOffset={2}", index.n, index.PageOffset, rootPageOffset);
 
-        if (rootPageOffset > -1)
+        if (!rootPageOffset.IsNull())
         {
             BTreeMultiNode<ColumnValue>? node = await GetMultiNode(bufferpool, rootPageOffset);
             if (node is not null)
@@ -63,7 +64,7 @@ internal sealed class IndexMultiReader : IndexBaseReader
         return index;
     }
 
-    private async Task<BTreeMultiNode<ColumnValue>?> GetMultiNode(BufferPoolHandler tablespace, int offset)
+    private async Task<BTreeMultiNode<ColumnValue>?> GetMultiNode(BufferPoolHandler tablespace, ObjectIdValue offset)
     {
         byte[] data = await tablespace.GetDataFromPage(offset);
         if (data.Length == 0)
@@ -73,7 +74,7 @@ internal sealed class IndexMultiReader : IndexBaseReader
 
         int pointer = 0;
         node.KeyCount = Serializator.ReadInt32(data, ref pointer);
-        node.PageOffset = Serializator.ReadInt32(data, ref pointer);
+        node.PageOffset = Serializator.ReadObjectId(data, ref pointer);
 
         //Console.WriteLine("KeyCount={0} PageOffset={1}", node.KeyCount, node.PageOffset);
 
@@ -88,12 +89,12 @@ internal sealed class IndexMultiReader : IndexBaseReader
 
             //entry.Key =
 
-            int subTreeOffset = Serializator.ReadInt32(data, ref pointer);
-            if (subTreeOffset > 0)
+            ObjectIdValue subTreeOffset = Serializator.ReadObjectId(data, ref pointer);
+            if (!subTreeOffset.IsNull())
                 entry.Value = await indexReader.ReadOffsets(tablespace, subTreeOffset);
 
-            int nextPageOffset = Serializator.ReadInt32(data, ref pointer);
-            if (nextPageOffset > -1)
+            ObjectIdValue nextPageOffset = Serializator.ReadObjectId(data, ref pointer);
+            if (!nextPageOffset.IsNull())
                 entry.Next = await GetMultiNode(tablespace, nextPageOffset);
 
             //Console.WriteLine("Children={0} Key={1} Value={2} NextOffset={3}", i, entry.Key, entry.Value, nextPageOffset);

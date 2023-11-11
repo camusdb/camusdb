@@ -55,16 +55,16 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
 
     private static BTreeTuple? UnserializeTuple(byte[] nodeBuffer, ref int pointer)
     {
-        int slotOne = Serializator.ReadInt32(nodeBuffer, ref pointer);
-        int slotTwo = Serializator.ReadInt32(nodeBuffer, ref pointer);
+        ObjectIdValue slotOne = Serializator.ReadObjectId(nodeBuffer, ref pointer);
+        ObjectIdValue slotTwo = Serializator.ReadObjectId(nodeBuffer, ref pointer);
 
-        if (slotOne == 0 && slotTwo == 0)
+        if (slotOne.IsNull() && slotTwo.IsNull())
             return null;
 
         return new BTreeTuple(slotOne, slotTwo);
     }
 
-    public async Task<BTreeNode<ColumnValue, BTreeTuple?>?> GetNode(int offset)
+    public async Task<BTreeNode<ColumnValue, BTreeTuple?>?> GetNode(ObjectIdValue offset)
     {
         byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
@@ -74,7 +74,7 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
 
         int pointer = 0;
         node.KeyCount = Serializator.ReadInt32(data, ref pointer);
-        node.PageOffset = Serializator.ReadInt32(data, ref pointer);
+        node.PageOffset = Serializator.ReadObjectId(data, ref pointer);
 
         //Console.WriteLine("KeyCount={0} PageOffset={1}", node.KeyCount, node.PageOffset);
 
@@ -85,7 +85,7 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
 
             BTreeEntry<ColumnValue, BTreeTuple?> entry = new(key, tuple, null)
             {
-                NextPageOffset = Serializator.ReadInt32(data, ref pointer)
+                NextPageOffset = Serializator.ReadObjectId(data, ref pointer)
             };
 
             node.children[i] = entry;

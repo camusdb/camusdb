@@ -22,5 +22,6 @@ public static class SerializatorTypeSizes
     public const int TypeBool = 1;
     public const int TypeFloat = 2;
     public const int TypeDouble = 4;
+    public const int TypeObjectId = 12;
 }
 

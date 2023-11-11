@@ -6,8 +6,9 @@
  * file that was distributed with this source code.
  */
 
-using System.Runtime.CompilerServices;
 using Nito.AsyncEx;
+using System.Runtime.CompilerServices;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -31,16 +32,18 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
     public int denseSize;           // number of key-value pairs in the B-tree
 
-    public int PageOffset = -1; // page offset to root node
+    public ObjectIdValue PageOffset; // page offset to root node
 
-    public readonly IBTreeNodeReader<int, int?>? SubTreeReader; // lazy node sub-tree reader    
+    public readonly IBTreeNodeReader<ObjectIdValue, ObjectIdValue>? SubTreeReader; // lazy node sub-tree reader    
 
     public AsyncReaderWriterLock ReaderWriterLock { get; } = new();
 
-    /**
-     * Initializes an empty B-tree.
-     */
-    public BTreeMulti(int rootOffset, IBTreeNodeReader<int, int?>? subTreeReader = null)
+    /// <summary>
+    /// Initializes an empty B-tree.
+    /// </summary>
+    /// <param name="rootOffset"></param>
+    /// <param name="subTreeReader"></param>
+    public BTreeMulti(ObjectIdValue rootOffset, IBTreeNodeReader<ObjectIdValue, ObjectIdValue>? subTreeReader = null)
     {
         PageOffset = rootOffset;
         SubTreeReader = subTreeReader;
@@ -89,7 +92,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
      * @return the value associated with the given key if the key is in the symbol table
      *         and {@code null} if the key is not in the symbol table
      */
-    public BTree<int, int?>? Get(TKey key)
+    public BTree<ObjectIdValue, ObjectIdValue>? Get(TKey key)
     {
         return Search(root, key, height);
     }
@@ -101,18 +104,18 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
      * @return the value associated with the given key if the key is in the symbol table
      *         and {@code null} if the key is not in the symbol table
      */
-    public async IAsyncEnumerable<int> GetAll(TKey key)
+    public async IAsyncEnumerable<ObjectIdValue> GetAll(TKey key)
     {
-        BTree<int, int?>? subTree = Search(root, key, height);
+        BTree<ObjectIdValue, ObjectIdValue>? subTree = Search(root, key, height);
 
         if (subTree is null)
             yield break;
 
-        await foreach (BTreeEntry<int, int?> subTreeEntry in subTree.EntriesTraverse())
+        await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> subTreeEntry in subTree.EntriesTraverse())
             yield return subTreeEntry.Key;
     }
 
-    private BTree<int, int?>? Search(BTreeMultiNode<TKey>? node, TKey key, int ht)
+    private BTree<ObjectIdValue, ObjectIdValue>? Search(BTreeMultiNode<TKey>? node, TKey key, int ht)
     {
         if (node is null)
             return null;
@@ -218,9 +221,9 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         }
     }
 
-    public async Task<Dictionary<int, BTreeMultiDelta<TKey>>> Put(TKey key, int value)
+    public async Task<Dictionary<int, BTreeMultiDelta<TKey>>> Put(TKey key, ObjectIdValue value)
     {
-        return await Put(key, new BTreeTuple(value, 0));
+        return await Put(key, new BTreeTuple(value, new()));
     }
 
     public async Task<Dictionary<int, BTreeMultiDelta<TKey>>> Put(TKey key, BTreeTuple value)
@@ -252,7 +255,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         root = newRoot;
 
         newRoot.PageOffset = root.PageOffset;
-        root.PageOffset = -1;
+        root.PageOffset = new();
 
         height++;
 
@@ -268,7 +271,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         BTreeMultiDelta<TKey>? multiDelta;
         BTreeMultiEntry<TKey>? newEntry = null;
         BTreeMultiEntry<TKey>[] children = node.children;
-        HashSet<BTreeNode<int, int?>> innerDeltas;
+        HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>> innerDeltas;
 
         // external node at height 0
         if (ht == 0)
@@ -313,7 +316,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
                         return null;
 
                     newEntry = new(split.children[0].Key, split);
-                    newEntry.Value = new BTree<int, int?>(-1, SubTreeReader);
+                    newEntry.Value = new BTree<ObjectIdValue, ObjectIdValue>(new(), SubTreeReader);
                     //size++;
                     break;
                 }
@@ -330,7 +333,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         {
             newEntry = new(key, null)
             {
-                Value = new BTree<int, int?>(-1, SubTreeReader)
+                Value = new BTree<ObjectIdValue, ObjectIdValue>(new(), SubTreeReader)
             };
             size++;
         }
@@ -426,7 +429,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             if (position == -1)
                 return false;
 
-            BTree<int, int?>? subTree = children[position].Value;
+            BTree<ObjectIdValue, ObjectIdValue>? subTree = children[position].Value;
             if (subTree is not null)
                 denseSize -= subTree.size;
 

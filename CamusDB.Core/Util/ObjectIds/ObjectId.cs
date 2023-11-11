@@ -25,7 +25,7 @@ public sealed class ObjectId
 
     public static string ToString(int _a, int _b, int _c)
     {
-        var c = new char[24];
+        char[] c = new char[24];
 
         c[0] = ToHexChar((_a >> 28) & 0x0f);
         c[1] = ToHexChar((_a >> 24) & 0x0f);
@@ -88,14 +88,13 @@ public sealed class ObjectId
         if (s == null)
             return false;
 
-        var buffer = new byte[(s.Length + 1) / 2];
+        byte[] buffer = new byte[(s.Length + 1) / 2];
 
-        var i = 0;
-        var j = 0;
+        int i = 0;
+        int j = 0;
 
         if ((s.Length % 2) == 1) // if s has an odd length assume an implied leading "0"
         {
-
             if (!TryParseHexChar(s[i++], out int y))
                 return false;
 

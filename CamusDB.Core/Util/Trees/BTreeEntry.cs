@@ -1,11 +1,13 @@
 ﻿
-/**
- * This file is part of CamusDB  
- *
- * For the full copyright and license information, please view the LICENSE.txt
- * file that was distributed with this source code.
- */
 
+
+using CamusDB.Core.Util.ObjectIds;
+/**
+* This file is part of CamusDB  
+*
+* For the full copyright and license information, please view the LICENSE.txt
+* file that was distributed with this source code.
+*/
 namespace CamusDB.Core.Util.Trees;
 
 // internal nodes: only use key and next
@@ -20,7 +22,7 @@ public sealed class BTreeEntry<TKey, TValue>
 
     public bool Loaded; // whether the "next" node is loaded from disk
 
-    public int NextPageOffset = -1; // the address of the next page offset
+    public ObjectIdValue NextPageOffset; // the address of the next page offset
 
     public BTreeEntry(TKey key, TValue? value, BTreeNode<TKey, TValue>? next)
     {

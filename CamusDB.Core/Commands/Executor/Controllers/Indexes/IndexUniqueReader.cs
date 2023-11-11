@@ -10,6 +10,7 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -22,7 +23,7 @@ internal sealed class IndexUniqueReader : IndexBaseReader
         this.indexReader = indexReader;
     }
 
-    public async Task<BTree<ColumnValue, BTreeTuple?>> ReadUnique(BufferPoolHandler bufferpool, int offset)
+    public async Task<BTree<ColumnValue, BTreeTuple?>> ReadUnique(BufferPoolHandler bufferpool, ObjectIdValue offset)
     {
         //Console.WriteLine("***");
 
@@ -41,9 +42,9 @@ internal sealed class IndexUniqueReader : IndexBaseReader
         index.height = Serializator.ReadInt32(data, ref pointer);
         index.size = Serializator.ReadInt32(data, ref pointer);
 
-        int rootPageOffset = Serializator.ReadInt32(data, ref pointer);
+        ObjectIdValue rootPageOffset = Serializator.ReadObjectId(data, ref pointer);
 
-        if (rootPageOffset > -1)
+        if (!rootPageOffset.IsNull())
         {
             BTreeNode<ColumnValue, BTreeTuple?>? node = await reader.GetNode(rootPageOffset);
             if (node is not null)

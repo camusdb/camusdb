@@ -6,8 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.CommandsExecutor.Models;
-
 namespace CamusDB.App.Models;
 
 public sealed class DeleteByIdRequest
@@ -16,5 +14,5 @@ public sealed class DeleteByIdRequest
 
     public string? TableName { get; set; }
 
-    public int Id { get; set; }
+    public string? Id { get; set; }
 }

@@ -11,6 +11,7 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -32,15 +33,15 @@ internal sealed class QueryExecutor
 
         using IDisposable readerLock = await table.Rows.ReaderWriterLock.ReaderLockAsync();
 
-        await foreach (BTreeEntry<int, int?> entry in table.Rows.EntriesTraverse())
+        await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse())
         {
-            if (entry.Value is null)
+            if (entry.Value.IsNull())
             {
                 Console.WriteLine("Index RowId={0} has no page offset value", entry.Key);
                 continue;
             }
 
-            byte[] data = await tablespace.GetDataFromPage(entry.Value.Value);
+            byte[] data = await tablespace.GetDataFromPage(entry.Value);
             if (data.Length == 0)
             {
                 Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
@@ -86,17 +87,17 @@ internal sealed class QueryExecutor
         {
             //Console.WriteLine("MultiTree={0} Key={0} PageOffset={1}", index.Id, entry.Key, entry.Value!.Size());
 
-            await foreach (BTreeEntry<int, int?> subEntry in entry.Value!.EntriesTraverse())
+            await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> subEntry in entry.Value!.EntriesTraverse())
             {
                 //Console.WriteLine(" > Index Key={0} PageOffset={1}", subEntry.Key, subEntry.Value);
 
-                if (subEntry.Value is null)
+                if (subEntry.Value.IsNull())
                 {
                     Console.WriteLine("Index RowId={0} has no page offset value", subEntry.Key);
                     continue;
                 }
 
-                byte[] data = await tablespace.GetDataFromPage(subEntry.Value.Value);
+                byte[] data = await tablespace.GetDataFromPage(subEntry.Value);
                 if (data.Length == 0)
                 {
                     Console.WriteLine("Index RowId={0} has an empty page data", subEntry.Key);

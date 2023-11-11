@@ -16,9 +16,9 @@ public sealed record DatabaseIndexObject
 
     public IndexType Type { get; }
 
-    public int StartOffset { get; }
+    public string StartOffset { get; }
 
-    public DatabaseIndexObject(string column, IndexType type, int startOffset)
+    public DatabaseIndexObject(string column, IndexType type, string startOffset)
     {
         Column = column;
         Type = type;

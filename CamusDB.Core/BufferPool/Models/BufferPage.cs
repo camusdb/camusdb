@@ -7,12 +7,13 @@
  */
 
 using Nito.AsyncEx;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.BufferPool.Models;
 
 public sealed class BufferPage
 {
-    public int Offset { get; }
+    public ObjectIdValue Offset { get; }
 
     public Lazy<byte[]> Buffer { get; set; }
 
@@ -20,7 +21,7 @@ public sealed class BufferPage
 
     private readonly AsyncReaderWriterLock readerWriterLock = new();
 
-    public BufferPage(int offset, Lazy<byte[]> buffer)
+    public BufferPage(ObjectIdValue offset, Lazy<byte[]> buffer)
     {
         Offset = offset;
         Buffer = buffer;

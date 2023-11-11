@@ -6,15 +6,18 @@
  * file that was distributed with this source code.
  */
 
+using System.Threading.Channels;
+using System.Collections.Concurrent;
+
 using CamusDB.Core.Storage;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Hashes;
 using CamusDB.Core.BufferPool.Models;
+using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.CommandsExecutor.Models.StateMachines;
+
 using Config = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
-using System.Threading.Channels;
-using System.Collections.Concurrent;
-using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 namespace CamusDB.Core.BufferPool;
 
@@ -22,7 +25,7 @@ namespace CamusDB.Core.BufferPool;
  * BufferPoolHandler
  *
  * A buffer pool is an area of main memory that has been allocated by the database manager
- * for the purpose of caching table and index data as it is read from disk.
+ * for the purpose of caching table and index data as it is read from storage.
  *
  * When a row of data in a table is first accessed, the database manager places the page that
  * contains that data into a buffer pool. Pages stay in the buffer pool until the database
@@ -36,9 +39,9 @@ namespace CamusDB.Core.BufferPool;
  * | checksum (4 bytes unsigned integer)                  |
  * +----------+----------+----------+---------------------+
  * | last wrote journal seq (4 bytes unsigned integer)    |
- * +----------+----------+----------+---------------------+
- * | next page offset (4 bytes integer)                   |
- * +----------+----------+----------+---------------------+
+ * +----------+----------+----------+----------------------------------------+
+ * | next page offset (12 bytes integer)                                     |
+ * +----------+----------+----------+----------------------------------------+
  * | data length (4 bytes integer)                        |
  * +----------+----------+----------+---------------------+
  */
@@ -46,119 +49,42 @@ public sealed class BufferPoolHandler : IDisposable
 {
     private readonly StorageManager storage;
 
-    private readonly ConcurrentDictionary<int, Lazy<BufferPage>> pages = new();
-
-    private readonly SemaphoreSlim semaphore = new(1, 1);
-
-    private readonly ChannelWriter<NextRowIdOffsetUpdate> offsetUpdaterWriter;
-
-    private readonly ChannelReader<NextRowIdOffsetUpdate> offsetUpdaterReader;
+    private readonly ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> pages = new();
 
     public int NumberPages => pages.Count;
 
-    public ConcurrentDictionary<int, Lazy<BufferPage>> Pages => pages;
-
-    private int nextRowId;
-
-    private int nextFreeOffset;
+    public ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> Pages => pages;
 
     public BufferPoolHandler(StorageManager storage)
     {
         this.storage = storage;
-
-        Channel<NextRowIdOffsetUpdate> channel = Channel.CreateUnbounded<NextRowIdOffsetUpdate>(new UnboundedChannelOptions
-        {
-            SingleWriter = false,
-            SingleReader = true,
-            AllowSynchronousContinuations = true
-        });
-
-        offsetUpdaterReader = channel.Reader;
-        offsetUpdaterWriter = channel.Writer;
-    }
-
-    public async Task Initialize()
-    {
-        nextRowId = await GetNextRowIdFromPage();
-        nextFreeOffset = await GetNextFreeOffsetFromPage();
-
-        _ = Task.Run(ConsumeUpdateNextOffsetId);
-    }
-
-    private async ValueTask ConsumeUpdateNextOffsetId()
-    {
-        while (await offsetUpdaterReader.WaitToReadAsync())
-        {
-            while (offsetUpdaterReader.TryRead(out NextRowIdOffsetUpdate operation))
-            {
-                if (operation.Type == NextRowIdOffsetUpdateType.NextId)
-                    await WriteNextRowId(operation.Value);
-
-                if (operation.Type == NextRowIdOffsetUpdateType.NextOffset)
-                    await WriteNextFreeOffset(operation.Value);
-
-                Console.WriteLine(operation.Value);
-            }
-        }
     }
 
     // Load a page without reading its contents
-    public BufferPage GetPage(int offset)
+    public BufferPage GetPage(ObjectIdValue offset)
     {
-        if (offset < 0)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidPageOffset,
-                "Invalid page offset"
-            );
-
         Lazy<BufferPage> lazyBufferPage = pages.GetOrAdd(offset, (x) => new Lazy<BufferPage>(() => LoadPage(offset)));
         return lazyBufferPage.Value;
     }
 
-    private BufferPage LoadPage(int offset)
+    private BufferPage LoadPage(ObjectIdValue offset)
     {
         return new BufferPage(offset, new Lazy<byte[]>(() => ReadFromDisk(offset)));
     }
 
-    private byte[] ReadFromDisk(int offset)
+    private byte[] ReadFromDisk(ObjectIdValue offset)
     {
-        return storage.Read(Config.PageSize * offset);
+        return storage.Read(offset);
     }
 
     // Load a page reading its contents
-    public BufferPage ReadPage(int offset)
+    public BufferPage ReadPage(ObjectIdValue offset)
     {
-        if (offset < 0)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidPageOffset,
-                "Invalid page offset"
-            );
-
         Lazy<BufferPage> lazyBufferPage = pages.GetOrAdd(offset, (x) => new Lazy<BufferPage>(() => LoadPage(offset)));
         return lazyBufferPage.Value;
     }
 
-    public async Task<bool> IsInitialized(int offset)
-    {
-        if (offset < 0)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidPageOffset,
-                "Invalid page offset"
-            );
-
-        BufferPage memoryPage = ReadPage(offset);
-
-        using IDisposable readerLock = await memoryPage.ReaderLockAsync();
-
-        byte[] pageBuffer = memoryPage.Buffer.Value; // get a pointer to the buffer to get a consistent read
-
-        int pointer = BConfig.PageLayoutOffset;
-        short pageLayout = Serializator.ReadInt16(pageBuffer, ref pointer);
-
-        return pageLayout > 0;
-    }
-
-    private async Task<(int, List<BufferPage>, List<IDisposable>)> GetDataLength(int offset)
+    private async Task<(int, List<BufferPage>, List<IDisposable>)> GetDataLength(ObjectIdValue offset)
     {
         int length = 0;
         List<BufferPage> pages = new();
@@ -166,8 +92,6 @@ public sealed class BufferPoolHandler : IDisposable
 
         do
         {
-            //Console.WriteLine(offset);
-
             BufferPage memoryPage = ReadPage(offset);
             pages.Add(memoryPage);
 
@@ -179,21 +103,15 @@ public sealed class BufferPoolHandler : IDisposable
             length += Serializator.ReadInt32(pageBuffer, ref pointer);
 
             pointer = BConfig.NextPageOffset;
-            offset = Serializator.ReadInt32(pageBuffer, ref pointer);
+            offset = Serializator.ReadObjectId(pageBuffer, ref pointer);
 
-        } while (offset > 0);
+        } while (!offset.IsNull());
 
         return (length, pages, disposables);
     }
 
-    public async Task<byte[]> GetDataFromPage(int offset)
+    public async Task<byte[]> GetDataFromPage(ObjectIdValue offset)
     {
-        if (offset < 0)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidPageOffset,
-                "Invalid page offset"
-            );
-
         (int length, List<BufferPage> pages, List<IDisposable> disposables) = await GetDataLength(offset); // @todo calculated length of page can be different to the read page
 
         try
@@ -220,7 +138,7 @@ public sealed class BufferPoolHandler : IDisposable
                     );
 
                 pointer = BConfig.NextPageOffset;
-                offset = Serializator.ReadInt32(pageBuffer, ref pointer);
+                offset = Serializator.ReadObjectId(pageBuffer, ref pointer);
 
                 pointer = BConfig.ChecksumOffset;
                 checksum = Serializator.ReadUInt32(pageBuffer, ref pointer);
@@ -252,207 +170,45 @@ public sealed class BufferPoolHandler : IDisposable
         }
     }
 
-    public async Task<uint> GetSequenceFromPage(int offset)
-    {
-        BufferPage memoryPage = ReadPage(offset);
-
-        using IDisposable readerLock = await memoryPage.ReaderLockAsync();
-
-        byte[] pageBuffer = memoryPage.Buffer.Value; // get a pointer to the buffer to get a consistent read
-
-        int pointer = BConfig.LastSequenceOffset;
-        return Serializator.ReadUInt32(pageBuffer, ref pointer);
-    }
-
     public void FlushPage(BufferPage memoryPage)
     {
-        storage.Write(Config.PageSize * memoryPage.Offset, memoryPage.Buffer.Value);
+        storage.Write(memoryPage.Offset, memoryPage.Buffer.Value);
     }
 
-    public void WriteTableSpaceHeader(byte[] pageBuffer)
+    public static int WritePageHeader(byte[] pageBuffer, uint checksum, uint lastSequence, ObjectIdValue nextPage, int length)
     {
         int pointer = 0;
-        Serializator.WriteInt16(pageBuffer, Config.PageLayoutVersion, ref pointer); // layout version (2 byte integer)
-        Serializator.WriteUInt32(pageBuffer, 0, ref pointer); // checksum (4 bytes integer)
-        Serializator.WriteInt32(pageBuffer, 8, ref pointer);  // data length (4 bytes integer)
-        Serializator.WriteInt32(pageBuffer, 1, ref pointer);  // first page
-        Serializator.WriteInt32(pageBuffer, 1, ref pointer);  // first row id
-    }
-
-    public static int WritePageHeader(byte[] pageBuffer, uint checksum, uint lastSequence, int nextPage, int length)
-    {
-        int pointer = 0;
-        Serializator.WriteInt16(pageBuffer, Config.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)
-        Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                 // checksum (4 bytes unsigned integer)
-        Serializator.WriteUInt32(pageBuffer, lastSequence, ref pointer);             // lastWroteSequence (4 bytes unsigned integer)
-        Serializator.WriteInt32(pageBuffer, nextPage, ref pointer);                  // next page (4 bytes integer)
-        Serializator.WriteInt32(pageBuffer, length, ref pointer);                    // data length (4 bytes integer)
+        Serializator.WriteInt16(pageBuffer, Config.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)        
+        Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                 // checksum (4 bytes unsigned integer)        
+        Serializator.WriteUInt32(pageBuffer, lastSequence, ref pointer);             // lastWroteSequence (4 bytes unsigned integer)        
+        Serializator.WriteObjectId(pageBuffer, nextPage, ref pointer);               // next page (12 bytes objectid)        
+        Serializator.WriteInt32(pageBuffer, length, ref pointer);                    // data length (4 bytes integer)                
         return pointer;
     }
 
-    public async Task<int> GetNextFreeOffset()
+    public ObjectIdValue GetNextFreeOffset()
     {
-        //int newFreeOffset = Interlocked.Increment(ref nextFreeOffset);
-        //await offsetUpdaterWriter.WriteAsync(new NextRowIdOffsetUpdate(NextRowIdOffsetUpdateType.NextOffset, newFreeOffset));
-        //return newFreeOffset;
-
-        return await GetNextFreeOffsetFromPage();
+        return ObjectIdGenerator.Generate();
     }
 
-    public async Task<int> GetNextFreeOffsetFromPage()
+    public ObjectIdValue GetNextRowId()
     {
-        BufferPage page = ReadPage(Config.TableSpaceHeaderPage);
-
-        int pointer = BConfig.FreePageOffset - 4, pageOffset = 1;
-
-        using IDisposable writerLock = await page.WriterLockAsync();
-
-        byte[] pageBuffer = page.Buffer.Value; // get a pointer to the buffer to get a consistent read
-
-        int length = Serializator.ReadInt32(pageBuffer, ref pointer);
-
-        if (length == 0)
-        {
-            // tablespace is not initialized ?
-            WriteTableSpaceHeader(pageBuffer);
-        }
-        else
-        {
-            pointer = BConfig.FreePageOffset;
-            pageOffset = Serializator.ReadInt32(pageBuffer, ref pointer); // retrieve existing offset
-        }
-
-        pointer = BConfig.FreePageOffset;
-        Serializator.WriteInt32(pageBuffer, pageOffset + 1, ref pointer); // write new offset
-
-        storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer);
-
-        page.Dirty = true;
-
-        //Console.WriteLine("CurrentPageOffset={0} NextPageOffset={1}", pageOffset, pageOffset + 1);
-
-        return pageOffset;
+        return ObjectIdGenerator.Generate();
     }
 
-    public async Task WriteNextFreeOffset(int pageOffset)
+    public async Task<ObjectIdValue> WriteDataToFreePage(byte[] data)
     {
-        BufferPage page = ReadPage(Config.TableSpaceHeaderPage);
-
-        int pointer = BConfig.FreePageOffset - 4;
-
-        using IDisposable writeLock = await page.WriterLockAsync();
-
-        byte[] pageBuffer = page.Buffer.Value; // get a pointer to the buffer to get a consistent read
-
-        int length = Serializator.ReadInt32(pageBuffer, ref pointer);
-
-        if (length == 0)
-        {
-            // tablespace is not initialized ?
-            WriteTableSpaceHeader(pageBuffer);
-        }
-        else
-        {
-            pointer = BConfig.FreePageOffset;
-            pageOffset = Serializator.ReadInt32(pageBuffer, ref pointer); // retrieve existing offset
-        }
-
-        pointer = BConfig.FreePageOffset;
-        Serializator.WriteInt32(pageBuffer, pageOffset, ref pointer); // write new offset
-
-        storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer);
-
-        page.Dirty = true;
-    }
-
-    public async Task<int> GetNextRowId()
-    {
-        //int newRowId = Interlocked.Increment(ref nextRowId);
-        //await offsetUpdaterWriter.WriteAsync(new NextRowIdOffsetUpdate(NextRowIdOffsetUpdateType.NextId, newRowId));
-        //return newRowId;
-
-        return await GetNextRowIdFromPage();
-    }
-
-    public async Task<int> GetNextRowIdFromPage()
-    {
-        BufferPage page = ReadPage(Config.TableSpaceHeaderPage);
-
-        using IDisposable writeLock = await page.WriterLockAsync();
-
-        // @todo page's content can change here?
-
-        byte[] pageBuffer = page.Buffer.Value; // get a pointer to the buffer to get a consistent read
-
-        int pointer = BConfig.FreePageOffset - 4, rowId = 1;
-
-        int length = Serializator.ReadInt32(pageBuffer, ref pointer);
-
-        if (length == 0) // tablespace is not initialized ?
-            WriteTableSpaceHeader(pageBuffer);
-        else
-        {
-            pointer = BConfig.RowIdOffset;
-            rowId = Serializator.ReadInt32(pageBuffer, ref pointer); // retrieve existing row id
-        }
-
-        pointer = BConfig.RowIdOffset;
-        Serializator.WriteInt32(pageBuffer, rowId + 1, ref pointer); // write new row id
-
-        //Console.WriteLine("CurrentRowId={0} NextRowId={1}", rowId, rowId + 1);
-
-        storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer);
-
-        page.Dirty = true;
-        page.Buffer = new Lazy<byte[]>(pageBuffer);
-
-        return rowId;
-    }
-
-    public async Task WriteNextRowId(int rowId)
-    {
-        BufferPage page = ReadPage(Config.TableSpaceHeaderPage);
-
-        using IDisposable writeLock = await page.WriterLockAsync();
-
-        byte[] pageBuffer = page.Buffer.Value; // get a pointer to the buffer to get a consistent read
-
-        int pointer = BConfig.FreePageOffset - 4;
-        int length = Serializator.ReadInt32(pageBuffer, ref pointer);
-
-        if (length == 0) // tablespace is not initialized ?
-            WriteTableSpaceHeader(pageBuffer);
-
-        pointer = BConfig.RowIdOffset;
-        Serializator.WriteInt32(pageBuffer, rowId, ref pointer); // write new row id
-
-        //Console.WriteLine("CurrentRowId={0} NextRowId={1}", rowId, rowId + 1);
-
-        storage.Write(Config.PageSize * Config.TableSpaceHeaderPage, pageBuffer);
-
-        page.Dirty = true;
-        page.Buffer = new Lazy<byte[]>(pageBuffer);
-    }
-
-    public async Task<int> WriteDataToFreePage(byte[] data)
-    {
-        int freeOffset = await GetNextFreeOffset();
+        ObjectIdValue freeOffset = GetNextFreeOffset();
         await WriteDataToPage(freeOffset, 0, data);
         return freeOffset;
     }
 
-    public async Task WriteDataToPage(int offset, uint sequence, byte[] data, int startOffset = 0, List<PageToWrite>? pagesToWrite = null)
+    public async Task WriteDataToPage(ObjectIdValue offset, uint sequence, byte[] data, int startOffset = 0)
     {
-        if (offset < 0)
+        if (offset.IsNull())
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidPageOffset,
                 "Invalid page offset"
-            );
-
-        if (offset == Config.TableSpaceHeaderPage)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "Cannot write to tablespace header page"
             );
 
         if (startOffset < 0)
@@ -465,7 +221,8 @@ public sealed class BufferPoolHandler : IDisposable
 
         using IDisposable writeLock = await page.WriterLockAsync();
 
-        int nextPage = 0, length;
+        int length;
+        ObjectIdValue nextPage = new(0, 0, 0);
 
         // Calculate remaining data length less the page's header
         if (((data.Length - startOffset) + BConfig.DataOffset) < Config.PageSize)
@@ -476,7 +233,7 @@ public sealed class BufferPoolHandler : IDisposable
         int remaining = (data.Length - startOffset) - length;
 
         if (remaining > 0)
-            nextPage = await GetNextFreeOffset();
+            nextPage = GetNextFreeOffset();
 
         // Create a buffer to calculate the checksum
         byte[] pageData = new byte[length];
@@ -489,14 +246,14 @@ public sealed class BufferPoolHandler : IDisposable
 
         int pointer = WritePageHeader(pageBuffer, checksum, sequence, nextPage, length);
 
-        if (nextPage > 0 && nextPage == offset)
+        if (!nextPage.IsNull() && nextPage == offset)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 "Cannot write recursively to the same page"
             );
 
         Buffer.BlockCopy(data, startOffset, pageBuffer, pointer, length);
-        storage.Write(Config.PageSize * offset, pageBuffer);
+        storage.Write(offset, pageBuffer);
 
         // Replace buffer, this helps to get readers consistent copies
         page.Dirty = true;
@@ -506,13 +263,13 @@ public sealed class BufferPoolHandler : IDisposable
             "Wrote {0} bytes to page {1}/{2} from buffer staring at {3}, remaining {4}, next page {5}",
             length,
             offset,
-            Config.PageSize * offset,
+            offset,
             startOffset,
             remaining,
             nextPage
         );*/
 
-        if (nextPage > 0)
+        if (!nextPage.IsNull())
             await WriteDataToPage(nextPage, sequence, data, startOffset + length);
     }
 
@@ -520,7 +277,7 @@ public sealed class BufferPoolHandler : IDisposable
     {
         List<PageToWrite> pagesToWrite = new(modifiedPages.Count);
 
-        foreach (InsertModifiedPage modifiedPage in modifiedPages)        
+        foreach (InsertModifiedPage modifiedPage in modifiedPages)
             await WriteDataToPageBatch(pagesToWrite, modifiedPage.Offset, modifiedPage.Sequence, modifiedPage.Buffer);
 
         Console.WriteLine("Wrote {0} pages in the batch", pagesToWrite.Count);
@@ -528,18 +285,14 @@ public sealed class BufferPoolHandler : IDisposable
         storage.WriteBatch(pagesToWrite);
     }
 
-    public async Task WriteDataToPageBatch(List<PageToWrite> pagesToWrite, int offset, uint sequence, byte[] data, int startOffset = 0)
+    public async Task WriteDataToPageBatch(List<PageToWrite> pagesToWrite, ObjectIdValue offset, uint sequence, byte[] data, int startOffset = 0)
     {
-        if (offset < 0)
+        //Console.WriteLine(offset);
+
+        if (offset.IsNull())
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidPageOffset,
                 "Invalid page offset"
-            );
-
-        if (offset == Config.TableSpaceHeaderPage)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "Cannot write to tablespace header page"
             );
 
         if (startOffset < 0)
@@ -552,7 +305,8 @@ public sealed class BufferPoolHandler : IDisposable
 
         using IDisposable writeLock = await page.WriterLockAsync();
 
-        int nextPage = 0, length;
+        int length;
+        ObjectIdValue nextPage = new(0, 0, 0);
 
         // Calculate remaining data length less the page's header
         if (((data.Length - startOffset) + BConfig.DataOffset) < Config.PageSize)
@@ -563,7 +317,7 @@ public sealed class BufferPoolHandler : IDisposable
         int remaining = (data.Length - startOffset) - length;
 
         if (remaining > 0)
-            nextPage = await GetNextFreeOffset();
+            nextPage = GetNextFreeOffset();
 
         // Create a buffer to calculate the checksum
         byte[] pageData = new byte[length];
@@ -576,7 +330,7 @@ public sealed class BufferPoolHandler : IDisposable
 
         int pointer = WritePageHeader(pageBuffer, checksum, sequence, nextPage, length);
 
-        if (nextPage > 0 && nextPage == offset)
+        if (!nextPage.IsNull() && nextPage == offset)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 "Cannot write recursively to the same page"
@@ -584,7 +338,7 @@ public sealed class BufferPoolHandler : IDisposable
 
         Buffer.BlockCopy(data, startOffset, pageBuffer, pointer, length);
         //storage.Write(Config.PageSize * offset, pageBuffer);
-        pagesToWrite.Add(new PageToWrite(Config.PageSize * offset, pageBuffer));
+        pagesToWrite.Add(new PageToWrite(offset, pageBuffer));
 
         // Replace buffer, this helps to get readers consistent copies
         page.Dirty = true;
@@ -600,36 +354,25 @@ public sealed class BufferPoolHandler : IDisposable
             nextPage
         );*/
 
-        if (nextPage > 0)
+        if (!nextPage.IsNull())
             await WriteDataToPageBatch(pagesToWrite, nextPage, sequence, data, startOffset + length);
     }
 
-    public async Task CleanPage(int offset)
+    public async Task DeletePage(ObjectIdValue offset)
     {
-        if (offset < 0)
+        if (offset.IsNull())
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidPageOffset,
                 "Invalid page offset"
-            );
-
-        if (offset == Config.TableSpaceHeaderPage)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "Cannot write to tablespace header page"
             );
 
         BufferPage page = ReadPage(offset);
 
         using IDisposable writeLock = await page.WriterLockAsync();
 
-        byte[] pageBuffer = new byte[Config.PageSize];
+        storage.Delete(offset);
 
-        WritePageHeader(pageBuffer, 0, 0, 0, 0);
-
-        storage.Write(Config.PageSize * offset, pageBuffer);
-
-        page.Buffer = new Lazy<byte[]>(pageBuffer);
-        page.Dirty = true;
+        pages.TryRemove(offset, out _);
     }
 
     public void Flush()

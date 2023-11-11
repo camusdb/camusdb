@@ -37,7 +37,7 @@ public sealed class ObjectIdGenerator
 
     private static int machineHash;
 
-    private static DateTime epoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime epoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static int GetCurrentProcessId()
@@ -103,7 +103,7 @@ public sealed class ObjectIdGenerator
 
         int _a = timestamp;
         int _b = (machine << 8) | (((int)pid >> 8) & 0xff);
-        int _c = ((int)pid << 24) | increment;
+        int _c = ((int)pid << 24) | increment;        
 
         return new ObjectIdValue(a: _a, b: _b, c: _c);
     }    

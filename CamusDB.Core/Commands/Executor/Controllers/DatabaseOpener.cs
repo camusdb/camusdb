@@ -51,7 +51,7 @@ internal sealed class DatabaseOpener
 
             //if (!Directory.Exists(path))
             //    throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
-            
+
             StorageManager tablespaceStorage = new(dbHandler);
 
             databaseDescriptor = new(
@@ -63,13 +63,7 @@ internal sealed class DatabaseOpener
             await Task.WhenAll(new Task[]
             {
                 LoadDatabaseSchema(databaseDescriptor),
-                LoadDatabaseSystemSpace(databaseDescriptor),
-                LoadDatabaseTableSpace(databaseDescriptor)
-            });
-
-            await Task.WhenAll(new Task[]
-            {
-                databaseDescriptor.TableSpace.Initialize()
+                LoadDatabaseSystemSpace(databaseDescriptor),                
             });
 
             Console.WriteLine("Database {0} opened", name);
@@ -88,7 +82,7 @@ internal sealed class DatabaseOpener
     }
 
     private static Task LoadDatabaseSchema(DatabaseDescriptor database)
-    {        
+    {
         byte[]? data = database.DbHandler.Get(Config.SchemaKey); //SchemaSpace!.GetDataFromPage(Config.SchemaHeaderPage);
 
         if (data is not null && data.Length > 0)
@@ -113,23 +107,5 @@ internal sealed class DatabaseOpener
         Console.WriteLine("System tablespaces read. Found {0} objects", database.SystemSchema.Objects.Count);
 
         return Task.CompletedTask;
-    }
-
-    private static async Task LoadDatabaseTableSpace(DatabaseDescriptor databaseDescriptor)
-    {
-        BufferPoolHandler tablespace = databaseDescriptor.TableSpace;
-
-        bool initialized = await tablespace.IsInitialized(Config.TableSpaceHeaderPage);
-
-        if (initialized) // tablespace is initialized?
-            return;
-
-        // write tablespace header
-        BufferPage page = databaseDescriptor.TableSpace.ReadPage(Config.TableSpaceHeaderPage);
-
-        tablespace.WriteTableSpaceHeader(page.Buffer.Value);
-        tablespace.FlushPage(page); // @todo make this atomic
-
-        Console.WriteLine("Data tablespaces initialized");
-    }
+    }    
 }

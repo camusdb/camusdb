@@ -12,6 +12,7 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -45,13 +46,13 @@ internal sealed class TableCreator
 
             string tableName = tableSchema.Name!;            
 
-            int pageOffset = await tablespace.GetNextFreeOffset();
+            ObjectIdValue pageOffset = tablespace.GetNextFreeOffset();
 
             DatabaseObject databaseObject = new()
             {
                 Type = DatabaseObjectType.Table,
                 Name = tableName,
-                StartOffset = pageOffset,
+                StartOffset = pageOffset.ToString(),
                 Indexes = new()
             };
 
@@ -59,26 +60,26 @@ internal sealed class TableCreator
             {
                 if (column.Primary)
                 {
-                    int indexPageOffset = await tablespace.GetNextFreeOffset();
+                    ObjectIdValue indexPageOffset = tablespace.GetNextFreeOffset();
 
                     Console.WriteLine("Primary key for {0} added to system, staring at {1}", tableName, indexPageOffset);
 
                     databaseObject.Indexes.Add(
                         CamusDBConfig.PrimaryKeyInternalName,
-                        new DatabaseIndexObject(column.Name, IndexType.Unique, indexPageOffset)
+                        new DatabaseIndexObject(column.Name, IndexType.Unique, indexPageOffset.ToString())
                     );
                     continue;
                 }
 
                 if (column.Index != IndexType.None)
                 {
-                    int indexPageOffset = await tablespace.GetNextFreeOffset();
+                    ObjectIdValue indexPageOffset = tablespace.GetNextFreeOffset();
 
                     Console.WriteLine("Index {0}/{1} key for {2} added to system, staring at {3}", column.Name, column.Index, tableName, indexPageOffset);
 
                     databaseObject.Indexes.Add(
                         column.Name,
-                        new DatabaseIndexObject(column.Name, column.Index, indexPageOffset)
+                        new DatabaseIndexObject(column.Name, column.Index, indexPageOffset.ToString())
                     );
                     continue;
                 }

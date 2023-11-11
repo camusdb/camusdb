@@ -29,7 +29,7 @@ public sealed class DeleteByIdFluxState
 
     public Dictionary<string, ColumnValue> ColumnValues { get; set; } = new();
 
-    public BTreeTuple? RowTuple { get; set; } = new(-1, -1);
+    public BTreeTuple? RowTuple { get; set; } = new(new(), new());
 
     public DeleteByIdFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteByIdTicket ticket, DeleteByIdFluxIndexState indexes)
     {

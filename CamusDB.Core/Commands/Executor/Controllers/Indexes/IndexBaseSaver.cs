@@ -21,7 +21,7 @@ internal abstract class IndexBaseSaver
     {
         return columnValue.Type switch
         {
-            ColumnType.Id => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger32 * 3,
+            ColumnType.Id => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeObjectId,
             ColumnType.Integer => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger32,
             ColumnType.String => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger32 + columnValue.Value.Length,
             _ => throw new Exception("Can't use this type as index"),
@@ -37,9 +37,9 @@ internal abstract class IndexBaseSaver
             BTreeEntry<ColumnValue, BTreeTuple?> entry = node.children[i];
 
             if (entry is null)
-                length += 14; // type(2 byte) + tuple(4 byte + 4 byte) + nextPage(4 byte)
+                length += 2 + 12 * 3; // type(2 byte) + tuple(12 byte + 12 byte) + nextPage(12 byte)
             else
-                length += 12 + GetKeySize(entry.Key);
+                length += 12 * 3 + GetKeySize(entry.Key);
         }
 
         return length;
@@ -54,9 +54,9 @@ internal abstract class IndexBaseSaver
             BTreeMultiEntry<ColumnValue> entry = node.children[i];
 
             if (entry is null)
-                length += 10; // type (2 byte) + 4 byte + 4 byte
+                length += 2 + 36 + 12; // type (2 byte) + 12 byte + 12 byte
             else
-                length += 12 + GetKeySize(entry.Key);
+                length += 36 + GetKeySize(entry.Key);
         }
 
         return length;
@@ -91,13 +91,13 @@ internal abstract class IndexBaseSaver
     {
         if (rowTuple is not null)
         {
-            Serializator.WriteInt32(nodeBuffer, rowTuple.SlotOne, ref pointer);
-            Serializator.WriteInt32(nodeBuffer, rowTuple.SlotTwo, ref pointer);
+            Serializator.WriteObjectId(nodeBuffer, rowTuple.SlotOne, ref pointer);
+            Serializator.WriteObjectId(nodeBuffer, rowTuple.SlotTwo, ref pointer);
         }
         else
         {
-            Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
-            Serializator.WriteInt32(nodeBuffer, 0, ref pointer);
+            Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
+            Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
         }
     }
 }

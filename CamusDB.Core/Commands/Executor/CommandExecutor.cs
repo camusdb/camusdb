@@ -122,7 +122,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         await rowInserter.InsertWithState(machine, state);
     }
 
-    public async Task DeleteById(DeleteByIdTicket ticket)
+    public async Task<int> DeleteById(DeleteByIdTicket ticket)
     {
         //validator.Validate(ticket);
 
@@ -130,7 +130,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
-        await rowDeleter.DeleteById(database, table, ticket);
+        return await rowDeleter.DeleteById(database, table, ticket);
     }
 
     public async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> Query(QueryTicket ticket)
