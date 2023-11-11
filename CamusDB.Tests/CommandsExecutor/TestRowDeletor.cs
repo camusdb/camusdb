@@ -8,9 +8,11 @@
 
 using CamusDB.Core;
 using NUnit.Framework;
-using CamusDB.Core.Catalogs;
+
 using System.Threading.Tasks;
 using System.Collections.Generic;
+
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;

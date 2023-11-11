@@ -8,7 +8,7 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public sealed class CloseDatabaseTicket
+public readonly struct CloseDatabaseTicket
 {
     public string DatabaseName { get; }
 

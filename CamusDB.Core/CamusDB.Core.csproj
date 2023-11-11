@@ -30,17 +30,11 @@
     <Folder Include="Flux\" />
     <Folder Include="BufferPool\Controllers\" />
     <Folder Include="Flux\Models\" />
-    <Folder Include="Commands\Executor\" />
     <Folder Include="Commands\Executor\Controllers\" />
-    <Folder Include="Commands\Executor\Models\" />
     <Folder Include="Commands\Validator\" />
     <Folder Include="Commands\Validator\Validators\" />
     <Folder Include="Storage\" />
     <Folder Include="Storage\Adapters\" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="../CamusDB.Generators/CamusDB.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
   <ItemGroup>

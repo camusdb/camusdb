@@ -138,7 +138,7 @@ public sealed class FluxMachine<TSteps, TState> where TSteps : Enum
     private async Task RunAbortHandlers()
     {
         if (abortHandler != null)
-            abortHandler(state);
+            _ = abortHandler(state);
 
         if (abortAsyncHandler != null)
             await abortAsyncHandler(state);

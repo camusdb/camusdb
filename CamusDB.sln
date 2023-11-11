@@ -1,15 +1,13 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 16
-VisualStudioVersion = 25.0.1700.0
+# Visual Studio Version 17
+VisualStudioVersion = 17.7.34031.279
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB", "CamusDB\CamusDB.csproj", "{70EA73AD-810C-4489-92B5-6E78FAFB906B}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CamusDB", "CamusDB\CamusDB.csproj", "{70EA73AD-810C-4489-92B5-6E78FAFB906B}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB.Core", "CamusDB.Core\CamusDB.Core.csproj", "{E52147E7-E09A-4599-A563-0764D7F0ADF0}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CamusDB.Core", "CamusDB.Core\CamusDB.Core.csproj", "{E52147E7-E09A-4599-A563-0764D7F0ADF0}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB.Tests", "CamusDB.Tests\CamusDB.Tests.csproj", "{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB.Generators", "CamusDB.Generators\CamusDB.Generators.csproj", "{CA4DE866-1B2A-4BC6-A0EB-5B2CFC3304DE}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CamusDB.Tests", "CamusDB.Tests\CamusDB.Tests.csproj", "{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -29,10 +27,6 @@ Global
 		{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}.Release|Any CPU.Build.0 = Release|Any CPU
-		{CA4DE866-1B2A-4BC6-A0EB-5B2CFC3304DE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{CA4DE866-1B2A-4BC6-A0EB-5B2CFC3304DE}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{CA4DE866-1B2A-4BC6-A0EB-5B2CFC3304DE}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{CA4DE866-1B2A-4BC6-A0EB-5B2CFC3304DE}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

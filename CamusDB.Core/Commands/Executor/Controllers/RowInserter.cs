@@ -55,7 +55,7 @@ internal sealed class RowInserter
             if (!hasColumn)
                 throw new CamusDBException(
                     CamusDBErrorCodes.UnknownColumn,
-                    "Unknown column '" + columnValue.Key + "' in column list"
+                    $"Unknown column '{columnValue.Key}' in column list"
                 );
         }
     }
