@@ -358,7 +358,7 @@ public sealed class BufferPoolHandler : IDisposable
             await WriteDataToPageBatch(pagesToWrite, nextPage, sequence, data, startOffset + length);
     }
 
-    public async Task CleanPage(ObjectIdValue offset)
+    public async Task DeletePage(ObjectIdValue offset)
     {
         if (offset.IsNull())
             throw new CamusDBException(
@@ -370,14 +370,9 @@ public sealed class BufferPoolHandler : IDisposable
 
         using IDisposable writeLock = await page.WriterLockAsync();
 
-        byte[] pageBuffer = new byte[Config.PageSize];
+        storage.Delete(offset);
 
-        WritePageHeader(pageBuffer, 0, 0, new(0, 0, 0), 0);
-
-        storage.Write(offset, pageBuffer);
-
-        page.Buffer = new Lazy<byte[]>(pageBuffer);
-        page.Dirty = true;
+        pages.TryRemove(offset, out _);
     }
 
     public void Flush()

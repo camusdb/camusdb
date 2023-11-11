@@ -140,9 +140,11 @@ internal sealed class RowInserter
         return Task.FromResult(FluxAction.Continue);
     }
 
-    /**
-     * Unique keys after updated before inserting the actual row
-     */
+    /// <summary>
+    /// Unique keys after updated before inserting the actual row
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private async Task<FluxAction> UpdateUniqueKeysStep(InsertFluxState state)
     {
         UpdateUniqueIndexTicket ticket = new(

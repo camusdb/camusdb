@@ -26,13 +26,13 @@ internal sealed class RowDeleter
     private readonly RowDeserializer rowDeserializer = new();
 
     /// <summary>
-    /// Schedules a new insert operation
+    /// Schedules a new delete operation by the row id
     /// </summary>
     /// <param name="database"></param>
     /// <param name="table"></param>
     /// <param name="ticket"></param>
     /// <returns></returns>
-    public async Task DeleteById(DatabaseDescriptor database, TableDescriptor table, DeleteByIdTicket ticket)
+    public async Task<int> DeleteById(DatabaseDescriptor database, TableDescriptor table, DeleteByIdTicket ticket)
     {
         DeleteByIdFluxState state = new(
             database: database,
@@ -43,7 +43,7 @@ internal sealed class RowDeleter
 
         FluxMachine<DeleteByIdFluxSteps, DeleteByIdFluxState> machine = new(state);
 
-        await DeleteByIdInternal(machine, state);
+        return await DeleteByIdInternal(machine, state);
     }
 
     private static ColumnValue? GetColumnValue(Dictionary<string, ColumnValue> columnValues, string name)
@@ -242,7 +242,7 @@ internal sealed class RowDeleter
             // @todo persist index?
         }
 
-        await tablespace.CleanPage(state.RowTuple.SlotOne);
+        await tablespace.DeletePage(state.RowTuple.SlotOne);
 
         return FluxAction.Continue;
     }

@@ -18,6 +18,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using System.Linq;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -140,7 +141,16 @@ public class TestRowDeletor
             id: objectsId[0]
         );
 
-        await executor.DeleteById(ticket);
+        Assert.AreEqual(1, await executor.DeleteById(ticket));
+
+        QueryByIdTicket queryByIdTicket = new(
+            database: dbname,
+            name: "robots",
+            id: objectsId[0]
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
+        Assert.IsEmpty(result);
     }
 
     [Test]
@@ -155,7 +165,7 @@ public class TestRowDeletor
             id: "---"
         );
 
-        await executor.DeleteById(ticket);
+        Assert.AreEqual(0, await executor.DeleteById(ticket));
     }
 
     [Test]
@@ -172,7 +182,7 @@ public class TestRowDeletor
                 id: objectId
             );
 
-            await executor.DeleteById(ticket);
+            Assert.AreEqual(1, await executor.DeleteById(ticket));
         }        
     }
 }

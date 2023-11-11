@@ -40,7 +40,7 @@ public sealed class StorageManager
         //tablespace.Item2.WriteArray<byte>(offset - tablespace.Item1, buffer, 0, length);
 
         dbHandler.Put(offset.ToBytes(), buffer);
-    }    
+    }
 
     internal void WriteBatch(List<PageToWrite> pagesToWrite)
     {
@@ -50,6 +50,11 @@ public sealed class StorageManager
             batch.Put(page.Offset.ToBytes(), page.Buffer);
 
         dbHandler.Write(batch);
+    }
+
+    internal void Delete(ObjectIdValue offset)
+    {
+        dbHandler.Remove(offset.ToBytes());
     }
 
     internal void Dispose()
