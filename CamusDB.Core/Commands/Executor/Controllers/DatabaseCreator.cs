@@ -6,7 +6,7 @@
  * file that was distributed with this source code.
  */
 
-using Config = CamusDB.Core.CamusDBConfig;
+using CamusConfig = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -17,7 +17,7 @@ internal sealed class DatabaseCreator
     {
         string name = ticket.DatabaseName;
         
-        string dbPath = Path.Combine(Config.DataDirectory, name);
+        string dbPath = Path.Combine(CamusConfig.DataDirectory, name);
 
         if (Directory.Exists(dbPath))
             throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Database already exists");

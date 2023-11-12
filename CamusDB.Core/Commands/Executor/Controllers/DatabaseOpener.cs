@@ -7,13 +7,13 @@
  */
 
 using RocksDbSharp;
+using Nito.AsyncEx;
 using CamusDB.Core.Storage;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.BufferPool.Models;
-using Config = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -28,62 +28,50 @@ internal sealed class DatabaseOpener
 
     public async ValueTask<DatabaseDescriptor> Open(CommandExecutor executor, string name, bool recoveryMode = false)
     {
-        if (databaseDescriptors.Descriptors.TryGetValue(name, out DatabaseDescriptor? databaseDescriptor))
-            return databaseDescriptor;
+        AsyncLazy<DatabaseDescriptor> openDatabaseLazy = databaseDescriptors.Descriptors.GetOrAdd(
+                                                            name,
+                                                            (x) => new AsyncLazy<DatabaseDescriptor>(() => LoadDatabase(name))
+                                                         );
+        return await openDatabaseLazy;
+    }
+  
+    private async Task<DatabaseDescriptor> LoadDatabase(string name)
+    {                    
+        string path = Path.Combine(CamusConfig.DataDirectory, name);
 
-        try
+        DbOptions options = new DbOptions()
+                                .SetCreateIfMissing(true)
+                                .SetWalDir(path) // using WAL
+                                .SetWalRecoveryMode(Recovery.AbsoluteConsistency) // setting recovery mode to Absolute Consistency
+                                .SetAllowConcurrentMemtableWrite(true);
+
+        RocksDb dbHandler = RocksDb.Open(options, path);
+
+        //if (!Directory.Exists(path))
+        //    throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
+
+        StorageManager tablespaceStorage = new(dbHandler);
+
+        DatabaseDescriptor databaseDescriptor = new(
+            name: name,
+            dbHandler,
+            tableSpace: new BufferPoolHandler(tablespaceStorage)
+        );
+
+        await Task.WhenAll(new Task[]
         {
-            // This semamphore prevents multiple threads to open the same database
-            await databaseDescriptors.Semaphore.WaitAsync();
+            LoadDatabaseSchema(databaseDescriptor),
+            LoadDatabaseSystemSpace(databaseDescriptor),
+        });
 
-            if (databaseDescriptors.Descriptors.TryGetValue(name, out databaseDescriptor))
-                return databaseDescriptor;
-
-            string path = Path.Combine(Config.DataDirectory, name);
-
-            DbOptions options = new DbOptions()
-                                    .SetCreateIfMissing(true)
-                                    .SetWalDir(path) // using WAL
-                                    .SetWalRecoveryMode(Recovery.AbsoluteConsistency) // setting recovery mode to Absolute Consistency
-                                    .SetAllowConcurrentMemtableWrite(true);
-
-            RocksDb dbHandler = RocksDb.Open(options, path);
-
-            //if (!Directory.Exists(path))
-            //    throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
-
-            StorageManager tablespaceStorage = new(dbHandler);
-
-            databaseDescriptor = new(
-                name: name,
-                dbHandler,
-                tableSpace: new BufferPoolHandler(tablespaceStorage)
-            );
-
-            await Task.WhenAll(new Task[]
-            {
-                LoadDatabaseSchema(databaseDescriptor),
-                LoadDatabaseSystemSpace(databaseDescriptor),                
-            });
-
-            Console.WriteLine("Database {0} opened", name);
-
-            // Only the data table space has a concurrent dirty page flusher
-            //_ = Task.Factory.StartNew(databaseDescriptor.TableSpaceFlusher.PeriodicallyFlush);                        
-
-            databaseDescriptors.Descriptors.Add(name, databaseDescriptor);
-        }
-        finally
-        {
-            databaseDescriptors.Semaphore.Release();
-        }
+        Console.WriteLine("Database {0} opened", name);
 
         return databaseDescriptor;
     }
 
     private static Task LoadDatabaseSchema(DatabaseDescriptor database)
     {
-        byte[]? data = database.DbHandler.Get(Config.SchemaKey); //SchemaSpace!.GetDataFromPage(Config.SchemaHeaderPage);
+        byte[]? data = database.DbHandler.Get(CamusConfig.SchemaKey); //SchemaSpace!.GetDataFromPage(Config.SchemaHeaderPage);
 
         if (data is not null && data.Length > 0)
             database.Schema.Tables = Serializator.Unserialize<Dictionary<string, TableSchema>>(data);
@@ -97,7 +85,7 @@ internal sealed class DatabaseOpener
 
     private static Task LoadDatabaseSystemSpace(DatabaseDescriptor database)
     {
-        byte[]? data = database.DbHandler.Get(Config.SystemKey);
+        byte[]? data = database.DbHandler.Get(CamusConfig.SystemKey);
 
         if (data is not null && data.Length > 0)
             database.SystemSchema.Objects = Serializator.Unserialize<Dictionary<string, DatabaseObject>>(data);

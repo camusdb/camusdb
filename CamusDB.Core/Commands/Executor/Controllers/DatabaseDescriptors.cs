@@ -6,13 +6,13 @@
  * file that was distributed with this source code.
  */
 
+using Nito.AsyncEx;
+using System.Collections.Concurrent;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal class DatabaseDescriptors
-{
-    public readonly SemaphoreSlim Semaphore = new(1, 1);
-
-    public readonly Dictionary<string, DatabaseDescriptor> Descriptors = new();
+{    
+    public readonly ConcurrentDictionary<string, AsyncLazy<DatabaseDescriptor>> Descriptors = new();
 }

@@ -6,17 +6,19 @@
  * file that was distributed with this source code.
  */
 
+using RocksDbSharp;
+using NUnit.Framework;
+
 using System;
 using System.Text;
 using System.Threading.Tasks;
-using RocksDbSharp;
-using NUnit.Framework;
+
 using CamusDB.Core.Storage;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.ObjectIds;
 
-using Config = CamusDB.Core.CamusDBConfig;
+using CamusConfig = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
 
 namespace CamusDB.Tests.BufferPool;
@@ -60,7 +62,7 @@ public class TestBufferPool
 
         page = bufferPool.ReadPage(offset);
 
-        Assert.AreEqual(page.Buffer.Value.Length, Config.PageSize);
+        Assert.AreEqual(page.Buffer.Value.Length, CamusConfig.PageSize);
         Assert.AreEqual(page.Offset, offset);
 
         Assert.AreEqual(bufferPool.NumberPages, 2);
@@ -80,14 +82,14 @@ public class TestBufferPool
 
         BufferPage page = bufferPool.ReadPage(offset);
 
-        Assert.AreEqual(page.Buffer.Value.Length, Config.PageSize);
+        Assert.AreEqual(page.Buffer.Value.Length, CamusConfig.PageSize);
         Assert.AreEqual(page.Offset, offset);
 
         offset = ObjectIdGenerator.Generate();
 
         page = bufferPool.ReadPage(offset);
 
-        Assert.AreEqual(page.Buffer.Value.Length, Config.PageSize);
+        Assert.AreEqual(page.Buffer.Value.Length, CamusConfig.PageSize);
         Assert.AreEqual(page.Offset, offset);
 
         Assert.AreEqual(bufferPool.NumberPages, 2);
@@ -111,7 +113,7 @@ public class TestBufferPool
 
         BufferPage page = bufferPool.ReadPage(offset);
 
-        Assert.AreEqual(page.Buffer.Value.Length, Config.PageSize);
+        Assert.AreEqual(page.Buffer.Value.Length, CamusConfig.PageSize);
         Assert.AreEqual(page.Offset, offset);
 
         Assert.AreEqual(bufferPool.NumberPages, 1); // page #1
@@ -202,13 +204,13 @@ public class TestBufferPool
 
         using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
-        byte[] data = Encoding.UTF8.GetBytes(new string('s', Config.PageSize));
+        byte[] data = Encoding.UTF8.GetBytes(new string('s', CamusConfig.PageSize));
 
         ObjectIdValue pageOffset = await bufferPool.WriteDataToFreePage(data);
 
         byte[] readData = await bufferPool.GetDataFromPage(pageOffset);
 
-        Assert.AreEqual(Config.PageSize, readData.Length);
+        Assert.AreEqual(CamusConfig.PageSize, readData.Length);
         Assert.AreEqual(data.Length, readData.Length);
 
         for (int i = 0; i < data.Length; i++)
@@ -225,13 +227,13 @@ public class TestBufferPool
 
         using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
-        byte[] data = Encoding.UTF8.GetBytes(new string('s', Config.PageSize * 5));
+        byte[] data = Encoding.UTF8.GetBytes(new string('s', CamusConfig.PageSize * 5));
 
         ObjectIdValue pageOffset = await bufferPool.WriteDataToFreePage(data);
 
         byte[] readData = await bufferPool.GetDataFromPage(pageOffset);
 
-        Assert.AreEqual(readData.Length, Config.PageSize * 5);
+        Assert.AreEqual(readData.Length, CamusConfig.PageSize * 5);
         Assert.AreEqual(data.Length, readData.Length);
 
         for (int i = 0; i < data.Length; i++)

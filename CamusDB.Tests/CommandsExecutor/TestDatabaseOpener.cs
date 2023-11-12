@@ -9,7 +9,6 @@
 using NUnit.Framework;
 using System.Threading.Tasks;
 
-using CamusDB.Tests.Utils;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.CommandsValidator;

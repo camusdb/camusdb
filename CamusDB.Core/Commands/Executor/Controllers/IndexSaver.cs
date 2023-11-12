@@ -64,4 +64,3 @@ internal sealed class IndexSaver
         await indexMultiSaver.Remove(tablespace, index, key);
     }
 }
-

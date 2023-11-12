@@ -12,9 +12,9 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.BufferPool;
 
-namespace CamusDB.Core.CommandsExecutor.Controllers.Insert;
+namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
-internal sealed class InsertUniqueKeySaver : InsertKeyBase
+internal sealed class DMLUniqueKeySaver : DMLKeyBase
 {
     private readonly IndexSaver indexSaver = new();
 

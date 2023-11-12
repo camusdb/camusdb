@@ -8,8 +8,8 @@
 
 using NUnit.Framework;
 using CamusDB.Core.Util.Trees;
-using System.Collections.Generic;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 
 namespace CamusDB.Tests.Indexes;
 

@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.CommandsExecutor.Models;
+using Nito.AsyncEx;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -19,33 +20,25 @@ internal sealed class DatabaseCloser : IAsyncDisposable
         this.databaseDescriptors = databaseDescriptors;
     }
 
-    public async ValueTask Close(string name)
+    public async Task Close(string name)
     {
-        if (!databaseDescriptors.Descriptors.TryGetValue(name, out DatabaseDescriptor? databaseDescriptor))
+        if (!databaseDescriptors.Descriptors.TryGetValue(name, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
             return;
 
-        try
-        {
-            await databaseDescriptors.Semaphore.WaitAsync();
+        DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
 
-            if (databaseDescriptor.TableSpace is not null)
-                databaseDescriptor.TableSpace.Dispose();
+        databaseDescriptor.TableSpace?.Dispose();
 
-            databaseDescriptor.DbHandler.Dispose();
+        databaseDescriptor.DbHandler.Dispose();
 
-            databaseDescriptors.Descriptors.Remove(name);
+        databaseDescriptors.Descriptors.TryRemove(name, out _);
 
-            Console.WriteLine("Database {0} closed", name);
-        }
-        finally
-        {
-            databaseDescriptors.Semaphore.Release();
-        }
+        Console.WriteLine("Database {0} closed", name);
     }
 
     public async ValueTask DisposeAsync()
     {
-        foreach (KeyValuePair<string, DatabaseDescriptor> keyValuePair in databaseDescriptors.Descriptors)
+        foreach (KeyValuePair<string, AsyncLazy<DatabaseDescriptor>> keyValuePair in databaseDescriptors.Descriptors)
             await Close(keyValuePair.Key);
     }
 }

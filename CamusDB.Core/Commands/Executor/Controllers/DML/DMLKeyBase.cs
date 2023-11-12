@@ -10,9 +10,9 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-namespace CamusDB.Core.CommandsExecutor.Controllers.Insert;
+namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
-internal abstract class InsertKeyBase
+internal abstract class DMLKeyBase
 {
     protected static ColumnValue? GetColumnValue(TableDescriptor table, InsertTicket ticket, string name)
     {

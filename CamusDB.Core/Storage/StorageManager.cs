@@ -9,7 +9,7 @@
 using RocksDbSharp;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.ObjectIds;
-using Config = CamusDB.Core.CamusDBConfig;
+using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.Storage;
 
@@ -31,7 +31,7 @@ public sealed class StorageManager
         if (buffer is not null)
             return buffer;
 
-        return new byte[Config.PageSize];
+        return new byte[CamusConfig.PageSize];
     }
 
     public void Write(ObjectIdValue offset, byte[] buffer)

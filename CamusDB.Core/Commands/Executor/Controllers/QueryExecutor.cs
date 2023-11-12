@@ -27,11 +27,55 @@ internal sealed class QueryExecutor
             return QueryUsingTableIndex(database, table, ticket);
 
         return QueryUsingIndex(database, table, ticket);
+    }    
+
+    public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
+    {
+        BufferPoolHandler tablespace = database.TableSpace!;
+
+        using IDisposable disposable = await table.ReaderWriterLock.ReaderLockAsync();
+
+        if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Table doesn't have a primary key index"
+            );
+        }
+
+        if (index.UniqueRows is null)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Table doesn't have a primary key index"
+            );
+        }
+
+        ColumnValue columnId = new(ColumnType.Id, ticket.Id);        
+
+        BTreeTuple? pageOffset = await index.UniqueRows.Get(columnId);
+
+        if (pageOffset is null)
+        {
+            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+            yield break;
+        }
+
+        byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo);
+        if (data.Length == 0)
+        {
+            Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
+            yield break;
+        }
+
+        Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
+
+        yield return rowDeserializer.Deserialize(table.Schema!, data);
     }
 
     private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
-        BufferPoolHandler tablespace = database.TableSpace!;        
+        BufferPoolHandler tablespace = database.TableSpace!;
 
         await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse())
         {
@@ -119,49 +163,5 @@ internal sealed class QueryExecutor
             return QueryUsingUniqueIndex(database, table, index.UniqueRows!);
 
         return QueryUsingMultiIndex(database, table, index.MultiRows!);
-    }
-
-    public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
-    {
-        BufferPoolHandler tablespace = database.TableSpace!;
-
-        using IDisposable disposable = await table.ReaderWriterLock.ReaderLockAsync();
-
-        if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "Table doesn't have a primary key index"
-            );
-        }
-
-        if (index.UniqueRows is null)
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "Table doesn't have a primary key index"
-            );
-        }
-
-        ColumnValue columnId = new(ColumnType.Id, ticket.Id);        
-
-        BTreeTuple? pageOffset = await index.UniqueRows.Get(columnId);
-
-        if (pageOffset is null)
-        {
-            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
-            yield break;
-        }
-
-        byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo);
-        if (data.Length == 0)
-        {
-            Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
-            yield break;
-        }
-
-        Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
-
-        yield return rowDeserializer.Deserialize(table.Schema!, data);
     }
 }

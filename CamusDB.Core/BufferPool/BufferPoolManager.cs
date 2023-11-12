@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Threading.Channels;
 using System.Collections.Concurrent;
 
 using CamusDB.Core.Storage;
@@ -16,7 +15,7 @@ using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
-using Config = CamusDB.Core.CamusDBConfig;
+using CamusConfig = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
 
 namespace CamusDB.Core.BufferPool;
@@ -178,7 +177,7 @@ public sealed class BufferPoolHandler : IDisposable
     public static int WritePageHeader(byte[] pageBuffer, uint checksum, uint lastSequence, ObjectIdValue nextPage, int length)
     {
         int pointer = 0;
-        Serializator.WriteInt16(pageBuffer, Config.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)        
+        Serializator.WriteInt16(pageBuffer, CamusConfig.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)        
         Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                 // checksum (4 bytes unsigned integer)        
         Serializator.WriteUInt32(pageBuffer, lastSequence, ref pointer);             // lastWroteSequence (4 bytes unsigned integer)        
         Serializator.WriteObjectId(pageBuffer, nextPage, ref pointer);               // next page (12 bytes objectid)        
@@ -225,10 +224,10 @@ public sealed class BufferPoolHandler : IDisposable
         ObjectIdValue nextPage = new(0, 0, 0);
 
         // Calculate remaining data length less the page's header
-        if (((data.Length - startOffset) + BConfig.DataOffset) < Config.PageSize)
+        if (((data.Length - startOffset) + BConfig.DataOffset) < CamusConfig.PageSize)
             length = data.Length - startOffset;
         else
-            length = Config.PageSize - BConfig.DataOffset;
+            length = CamusConfig.PageSize - BConfig.DataOffset;
 
         int remaining = (data.Length - startOffset) - length;
 
@@ -242,7 +241,7 @@ public sealed class BufferPoolHandler : IDisposable
         uint checksum = XXHash.Compute(pageData, 0, length);
 
         // Create a new page buffer to replace the existing one
-        byte[] pageBuffer = new byte[Config.PageSize];
+        byte[] pageBuffer = new byte[CamusConfig.PageSize];
 
         int pointer = WritePageHeader(pageBuffer, checksum, sequence, nextPage, length);
 
@@ -309,10 +308,10 @@ public sealed class BufferPoolHandler : IDisposable
         ObjectIdValue nextPage = new(0, 0, 0);
 
         // Calculate remaining data length less the page's header
-        if (((data.Length - startOffset) + BConfig.DataOffset) < Config.PageSize)
+        if (((data.Length - startOffset) + BConfig.DataOffset) < CamusConfig.PageSize)
             length = data.Length - startOffset;
         else
-            length = Config.PageSize - BConfig.DataOffset;
+            length = CamusConfig.PageSize - BConfig.DataOffset;
 
         int remaining = (data.Length - startOffset) - length;
 
@@ -326,7 +325,7 @@ public sealed class BufferPoolHandler : IDisposable
         uint checksum = XXHash.Compute(pageData, 0, length);
 
         // Create a new page buffer to replace the existing one
-        byte[] pageBuffer = new byte[Config.PageSize];
+        byte[] pageBuffer = new byte[CamusConfig.PageSize];
 
         int pointer = WritePageHeader(pageBuffer, checksum, sequence, nextPage, length);
 

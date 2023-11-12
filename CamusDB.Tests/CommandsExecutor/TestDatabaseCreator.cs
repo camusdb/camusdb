@@ -15,7 +15,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-using Config = CamusDB.Core.CamusDBConfig;
+using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -43,7 +43,7 @@ internal class TestDatabaseCreator
 
         await executor.CreateDatabase(databaseTicket);
 
-        string path = Path.Combine(Config.DataDirectory, dbname);
+        string path = Path.Combine(CamusConfig.DataDirectory, dbname);
 
         Assert.IsTrue(Directory.Exists(path));
     }
