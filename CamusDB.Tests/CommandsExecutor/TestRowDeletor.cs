@@ -211,7 +211,7 @@ public class TestRowDeletor
         QueryTicket queryTicket = new(
            database: dbname,
            name: "robots"
-       );
+        );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsEmpty(result);

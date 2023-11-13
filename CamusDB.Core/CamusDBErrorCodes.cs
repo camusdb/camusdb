@@ -30,8 +30,5 @@ public static class CamusDBErrorCodes
     public const string UnknownKey = "CADB0205";
 
     public const string DuplicateUniqueKeyValue = "CADB0300";
-
-    public const string InvalidJournalData = "CADB0700";
-    public const string JournalNotInitialized = "CADB0701";
-    public const string JournalForcedFailure = "CADB0799";
+    public const string NotNullViolation = "CADB0301";
 }

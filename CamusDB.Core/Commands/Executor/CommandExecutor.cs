@@ -127,7 +127,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     public async Task<int> UpdateById(UpdateByIdTicket ticket)
     {
-        //validator.Validate(ticket);
+        validator.Validate(ticket);
 
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 

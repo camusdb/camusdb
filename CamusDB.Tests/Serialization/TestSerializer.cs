@@ -39,12 +39,12 @@ public class TestSerializer
         for (int i = 0; i < 22; i++)
         {
             int pointer = 0;
-            Serializator.WriteType(buffer, i, ref pointer);            
+            Serializator.WriteType(buffer, i, ref pointer);
             Assert.AreEqual(pointer, SerializatorTypeSizes.TypeInteger8);
 
             pointer = 0;
             int type = Serializator.ReadType(buffer, ref pointer);
-            Assert.AreEqual(i, type);            
+            Assert.AreEqual(i, type);
             Assert.AreEqual(pointer, SerializatorTypeSizes.TypeInteger8);
         }
     }
@@ -180,14 +180,14 @@ public class TestSerializer
     [TestCase("hëllœ")]
     public void TestSerializeString(string writeValue)
     {
-        byte[] buffer = Encoding.UTF8.GetBytes(writeValue);
+        byte[] buffer = new byte[Encoding.Unicode.GetBytes(writeValue).Length + 4];
 
         int pointer = 0;
         Serializator.WriteString(buffer, writeValue, ref pointer);
         Assert.AreEqual(pointer, buffer.Length);
 
         pointer = 0;
-        string readValue = Serializator.ReadString(buffer, buffer.Length, ref pointer);
+        string readValue = Serializator.ReadString(buffer, ref pointer);
         Assert.AreEqual(pointer, buffer.Length);
         Assert.AreEqual(readValue, writeValue);
     }
@@ -195,15 +195,16 @@ public class TestSerializer
     [Test]
     public void TestSerializeLargeString()
     {
-        string writeValue = new string('f', 4096);
-        byte[] buffer = Encoding.UTF8.GetBytes(writeValue);
+        string writeValue = new('f', 4096);
+        byte[] strBuffer = Encoding.Unicode.GetBytes(writeValue);
+        byte[] buffer = new byte[4 + strBuffer.Length];
 
         int pointer = 0;
         Serializator.WriteString(buffer, writeValue, ref pointer);
-        Assert.AreEqual(pointer, buffer.Length);
+        Assert.AreEqual(pointer, buffer.Length);        
 
         pointer = 0;
-        string readValue = Serializator.ReadString(buffer, buffer.Length, ref pointer);
+        string readValue = Serializator.ReadString(buffer, ref pointer);
         Assert.AreEqual(pointer, buffer.Length);
         Assert.AreEqual(readValue, writeValue);
     }

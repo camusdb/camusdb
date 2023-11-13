@@ -22,18 +22,18 @@ public sealed class Serializator
     public static byte[] Serialize(Dictionary<string, TableSchema> tableSchema)
     {
         string jsonSerialized = JsonSerializer.Serialize(tableSchema);
-        return Encoding.UTF8.GetBytes(jsonSerialized);
+        return Encoding.Unicode.GetBytes(jsonSerialized);
     }
 
     public static byte[] Serialize(Dictionary<string, DatabaseObject> databaseObjects)
     {
         string jsonSerialized = JsonSerializer.Serialize(databaseObjects);
-        return Encoding.UTF8.GetBytes(jsonSerialized);
+        return Encoding.Unicode.GetBytes(jsonSerialized);
     }
 
     public static T Unserialize<T>(byte[] buffer) where T : new()
     {
-        string str = Encoding.UTF8.GetString(buffer);
+        string str = Encoding.Unicode.GetString(buffer);
 
         T? deserialized = JsonSerializer.Deserialize<T>(str);
         if (deserialized is null)
@@ -174,7 +174,15 @@ public sealed class Serializator
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteString(byte[] buffer, string str, ref int pointer)
     {
-        byte[] bytes = Encoding.UTF8.GetBytes(str);
+        byte[] bytes = Encoding.Unicode.GetBytes(str);
+
+        int length = bytes.Length;
+        buffer[pointer + 0] = (byte)((length >> 0) & 0xff);
+        buffer[pointer + 1] = (byte)((length >> 8) & 0xff);
+        buffer[pointer + 2] = (byte)((length >> 16) & 0xff);
+        buffer[pointer + 3] = (byte)((length >> 24) & 0xff);
+        pointer += 4;
+
         Buffer.BlockCopy(bytes, 0, buffer, pointer, bytes.Length);
         pointer += bytes.Length;
     }
@@ -277,12 +285,14 @@ public sealed class Serializator
         return new ObjectIdValue(a, b, c);
     }
 
-    public static string ReadString(byte[] buffer, int length, ref int pointer)
+    public static string ReadString(byte[] buffer, ref int pointer)
     {
+        int length = ReadInt32(buffer, ref pointer);
+
         byte[] bytes = new byte[length];
         Buffer.BlockCopy(buffer, pointer, bytes, 0, length);
 
-        string str = Encoding.UTF8.GetString(bytes);
+        string str = Encoding.Unicode.GetString(bytes);
         pointer += length;
         return str;
     }

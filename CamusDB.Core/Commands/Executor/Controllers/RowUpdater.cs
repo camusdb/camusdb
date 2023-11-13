@@ -1,6 +1,13 @@
 ﻿
-using CamusDB.Core.BufferPool;
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System.Diagnostics;
+using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
@@ -8,7 +15,6 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Util.Trees;
-using System.Net.Sockets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -26,7 +32,7 @@ public sealed class RowUpdater
     /// <param name="table"></param>
     /// <param name="ticket"></param>
     /// <exception cref="CamusDBException"></exception>
-    private static void Validate(TableDescriptor table, UpdateTicket ticket) // @todo optimize this
+    private static void Validate(TableDescriptor table, UpdateByIdTicket ticket) // @todo optimize this
     {
         List<TableColumnSchema> columns = table.Schema.Columns!;
 
@@ -50,6 +56,23 @@ public sealed class RowUpdater
                     $"Unknown column '{columnValue.Key}' in column list"
                 );
         }
+
+        foreach (TableColumnSchema columnSchema in columns)
+        {
+            if (!columnSchema.NotNull)
+                continue;
+
+            if (!ticket.Values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
+                continue;
+
+            if (columnValue.Value is null)
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.NotNullViolation,
+                    $"Column '{columnSchema.Name}' cannot be null"
+                );
+            }
+        }
     }
 
     /// <summary>
@@ -61,6 +84,8 @@ public sealed class RowUpdater
     /// <returns></returns>
     public async Task<int> UpdateById(DatabaseDescriptor database, TableDescriptor table, UpdateByIdTicket ticket)
     {
+        Validate(table, ticket);
+
         UpdateByIdFluxState state = new(
             database: database,
             table: table,
@@ -277,7 +302,7 @@ public sealed class RowUpdater
         TableDescriptor table = state.Table;
         UpdateByIdTicket ticket = state.Ticket;
 
-        foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.ColumnValues)
+        foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)
             state.ColumnValues[keyValuePair.Key] = keyValuePair.Value;
 
         byte[] buffer = rowSerializer.Serialize(table, state.ColumnValues, state.RowTuple.SlotOne);

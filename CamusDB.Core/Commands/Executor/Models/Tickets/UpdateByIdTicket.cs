@@ -16,13 +16,13 @@ public readonly struct UpdateByIdTicket
 
     public string Id { get; }
 
-    public Dictionary<string, ColumnValue> ColumnValues { get; }
+    public Dictionary<string, ColumnValue> Values { get; }
 
     public UpdateByIdTicket(string database, string name, string id, Dictionary<string, ColumnValue> columnValues)
     {
         DatabaseName = database;
         TableName = name;
         Id = id;
-        ColumnValues = columnValues;
+        Values = columnValues;
     }
 }

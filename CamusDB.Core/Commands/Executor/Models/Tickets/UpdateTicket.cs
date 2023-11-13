@@ -6,8 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.CommandsExecutor.Models;
-
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct UpdateTicket

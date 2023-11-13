@@ -73,7 +73,7 @@ public sealed class FluxMachine<TSteps, TState> where TSteps : Enum
     }
 
     private async Task TryExecuteHandler(TSteps status)
-    {        
+    {
         if (IsAborted)
             return;
 
@@ -93,10 +93,9 @@ public sealed class FluxMachine<TSteps, TState> where TSteps : Enum
                 await RunAbortHandlers();
             }
         }
-        catch (CamusDBException e)
+        catch (CamusDBException)
         {
-            if (e.Code != CamusDBErrorCodes.JournalForcedFailure)
-                await RunAbortHandlers();
+            await RunAbortHandlers();
             throw;
         }
         catch (Exception)
@@ -127,10 +126,9 @@ public sealed class FluxMachine<TSteps, TState> where TSteps : Enum
                 await RunAbortHandlers();
             }
         }
-        catch (CamusDBException e)
+        catch (CamusDBException)
         {
-            if (e.Code != CamusDBErrorCodes.JournalForcedFailure)
-                await RunAbortHandlers();
+            await RunAbortHandlers();
             throw;
         }
         catch (Exception)

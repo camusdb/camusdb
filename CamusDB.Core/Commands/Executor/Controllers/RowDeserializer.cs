@@ -85,10 +85,9 @@ internal sealed class RowDeserializer
                     break;
 
                 case ColumnType.String:
-                    Serializator.ReadType(data, ref pointer);
-                    int length = Serializator.ReadInt32(data, ref pointer);
-                    //Console.WriteLine("Length={0}", length);
-                    columnValues.Add(column.Name, new(ColumnType.String, Serializator.ReadString(data, length, ref pointer)));
+                    Serializator.ReadType(data, ref pointer);                    
+                    string str = Serializator.ReadString(data, ref pointer);
+                    columnValues.Add(column.Name, new(ColumnType.String, str));
                     break;
 
                 case ColumnType.Bool:

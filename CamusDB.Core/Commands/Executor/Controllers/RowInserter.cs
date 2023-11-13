@@ -58,6 +58,28 @@ internal sealed class RowInserter
                     $"Unknown column '{columnValue.Key}' in column list"
                 );
         }
+
+        foreach (TableColumnSchema columnSchema in columns)
+        {
+            if (!columnSchema.NotNull)
+                continue;
+
+            if (!ticket.Values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.NotNullViolation,
+                    $"Column '{columnSchema.Name}' cannot be null"
+                );
+            }
+
+            if (columnValue.Value is null)
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.NotNullViolation,
+                    $"Column '{columnSchema.Name}' cannot be null"
+                );
+            }
+        }
     }
 
     /// <summary>

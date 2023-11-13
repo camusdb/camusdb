@@ -12,18 +12,25 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
+using System.Text;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
 internal abstract class IndexBaseSaver
 {
+    private static int GetStringLengthInBytes(string str)
+    {
+        byte[] bytes = Encoding.Unicode.GetBytes(str);
+        return bytes.Length;
+    }
+
     protected static int GetKeySize(ColumnValue columnValue)
     {
         return columnValue.Type switch
         {
             ColumnType.Id => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeObjectId,
             ColumnType.Integer64 => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger64,
-            ColumnType.String => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger32 + columnValue.Value.Length,
+            ColumnType.String => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger32 + GetStringLengthInBytes(columnValue.Value),
             _ => throw new Exception("Can't use this type as index"),
         };
     }
@@ -78,7 +85,6 @@ internal abstract class IndexBaseSaver
 
             case ColumnType.String:
                 Serializator.WriteInt16(nodeBuffer, (int)ColumnType.String, ref pointer);
-                Serializator.WriteInt32(nodeBuffer, columnValue.Value.Length, ref pointer);
                 Serializator.WriteString(nodeBuffer, columnValue.Value, ref pointer);
                 break;
 

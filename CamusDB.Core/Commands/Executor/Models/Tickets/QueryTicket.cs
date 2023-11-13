@@ -8,7 +8,7 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public sealed class QueryTicket
+public readonly struct QueryTicket
 {
     public string DatabaseName { get; }
 

@@ -36,4 +36,16 @@ public sealed class CommandValidator
         InsertValidator validator = new();
         validator.Validate(ticket);
     }
+
+    public void Validate(UpdateTicket ticket)
+    {
+        UpdateValidator validator = new();
+        validator.Validate(ticket);
+    }
+
+    public void Validate(UpdateByIdTicket ticket)
+    {
+        UpdateByIdValidator validator = new();
+        validator.Validate(ticket);
+    }
 }

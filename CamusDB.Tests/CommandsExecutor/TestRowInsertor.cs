@@ -88,7 +88,7 @@ internal sealed class TestRowInsertor
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
-        Assert.AreEqual("Type Integer cannot be assigned to id (Id)", e!.Message);
+        Assert.AreEqual("Type Integer64 cannot be assigned to id (Id)", e!.Message);
     }
 
     [Test]
