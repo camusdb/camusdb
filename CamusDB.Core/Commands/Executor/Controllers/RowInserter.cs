@@ -14,7 +14,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
-using CamusDB.Core.CommandsExecutor.Controllers.Insert;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -24,9 +24,9 @@ internal sealed class RowInserter
 
     private readonly RowSerializer rowSerializer = new();
 
-    private readonly InsertMultiKeySaver insertMultiKeySaver = new();
+    private readonly DMLMultiKeySaver insertMultiKeySaver = new();
 
-    private readonly InsertUniqueKeySaver insertUniqueKeySaver = new();
+    private readonly DMLUniqueKeySaver insertUniqueKeySaver = new();
 
     /// <summary>
     /// Validates that all columns and values in the insert statement are valid
@@ -36,7 +36,7 @@ internal sealed class RowInserter
     /// <exception cref="CamusDBException"></exception>
     private static void Validate(TableDescriptor table, InsertTicket ticket) // @todo optimize this
     {
-        List<TableColumnSchema> columns = table.Schema!.Columns!;
+        List<TableColumnSchema> columns = table.Schema.Columns!;
 
         foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.Values)
         {
@@ -181,7 +181,7 @@ internal sealed class RowInserter
     /// <returns></returns>
     private Task<FluxAction> InsertToPageStep(InsertFluxState state)
     {
-        byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket, state.RowTuple.SlotOne);
+        byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket.Values, state.RowTuple.SlotOne);
 
         // Insert data to the page offset
         state.ModifiedPages.Add(new InsertModifiedPage(state.RowTuple.SlotTwo, state.Sequence, rowBuffer));

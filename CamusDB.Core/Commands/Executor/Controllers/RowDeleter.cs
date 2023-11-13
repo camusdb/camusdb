@@ -80,7 +80,7 @@ internal sealed class RowDeleter
     /// <returns></returns>
     private async Task<FluxAction> LocateTupleToDelete(DeleteByIdFluxState state)
     {
-        BufferPoolHandler tablespace = state.Database.TableSpace!;
+        BufferPoolHandler tablespace = state.Database.TableSpace;
         TableDescriptor table = state.Table;
         DeleteByIdTicket ticket = state.Ticket;
 
@@ -141,7 +141,7 @@ internal sealed class RowDeleter
         List<InsertModifiedPage> modifiedPages
     )
     {
-        BufferPoolHandler tablespace = database.TableSpace!;
+        BufferPoolHandler tablespace = database.TableSpace;
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
         {
@@ -176,7 +176,7 @@ internal sealed class RowDeleter
 
     private async Task DeleteMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
-        BufferPoolHandler tablespace = database.TableSpace!;
+        BufferPoolHandler tablespace = database.TableSpace;
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
         {
@@ -249,7 +249,7 @@ internal sealed class RowDeleter
             return FluxAction.Abort;
         }
 
-        BufferPoolHandler tablespace = state.Database.TableSpace!;
+        BufferPoolHandler tablespace = state.Database.TableSpace;
         TableDescriptor table = state.Table;
 
         /*(bool found, HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>> deltas) = await table.Rows.Remove(state.RowTuple.SlotOne);
@@ -283,7 +283,7 @@ internal sealed class RowDeleter
     public async Task<int> DeleteByIdInternal(FluxMachine<DeleteByIdFluxSteps, DeleteByIdFluxState> machine, DeleteByIdFluxState state)
     {
         DatabaseDescriptor database = state.Database;
-        BufferPoolHandler tablespace = state.Database.TableSpace!;
+        BufferPoolHandler tablespace = state.Database.TableSpace;
         TableDescriptor table = state.Table;
         DeleteByIdTicket ticket = state.Ticket;
 

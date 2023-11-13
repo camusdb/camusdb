@@ -11,15 +11,15 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
-public sealed class DeleteByIdFluxState
+public sealed class UpdateByIdFluxState
 {
     public DatabaseDescriptor Database { get; }
 
     public TableDescriptor Table { get; }
 
-    public DeleteByIdTicket Ticket { get; }    
+    public UpdateByIdTicket Ticket { get; }
 
-    public DeleteByIdFluxIndexState Indexes { get; }
+    public UpdateByIdFluxIndexState Indexes { get; }
 
     public List<InsertModifiedPage> ModifiedPages { get; } = new();
 
@@ -29,7 +29,7 @@ public sealed class DeleteByIdFluxState
 
     public BTreeTuple? RowTuple { get; set; } = new(new(), new());
 
-    public DeleteByIdFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteByIdTicket ticket, DeleteByIdFluxIndexState indexes)
+    public UpdateByIdFluxState(DatabaseDescriptor database, TableDescriptor table, UpdateByIdTicket ticket, UpdateByIdFluxIndexState indexes)
     {
         Database = database;
         Table = table;

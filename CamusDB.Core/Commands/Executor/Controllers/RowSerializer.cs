@@ -17,17 +17,17 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class RowSerializer
 {
-    private int CalculateBufferLength(TableDescriptor table, InsertTicket ticket)
+    private int CalculateBufferLength(TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
         int length = 20; // 1 type + 4 schemaVersion + 1 type + 12 rowId
 
-        List<TableColumnSchema> tableColumns = table.Schema!.Columns!;
+        List<TableColumnSchema> tableColumns = table.Schema.Columns!;
 
         for (int i = 0; i < tableColumns.Count; i++)
         {
             TableColumnSchema column = tableColumns[i];
 
-            if (!ticket.Values.TryGetValue(column.Name, out ColumnValue? columnValue))
+            if (!columnValues.TryGetValue(column.Name, out ColumnValue? columnValue))
             {
                 length += SerializatorTypeSizes.TypeNull; // null (1 byte)
                 continue;
@@ -60,9 +60,9 @@ internal sealed class RowSerializer
         return length;
     }
 
-    public byte[] Serialize(TableDescriptor table, InsertTicket ticket, ObjectIdValue rowId)
+    public byte[] Serialize(TableDescriptor table, Dictionary<string, ColumnValue> columnValues, ObjectIdValue rowId)
     {
-        int length = CalculateBufferLength(table, ticket);
+        int length = CalculateBufferLength(table, columnValues);
 
         //throw new Exception(length.ToString());
 
@@ -71,7 +71,7 @@ internal sealed class RowSerializer
         int pointer = 0;
 
         Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
-        Serializator.WriteInt32(rowBuffer, table.Schema!.Version, ref pointer); // schema version
+        Serializator.WriteInt32(rowBuffer, table.Schema.Version, ref pointer); // schema version
 
         Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
         Serializator.WriteObjectId(rowBuffer, rowId, ref pointer); // row Id
@@ -82,7 +82,7 @@ internal sealed class RowSerializer
         {
             TableColumnSchema column = columns[i];
 
-            if (!ticket.Values.TryGetValue(column.Name, out ColumnValue? columnValue))
+            if (!columnValues.TryGetValue(column.Name, out ColumnValue? columnValue))
             {
                 Serializator.WriteType(rowBuffer, SerializatorTypes.TypeNull, ref pointer);
                 continue;

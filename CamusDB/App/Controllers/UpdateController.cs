@@ -6,43 +6,44 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core;
-using System.Text.Json;
 using CamusDB.App.Models;
-using Microsoft.AspNetCore.Mvc;
+using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using Microsoft.AspNetCore.Mvc;
+using System.Text.Json;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
-public sealed class DeleteController : CommandsController
+public sealed class UpdateController : CommandsController
 {
-    public DeleteController(CommandExecutor executor) : base(executor)
+    public UpdateController(CommandExecutor executor) : base(executor)
     {
 
     }
 
     [HttpPost]
-    [Route("/delete-by-id")]
-    public async Task<JsonResult> DeleteById()
+    [Route("/update-by-id")]
+    public async Task<JsonResult> UpdateById()
     {
         try
         {
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
 
-            DeleteByIdRequest? request = JsonSerializer.Deserialize<DeleteByIdRequest>(body, jsonOptions);
+            UpdateByIdRequest? request = JsonSerializer.Deserialize<UpdateByIdRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("DeleteById request is not valid");
+                throw new Exception("UpdateById request is not valid");
 
-            DeleteByIdTicket ticket = new(
+            UpdateByIdTicket ticket = new(
                 database: request.DatabaseName ?? "",
                 name: request.TableName ?? "",
-                id: request.Id ?? ""
+                id: request.Id ?? "",
+                columnValues: request.ColumnValues ?? new()
             );
 
-            await executor.DeleteById(ticket);
+            await executor.UpdateById(ticket);
 
             return new JsonResult(new DeleteResponse("ok"));
         }

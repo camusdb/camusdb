@@ -42,7 +42,7 @@ internal sealed class TableCreator
 
             Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
 
-            BufferPoolHandler tablespace = database.TableSpace!;            
+            BufferPoolHandler tablespace = database.TableSpace;            
 
             string tableName = tableSchema.Name!;            
 

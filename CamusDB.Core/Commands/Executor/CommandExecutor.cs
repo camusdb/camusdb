@@ -35,6 +35,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly RowInserter rowInserter;
 
+    private readonly RowUpdater rowUpdater;
+
     private readonly RowDeleter rowDeleter;
 
     private readonly QueryExecutor queryExecutor;
@@ -52,6 +54,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableOpener = new(catalogs);
         tableCreator = new(catalogs);
         rowInserter = new();
+        rowUpdater = new();
         rowDeleter = new();
         queryExecutor = new();
     }
@@ -120,6 +123,17 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async Task InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
     {
         await rowInserter.InsertWithState(machine, state);
+    }
+
+    public async Task<int> UpdateById(UpdateByIdTicket ticket)
+    {
+        //validator.Validate(ticket);
+
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+
+        return await rowUpdater.UpdateById(database, table, ticket);
     }
 
     public async Task<int> DeleteById(DeleteByIdTicket ticket)

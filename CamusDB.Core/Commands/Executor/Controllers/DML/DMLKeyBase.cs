@@ -16,7 +16,7 @@ internal abstract class DMLKeyBase
 {
     protected static ColumnValue? GetColumnValue(TableDescriptor table, InsertTicket ticket, string name)
     {
-        List<TableColumnSchema> columns = table.Schema!.Columns!;
+        List<TableColumnSchema> columns = table.Schema.Columns!;
 
         for (int i = 0; i < columns.Count; i++)
         {

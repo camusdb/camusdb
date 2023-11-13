@@ -31,7 +31,7 @@ internal sealed class QueryExecutor
 
     public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
     {
-        BufferPoolHandler tablespace = database.TableSpace!;
+        BufferPoolHandler tablespace = database.TableSpace;
 
         using IDisposable disposable = await table.ReaderWriterLock.ReaderLockAsync();
 
@@ -70,12 +70,12 @@ internal sealed class QueryExecutor
 
         Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
 
-        yield return rowDeserializer.Deserialize(table.Schema!, data);
+        yield return rowDeserializer.Deserialize(table.Schema, data);
     }
 
     private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
-        BufferPoolHandler tablespace = database.TableSpace!;
+        BufferPoolHandler tablespace = database.TableSpace;
 
         await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse())
         {
@@ -92,13 +92,13 @@ internal sealed class QueryExecutor
                 continue;
             }
 
-            yield return rowDeserializer.Deserialize(table.Schema!, data);
+            yield return rowDeserializer.Deserialize(table.Schema, data);
         }
     }
 
     private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue, BTreeTuple?> index)
     {
-        BufferPoolHandler tablespace = database.TableSpace!;
+        BufferPoolHandler tablespace = database.TableSpace;
 
         await foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse())
         {
@@ -115,7 +115,7 @@ internal sealed class QueryExecutor
                 continue;
             }
 
-            yield return rowDeserializer.Deserialize(table.Schema!, data);
+            yield return rowDeserializer.Deserialize(table.Schema, data);
         }
     }
 
@@ -144,7 +144,7 @@ internal sealed class QueryExecutor
                     continue;
                 }
 
-                yield return rowDeserializer.Deserialize(table.Schema!, data);
+                yield return rowDeserializer.Deserialize(table.Schema, data);
             }
         }
     }

@@ -38,7 +38,7 @@ internal sealed class TableOpener
             if (database.TableDescriptors.TryGetValue(tableName, out tableDescriptor))
                 return tableDescriptor;
 
-            BufferPoolHandler tablespace = database.TableSpace!;
+            BufferPoolHandler tablespace = database.TableSpace;
 
             TableSchema tableSchema = Catalogs.GetTableSchema(database, tableName);
             DatabaseObject systemObject = GetSystemObject(database, tableName);
