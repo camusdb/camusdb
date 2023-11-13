@@ -59,13 +59,6 @@ public sealed class BufferPoolHandler : IDisposable
         this.storage = storage;
     }
 
-    // Load a page without reading its contents
-    public BufferPage GetPage(ObjectIdValue offset)
-    {
-        Lazy<BufferPage> lazyBufferPage = pages.GetOrAdd(offset, (x) => new Lazy<BufferPage>(() => LoadPage(offset)));
-        return lazyBufferPage.Value;
-    }
-
     private BufferPage LoadPage(ObjectIdValue offset)
     {
         return new BufferPage(offset, new Lazy<byte[]>(() => ReadFromDisk(offset)));
@@ -216,7 +209,7 @@ public sealed class BufferPoolHandler : IDisposable
                 "Start offset can't be negative"
             );
 
-        BufferPage page = GetPage(offset);
+        BufferPage page = ReadPage(offset);
 
         using IDisposable writeLock = await page.WriterLockAsync();
 
@@ -300,7 +293,7 @@ public sealed class BufferPoolHandler : IDisposable
                 "Start offset can't be negative"
             );
 
-        BufferPage page = GetPage(offset);
+        BufferPage page = ReadPage(offset);
 
         using IDisposable writeLock = await page.WriterLockAsync();
 

@@ -12,6 +12,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using System.Net.Sockets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -27,13 +28,13 @@ internal sealed class QueryExecutor
             return QueryUsingTableIndex(database, table, ticket);
 
         return QueryUsingIndex(database, table, ticket);
-    }    
+    }
 
     public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
     {
         BufferPoolHandler tablespace = database.TableSpace;
 
-        using IDisposable disposable = await table.ReaderWriterLock.ReaderLockAsync();
+        using IDisposable readerLock = await table.ReaderWriterLock.ReaderLockAsync();
 
         if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
         {
@@ -51,7 +52,7 @@ internal sealed class QueryExecutor
             );
         }
 
-        ColumnValue columnId = new(ColumnType.Id, ticket.Id);        
+        ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
         BTreeTuple? pageOffset = await index.UniqueRows.Get(columnId);
 
@@ -92,11 +93,14 @@ internal sealed class QueryExecutor
                 continue;
             }
 
-            yield return rowDeserializer.Deserialize(table.Schema, data);
+            Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, data);
+
+            if (MeetFilters(ticket, row))
+                yield return row;
         }
     }
 
-    private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue, BTreeTuple?> index)
+    private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue, BTreeTuple?> index, QueryTicket ticket)
     {
         BufferPoolHandler tablespace = database.TableSpace;
 
@@ -115,8 +119,48 @@ internal sealed class QueryExecutor
                 continue;
             }
 
-            yield return rowDeserializer.Deserialize(table.Schema, data);
+            Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, data);
+
+            if (MeetFilters(ticket, row))
+                yield return row;
         }
+    }
+
+    private static bool MeetFilters(QueryTicket ticket, Dictionary<string, ColumnValue> row)
+    {
+        if (ticket.Filters is null || ticket.Filters.Count == 0)
+            return true;
+
+        foreach (QueryFilter filter in ticket.Filters)
+        {
+            if (string.IsNullOrEmpty(filter.ColumnName))
+            {
+                Console.WriteLine("Found empty or null column name in filters");
+                return false;
+            }
+
+            if (!row.TryGetValue(filter.ColumnName, out ColumnValue? value))
+                return false;
+
+            switch (filter.Operator)
+            {
+                case "=":
+                    if (value.Value != filter.Value.Value)
+                        return false;
+                    break;
+
+                case "!=":
+                    if (value.Value == filter.Value.Value)
+                        return false;
+                    break;
+
+                default:
+                    Console.WriteLine("Unknown operator");
+                    break;
+            }
+        }
+
+        return true;
     }
 
     private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
@@ -160,7 +204,7 @@ internal sealed class QueryExecutor
         }
 
         if (index.Type == IndexType.Unique)
-            return QueryUsingUniqueIndex(database, table, index.UniqueRows!);
+            return QueryUsingUniqueIndex(database, table, index.UniqueRows!, ticket);
 
         return QueryUsingMultiIndex(database, table, index.MultiRows!);
     }

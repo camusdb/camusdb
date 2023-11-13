@@ -20,7 +20,6 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
-using System;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -249,13 +248,44 @@ public class TestRowUpdater
 
         QueryTicket queryTicket = new(
            database: dbname,
-           name: "robots"
+           name: "robots",
+           index: null,
+           filters: null
         );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
-        foreach (Dictionary<string, ColumnValue> x in result)        
+        foreach (Dictionary<string, ColumnValue> x in result)
             Assert.AreEqual("updated value", x["name"].Value);
+
+        queryTicket = new(
+           database: dbname,
+           name: "robots",
+           index: null,
+           filters: new()
+           {
+               new("name", "=", new ColumnValue(ColumnType.String, "updated value")) 
+           }
+        );
+
+        result = await (await executor.Query(queryTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (Dictionary<string, ColumnValue> x in result)
+            Assert.AreEqual("updated value", x["name"].Value);
+
+        queryTicket = new(
+           database: dbname,
+           name: "robots",
+           index: null,
+           filters: new()
+           {
+               new("name", "=", new ColumnValue(ColumnType.String, "another updated value"))
+           }
+        );
+
+        result = await (await executor.Query(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
     }
 }

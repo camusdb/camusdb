@@ -107,7 +107,8 @@ internal sealed class TestRowMultiInsertor
         QueryTicket queryTicket = new(
             database: dbname,
             name: "user_robots",
-            index: "robots_id"
+            index: "robots_id",
+            filters: null
         );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -154,7 +155,8 @@ internal sealed class TestRowMultiInsertor
         QueryTicket queryTicket = new(
             database: dbname,
             name: "user_robots",
-            index: "robots_id"
+            index: "robots_id",
+            filters: null
         );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();

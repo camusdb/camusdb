@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.App.Controllers;
 
@@ -24,6 +25,7 @@ public sealed class QueryController : CommandsController
 
     }
 
+    [HttpPost]
     [Route("/query")]
     public async Task<JsonResult> Query()
     {
@@ -31,8 +33,12 @@ public sealed class QueryController : CommandsController
         {
             QueryTicket ticket = new(
                 database: "test",
-                name: "my_table"
-            //index: "code"
+                name: "my_table",
+                index: null,
+                filters: new List<QueryFilter>()
+                {
+                    new QueryFilter("code", "=", new ColumnValue(ColumnType.String, "A"))
+                }
             );
 
             List<Dictionary<string, ColumnValue>> rows = new();
@@ -60,7 +66,7 @@ public sealed class QueryController : CommandsController
     {
         try
         {
-            using StreamReader reader = new StreamReader(Request.Body);
+            using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
 
             QueryByIdRequest? request = JsonSerializer.Deserialize<QueryByIdRequest>(body, jsonOptions);

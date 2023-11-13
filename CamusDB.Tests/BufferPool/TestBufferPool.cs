@@ -42,34 +42,6 @@ public class TestBufferPool
 
     [Test]
     [NonParallelizable]
-    public void TestGetPage()
-    {
-        using RocksDb storage = GetTempRocksDb();
-
-        StorageManager tablespaceStorage = new(storage);
-        //await tablespaceStorage.Initialize();
-
-        using BufferPoolHandler bufferPool = new(tablespaceStorage);
-
-        ObjectIdValue offset = ObjectIdGenerator.Generate();
-
-        BufferPage page = bufferPool.GetPage(offset);
-
-        Assert.AreEqual(page.Buffer.Value.Length, 4096);
-        Assert.AreEqual(page.Offset, offset);
-
-        offset = ObjectIdGenerator.Generate();
-
-        page = bufferPool.ReadPage(offset);
-
-        Assert.AreEqual(page.Buffer.Value.Length, CamusConfig.PageSize);
-        Assert.AreEqual(page.Offset, offset);
-
-        Assert.AreEqual(bufferPool.NumberPages, 2);
-    }
-
-    [Test]
-    [NonParallelizable]
     public void TestReadPage()
     {
         using RocksDb storage = GetTempRocksDb();
@@ -107,7 +79,7 @@ public class TestBufferPool
 
         ObjectIdValue offset = ObjectIdGenerator.Generate();
 
-        byte[] data = Encoding.UTF8.GetBytes("some data");
+        byte[] data = Encoding.Unicode.GetBytes("some data");
 
         await bufferPool.WriteDataToPage(offset, 0, data);
 
@@ -125,7 +97,7 @@ public class TestBufferPool
     {
         using RocksDb storage = GetTempRocksDb();
 
-        byte[] data = Encoding.UTF8.GetBytes("some data");
+        byte[] data = Encoding.Unicode.GetBytes("some data");
 
         StorageManager tablespaceStorage = new(storage);
         //await tablespaceStorage.Initialize();
@@ -160,7 +132,7 @@ public class TestBufferPool
 
         using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
-        byte[] data = Encoding.UTF8.GetBytes("some data some data");
+        byte[] data = Encoding.Unicode.GetBytes("some data some data");
 
         ObjectIdValue offset = ObjectIdGenerator.Generate();
 
@@ -184,7 +156,7 @@ public class TestBufferPool
 
         ObjectIdValue offset = ObjectIdGenerator.Generate();
 
-        byte[] data = Encoding.UTF8.GetBytes("some data some data");
+        byte[] data = Encoding.Unicode.GetBytes("some data some data");
 
         await bufferPool.WriteDataToPage(offset, 0, data);
 
@@ -204,7 +176,7 @@ public class TestBufferPool
 
         using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
-        byte[] data = Encoding.UTF8.GetBytes(new string('s', CamusConfig.PageSize));
+        byte[] data = Encoding.Unicode.GetBytes(new string('s', CamusConfig.PageSize));
 
         ObjectIdValue pageOffset = await bufferPool.WriteDataToFreePage(data);
 
@@ -227,7 +199,7 @@ public class TestBufferPool
 
         using BufferPoolHandler bufferPool = new(tablespaceStorage);
 
-        byte[] data = Encoding.UTF8.GetBytes(new string('s', CamusConfig.PageSize * 5));
+        byte[] data = Encoding.Unicode.GetBytes(new string('s', CamusConfig.PageSize * 5));
 
         ObjectIdValue pageOffset = await bufferPool.WriteDataToFreePage(data);
 

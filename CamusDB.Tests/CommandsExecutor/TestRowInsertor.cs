@@ -496,7 +496,9 @@ internal sealed class TestRowInsertor
 
         QueryTicket queryTicket = new(
             database: dbname,
-            name: "robots"
+            name: "robots",
+            index: null,
+            filters: null
         );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();

@@ -12,7 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-internal class DatabaseDescriptors
+internal sealed class DatabaseDescriptors
 {    
     public readonly ConcurrentDictionary<string, AsyncLazy<DatabaseDescriptor>> Descriptors = new();
 }

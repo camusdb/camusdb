@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using Nito.AsyncEx;
 using System.Runtime.CompilerServices;
 using CamusDB.Core.Util.ObjectIds;
 

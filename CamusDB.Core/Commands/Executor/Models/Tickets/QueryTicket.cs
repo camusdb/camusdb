@@ -16,10 +16,13 @@ public readonly struct QueryTicket
 
     public string? IndexName { get; }
 
-    public QueryTicket(string database, string name, string? index = null)
+    public List<QueryFilter>? Filters { get; }
+
+    public QueryTicket(string database, string name, string? index, List<QueryFilter>? filters)
     {
         DatabaseName = database;
         TableName = name;
         IndexName = index;
+        Filters = filters;
     }
 }
