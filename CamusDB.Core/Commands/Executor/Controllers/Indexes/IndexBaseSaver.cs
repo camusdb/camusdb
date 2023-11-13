@@ -22,7 +22,7 @@ internal abstract class IndexBaseSaver
         return columnValue.Type switch
         {
             ColumnType.Id => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeObjectId,
-            ColumnType.Integer => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger32,
+            ColumnType.Integer64 => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger64,
             ColumnType.String => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger32 + columnValue.Value.Length,
             _ => throw new Exception("Can't use this type as index"),
         };
@@ -71,9 +71,9 @@ internal abstract class IndexBaseSaver
                 Serializator.WriteObjectId(nodeBuffer, ObjectId.ToValue(columnValue.Value), ref pointer);
                 break;
 
-            case ColumnType.Integer:
-                Serializator.WriteInt16(nodeBuffer, (int)ColumnType.Integer, ref pointer);
-                Serializator.WriteInt32(nodeBuffer, int.Parse(columnValue.Value), ref pointer);
+            case ColumnType.Integer64:
+                Serializator.WriteInt16(nodeBuffer, (int)ColumnType.Integer64, ref pointer);
+                Serializator.WriteInt64(nodeBuffer, long.Parse(columnValue.Value), ref pointer);
                 break;
 
             case ColumnType.String:

@@ -30,10 +30,10 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         if (Type != other.Type)
             throw new ArgumentException("Comparing incompatible ColumnValue");
 
-        if (Type == ColumnType.Integer)
+        if (Type == ColumnType.Integer64)
         {
-            int value1 = int.Parse(Value);
-            int value2 = int.Parse(other.Value);
+            long value1 = long.Parse(Value);
+            long value2 = long.Parse(other.Value);
             return value1.CompareTo(value2);
         }
 

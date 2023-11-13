@@ -17,7 +17,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class RowSerializer
 {
-    private int CalculateBufferLength(TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
+    private static int CalculateBufferLength(TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
         int length = 20; // 1 type + 4 schemaVersion + 1 type + 12 rowId
 
@@ -45,7 +45,7 @@ internal sealed class RowSerializer
                 ColumnType.Id => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeObjectId,
 
                 // type 1 byte + 4 byte int
-                ColumnType.Integer => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32,
+                ColumnType.Integer64 => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger64,
 
                 // type 1 byte + 4 byte length + strLength
                 ColumnType.String => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + columnValue.Value.Length,
@@ -98,9 +98,9 @@ internal sealed class RowSerializer
                     Serializator.WriteObjectId(rowBuffer, objectId, ref pointer);
                     break;
 
-                case ColumnType.Integer: // @todo use int.TryParse
-                    Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger32, ref pointer);
-                    Serializator.WriteInt32(rowBuffer, int.Parse(columnValue.Value), ref pointer);
+                case ColumnType.Integer64: // @todo use int.TryParse
+                    Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger64, ref pointer);
+                    Serializator.WriteInt64(rowBuffer, long.Parse(columnValue.Value), ref pointer);
                     break;
 
                 case ColumnType.String:

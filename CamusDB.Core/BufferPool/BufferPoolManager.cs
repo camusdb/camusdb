@@ -111,7 +111,7 @@ public sealed class BufferPoolHandler : IDisposable
 
     public async Task<byte[]> GetDataFromPage(ObjectIdValue offset)
     {
-        (int length, List<BufferPage> pages, List<IDisposable> disposables) = await GetDataLength(offset); // @todo calculated length of page can be different to the read page
+        (int length, List<BufferPage> pages, List<IDisposable> disposables) = await GetDataLength(offset);
 
         try
         {

@@ -32,7 +32,7 @@ public sealed class CreateTableController : CommandsController
             throw new Exception("Invalid type");
 
         if (name == "int")
-            return ColumnType.Integer;
+            return ColumnType.Integer64;
 
         if (name == "string")
             return ColumnType.String;

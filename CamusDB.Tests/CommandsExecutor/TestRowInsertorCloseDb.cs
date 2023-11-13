@@ -59,7 +59,7 @@ internal sealed class TestRowInsertorCloseDb
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("usersId", ColumnType.Id, notNull: true, index: IndexType.Multi),
-                new ColumnInfo("amount", ColumnType.Integer)
+                new ColumnInfo("amount", ColumnType.Integer64)
             }
         );
 
@@ -81,7 +81,7 @@ internal sealed class TestRowInsertorCloseDb
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                { "amount", new ColumnValue(ColumnType.Integer, "100") }
+                { "amount", new ColumnValue(ColumnType.Integer64, "100") }
             }
         );
 
@@ -101,7 +101,7 @@ internal sealed class TestRowInsertorCloseDb
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                { "amount", new ColumnValue(ColumnType.Integer, "50") },
+                { "amount", new ColumnValue(ColumnType.Integer64, "50") },
             }
         );
 
@@ -112,7 +112,7 @@ internal sealed class TestRowInsertorCloseDb
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
                 { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                { "amount", new ColumnValue(ColumnType.Integer, "50") },
+                { "amount", new ColumnValue(ColumnType.Integer64, "50") },
             }
         );
 
@@ -196,7 +196,7 @@ internal sealed class TestRowInsertorCloseDb
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "usersId", new ColumnValue(ColumnType.Id, userIds[i % 5]) },
-                    { "amount", new ColumnValue(ColumnType.Integer, "50") },
+                    { "amount", new ColumnValue(ColumnType.Integer64, "50") },
                 }
             );
 

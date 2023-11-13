@@ -7,16 +7,13 @@
  */
 
 using CamusDB.Core;
-using CamusDB.Core.Util;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
-using System.IO;
-using RocksDbSharp;
 
-//Console.WriteLine(UInt32.MaxValue);
+Console.WriteLine(UInt32.MaxValue);
 
-var builder = WebApplication.CreateBuilder(args);
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddRazorPages();
@@ -25,10 +22,10 @@ builder.Services.AddSingleton<CommandExecutor>();
 builder.Services.AddSingleton<CommandValidator>();
 builder.Services.AddSingleton<CatalogsManager>();
 
-var app = builder.Build();
+WebApplication app = builder.Build();
 
 // Initialize DB system
-var camus = new CamusStartup(
+CamusStartup camus = new(
     app.Services.GetRequiredService<CommandExecutor>()
 );
 

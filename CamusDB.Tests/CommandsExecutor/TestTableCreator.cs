@@ -51,7 +51,7 @@ internal sealed class TestTableCreator
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("age", ColumnType.Integer),
+                new ColumnInfo("age", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
             }
         );
@@ -202,7 +202,7 @@ internal sealed class TestTableCreator
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("age", ColumnType.Integer),
+                new ColumnInfo("age", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
             }
         );

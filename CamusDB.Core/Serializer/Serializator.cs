@@ -124,6 +124,21 @@ public sealed class Serializator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteInt64(byte[] buffer, long number, ref int pointer)
+    {
+        //CheckBufferOverflow(4);
+        buffer[pointer + 0] = (byte)((number >> 0) & 0xff);
+        buffer[pointer + 1] = (byte)((number >> 8) & 0xff);
+        buffer[pointer + 2] = (byte)((number >> 16) & 0xff);
+        buffer[pointer + 3] = (byte)((number >> 24) & 0xff);
+        buffer[pointer + 4] = (byte)((number >> 32) & 0xff);
+        buffer[pointer + 5] = (byte)((number >> 40) & 0xff);
+        buffer[pointer + 6] = (byte)((number >> 48) & 0xff);
+        buffer[pointer + 7] = (byte)((number >> 56) & 0xff);
+        pointer += 8;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteUInt32(byte[] buffer, uint number, ref int pointer)
     {
         //CheckBufferOverflow(4);
@@ -220,6 +235,14 @@ public sealed class Serializator
         number += (buffer[pointer + 2] << 16);
         number += (buffer[pointer + 3] << 24);
         pointer += 4;
+        return number;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static long ReadInt64(byte[] buffer, ref int pointer)
+    {
+        long number = BitConverter.ToInt64(buffer, pointer);
+        pointer += 8;
         return number;
     }
 

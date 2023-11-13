@@ -46,8 +46,8 @@ internal sealed class InsertValidator : ValidatorBase
                         );
                     break;
 
-                case ColumnType.Integer:
-                    if (!int.TryParse(columnValue.Value.Value, out int _))
+                case ColumnType.Integer64:
+                    if (!long.TryParse(columnValue.Value.Value, out long _))
                         throw new CamusDBException(
                             CamusDBErrorCodes.InvalidInput,
                             "Invalid numeric integer format for field '" + columnValue.Key + "'"

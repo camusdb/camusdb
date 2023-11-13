@@ -35,7 +35,10 @@ public sealed class QueryController : CommandsController
             //index: "code"
             );
 
-            List<Dictionary<string, ColumnValue>> rows = await executor.Query(ticket);
+            List<Dictionary<string, ColumnValue>> rows = new();
+
+            await foreach (Dictionary<string, ColumnValue> row in await executor.Query(ticket))
+                rows.Add(row);
 
             return new JsonResult(new QueryResponse("ok", rows));
         }

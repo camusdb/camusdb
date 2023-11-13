@@ -87,12 +87,6 @@ internal sealed class TableCreator
 
             objects.Add(tableName, databaseObject);
 
-            /*await systemTablespace.WriteDataToPage(
-                CamusDBConfig.SystemHeaderPage,
-                0,
-                Serializator.Serialize(database.SystemSchema.Objects)
-            );*/
-
             database.DbHandler.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema.Objects));
 
             Console.WriteLine("Added table {0} to system, data table staring at {1}", tableName, pageOffset);

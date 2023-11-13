@@ -262,7 +262,7 @@ public sealed class RowUpdater
     }
 
     /// <summary>
-    /// Updates the row from disk
+    /// Updates the row on the disk
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>

@@ -15,6 +15,7 @@ public static class SerializatorTypeSizes
     public const int TypeInteger8 = 1;
     public const int TypeInteger16 = 2;
     public const int TypeInteger32 = 4;
+    public const int TypeInteger64 = 8;
     public const int TypeUnsignedInteger8 = 1;
     public const int TypeUnsignedInteger16 = 2;
     public const int TypeUnsignedInteger32 = 4;
@@ -22,6 +23,6 @@ public static class SerializatorTypeSizes
     public const int TypeBool = 1;
     public const int TypeFloat = 2;
     public const int TypeDouble = 4;
-    public const int TypeObjectId = 12;
+    public const int TypeObjectId = 12;    
 }
 

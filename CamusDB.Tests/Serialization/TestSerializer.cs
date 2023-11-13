@@ -39,12 +39,12 @@ public class TestSerializer
         for (int i = 0; i < 22; i++)
         {
             int pointer = 0;
-            Serializator.WriteType(buffer, i, ref pointer);
+            Serializator.WriteType(buffer, i, ref pointer);            
             Assert.AreEqual(pointer, SerializatorTypeSizes.TypeInteger8);
 
             pointer = 0;
             int type = Serializator.ReadType(buffer, ref pointer);
-            Assert.AreEqual(type, i);
+            Assert.AreEqual(i, type);            
             Assert.AreEqual(pointer, SerializatorTypeSizes.TypeInteger8);
         }
     }
@@ -131,6 +131,29 @@ public class TestSerializer
         pointer = 0;
         uint readValue = Serializator.ReadUInt32(buffer, ref pointer);
         Assert.AreEqual(pointer, SerializatorTypeSizes.TypeUnsignedInteger32);
+        Assert.AreEqual(readValue, writeValue);
+    }
+
+    [Test]
+    [TestCase(-128)]
+    [TestCase(0)]
+    [TestCase(1)]
+    [TestCase(256)]
+    [TestCase(2048)]
+    [TestCase(65512)]
+    [TestCase(long.MinValue)]
+    [TestCase(long.MaxValue)]
+    public void TestSerializeLong32(long writeValue)
+    {
+        byte[] buffer = new byte[SerializatorTypeSizes.TypeInteger64];
+
+        int pointer = 0;
+        Serializator.WriteInt64(buffer, writeValue, ref pointer);
+        Assert.AreEqual(pointer, SerializatorTypeSizes.TypeInteger64);
+
+        pointer = 0;
+        long readValue = Serializator.ReadInt64(buffer, ref pointer);
+        Assert.AreEqual(pointer, SerializatorTypeSizes.TypeInteger64);
         Assert.AreEqual(readValue, writeValue);
     }
 

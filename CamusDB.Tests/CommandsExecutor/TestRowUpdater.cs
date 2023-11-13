@@ -20,6 +20,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using System;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -59,7 +60,7 @@ public class TestRowUpdater
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer),
+                new ColumnInfo("year", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
             }
         );
@@ -79,7 +80,7 @@ public class TestRowUpdater
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer, (2000 + i).ToString()) },
+                    { "year", new ColumnValue(ColumnType.Integer64, (2000 + i).ToString()) },
                     { "enabled", new ColumnValue(ColumnType.Bool, "FALSE") },
                 }
             );
@@ -221,9 +222,9 @@ public class TestRowUpdater
         }
     }
 
-    /*[Test]
+    [Test]
     [NonParallelizable]
-    public async Task TestMultiDeleteParallel()
+    public async Task TestMultiUpdateParallel()
     {
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
@@ -231,13 +232,17 @@ public class TestRowUpdater
 
         foreach (string objectId in objectsId)
         {
-            DeleteByIdTicket ticket = new(
+            UpdateByIdTicket ticket = new(
                 database: dbname,
                 name: "robots",
-                id: objectId
+                id: objectId,
+                columnValues: new Dictionary<string, ColumnValue>()
+                {
+                    { "name", new ColumnValue(ColumnType.String, "updated value") }
+                }
             );
 
-            tasks.Add(executor.DeleteById(ticket));
+            tasks.Add(executor.UpdateById(ticket));
         }
 
         await Task.WhenAll(tasks);
@@ -245,9 +250,12 @@ public class TestRowUpdater
         QueryTicket queryTicket = new(
            database: dbname,
            name: "robots"
-       );
+        );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
-        Assert.IsEmpty(result);
-    }*/
+        Assert.IsNotEmpty(result);
+
+        foreach (Dictionary<string, ColumnValue> x in result)        
+            Assert.AreEqual("updated value", x["name"].Value);
+    }
 }

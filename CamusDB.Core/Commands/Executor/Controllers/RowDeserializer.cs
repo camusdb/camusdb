@@ -45,7 +45,6 @@ internal sealed class RowDeserializer
 
         for (int i = 0; i < columns.Count; i++)
         {
-            int value;
             TableColumnSchema column = columns[i];
 
             //Console.WriteLine("{0} {1}", column.Name, column.Type);
@@ -68,13 +67,13 @@ internal sealed class RowDeserializer
                     }
                     break;
 
-                case ColumnType.Integer:
+                case ColumnType.Integer64:
                     {
                         int columnType = Serializator.ReadType(data, ref pointer);
-                        if (columnType == SerializatorTypes.TypeInteger32)
+                        if (columnType == SerializatorTypes.TypeInteger64)
                         {
-                            value = Serializator.ReadInt32(data, ref pointer);
-                            columnValues.Add(column.Name, new(ColumnType.Integer, value.ToString()));
+                            long value = Serializator.ReadInt64(data, ref pointer);
+                            columnValues.Add(column.Name, new(ColumnType.Integer64, value.ToString()));
                         }
                         else
                         {

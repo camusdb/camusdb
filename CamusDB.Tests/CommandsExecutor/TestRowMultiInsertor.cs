@@ -51,7 +51,7 @@ internal sealed class TestRowMultiInsertor
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("robots_id", ColumnType.Id, notNull: true, index: IndexType.Multi),
-                new ColumnInfo("amount", ColumnType.Integer)
+                new ColumnInfo("amount", ColumnType.Integer64)
             }
         );
 
@@ -74,7 +74,7 @@ internal sealed class TestRowMultiInsertor
             {
                 { "id", new ColumnValue(ColumnType.Id, "5bc30818bc6a4e7b6c441308") },
                 { "robots_id", new ColumnValue(ColumnType.Id, "5e1aac86542f77367452d9b3") },
-                { "amount", new ColumnValue(ColumnType.Integer, "100") }
+                { "amount", new ColumnValue(ColumnType.Integer64, "100") }
             }
         );
 
@@ -97,7 +97,7 @@ internal sealed class TestRowMultiInsertor
                 {
                     { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
                     { "robots_id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                    { "amount", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) }
+                    { "amount", new ColumnValue(ColumnType.Integer64, (i * 1000).ToString()) }
                 }
             );
 
@@ -123,7 +123,7 @@ internal sealed class TestRowMultiInsertor
             Assert.AreEqual(ColumnType.Id, row["robots_id"].Type);
             Assert.AreEqual(24, row["robots_id"].Value.Length);
 
-            Assert.AreEqual(ColumnType.Integer, row["amount"].Type);
+            Assert.AreEqual(ColumnType.Integer64, row["amount"].Type);
             Assert.AreEqual((i * 1000).ToString(), row["amount"].Value);
         }
     }
@@ -144,7 +144,7 @@ internal sealed class TestRowMultiInsertor
                 {
                     { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
                     { "robots_id", new ColumnValue(ColumnType.Id, "5e1aac86542f77367452d9b3") },
-                    { "amount", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) }
+                    { "amount", new ColumnValue(ColumnType.Integer64, (i * 1000).ToString()) }
                 }
             );
 
@@ -171,7 +171,7 @@ internal sealed class TestRowMultiInsertor
             Assert.AreEqual(row["robots_id"].Type, ColumnType.Id);
             Assert.AreEqual(row["robots_id"].Value, "5e1aac86542f77367452d9b3");
 
-            Assert.AreEqual(row["amount"].Type, ColumnType.Integer);
+            Assert.AreEqual(row["amount"].Type, ColumnType.Integer64);
             Assert.AreEqual(row["amount"].Value, (i * 1000).ToString());
         }
     }

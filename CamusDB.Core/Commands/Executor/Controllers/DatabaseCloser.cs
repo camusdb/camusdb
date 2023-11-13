@@ -6,8 +6,8 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.CommandsExecutor.Models;
 using Nito.AsyncEx;
+using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 

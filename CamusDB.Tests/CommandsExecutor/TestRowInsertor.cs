@@ -59,7 +59,7 @@ internal sealed class TestRowInsertor
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer),
+                new ColumnInfo("year", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
             }
         );
@@ -80,9 +80,9 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "id", new ColumnValue(ColumnType.Integer64, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "False") },
             }
         );
@@ -102,9 +102,9 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "id", new ColumnValue(ColumnType.Integer64, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "invalid int value") },
+                { "year", new ColumnValue(ColumnType.Integer64, "invalid int value") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
             }
         );
@@ -124,9 +124,9 @@ internal sealed class TestRowInsertor
             name: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "id", new ColumnValue(ColumnType.Integer, "1") },
+                { "id", new ColumnValue(ColumnType.Integer64, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1000") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1000") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
             }
         );
@@ -170,7 +170,7 @@ internal sealed class TestRowInsertor
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "true") },
             }
         );
@@ -192,7 +192,7 @@ internal sealed class TestRowInsertor
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1234") },
                 { "unknownColumn", new ColumnValue(ColumnType.Bool, "TRUE") },
             }
         );
@@ -214,7 +214,7 @@ internal sealed class TestRowInsertor
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
         );
@@ -235,7 +235,7 @@ internal sealed class TestRowInsertor
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
         );
@@ -249,7 +249,7 @@ internal sealed class TestRowInsertor
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "true") },
             }
         );
@@ -270,7 +270,7 @@ internal sealed class TestRowInsertor
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
         );
@@ -282,7 +282,7 @@ internal sealed class TestRowInsertor
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "true") },
             }
         );
@@ -307,7 +307,7 @@ internal sealed class TestRowInsertor
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
         );
@@ -330,7 +330,7 @@ internal sealed class TestRowInsertor
         Assert.AreEqual(row["name"].Type, ColumnType.String);
         Assert.AreEqual(row["name"].Value, "some name");
 
-        Assert.AreEqual(row["year"].Type, ColumnType.Integer);
+        Assert.AreEqual(row["year"].Type, ColumnType.Integer64);
         Assert.AreEqual(row["year"].Value, "1234");
     }
 
@@ -347,7 +347,7 @@ internal sealed class TestRowInsertor
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name 1") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1234") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
         );
@@ -359,7 +359,7 @@ internal sealed class TestRowInsertor
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
                 { "name", new ColumnValue(ColumnType.String, "some name 2") },
-                { "year", new ColumnValue(ColumnType.Integer, "4567") },
+                { "year", new ColumnValue(ColumnType.Integer64, "4567") },
                 { "enabled", new ColumnValue(ColumnType.Bool, "true") },
             }
         );
@@ -386,7 +386,7 @@ internal sealed class TestRowInsertor
         Assert.AreEqual(row["name"].Type, ColumnType.String);
         Assert.AreEqual(row["name"].Value, "some name 2");
 
-        Assert.AreEqual(row["year"].Type, ColumnType.Integer);
+        Assert.AreEqual(row["year"].Type, ColumnType.Integer64);
         Assert.AreEqual(row["year"].Value, "4567");
 
         Assert.AreEqual(row["enabled"].Type, ColumnType.Bool);
@@ -408,7 +408,7 @@ internal sealed class TestRowInsertor
         Assert.AreEqual(row["name"].Type, ColumnType.String);
         Assert.AreEqual(row["name"].Value, "some name 1");
 
-        Assert.AreEqual(row["year"].Type, ColumnType.Integer);
+        Assert.AreEqual(row["year"].Type, ColumnType.Integer64);
         Assert.AreEqual(row["year"].Value, "1234");
 
         Assert.AreEqual(row["enabled"].Type, ColumnType.Bool);
@@ -436,7 +436,7 @@ internal sealed class TestRowInsertor
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) },
+                    { "year", new ColumnValue(ColumnType.Integer64, (i * 1000).ToString()) },
                     { "enabled", new ColumnValue(ColumnType.Bool, "false") },
                 }
             );
@@ -464,7 +464,7 @@ internal sealed class TestRowInsertor
             Assert.AreEqual(ColumnType.String, row["name"].Type);
             Assert.AreEqual("some name " + i, row["name"].Value);
 
-            Assert.AreEqual(ColumnType.Integer, row["year"].Type);
+            Assert.AreEqual(ColumnType.Integer64, row["year"].Type);
             Assert.AreEqual((i * 1000).ToString(), row["year"].Value);
 
             i++;
@@ -486,7 +486,7 @@ internal sealed class TestRowInsertor
                 {
                     { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer, (i * 1000).ToString()) },
+                    { "year", new ColumnValue(ColumnType.Integer64, (i * 1000).ToString()) },
                     { "enabled", new ColumnValue(ColumnType.Bool, "false") },
                 }
             );
@@ -511,7 +511,7 @@ internal sealed class TestRowInsertor
             Assert.AreEqual(ColumnType.String, row["name"].Type);
             Assert.AreEqual("some name " + i, row["name"].Value);
 
-            Assert.AreEqual(ColumnType.Integer, row["year"].Type);
+            Assert.AreEqual(ColumnType.Integer64, row["year"].Type);
             Assert.AreEqual((i * 1000).ToString(), row["year"].Value);
         }
     }

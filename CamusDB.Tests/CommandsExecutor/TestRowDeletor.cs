@@ -59,7 +59,7 @@ public class TestRowDeletor
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer),
+                new ColumnInfo("year", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
             }
         );
@@ -79,7 +79,7 @@ public class TestRowDeletor
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer, (2000 + i).ToString()) },
+                    { "year", new ColumnValue(ColumnType.Integer64, (2000 + i).ToString()) },
                     { "enabled", new ColumnValue(ColumnType.Bool, "FALSE") },
                 }
             );
