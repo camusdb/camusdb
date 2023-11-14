@@ -92,7 +92,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return await Search(root, key, height);
     }
 
-    private async Task<TValue?> Search(BTreeNode<TKey, TValue>? node, TKey key, int ht)
+    private async ValueTask<TValue?> Search(BTreeNode<TKey, TValue>? node, TKey key, int ht)
     {
         if (node is null)
             return default;

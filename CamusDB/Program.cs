@@ -11,7 +11,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 
-Console.WriteLine(UInt32.MaxValue);
+//Console.WriteLine(UInt32.MaxValue);
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
@@ -29,7 +29,7 @@ CamusStartup camus = new(
     app.Services.GetRequiredService<CommandExecutor>()
 );
 
-await camus.Initialize();
+await camus.Initialize(await File.ReadAllTextAsync("Config/config.yml"));
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())

@@ -12,7 +12,6 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
-using System.Net.Sockets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -142,7 +141,7 @@ internal sealed class QueryExecutor
             if (!row.TryGetValue(filter.ColumnName, out ColumnValue? value))
                 return false;
 
-            switch (filter.Operator)
+            switch (filter.Op)
             {
                 case "=":
                     if (value.Value != filter.Value.Value)

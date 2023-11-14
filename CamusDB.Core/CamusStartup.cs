@@ -6,7 +6,9 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Config;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.Config.Models;
 
 namespace CamusDB.Core;
 
@@ -22,8 +24,18 @@ public sealed class CamusStartup
         this.executor = executor;
     }
 
-    public Task Initialize()
+    public Task Initialize(string ymlConfig)
     {
+        ConfigReader reader = new();
+
+        ConfigDefinition config = reader.Read(ymlConfig);        
+
+        if (config.BufferPoolSize > 0)
+            CamusDBConfig.BufferPoolSize = config.BufferPoolSize;
+
+        if (!string.IsNullOrEmpty(config.DataDir))
+            CamusDBConfig.DataDirectory = config.DataDir;
+
         //await CheckRecovery();
         return Task.CompletedTask;
     }

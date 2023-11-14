@@ -1,10 +1,10 @@
 ﻿
 /**
-* This file is part of CamusDB  
-*
-* For the full copyright and license information, please view the LICENSE.txt
-* file that was distributed with this source code.
-*/
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
 
 using System.Text;
 
@@ -12,13 +12,15 @@ namespace CamusDB.Core;
 
 public static class CamusDBConfig
 {
-    public readonly static string DataDirectory = Path.GetFullPath("Data");
+    public static string DataDirectory = Path.GetFullPath("Data");
 
     #region bufferpool
 
     public const int PageLayoutVersion = 1;
 
     public const int PageSize = 4096;
+
+    public static int BufferPoolSize = 8192;
 
     #endregion
 

@@ -15,12 +15,14 @@
     <None Remove="CSharpTest.Net.Collections" />
     <None Remove="CodeExMachina.BTree" />
     <None Remove="App\Models\" />
+    <None Remove="Config\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="App\" />
     <Folder Include="App\Controllers\" />
     <Folder Include="Data\" />
     <Folder Include="App\Models\" />
+    <Folder Include="Config\" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj">

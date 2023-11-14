@@ -23,6 +23,7 @@
     <None Remove="Commands\Validator\Validators\" />
     <None Remove="Storage\" />
     <None Remove="Config\" />
+    <None Remove="Config\Models\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Util\Hashes\" />
@@ -33,6 +34,7 @@
     <Folder Include="Commands\Validator\Validators\" />
     <Folder Include="Storage\" />
     <Folder Include="Config\" />
+    <Folder Include="Config\Models\" />
   </ItemGroup>
 
   <ItemGroup>

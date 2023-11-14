@@ -12,14 +12,14 @@ public sealed class QueryFilter
 {
     public string ColumnName { get; }
 
-    public string Operator { get; }
+    public string Op { get; }
 
     public ColumnValue Value { get; }
 
-    public QueryFilter(string column, string op, ColumnValue value)
+    public QueryFilter(string columnName, string op, ColumnValue value)
     {
-        ColumnName = column;
-        Operator = op;
+        ColumnName = columnName;
+        Op = op;
         Value = value;
     }
 }

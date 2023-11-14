@@ -1,14 +1,10 @@
 ﻿
-using System;
+
+using CamusDB.Core.Config.Models;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
 namespace CamusDB.Core.Config;
-
-public class ConfigDefinition
-{
-    public int BufferPoolSize { get; set; } = -1;
-}
 
 public class ConfigReader
 {

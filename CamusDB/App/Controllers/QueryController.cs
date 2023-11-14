@@ -31,14 +31,18 @@ public sealed class QueryController : CommandsController
     {
         try
         {
+            using StreamReader reader = new(Request.Body);
+            string body = await reader.ReadToEndAsync();
+
+            QueryRequest? request = JsonSerializer.Deserialize<QueryRequest>(body, jsonOptions);
+            if (request == null)
+                throw new Exception("Query request is not valid");
+
             QueryTicket ticket = new(
-                database: "test",
-                name: "my_table",
+                database: request.DatabaseName ?? "",
+                name: request.TableName ?? "",
                 index: null,
-                filters: new List<QueryFilter>()
-                {
-                    new QueryFilter("code", "=", new ColumnValue(ColumnType.String, "A"))
-                }
+                filters: request.Filters
             );
 
             List<Dictionary<string, ColumnValue>> rows = new();
