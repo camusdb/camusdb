@@ -6,8 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.CommandsExecutor.Models;
-
 namespace CamusDB.App.Models;
 
 public sealed class CreateTableRequest

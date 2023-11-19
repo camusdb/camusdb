@@ -12,6 +12,7 @@
     <PackageReference Include="NUnit" Version="3.13.2" />
     <PackageReference Include="NUnit3TestAdapter" Version="4.1.0" />
     <PackageReference Include="coverlet.collector" Version="3.1.0" />
+    <PackageReference Include="CsvHelper" Version="30.0.1" />
   </ItemGroup>
 
   <ItemGroup>
@@ -28,6 +29,7 @@
     <None Remove="Flux\Fixtures\" />
     <None Remove="ObjectIds\" />
     <None Remove="Config\" />
+    <None Remove="Integration\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="BufferPool\" />
@@ -40,5 +42,6 @@
     <Folder Include="Flux\Fixtures\" />
     <Folder Include="ObjectIds\" />
     <Folder Include="Config\" />
+    <Folder Include="Integration\" />
   </ItemGroup>
 </Project>

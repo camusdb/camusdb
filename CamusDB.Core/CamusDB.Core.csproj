@@ -24,6 +24,7 @@
     <None Remove="Storage\" />
     <None Remove="Config\" />
     <None Remove="Config\Models\" />
+    <None Remove="BufferPool\Controllers\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Util\Hashes\" />
@@ -35,6 +36,7 @@
     <Folder Include="Storage\" />
     <Folder Include="Config\" />
     <Folder Include="Config\Models\" />
+    <Folder Include="BufferPool\Controllers\" />
   </ItemGroup>
 
   <ItemGroup>

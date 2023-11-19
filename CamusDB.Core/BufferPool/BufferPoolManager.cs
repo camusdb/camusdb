@@ -48,7 +48,11 @@ public sealed class BufferPoolHandler : IDisposable
 {
     private readonly StorageManager storage;
 
+    private readonly SortedDictionary<DateTime, ObjectIdValue> lruPages = new();
+
     private readonly ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> pages = new();
+
+    private readonly Timer releaser;
 
     public int NumberPages => pages.Count;
 
@@ -57,6 +61,46 @@ public sealed class BufferPoolHandler : IDisposable
     public BufferPoolHandler(StorageManager storage)
     {
         this.storage = storage;
+
+        releaser = new(ReleasePages, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    private void ReleasePages(object? state)
+    {
+        float percent = Pages.Count / (float)CamusConfig.BufferPoolSize;
+        if (percent < 0.8)
+            return;
+
+        int numberToFree = (int)(CamusConfig.BufferPoolSize * (1 - (percent > 0.8 ? 0.8 : percent)));               
+
+        lruPages.Clear();
+
+        foreach (KeyValuePair<ObjectIdValue, Lazy<BufferPage>> keyValuePair in Pages)
+        {
+            Lazy<BufferPage> page = keyValuePair.Value;
+
+            if (!page.IsValueCreated)
+                continue;
+
+            if (lruPages.Count > (numberToFree * 2)) // fill the red-black tree with twice the pages to release
+                break;
+
+            lruPages.Add(page.Value.LastAccess, keyValuePair.Key);
+        }
+
+        int numberFreed = 0;
+
+        foreach (KeyValuePair<DateTime, ObjectIdValue> keyValue in lruPages)
+        {
+            Pages.TryRemove(keyValue.Value, out _);
+
+            numberFreed++;
+
+            if (numberFreed > numberToFree)
+                break;
+        }
+
+        Console.WriteLine("Total pages freed: {0}, remaining: {1}", numberFreed, Pages.Count);
     }
 
     private BufferPage LoadPage(ObjectIdValue offset)
@@ -73,7 +117,10 @@ public sealed class BufferPoolHandler : IDisposable
     public BufferPage ReadPage(ObjectIdValue offset)
     {
         Lazy<BufferPage> lazyBufferPage = pages.GetOrAdd(offset, (x) => new Lazy<BufferPage>(() => LoadPage(offset)));
-        return lazyBufferPage.Value;
+        BufferPage bufferPage = lazyBufferPage.Value;
+        bufferPage.Accesses++;
+        bufferPage.LastAccess = DateTime.UtcNow;
+        return bufferPage;
     }
 
     private async Task<(int, List<BufferPage>, List<IDisposable>)> GetDataLength(ObjectIdValue offset)
@@ -380,5 +427,6 @@ public sealed class BufferPoolHandler : IDisposable
     public void Dispose()
     {
         //offsetUpdaterWriter.Complete();
+        releaser?.Dispose();
     }
 }

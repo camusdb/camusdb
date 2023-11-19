@@ -19,6 +19,10 @@ public sealed class BufferPage
 
     public bool Dirty { get; set; }
 
+    public int Accesses { get; set; }
+
+    public DateTime LastAccess { get; set; }
+
     private readonly AsyncReaderWriterLock readerWriterLock = new();
 
     public BufferPage(ObjectIdValue offset, Lazy<byte[]> buffer)
