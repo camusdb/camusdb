@@ -250,7 +250,8 @@ public class TestRowUpdater
            database: dbname,
            name: "robots",
            index: null,
-           filters: null
+           filters: null,
+           orderBy: null
         );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -266,7 +267,8 @@ public class TestRowUpdater
            filters: new()
            {
                new("name", "=", new ColumnValue(ColumnType.String, "updated value")) 
-           }
+           },
+           orderBy: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -282,7 +284,8 @@ public class TestRowUpdater
            filters: new()
            {
                new("name", "=", new ColumnValue(ColumnType.String, "another updated value"))
-           }
+           },
+           orderBy: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();

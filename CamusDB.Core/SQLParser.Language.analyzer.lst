@@ -1,3 +1,12 @@
+
+// ==========================================================================
+//  GPLEX error listing for lex source file <SQLParser.Language.analyzer.lex>
+// ==========================================================================
+//  Version:  1.2.2
+//  DateTime: 11/20/2023 6:01:39 PM
+// ==========================================================================
+
+
 %namespace CamusDB.Core.SQLParser
 %scannertype sqlScanner
 %visibility internal
@@ -25,7 +34,7 @@ OctEsc          \\{OctDig}{3}
 HexEsc          \\x{HexDig}{2}
 UniEsc          \\u{HexDig}{4}
 UNIESC          \\U{HexDig}{8}
-String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\"
+LitStr          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\"
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
 TAdd            \+
 TMult           \*
@@ -51,6 +60,9 @@ TGreaterEquals  >=
 {Number}		{ Console.WriteLine("number: {0}", yytext); yylval.s = yytext; return (int)Token.TDIGIT; }
 
 {String}		{ Console.WriteLine("string: {0}", yytext); yylval.s = yytext; return (int)Token.TSTRING; }
+//^^^^^
+// Error: Unknown lexical category <String> 
+// -----------------------------------------
 
 {Space}+		/* skip */
 
@@ -94,4 +106,5 @@ TGreaterEquals  >=
 
 {Identifier} { Console.WriteLine("identifier: {0}", yytext); return (int)Token.IDENTIFIER; }
 
-%%
+%%// ==========================================================================
+

@@ -1,15 +1,12 @@
 ﻿
 namespace CamusDB.Core.SQLParser;
 
-public class SQLParserProcessor
+public static class SQLParserProcessor
 {
-	public static void Get()
-	{
-        sqlParser x = new();        
-
-        NodeAst xu = x.Parse("SELECT xx, aa FROM yy");
-
-        Console.WriteLine(xu.leftAst.nodeType);
+    public static NodeAst Parse(string sql)
+    {
+        sqlParser sqlParser = new();
+        return sqlParser.Parse(sql);
     }
 }
 

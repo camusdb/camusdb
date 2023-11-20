@@ -212,7 +212,8 @@ public class TestRowDeletor
            database: dbname,
            name: "robots",
            index: null,
-           filters: null
+           filters: null,
+           orderBy: null
         );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();

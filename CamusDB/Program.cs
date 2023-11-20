@@ -14,7 +14,11 @@ using CamusDB.Core.SQLParser;
 
 //Console.WriteLine(UInt32.MaxValue);
 
-SQLParserProcessor.Get();
+NodeAst ast = SQLParserProcessor.Parse("SELECT somefield FROM sometable");
+
+//Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+Console.WriteLine(ast.nodeType);
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 

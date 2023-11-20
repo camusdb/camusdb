@@ -108,7 +108,8 @@ internal sealed class TestRowMultiInsertor
             database: dbname,
             name: "user_robots",
             index: "robots_id",
-            filters: null
+            filters: null,
+            orderBy: null
         );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -156,7 +157,8 @@ internal sealed class TestRowMultiInsertor
             database: dbname,
             name: "user_robots",
             index: "robots_id",
-            filters: null
+            filters: null,
+            orderBy: null
         );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
