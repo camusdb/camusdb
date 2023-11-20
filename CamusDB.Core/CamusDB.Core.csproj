@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net6.0</TargetFramework>
+    <TargetFramework>net7.0</TargetFramework>
     <Version>0.1.0</Version>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -39,7 +39,28 @@
     <Folder Include="BufferPool\Controllers\" />
   </ItemGroup>
 
+  <ItemGroup Label="SQLParser">
+    <YaccFile Include="SQLParser\SQLParser.Language.grammar.y">
+      <OutputFile>SQLParser\SQLParser.Parser.Generated.cs</OutputFile>
+      <Arguments>/gplex /nolines</Arguments>
+    </YaccFile>
+    <None Include="SQLParser\SQLParser.Parser.Generated.cs">
+      <AutoGen>True</AutoGen>
+      <DesignTime>True</DesignTime>
+      <DependentUpon>SQLParser\SQLParser.Language.grammar.y</DependentUpon>
+    </None>
+    <LexFile Include="SQLParser\SQLParser.Language.analyzer.lex">
+      <OutputFile>SQLParser\SQLParser.Scanner.Generated.cs</OutputFile>
+    </LexFile>
+    <None Include="SQLParser\SQLParser.Scanner.Generated.cs">
+      <AutoGen>True</AutoGen>
+      <DesignTime>True</DesignTime>
+      <DependentUpon>SQLParser\SQLParser.Language.analyzer.lex</DependentUpon>
+    </None>
+  </ItemGroup>
+  
   <ItemGroup>
+    <PackageReference Include="YaccLexTools" Version="1.2.2" />
     <PackageReference Include="RocksDb" Version="8.5.3.42578" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
     <PackageReference Include="System.Linq.Async" Version="6.0.1" />    

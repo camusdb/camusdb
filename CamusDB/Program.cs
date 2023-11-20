@@ -10,8 +10,11 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
+using CamusDB.Core.SQLParser;
 
 //Console.WriteLine(UInt32.MaxValue);
+
+SQLParserProcessor.Get();
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 

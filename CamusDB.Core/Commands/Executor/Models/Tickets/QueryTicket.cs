@@ -18,7 +18,7 @@ public readonly struct QueryTicket
 
     public List<QueryFilter>? Filters { get; }
 
-    public QueryTicket(string database, string name, string? index, List<QueryFilter>? filters)
+    public QueryTicket(string database, string name, string? index, List<QueryFilter>? filters, List<QueryOrderBy>? orderBy)
     {
         DatabaseName = database;
         TableName = name;

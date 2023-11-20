@@ -33,7 +33,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
         if (rowTuple is not null)
             throw new CamusDBException(
                 CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                "Duplicate entry for key " + table.Name + " " + uniqueValue
+                "Duplicate entry for key " + table.Name + " " + uniqueValue.Type + " " + uniqueValue.Value
             );
 
         return uniqueValue;

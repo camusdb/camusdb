@@ -132,7 +132,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
             //await tablespace.WriteDataToPage(node.PageOffset, 0, nodeBuffer);
             modifiedPages.Add(new InsertModifiedPage(node.PageOffset, 0, nodeBuffer));
 
-            //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);            
+            Console.WriteLine("Node {0} at {1} KeyCount={2} Length={3}", node.Id, node.PageOffset, node.KeyCount, nodeBuffer.Length);            
         }
     }
 }

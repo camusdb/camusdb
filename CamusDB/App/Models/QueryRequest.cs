@@ -19,4 +19,6 @@ public sealed class QueryRequest
     public string? IndexName { get; set; }
 
     public List<QueryFilter>? Filters { get; set; }
+
+    public List<QueryOrderBy>? OrderBy { get; set; }
 }
