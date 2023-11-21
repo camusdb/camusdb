@@ -1,4 +1,12 @@
 ﻿
+
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 namespace CamusDB.Core.SQLParser;
 
 public enum NodeType
@@ -11,5 +19,7 @@ public enum NodeType
     ExprNotEquals = 6,
     ExprLessThan = 7,
     ExprGreaterThan = 8,
+    ExprOr = 9,
+    ExprAnd = 10,
     Select = 20,
 }

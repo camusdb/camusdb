@@ -19,10 +19,7 @@
     <None Remove="Config\" />
   </ItemGroup>
   <ItemGroup>
-    <Folder Include="App\" />
-    <Folder Include="App\Controllers\" />
     <Folder Include="Data\" />
-    <Folder Include="App\Models\" />
     <Folder Include="Config\" />
   </ItemGroup>
   <ItemGroup>

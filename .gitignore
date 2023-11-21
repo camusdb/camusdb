@@ -6,6 +6,8 @@ CamusDB.Tests/bin
 CamusDb.Tests/obj
 CamusDB.Generators/bin
 CamusDB.Generators/obj
+CamusDB.Core\SQLParser.Language.analyzer.lst
+CamusDB.Core\sqlParser.Language.grammar.lst
 .vs/
 bench/node_modules/
 CamusDB/Data/

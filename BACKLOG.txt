@@ -7,19 +7,9 @@ Indexes
 
 BufferPool/Storage
 - Support more than 8 tablespaces per type
-- Get consistent reads of pages when reading data
 - Support multiple items per page to avoid storage waste
 - Support multiple storage adaptars
-
-Journal
-- Add multi index insert to journal recovery
-- Check pages modified by indexes in journal recovery
-
-HTTP API
-- Receive POST parameters for query
 
 Create Table
 - Dont allow null type columns in create table
 
-Insert
-- Validate not null fields

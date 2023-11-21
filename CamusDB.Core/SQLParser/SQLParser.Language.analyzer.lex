@@ -8,6 +8,8 @@
 TSelect         "SELECT"
 TFrom           "FROM"
 TWhere          "WHERE"
+TOrder          "ORDER"
+TBy             "BY"
 TAnd            "AND"
 TOr             "OR"
 LParen          \(
@@ -48,9 +50,9 @@ TGreaterEquals  >=
 
 /* Scanner body */
 
-{Number}		{ Console.WriteLine("number: {0}", yytext); yylval.s = yytext; return (int)Token.TDIGIT; }
+{Number}		{ yylval.s = yytext; return (int)Token.TDIGIT; }
 
-{String}		{ Console.WriteLine("string: {0}", yytext); yylval.s = yytext; return (int)Token.TSTRING; }
+{String}		{ yylval.s = yytext; return (int)Token.TSTRING; }
 
 {Space}+		/* skip */
 
@@ -63,6 +65,10 @@ TGreaterEquals  >=
 {TFrom} { return (int)Token.TFROM; }
 
 {TWhere} { return (int)Token.TWHERE; }
+
+{TOrder} { return (int)Token.TORDER; }
+
+{TBy} { return (int)Token.TBY; }
 
 {TAdd} { return (int)Token.TADD; }
 
@@ -92,6 +98,6 @@ TGreaterEquals  >=
 
 {TNotEquals2} { return (int)Token.TNOTEQUALS; }
 
-{Identifier} { Console.WriteLine("identifier: {0}", yytext); return (int)Token.IDENTIFIER; }
+{Identifier} { yylval.s = yytext; return (int)Token.IDENTIFIER; }
 
 %%
