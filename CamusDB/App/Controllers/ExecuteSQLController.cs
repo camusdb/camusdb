@@ -12,6 +12,7 @@ using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.App.Controllers;
 
@@ -42,9 +43,12 @@ public sealed class ExecuteSQLController : CommandsController
                 parameters: request.Parameters
             );
 
-            await executor.ExecuteSQL(ticket);
+            List<Dictionary<string, ColumnValue>> rows = new();
 
-            return new JsonResult(new ExecuteSQLResponse("ok"));
+            await foreach (Dictionary<string, ColumnValue> row in await executor.ExecuteSQLQuery(ticket))
+                rows.Add(row);
+
+            return new JsonResult(new ExecuteSQLResponse("ok", rows));
         }
         catch (CamusDBException e)
         {

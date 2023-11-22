@@ -18,11 +18,14 @@ public readonly struct QueryTicket
 
     public List<QueryFilter>? Filters { get; }
 
+    public List<QueryOrderBy>? OrderBy { get; }
+
     public QueryTicket(string database, string name, string? index, List<QueryFilter>? filters, List<QueryOrderBy>? orderBy)
     {
         DatabaseName = database;
         TableName = name;
         IndexName = index;
         Filters = filters;
+        OrderBy = orderBy;
     }
 }

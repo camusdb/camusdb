@@ -31,7 +31,13 @@ public sealed class NodeAst
 		this.extendedTwo = extendedTwo;
 		this.yytext = yytext;
 
-		if (!string.IsNullOrEmpty(yytext))		
+        //if (leftAst is not null)
+        //	Console.WriteLine("left={0}/{1}", leftAst.nodeType, leftAst.yytext);
+
+        //if (rightAst is not null)
+        //Console.WriteLine("right={0}/{1}", rightAst.nodeType, rightAst.yytext);
+
+        if (!string.IsNullOrEmpty(yytext))		
 			Console.WriteLine("{0}: {1}", nodeType, yytext);
 	}
 }

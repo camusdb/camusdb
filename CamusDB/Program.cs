@@ -12,14 +12,6 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.SQLParser;
 
-//Console.WriteLine(UInt32.MaxValue);
-
-NodeAst ast = SQLParserProcessor.Parse("SELECT somefield FROM sometable");
-
-//Assert.AreEqual(NodeType.Select, ast.nodeType);
-
-Console.WriteLine(ast.nodeType);
-
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.

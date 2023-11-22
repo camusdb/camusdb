@@ -1,5 +1,4 @@
 ﻿
-
 /**
  * This file is part of CamusDB
  *

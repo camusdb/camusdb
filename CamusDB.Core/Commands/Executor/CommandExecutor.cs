@@ -13,6 +13,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
+using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor;
 
@@ -41,6 +42,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly QueryExecutor queryExecutor;
 
+    private readonly SqlExecutor sqlExecutor;
+
     private readonly CommandValidator validator;
 
     public CommandExecutor(CommandValidator validator, CatalogsManager catalogs)
@@ -57,6 +60,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         rowUpdater = new();
         rowDeleter = new();
         queryExecutor = new();
+        sqlExecutor = new();
     }
 
     #region database
@@ -119,7 +123,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         await rowInserter.Insert(database, table, ticket);
     }
-    
+
     public async Task InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
     {
         await rowInserter.InsertWithState(machine, state);
@@ -154,7 +158,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
         return await queryExecutor.Query(database, table, ticket);
-    }
+    }    
 
     /// <summary>
     /// Queries a table by the row's id
@@ -168,6 +172,41 @@ public sealed class CommandExecutor : IAsyncDisposable
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
         return queryExecutor.QueryById(database, table, ticket);
+    }
+
+    /// <summary>
+    /// Execute a SQL statement that doesn't return rows
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
+    public async Task ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
+    {
+        NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
+
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+
+        switch (ast.nodeType)
+        {
+            case NodeType.Select:
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Execute a SQL statement that returns rows
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
+    /// <exception cref="Exception"></exception>
+    public async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> ExecuteSQLQuery(ExecuteSQLTicket ticket)
+    {
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+
+        QueryTicket queryTicket = sqlExecutor.CreateQueryTicket(ticket);
+
+        TableDescriptor table = await tableOpener.Open(database, queryTicket.TableName);
+
+        return await queryExecutor.Query(database, table, queryTicket);
     }
 
     #endregion    

@@ -20,8 +20,12 @@ public class TestSQLParser
         NodeAst ast = SQLParserProcessor.Parse("SELECT some_field FROM some_table");
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
+
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+
+        Assert.AreEqual("some_field", ast.leftAst!.yytext);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
     }
 
     [Test]

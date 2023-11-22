@@ -35,7 +35,7 @@ select_stmt    : TSELECT identifier_list TFROM identifier { $$.n = new(NodeType.
                ;
 
 identifier_list  : identifier_list TCOMMA identifier { $$.n = new(NodeType.IdentifierList, $1.n, $3.n, null, null, null); }
-                 | identifier { $$.n = $1.n; }
+                 | identifier { $$.n = $1.n; $$.s = $1.s; }
                  ;
 
 condition  : equals_expr { $$.n = $1.n; }
@@ -65,9 +65,9 @@ less_than_expr   : condition TLESSTHAN condition { $$.n = new(NodeType.ExprLessT
 greater_than_expr : condition TGREATERTHAN condition { $$.n = new(NodeType.ExprGreaterThan, $1.n, $3.n, null, null, null); }
                   ;
 
-simple_expr : identifier { $$.n = $1.n; }
-			| number { $$.n = $1.n; }
-            | string { $$.n = $1.n; }
+simple_expr : identifier { $$.n = $1.n; $$.s = $1.s; }
+			| number { $$.n = $1.n; $$.s = $1.s; }
+            | string { $$.n = $1.n; $$.s = $1.s; }
 			;
 
 identifier  : IDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, $$.s); }
