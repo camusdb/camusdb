@@ -37,6 +37,8 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             return value1.CompareTo(value2);
         }
 
+        //Console.WriteLine(Value + " " + other.Value);
+
         return Value.CompareTo(other.Value);
     }
 }

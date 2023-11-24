@@ -161,8 +161,9 @@ internal sealed class QueryExecutor
             case ColumnType.Null:
                 return false;
 
-            case ColumnType.Bool:                
-                return evaluatedExpr.Value == "True";
+            case ColumnType.Bool:
+                //Console.WriteLine(evaluatedExpr.Value);
+                return evaluatedExpr.Value == "True" || evaluatedExpr.Value == "true";
 
             case ColumnType.Float:
                 if (float.TryParse(evaluatedExpr.Value, out float res))
@@ -187,9 +188,12 @@ internal sealed class QueryExecutor
     private ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row)
     {
         switch (expr.nodeType)
-        {            
+        {
             case NodeType.Number:
                 return new ColumnValue(ColumnType.Integer64, expr.yytext!);
+
+            case NodeType.String:
+                return new ColumnValue(ColumnType.String, expr.yytext!.Trim('"'));
 
             case NodeType.Identifier:
 
@@ -204,6 +208,14 @@ internal sealed class QueryExecutor
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
 
                     return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) == 0).ToString());
+                }
+
+            case NodeType.ExprNotEquals:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+
+                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) != 0).ToString());
                 }
 
             default:

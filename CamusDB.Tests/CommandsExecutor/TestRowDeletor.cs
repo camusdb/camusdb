@@ -80,7 +80,7 @@ public class TestRowDeletor
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
                     { "year", new ColumnValue(ColumnType.Integer64, (2000 + i).ToString()) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, "FALSE") },
+                    { "enabled", new ColumnValue(ColumnType.Bool, "false") },
                 }
             );
 

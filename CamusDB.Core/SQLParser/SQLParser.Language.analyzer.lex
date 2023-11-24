@@ -12,6 +12,8 @@ TOrder          "ORDER"
 TBy             "BY"
 TAnd            "AND"
 TOr             "OR"
+TDesc           "DESC"
+TAsc            "ASC"
 LParen          \(
 RParen          \)
 Eol             (\r\n?|\n)
@@ -69,6 +71,10 @@ TGreaterEquals  >=
 {TOrder} { return (int)Token.TORDER; }
 
 {TBy} { return (int)Token.TBY; }
+
+{TAsc} { return (int)Token.TASC; }
+
+{TDesc} { return (int)Token.TDESC; }
 
 {TAdd} { return (int)Token.TADD; }
 

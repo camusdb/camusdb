@@ -107,4 +107,50 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
     }
+
+    [Test]
+    public void TestParseSimpleSelectOrderBy4()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table WHERE xx = \"100\" ORDER BY xx ASC, yy");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectOrderBy5()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table WHERE xx = \"100\" ORDER BY xx ASC, yy DESC");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectAll()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT * FROM some_table");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.ExprAllFields, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectAll2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT *, * FROM some_table");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+    }
 }

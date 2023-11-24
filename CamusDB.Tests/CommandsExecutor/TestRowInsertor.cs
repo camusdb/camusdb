@@ -83,7 +83,7 @@ internal sealed class TestRowInsertor
                 { "id", new ColumnValue(ColumnType.Integer64, "1") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer64, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "False") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
             }
         );
 
@@ -193,7 +193,7 @@ internal sealed class TestRowInsertor
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "name", new ColumnValue(ColumnType.String, "some name") },
                 { "year", new ColumnValue(ColumnType.Integer64, "1234") },
-                { "unknownColumn", new ColumnValue(ColumnType.Bool, "TRUE") },
+                { "unknownColumn", new ColumnValue(ColumnType.Bool, "true") },
             }
         );
 

@@ -20,5 +20,6 @@ public enum NodeType
     ExprGreaterThan = 8,
     ExprOr = 9,
     ExprAnd = 10,
+    ExprAllFields = 19,
     Select = 20,
 }
