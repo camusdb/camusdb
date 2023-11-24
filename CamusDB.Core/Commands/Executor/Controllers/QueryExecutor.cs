@@ -12,6 +12,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -94,8 +95,21 @@ internal sealed class QueryExecutor
 
             Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, data);
 
-            if (MeetFilters(ticket, row))
-                yield return row;
+            if (ticket.Filters is not null && ticket.Filters.Count > 0)
+            {
+                if (MeetFilters(ticket.Filters, row))
+                    yield return row;
+            }
+            else
+            {
+                if (ticket.Where is not null)
+                {
+                    if (MeetWhere(ticket.Where, row))
+                        yield return row;
+                }
+                else
+                    yield return row;
+            }
         }
     }
 
@@ -120,17 +134,89 @@ internal sealed class QueryExecutor
 
             Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, data);
 
-            if (MeetFilters(ticket, row))
-                yield return row;
+            if (ticket.Filters is not null && ticket.Filters.Count > 0)
+            {
+                if (MeetFilters(ticket.Filters, row))
+                    yield return row;
+            }
+            else
+            {
+                if (ticket.Where is not null)
+                {
+                    if (MeetWhere(ticket.Where, row))
+                        yield return row;
+                }
+                else
+                    yield return row;
+            }
         }
     }
 
-    private static bool MeetFilters(QueryTicket ticket, Dictionary<string, ColumnValue> row)
+    private bool MeetWhere(NodeAst where, Dictionary<string, ColumnValue> row)
     {
-        if (ticket.Filters is null || ticket.Filters.Count == 0)
-            return true;
+        ColumnValue evaluatedExpr = EvalExpr(where, row);
 
-        foreach (QueryFilter filter in ticket.Filters)
+        switch (evaluatedExpr.Type)
+        {
+            case ColumnType.Null:
+                return false;
+
+            case ColumnType.Bool:                
+                return evaluatedExpr.Value == "True";
+
+            case ColumnType.Float:
+                if (float.TryParse(evaluatedExpr.Value, out float res))
+                {
+                    if (res != 0)
+                        return true;
+                }
+                return false;
+
+            case ColumnType.Integer64:
+                if (long.TryParse(evaluatedExpr.Value, out long res2))
+                {
+                    if (res2 != 0)
+                        return true;
+                }
+                return false;
+        }
+
+        return false;
+    }
+
+    private ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row)
+    {
+        switch (expr.nodeType)
+        {            
+            case NodeType.Number:
+                return new ColumnValue(ColumnType.Integer64, expr.yytext!);
+
+            case NodeType.Identifier:
+
+                if (row.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
+                    return columnValue;
+
+                throw new Exception("Not found column: " + expr.yytext!);
+
+            case NodeType.ExprEquals:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+
+                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) == 0).ToString());
+                }
+
+            default:
+                Console.WriteLine("ERROR {0}", expr.nodeType);
+                break;
+        }
+
+        return new ColumnValue(ColumnType.Null, "");
+    }
+
+    private static bool MeetFilters(List<QueryFilter> filters, Dictionary<string, ColumnValue> row)
+    {        
+        foreach (QueryFilter filter in filters)
         {
             if (string.IsNullOrEmpty(filter.ColumnName))
             {

@@ -250,6 +250,7 @@ public class TestRowUpdater
            database: dbname,
            name: "robots",
            index: null,
+           where: null,
            filters: null,
            orderBy: null
         );
@@ -264,6 +265,7 @@ public class TestRowUpdater
            database: dbname,
            name: "robots",
            index: null,
+           where: null,
            filters: new()
            {
                new("name", "=", new ColumnValue(ColumnType.String, "updated value")) 
@@ -281,6 +283,7 @@ public class TestRowUpdater
            database: dbname,
            name: "robots",
            index: null,
+           where: null,
            filters: new()
            {
                new("name", "=", new ColumnValue(ColumnType.String, "another updated value"))

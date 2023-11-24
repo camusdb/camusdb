@@ -30,8 +30,8 @@ public sealed class InsertController : CommandsController
     {
         try
         {
-            using var reader = new StreamReader(Request.Body);
-            var body = await reader.ReadToEndAsync();
+            using StreamReader reader = new(Request.Body);
+            string body = await reader.ReadToEndAsync();
 
             InsertRequest? request = JsonSerializer.Deserialize<InsertRequest>(body, jsonOptions);
             if (request == null)

@@ -23,7 +23,7 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestRowDeletor
+public class TestExecuteSql
 {
     [SetUp]
     public void Setup()
@@ -92,132 +92,53 @@ public class TestRowDeletor
         return (dbname, executor, objectsId);
     }
 
-    /*[Test]
-    [NonParallelizable]
-    public async Task TestInvalidDatabase()
-    {
-        var executor = await SetupBasicTable();
-
-        InsertTicket ticket = new(
-            database: "another_factory",
-            name: "robots",
-            values: new Dictionary<string, ColumnValue>()
-            {
-                { "id", new ColumnValue(ColumnType.Integer, "1") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer, "1234") },
-                { "enabled", new ColumnValue(ColumnType.Bool, "FALSE") },
-            }
-        );
-
-        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
-        Assert.AreEqual("Database doesn't exist", e!.Message);
-    }*/
-
     [Test]
     [NonParallelizable]
-    public async Task TestInvalidTable()
+    public async Task TestExecuteSelectGenericWhere()
     {
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
-        DeleteByIdTicket ticket = new(
+        ExecuteSQLTicket ticket = new(
             database: dbname,
-            name: "unknown_table",
-            id: objectsId[0]
-        );
+            sql: "SELECT x FROM robots WHERE 1=1",
+            parameters: null
+        );        
 
-        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.DeleteById(ticket));
-        Assert.AreEqual("Table 'unknown_table' doesn't exist", e!.Message);
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
     }
 
     [Test]
     [NonParallelizable]
-    public async Task TestBasicDelete()
+    public async Task TestExecuteSelectWhereBool()
     {
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
-        DeleteByIdTicket ticket = new(
+        ExecuteSQLTicket ticket = new(
             database: dbname,
-            name: "robots",
-            id: objectsId[0]
+            sql: "SELECT x FROM robots WHERE enabled=enabled",
+            parameters: null
         );
 
-        Assert.AreEqual(1, await executor.DeleteById(ticket));
-
-        QueryByIdTicket queryByIdTicket = new(
-            database: dbname,
-            name: "robots",
-            id: objectsId[0]
-        );
-
-        List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
-        Assert.IsEmpty(result);
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
     }
 
     [Test]
     [NonParallelizable]
-    public async Task TestDeleteUnknownRow()
+    public async Task TestExecuteSelectWhereColumnEqualsInteger()
     {
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
-        DeleteByIdTicket ticket = new(
+        ExecuteSQLTicket ticket = new(
             database: dbname,
-            name: "robots",
-            id: "---"
+            sql: "SELECT x FROM robots WHERE year=2000",
+            parameters: null
         );
 
-        Assert.AreEqual(0, await executor.DeleteById(ticket));
-    }
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
 
-    [Test]
-    [NonParallelizable]
-    public async Task TestMultiDelete()
-    {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
-
-        foreach (string objectId in objectsId)
-        {
-            DeleteByIdTicket ticket = new(
-                database: dbname,
-                name: "robots",
-                id: objectId
-            );
-
-            Assert.AreEqual(1, await executor.DeleteById(ticket));
-        }        
-    }
-
-    [Test]
-    [NonParallelizable]
-    public async Task TestMultiDeleteParallel()
-    {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
-
-        List<Task> tasks = new();
-
-        foreach (string objectId in objectsId)
-        {
-            DeleteByIdTicket ticket = new(
-                database: dbname,
-                name: "robots",
-                id: objectId
-            );
-
-            tasks.Add(executor.DeleteById(ticket));
-        }
-
-        await Task.WhenAll(tasks);
-
-        QueryTicket queryTicket = new(
-           database: dbname,
-           name: "robots",
-           index: null,
-           where: null,
-           filters: null,
-           orderBy: null
-        );
-
-        List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
-        Assert.IsEmpty(result);
+        Assert.AreEqual(1, result.Count);
     }
 }

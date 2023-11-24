@@ -26,30 +26,9 @@ internal sealed class SqlExecutor
         {
             case NodeType.Select:
 
-                string tableName = ast.rightAst!.yytext!;
+                string tableName = ast.rightAst!.yytext!;                
 
-                List<QueryFilter>? filters = null;
-
-                if (ast.extendedOne is not null)
-                {
-                    Console.WriteLine(ast.extendedOne.leftAst!.yytext!);
-                    Console.WriteLine(ast.extendedOne.rightAst!.yytext!.Trim('"'));
-
-                    filters = new() {
-                        new(
-                            ast.extendedOne.leftAst!.yytext!,
-                            "=",
-                            new ColumnValue(Catalogs.Models.ColumnType.String, ast.extendedOne.rightAst!.yytext!.Trim('"'))
-                        )
-                    };
-                }
-
-                /*if (ast.extendedTwo is not null)
-                    Console.WriteLine(ast.extendedTwo.nodeType);
-                else
-                    Console.WriteLine("extendedTwo is null");*/
-
-                return new(ticket.DatabaseName, tableName, null, filters, null);
+                return new(ticket.DatabaseName, tableName, null, null, ast.extendedOne, null);
 
             default:
                 throw new Exception("Unknown ast stmt");

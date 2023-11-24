@@ -13,7 +13,6 @@ using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.App.Controllers;
 
@@ -42,6 +41,7 @@ public sealed class QueryController : CommandsController
                 database: request.DatabaseName ?? "",
                 name: request.TableName ?? "",
                 index: null,
+                where: null,
                 filters: request.Filters,
                 orderBy: request.OrderBy
             );

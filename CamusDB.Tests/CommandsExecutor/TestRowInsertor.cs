@@ -498,6 +498,7 @@ internal sealed class TestRowInsertor
             database: dbname,
             name: "robots",
             index: null,
+            where: null,
             filters: null,
             orderBy: null
         );

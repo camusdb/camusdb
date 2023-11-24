@@ -108,6 +108,7 @@ internal sealed class TestRowMultiInsertor
             database: dbname,
             name: "user_robots",
             index: "robots_id",
+            where: null,
             filters: null,
             orderBy: null
         );
@@ -157,6 +158,7 @@ internal sealed class TestRowMultiInsertor
             database: dbname,
             name: "user_robots",
             index: "robots_id",
+            where: null,
             filters: null,
             orderBy: null
         );
