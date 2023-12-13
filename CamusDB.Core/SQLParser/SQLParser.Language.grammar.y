@@ -18,7 +18,7 @@
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
 
-%token TDIGIT TSTRING IDENTIFIER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
+%token TDIGIT TSTRING IDENTIFIER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
 
 %%
 
@@ -55,9 +55,12 @@ condition  : equals_expr { $$.n = $1.n; }
            | not_equals_expr { $$.n = $1.n; }
            | less_than_expr { $$.n = $1.n; }
            | greater_than_expr { $$.n = $1.n; }
+           | less_equals_than_expr { $$.n = $1.n; }
+           | greater_equals_than_expr { $$.n = $1.n; }
            | and_expr { $$.n = $1.n; }
            | or_expr { $$.n = $1.n; }
            | simple_expr { $$.n = $1.n; }
+           | group_paren_expr { $$.n = $1.n; } 
            ;
 
 and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, null, null, null); }
@@ -78,9 +81,19 @@ less_than_expr   : condition TLESSTHAN condition { $$.n = new(NodeType.ExprLessT
 greater_than_expr : condition TGREATERTHAN condition { $$.n = new(NodeType.ExprGreaterThan, $1.n, $3.n, null, null, null); }
                   ;
 
+greater_equals_than_expr : condition TGREATERTHANEQUALS condition { $$.n = new(NodeType.ExprGreaterEqualsThan, $1.n, $3.n, null, null, null); }
+                         ;
+
+less_equals_than_expr : condition TLESSTHANEQUALS condition { $$.n = new(NodeType.ExprLessEqualsThan, $1.n, $3.n, null, null, null); }
+                      ;
+
+group_paren_expr : LPAREN condition RPAREN { $$.n = $2.n; $$.s = $2.s; }
+                 ;
+
 simple_expr : identifier { $$.n = $1.n; $$.s = $1.s; }
 			| number { $$.n = $1.n; $$.s = $1.s; }
             | string { $$.n = $1.n; $$.s = $1.s; }
+            | bool { $$.n = $1.n; $$.s = $1.s; }
 			;
 
 identifier  : IDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, $$.s); }
@@ -90,6 +103,10 @@ number  : TDIGIT { $$.n = new(NodeType.Number, null, null, null, null, $$.s); }
         ;
 
 string  : TSTRING { $$.n = new(NodeType.String, null, null, null, null, $$.s); }
+        ;
+
+bool    : TTRUE { $$.n = new(NodeType.Bool, null, null, null, null, "true"); }
+        | TFALSE { $$.n = new(NodeType.Bool, null, null, null, null, "false"); }
         ;
 
 %%

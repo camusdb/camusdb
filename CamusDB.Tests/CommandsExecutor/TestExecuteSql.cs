@@ -101,7 +101,7 @@ public class TestExecuteSql
             database: dbname,
             sql: "SELECT x FROM robots WHERE 1=1",
             parameters: null
-        );        
+        );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
@@ -141,9 +141,25 @@ public class TestExecuteSql
 
     [Test]
     [NonParallelizable]
-    public async Task TestExecuteSelectWhereColumnEqualsInteger()
+    public async Task TestExecuteSelectWhereBool3()
     {
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT x FROM robots WHERE enabled=TRUE",
+            parameters: null
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereColumnEqualsInteger()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
@@ -161,7 +177,7 @@ public class TestExecuteSql
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnEqualsInteger2()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
@@ -179,7 +195,7 @@ public class TestExecuteSql
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnEqualsString()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
@@ -197,7 +213,7 @@ public class TestExecuteSql
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnEqualsString2()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
@@ -215,7 +231,7 @@ public class TestExecuteSql
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnNotEqualsInteger()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
@@ -233,7 +249,7 @@ public class TestExecuteSql
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnNotEqualsInteger2()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
@@ -245,5 +261,77 @@ public class TestExecuteSql
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(24, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereColumnEqualsIntegerOr()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT x FROM robots WHERE year=2000 OR year=2001",
+            parameters: null
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(2, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereColumnEqualsIntegerOr2()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT x FROM robots WHERE year=2000 OR year=2001 OR year=2002",
+            parameters: null
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(3, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereColumnGreaterInteger()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT x FROM robots WHERE year>2020",
+            parameters: null
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(4, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereColumnLessInteger()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT x FROM robots WHERE year<2005",
+            parameters: null
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(5, result.Count);
     }
 }

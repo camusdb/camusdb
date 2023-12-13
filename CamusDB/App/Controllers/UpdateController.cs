@@ -45,17 +45,17 @@ public sealed class UpdateController : CommandsController
 
             await executor.UpdateById(ticket);
 
-            return new JsonResult(new DeleteResponse("ok"));
+            return new JsonResult(new UpdateResponse("ok"));
         }
         catch (CamusDBException e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
-            return new JsonResult(new DeleteResponse("failed", e.Code, e.Message));
+            return new JsonResult(new UpdateResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
-            return new JsonResult(new DeleteResponse("failed", "CA0000", e.Message));
+            return new JsonResult(new UpdateResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }
 }

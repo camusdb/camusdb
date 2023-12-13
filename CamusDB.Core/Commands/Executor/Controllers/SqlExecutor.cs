@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.SQLParser;
-using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;

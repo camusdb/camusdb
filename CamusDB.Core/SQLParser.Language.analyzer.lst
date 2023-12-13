@@ -1,19 +1,31 @@
+
+// ==========================================================================
+//  GPLEX error listing for lex source file <SQLParser.Language.analyzer.lex>
+// ==========================================================================
+//  Version:  1.2.2
+//  DateTime: 11/25/2023 10:49:53 PM
+// ==========================================================================
+
+
 %namespace CamusDB.Core.SQLParser
 %scannertype sqlScanner
 %visibility internal
 %tokentype Token
 
-%option stack, minimize, parser, verbose, persistbuffer, noembedbuffers
+%option stack, minimize, parser, verbose, persistbuffer, noembedbuffers, caseless
+//-----^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+// Error: Unrecognized "%option" command  <caseless> 
+// --------------------------------------------------
 
-TSelect         (S|s)(E|e)(L|l)(E|e)(C|c)(T|t)
-TFrom           (F|f)(R|r)(O|o)(M|m)
-TWhere          (W|w)(H|h)(E|e)(R|r)(E|e)
-TOrder          (O|o)(R|r)(D|d)(E|e)(R|r)
-TBy             (B|b)(Y|y)
-TAnd            (A|a)(N|n)(D|d)
-TOr             (O|o)(R|r)
-TDesc           (D|d)(E|e)(S|s)(C|c)
-TAsc            (A|a)(S|s)(C|c)
+TSelect         "SELECT"
+TFrom           "FROM"
+TWhere          "WHERE"
+TOrder          "ORDER"
+TBy             "BY"
+TAnd            "AND"
+TOr             "OR"
+TDesc           "DESC"
+TAsc            "ASC"
 TTrue           "TRUE"
 TFalse          "FALSE"
 LParen          \(
@@ -112,4 +124,5 @@ TGreaterEquals  >=
 
 {Identifier} { yylval.s = yytext; return (int)Token.IDENTIFIER; }
 
-%%
+%%// ==========================================================================
+

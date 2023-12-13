@@ -12,4 +12,3 @@ BufferPool/Storage
 
 Create Table
 - Dont allow null type columns in create table
-

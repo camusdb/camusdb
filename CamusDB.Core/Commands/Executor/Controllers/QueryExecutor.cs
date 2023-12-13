@@ -195,6 +195,9 @@ internal sealed class QueryExecutor
             case NodeType.String:
                 return new ColumnValue(ColumnType.String, expr.yytext!.Trim('"'));
 
+            case NodeType.Bool:
+                return new ColumnValue(ColumnType.Bool, expr.yytext!);
+
             case NodeType.Identifier:
 
                 if (row.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
@@ -216,6 +219,38 @@ internal sealed class QueryExecutor
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
 
                     return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) != 0).ToString());
+                }
+
+            case NodeType.ExprLessThan:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+
+                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) < 0).ToString());
+                }
+
+            case NodeType.ExprGreaterThan:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+
+                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) > 0).ToString());
+                }
+
+            case NodeType.ExprOr:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+
+                    return new ColumnValue(ColumnType.Bool, (leftValue.Value.ToLowerInvariant() == "true" || rightValue.Value.ToLowerInvariant() == "true").ToString());
+                }
+
+            case NodeType.ExprAnd:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+
+                    return new ColumnValue(ColumnType.Bool, (leftValue.Value.ToLowerInvariant() == "true" && rightValue.Value.ToLowerInvariant() == "true").ToString());
                 }
 
             default:

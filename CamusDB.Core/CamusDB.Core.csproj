@@ -24,7 +24,9 @@
     <None Remove="Storage\" />
     <None Remove="Config\" />
     <None Remove="Config\Models\" />
-    <None Remove="BufferPool\Controllers\" />
+    <None Remove="Statistics\" />
+    <None Remove="Statistics\Models\" />
+    <None Remove="Util\Time\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Util\Hashes\" />
@@ -36,7 +38,9 @@
     <Folder Include="Storage\" />
     <Folder Include="Config\" />
     <Folder Include="Config\Models\" />
-    <Folder Include="BufferPool\Controllers\" />
+    <Folder Include="Statistics\" />
+    <Folder Include="Statistics\Models\" />
+    <Folder Include="Util\Time\" />
   </ItemGroup>
 
   <ItemGroup Label="SQLParser">

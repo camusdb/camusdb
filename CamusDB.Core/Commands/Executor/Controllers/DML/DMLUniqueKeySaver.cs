@@ -25,7 +25,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
         if (uniqueValue is null)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
-                "Cannot retrieve unique key for table " + table.Name
+                "Cannot retrieve primary key for table " + table.Name
             );
 
         BTreeTuple? rowTuple = await uniqueIndex.Get(uniqueValue);

@@ -28,7 +28,7 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             throw new ArgumentException("Object is not a ColumnValue");
 
         if (Type != other.Type)
-            throw new ArgumentException("Comparing incompatible ColumnValue");
+            throw new ArgumentException($"Comparing incompatible ColumnValue: {Type} and {other.Type}");
 
         if (Type == ColumnType.Integer64)
         {
