@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.2
-// DateTime: 11/25/2023 10:38:25 PM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 11/25/2023 10:38:03 PM>
+// DateTime: 12/26/2023 12:18:09 PM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 12/26/2023 12:18:04 PM>
 
 // options: no-lines gplex
 
@@ -203,7 +203,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null); }
         break;
       case 6: // select_stmt -> TSELECT, field_list, TFROM, identifier, TORDER, TBY, order_list
-{ CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null); }
+{ CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, null, ValueStack[ValueStack.Depth-1].n, null); }
         break;
       case 7: // select_stmt -> TSELECT, field_list, TFROM, identifier, TWHERE, condition, 
               //                TORDER, TBY, order_list

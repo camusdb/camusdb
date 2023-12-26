@@ -31,7 +31,7 @@ public sealed class CreateTableController : CommandsController
         if (string.IsNullOrEmpty(name))
             throw new Exception("Invalid type");
 
-        if (name == "int")
+        if (name == "int64")
             return ColumnType.Integer64;
 
         if (name == "string")
@@ -90,8 +90,8 @@ public sealed class CreateTableController : CommandsController
     {
         try
         {
-            using var reader = new StreamReader(Request.Body);
-            var body = await reader.ReadToEndAsync();
+            using StreamReader reader = new(Request.Body);
+            string body = await reader.ReadToEndAsync();
 
             CreateTableRequest? request = JsonSerializer.Deserialize<CreateTableRequest>(body, jsonOptions);
             if (request == null)

@@ -30,7 +30,7 @@ stat    : select_stmt { $$.n = $1.n; }
 
 select_stmt    : TSELECT field_list TFROM identifier { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, null); }
                | TSELECT field_list TFROM identifier TWHERE condition { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, null, null); }
-               | TSELECT field_list TFROM identifier TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, $7.n, null, null); }
+               | TSELECT field_list TFROM identifier TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, null, $7.n, null); }
                | TSELECT field_list TFROM identifier TWHERE condition TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, null); }
                ;
 

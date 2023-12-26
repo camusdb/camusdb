@@ -20,14 +20,83 @@ internal sealed class QueryExecutor
 {
     private readonly RowDeserializer rowDeserializer = new();
 
+    private readonly QueryPlanner queryPlanner = new();
+
     public async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
-        using IDisposable readerLock = await table.ReaderWriterLock.ReaderLockAsync();
+        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
 
-        if (string.IsNullOrEmpty(ticket.IndexName))
-            return QueryUsingTableIndex(database, table, ticket);
+        return await ExecuteQueryPlan(plan);
+    }
 
-        return QueryUsingIndex(database, table, ticket);
+    private async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> ExecuteQueryPlan(QueryPlan plan)
+    {
+        using IDisposable readerLock = await plan.Table.ReaderWriterLock.ReaderLockAsync();
+
+        foreach (QueryPlanStep step in plan.Steps)
+        {
+            Console.WriteLine("Executing step {0}", step.Type);
+
+            switch (step.Type)
+            {
+                case QueryPlanStepType.QueryFromIndex:
+                    plan.DataCursor = QueryUsingIndex(plan.Database, plan.Table, plan.Ticket);
+                    break;
+
+                case QueryPlanStepType.QueryFromTableIndex:
+                    plan.DataCursor = QueryUsingTableIndex(plan.Database, plan.Table, plan.Ticket);
+                    break;
+
+                case QueryPlanStepType.SortBy:
+                    if (plan.DataCursor is null)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
+
+                    plan.DataCursor = SortResultset(plan.Ticket, plan.DataCursor);
+                    break;
+
+                default:
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown query plan step: " + step.Type);
+            }
+        }
+
+        if (plan.DataCursor is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
+
+        return plan.DataCursor;
+    }
+
+    private async IAsyncEnumerable<Dictionary<string, ColumnValue>> SortResultset(QueryTicket ticket, IAsyncEnumerable<Dictionary<string, ColumnValue>> dataCursor)
+    {
+        if (ticket.OrderBy is null || ticket.OrderBy.Count == 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal sort context");
+
+        SortedDictionary<ColumnValue, List<Dictionary<string, ColumnValue>>> yy = new();
+
+        await foreach (Dictionary<string, ColumnValue> row in dataCursor)
+        {
+            string columnName = ticket.OrderBy[0].ColumnName;
+
+            ColumnValue? sortColumnValue = row[columnName];
+
+            if (sortColumnValue is null)
+            {
+                Console.WriteLine("?");
+                continue;
+            }
+            
+            if (yy.TryGetValue(sortColumnValue, out List<Dictionary<string, ColumnValue>>? aa))
+                aa.Add(row);
+            else            
+                yy.Add(sortColumnValue, new() { row });
+        }
+
+        foreach (KeyValuePair<ColumnValue, List<Dictionary<string, ColumnValue>>> x in yy)
+        {
+            foreach (Dictionary<string, ColumnValue> xx in x.Value)
+            {
+                yield return xx;
+            }
+        }
     }
 
     public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
@@ -262,7 +331,7 @@ internal sealed class QueryExecutor
     }
 
     private static bool MeetFilters(List<QueryFilter> filters, Dictionary<string, ColumnValue> row)
-    {        
+    {
         foreach (QueryFilter filter in filters)
         {
             if (string.IsNullOrEmpty(filter.ColumnName))

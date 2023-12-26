@@ -8,6 +8,7 @@
 
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -27,10 +28,21 @@ internal sealed class SqlExecutor
 
                 string tableName = ast.rightAst!.yytext!;                
 
-                return new(ticket.DatabaseName, tableName, null, null, ast.extendedOne, null);
+                return new(ticket.DatabaseName, tableName, null, null, ast.extendedOne, GetQueryClause(ast));
 
             default:
-                throw new Exception("Unknown ast stmt");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown ast stmt");
         }
-    }    
+    }
+
+    private List<QueryOrderBy>? GetQueryClause(NodeAst ast)
+    {
+        if (ast.extendedTwo is null)
+            return null;
+
+        if (ast.extendedTwo.nodeType == NodeType.Identifier)
+            return new() { new QueryOrderBy(ast.extendedTwo.yytext ?? "", QueryOrderByType.Ascending) };
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid order by clause");
+    }
 }
