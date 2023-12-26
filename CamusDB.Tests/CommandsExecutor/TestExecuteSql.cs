@@ -30,7 +30,7 @@ public class TestExecuteSql
         //SetupDb.Remove("factory");
     }
 
-    private async Task<(string, CommandExecutor)> SetupDatabase()
+    private static async Task<(string, CommandExecutor)> SetupDatabase()
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
@@ -47,7 +47,7 @@ public class TestExecuteSql
         return (dbname, executor);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
+    private static async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
     {
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
@@ -78,8 +78,8 @@ public class TestExecuteSql
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, (2000 + i).ToString()) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, "true") },
+                    { "year", new ColumnValue(ColumnType.Integer64, (2024 - i).ToString()) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0 ? "true" : "false") },
                 }
             );
 
@@ -111,7 +111,7 @@ public class TestExecuteSql
     [NonParallelizable]
     public async Task TestExecuteSelectWhereBool()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
@@ -127,7 +127,7 @@ public class TestExecuteSql
     [NonParallelizable]
     public async Task TestExecuteSelectWhereBool2()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
@@ -137,13 +137,16 @@ public class TestExecuteSql
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
+
+        foreach (Dictionary<string, ColumnValue> row in result)
+            Assert.AreEqual("true", row["enabled"].Value);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteSelectWhereBool3()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
@@ -153,6 +156,28 @@ public class TestExecuteSql
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
+
+        foreach (Dictionary<string, ColumnValue> row in result)
+            Assert.AreEqual("true", row["enabled"].Value);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereBool4()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT x FROM robots WHERE enabled=FALSE",
+            parameters: null
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (Dictionary<string, ColumnValue> row in result)
+            Assert.AreEqual("false", row["enabled"].Value);
     }
 
     [Test]
@@ -171,6 +196,8 @@ public class TestExecuteSql
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
+
+        Assert.AreEqual("2000", result[0]["year"].Value);
     }
 
     [Test]
@@ -189,6 +216,8 @@ public class TestExecuteSql
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
+
+        Assert.AreEqual("2000", result[0]["year"].Value);
     }
 
     [Test]
@@ -333,5 +362,108 @@ public class TestExecuteSql
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(5, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectOrderBy()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT x FROM robots ORDER BY year",
+            parameters: null
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+
+        Assert.AreEqual("2000", result[0]["year"].Value);
+        Assert.AreEqual("2001", result[1]["year"].Value);
+        Assert.AreEqual("2024", result[24]["year"].Value);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectOrderBy2()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT x FROM robots ORDER BY name",
+            parameters: null
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+
+        Assert.AreEqual("some name 0", result[0]["name"].Value);
+        Assert.AreEqual("some name 1", result[1]["name"].Value);
+        Assert.AreEqual("some name 9", result[24]["name"].Value);
+
+        foreach (var x in result)
+        {
+            System.Console.WriteLine(x["id"].Value);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectOrderBy3()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT x FROM robots ORDER BY enabled",
+            parameters: null
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+
+        Assert.AreEqual("false", result[0]["enabled"].Value);
+        Assert.AreEqual("false", result[1]["enabled"].Value);
+        Assert.AreEqual("true", result[24]["enabled"].Value);
+
+        foreach (var x in result)
+        {
+            System.Console.WriteLine("{0} {1}", x["enabled"].Value, x["id"].Value);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectOrderBy4()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT x FROM robots ORDER BY enabled, year",
+            parameters: null
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+
+        Assert.AreEqual("false", result[0]["enabled"].Value);
+        Assert.AreEqual("false", result[1]["enabled"].Value);
+        Assert.AreEqual("true", result[24]["enabled"].Value);
+
+        foreach (var x in result)
+        {
+            System.Console.WriteLine("{0} {1}", x["enabled"].Value, x["year"].Value);
+        }
     }
 }

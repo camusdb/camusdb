@@ -65,36 +65,51 @@ internal sealed class QueryExecutor
         return plan.DataCursor;
     }
 
-    private async IAsyncEnumerable<Dictionary<string, ColumnValue>> SortResultset(QueryTicket ticket, IAsyncEnumerable<Dictionary<string, ColumnValue>> dataCursor)
+    private static async IAsyncEnumerable<Dictionary<string, ColumnValue>> SortResultset(QueryTicket ticket, IAsyncEnumerable<Dictionary<string, ColumnValue>> dataCursor)
     {
         if (ticket.OrderBy is null || ticket.OrderBy.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal sort context");
 
-        SortedDictionary<ColumnValue, List<Dictionary<string, ColumnValue>>> yy = new();
+        if (ticket.OrderBy.Count > 2)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "High number of order clauses is not supported");
+
+        string firstSortColumn = ticket.OrderBy[0].ColumnName;
+        string secondSortColumn = ticket.OrderBy.Count > 1 ? ticket.OrderBy[1].ColumnName : "id";
+
+        SortedDictionary<ColumnValue, SortedDictionary<ColumnValue, List<Dictionary<string, ColumnValue>>>> sortedRows = new();
 
         await foreach (Dictionary<string, ColumnValue> row in dataCursor)
         {
-            string columnName = ticket.OrderBy[0].ColumnName;
-
-            ColumnValue? sortColumnValue = row[columnName];
-
-            if (sortColumnValue is null)
-            {
-                Console.WriteLine("?");
+            if (!row.TryGetValue(firstSortColumn, out ColumnValue? firstSortColumnValue))
                 continue;
+
+            if (!row.TryGetValue(secondSortColumn, out ColumnValue? secondSortColumnValue))
+                continue;
+
+            if (sortedRows.TryGetValue(firstSortColumnValue, out SortedDictionary<ColumnValue, List<Dictionary<string, ColumnValue>>>? existingSortGroup))
+            {
+                if (existingSortGroup.TryGetValue(secondSortColumnValue, out List<Dictionary<string, ColumnValue>>? innerSortGroup))
+                    innerSortGroup.Add(row);
+                else
+                    existingSortGroup.Add(secondSortColumnValue, new() { row });
             }
-            
-            if (yy.TryGetValue(sortColumnValue, out List<Dictionary<string, ColumnValue>>? aa))
-                aa.Add(row);
-            else            
-                yy.Add(sortColumnValue, new() { row });
+            else
+            {
+                SortedDictionary<ColumnValue, List<Dictionary<string, ColumnValue>>> secondSortGroup = new()
+                {
+                    { secondSortColumnValue, new() { row } }
+                };
+
+                sortedRows.Add(firstSortColumnValue, secondSortGroup);
+            }
         }
 
-        foreach (KeyValuePair<ColumnValue, List<Dictionary<string, ColumnValue>>> x in yy)
+        foreach (KeyValuePair<ColumnValue, SortedDictionary<ColumnValue, List<Dictionary<string, ColumnValue>>>> sortedGroup in sortedRows)
         {
-            foreach (Dictionary<string, ColumnValue> xx in x.Value)
+            foreach (KeyValuePair<ColumnValue, List<Dictionary<string, ColumnValue>>> secondSortGroup in sortedGroup.Value)
             {
-                yield return xx;
+                foreach (Dictionary<string, ColumnValue> sortedRow in secondSortGroup.Value)
+                    yield return sortedRow;
             }
         }
     }

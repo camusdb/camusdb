@@ -31,7 +31,7 @@ internal sealed class TestRowInsertor
         //SetupDb.Remove("factory");
     }
 
-    private async Task<(string, CommandExecutor)> SetupDatabase()
+    private static async Task<(string, CommandExecutor)> SetupDatabase()
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
@@ -48,7 +48,7 @@ internal sealed class TestRowInsertor
         return (dbname, executor);
     }
 
-    private async Task<(string, CommandExecutor)> SetupBasicTable()
+    private static async Task<(string, CommandExecutor)> SetupBasicTable()
     {
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
