@@ -13,19 +13,22 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class DatabaseCreator
 {
-    public void Create(CreateDatabaseTicket ticket)
+    public bool Create(CreateDatabaseTicket ticket)
     {
         string name = ticket.DatabaseName;
-        
+                
         string dbPath = Path.Combine(CamusConfig.DataDirectory, name);
 
         if (Directory.Exists(dbPath))
+        {
+            if (ticket.IfNotExists)
+                return false;
+
             throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Database already exists");
-
-        //Directory.CreateDirectory(dbPath);
-
-        //await InitializeDatabaseFiles(name, dbPath);
+        }        
 
         Console.WriteLine("Database {0} successfully created at {1}", name, dbPath);
+
+        return true;
     }
 }

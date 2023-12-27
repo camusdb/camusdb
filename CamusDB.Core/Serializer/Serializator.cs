@@ -288,6 +288,8 @@ public sealed class Serializator
     public static string ReadString(byte[] buffer, ref int pointer)
     {
         int length = ReadInt32(buffer, ref pointer);
+        if (length == 0)
+            return "";
 
         byte[] bytes = new byte[length];
         Buffer.BlockCopy(buffer, pointer, bytes, 0, length);

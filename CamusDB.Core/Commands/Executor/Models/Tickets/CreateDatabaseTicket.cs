@@ -10,10 +10,13 @@ namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct CreateDatabaseTicket
 {
-    public string DatabaseName { get; }    
+    public string DatabaseName { get; }
 
-    public CreateDatabaseTicket(string name)
+    public bool IfNotExists { get; }
+
+    public CreateDatabaseTicket(string name, bool ifNotExists)
     {
         DatabaseName = name;
+        IfNotExists = ifNotExists;
     }
 }

@@ -33,6 +33,8 @@ public sealed class InsertController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
 
+            Console.WriteLine(body);
+
             InsertRequest? request = JsonSerializer.Deserialize<InsertRequest>(body, jsonOptions);
             if (request == null)
                 throw new Exception("Insert request is not valid");

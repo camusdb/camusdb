@@ -29,15 +29,16 @@ public sealed class CreateDatabaseController : CommandsController
     {
         try
         {
-            using StreamReader reader = new StreamReader(Request.Body);
-            var body = await reader.ReadToEndAsync();
+            using StreamReader reader = new(Request.Body);
+            string body = await reader.ReadToEndAsync();
 
             CreateDatabaseRequest? request = JsonSerializer.Deserialize<CreateDatabaseRequest>(body, jsonOptions);
             if (request == null)
                 throw new Exception("CreateDatabase request is not valid");
 
             CreateDatabaseTicket ticket = new(
-                name: request.DatabaseName ?? ""
+                name: request.DatabaseName ?? "",
+                ifNotExists: request.IfNotExists
             );
 
             await executor.CreateDatabase(ticket);
