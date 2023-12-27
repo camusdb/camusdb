@@ -25,4 +25,7 @@ public enum NodeType
     ExprAnd,
     ExprAllFields,
     Select,
+    Update,
+    UpdateList,
+    UpdateItem,
 }

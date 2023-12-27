@@ -14,8 +14,10 @@ TAnd            (A|a)(N|n)(D|d)
 TOr             (O|o)(R|r)
 TDesc           (D|d)(E|e)(S|s)(C|c)
 TAsc            (A|a)(S|s)(C|c)
-TTrue           "TRUE"
-TFalse          "FALSE"
+TTrue           (T|t)(R|r)(U|u)(E|e)
+TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
+TUpdate         (U|u)(P|p)(D|d)(A|a)(T|t)(E|e)
+TSet            (S|s)(E|e)(T|t)
 LParen          \(
 RParen          \)
 Eol             (\r\n?|\n)
@@ -81,6 +83,10 @@ TGreaterEquals  >=
 {TTrue} { return (int)Token.TTRUE; }
 
 {TFalse} { return (int)Token.TFALSE; }
+
+{TUpdate} { return (int)Token.TUPDATE; }
+
+{TSet} { return (int)Token.TSET; }
 
 {TAdd} { return (int)Token.TADD; }
 

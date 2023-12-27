@@ -267,4 +267,43 @@ public class TestSQLParser
 
         Assert.AreEqual("some_table", ast.rightAst!.yytext);
     }
+
+    [Test]
+    public void TestParseSimpleUpdate()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value");
+
+        Assert.AreEqual(NodeType.Update, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.UpdateItem, ast.rightAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);        
+    }
+
+    [Test]
+    public void TestParseUpdateMultiSet()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value, some_other_field = 100");
+
+        Assert.AreEqual(NodeType.Update, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.UpdateList, ast.rightAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseUpdateMultiSet2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value, some_other_field = 100, bool_field = false");
+
+        Assert.AreEqual(NodeType.Update, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.UpdateList, ast.rightAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
 }
