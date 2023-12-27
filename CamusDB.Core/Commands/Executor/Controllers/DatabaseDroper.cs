@@ -12,24 +12,20 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-internal sealed class DatabaseCloser : IAsyncDisposable
+internal sealed class DatabaseDroper
 {
     private readonly DatabaseDescriptors databaseDescriptors;
 
-    public DatabaseCloser(DatabaseDescriptors databaseDescriptors)
+    public DatabaseDroper(DatabaseDescriptors databaseDescriptors)
     {
         this.databaseDescriptors = databaseDescriptors;
     }
 
-    public async Task Close(string name)
+    public async Task Drop(string name)
     {
         if (!databaseDescriptors.Descriptors.TryGetValue(name, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
         {
-            string dbPath = Path.Combine(CamusConfig.DataDirectory, name);
-
-            if (!Directory.Exists(dbPath))
-                throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
-
+            DropInternal(name);
             return;
         }
 
@@ -41,12 +37,20 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 
         databaseDescriptors.Descriptors.TryRemove(name, out _);
 
-        Console.WriteLine("Database {0} closed", name);
+        DropInternal(name);
+
+        Console.WriteLine("Database {0} dropped", name);
     }
 
-    public async ValueTask DisposeAsync()
+    private static void DropInternal(string name)
     {
-        foreach (KeyValuePair<string, AsyncLazy<DatabaseDescriptor>> keyValuePair in databaseDescriptors.Descriptors)
-            await Close(keyValuePair.Key);
+        string dbPath = Path.Combine(CamusConfig.DataDirectory, name);
+
+        if (!Directory.Exists(dbPath))
+            throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");        
+
+        string newDbPath = Path.Combine(CamusConfig.DataDirectory, "_" + name + "_" + DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss-fffffff"));
+
+        Directory.Move(dbPath, newDbPath);
     }
 }

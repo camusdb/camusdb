@@ -38,12 +38,48 @@ internal class TestDatabaseCreator
         CommandExecutor executor = new(validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
-            name: dbname
+            name: dbname,
+            ifNotExists: false
         );
 
         await executor.CreateDatabase(databaseTicket);
 
         string path = Path.Combine(CamusConfig.DataDirectory, dbname);
+
+        Assert.IsTrue(Directory.Exists(path));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateDatabaseIfNotExists()
+    {
+        string dbname = System.Guid.NewGuid().ToString("n");
+
+        CommandValidator validator = new();
+        CatalogsManager catalogsManager = new();
+        CommandExecutor executor = new(validator, catalogsManager);
+
+        CreateDatabaseTicket databaseTicket = new(
+            name: dbname,
+            ifNotExists: false
+        );
+
+        await executor.CreateDatabase(databaseTicket);
+
+        string path = Path.Combine(CamusConfig.DataDirectory, dbname);
+
+        Assert.IsTrue(Directory.Exists(path));
+
+        await executor.OpenDatabase(dbname);
+
+        databaseTicket = new(
+            name: dbname,
+            ifNotExists: true
+        );
+
+        await executor.CreateDatabase(databaseTicket);
+
+        path = Path.Combine(CamusConfig.DataDirectory, dbname);
 
         Assert.IsTrue(Directory.Exists(path));
     }

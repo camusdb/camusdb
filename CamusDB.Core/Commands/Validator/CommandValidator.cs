@@ -19,6 +19,12 @@ public sealed class CommandValidator
         validator.Validate(ticket);
     }
 
+    public void Validate(DropDatabaseTicket ticket)
+    {
+        DropDatabaseValidator validator = new();
+        validator.Validate(ticket);
+    }
+
     public void Validate(CreateTableTicket ticket)
     {
         CreateTableValidator validator = new();

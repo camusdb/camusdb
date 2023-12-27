@@ -28,6 +28,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly DatabaseCloser databaseCloser;
 
+    private readonly DatabaseDroper databaseDroper;
+
     private readonly DatabaseDescriptors databaseDescriptors;
 
     private readonly TableOpener tableOpener;
@@ -53,6 +55,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         databaseDescriptors = new();
         databaseOpener = new(databaseDescriptors);
         databaseCloser = new(databaseDescriptors);
+        databaseDroper = new(databaseDescriptors);
         databaseCreator = new();
         tableOpener = new(catalogs);
         tableCreator = new(catalogs);
@@ -84,6 +87,13 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         await databaseCloser.Close(ticket.DatabaseName);
+    }
+
+    public async Task DropDatabase(DropDatabaseTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        await databaseDroper.Drop(ticket.DatabaseName);
     }
 
     #endregion
@@ -214,5 +224,5 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await databaseCloser.DisposeAsync();
-    }
+    }    
 }

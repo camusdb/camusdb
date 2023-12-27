@@ -75,7 +75,7 @@ public sealed class CreateTableController : CommandsController
                 name: column.Name ?? "",
                 type: GetColumnType(column.Type),
                 primary: column.Primary,
-                notNull: false,
+                notNull: column.NotNull,
                 index: GetIndexType(column.Index),
                 defaultValue: null
             );

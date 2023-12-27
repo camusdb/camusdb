@@ -17,4 +17,6 @@ public sealed class CreateTableColumn
     public bool Primary { get; set; }
 
     public string? Index { get; set; }
+
+    public bool NotNull { get; set; }
 }

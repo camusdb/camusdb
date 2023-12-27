@@ -16,43 +16,43 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 namespace CamusDB.App.Controllers;
 
 [ApiController]
-public sealed class CloseDatabaseController : CommandsController
+public sealed class DropDatabaseController : CommandsController
 {
-    public CloseDatabaseController(CommandExecutor executor) : base(executor)
+    public DropDatabaseController(CommandExecutor executor) : base(executor)
     {
 
     }
 
     [HttpPost]
-    [Route("/close-db")]
-    public async Task<JsonResult> CloseDatabase()
+    [Route("/drop-db")]
+    public async Task<JsonResult> DropDatabase()
     {
         try
         {
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
 
-            CloseDatabaseRequest? request = JsonSerializer.Deserialize<CloseDatabaseRequest>(body, jsonOptions);
+            DropDatabaseRequest? request = JsonSerializer.Deserialize<DropDatabaseRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("CreateDatabase request is not valid");
+                throw new Exception("DropDatabase request is not valid");
 
-            CloseDatabaseTicket ticket = new(
-                name: request.DatabaseName ?? ""
+            DropDatabaseTicket ticket = new(
+                name: request.DatabaseName ?? ""                
             );
 
-            await executor.CloseDatabase(ticket);
+            await executor.DropDatabase(ticket);
 
-            return new JsonResult(new CloseDatabaseResponse("ok"));
+            return new JsonResult(new DropDatabaseResponse("ok"));
         }
         catch (CamusDBException e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
-            return new JsonResult(new CloseDatabaseResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
+            return new JsonResult(new DropDatabaseResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
-            return new JsonResult(new CloseDatabaseResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new DropDatabaseResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }
 }

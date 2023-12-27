@@ -32,7 +32,8 @@ internal sealed class TestRowMultiInsertor
         CommandExecutor executor = new(validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
-            name: dbname
+            name: dbname,
+            ifNotExists: false
         );
 
         await executor.CreateDatabase(databaseTicket);

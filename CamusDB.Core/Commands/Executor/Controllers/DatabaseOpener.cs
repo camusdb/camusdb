@@ -35,7 +35,7 @@ internal sealed class DatabaseOpener
         return await openDatabaseLazy;
     }
   
-    private async Task<DatabaseDescriptor> LoadDatabase(string name)
+    private static async Task<DatabaseDescriptor> LoadDatabase(string name)
     {                    
         string path = Path.Combine(CamusConfig.DataDirectory, name);
 

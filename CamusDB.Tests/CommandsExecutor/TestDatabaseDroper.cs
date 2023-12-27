@@ -6,19 +6,20 @@
  * file that was distributed with this source code.
  */
 
+using System.IO;
 using NUnit.Framework;
 using System.Threading.Tasks;
 
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.BufferPool;
-using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
-using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+
+using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestDatabaseOpener
+internal class TestDatabaseDroper
 {
     [SetUp]
     public void Setup()
@@ -28,7 +29,7 @@ public class TestDatabaseOpener
 
     [Test]
     [NonParallelizable]
-    public async Task TestOpenDatabase()
+    public async Task TestDropDatabase()
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
@@ -43,15 +44,20 @@ public class TestDatabaseOpener
 
         await executor.CreateDatabase(databaseTicket);
 
-        DatabaseDescriptor database = await executor.OpenDatabase(dbname);
+        await executor.OpenDatabase(dbname);
 
-        Assert.AreEqual(dbname, database.Name);
-        
-        Assert.IsInstanceOf<BufferPoolHandler>(database.TableSpace);
+        string path = Path.Combine(CamusConfig.DataDirectory, dbname);
 
-        Assert.IsInstanceOf<SystemSchema>(database.SystemSchema);
-        Assert.IsInstanceOf<Schema>(database.Schema);
+        Assert.IsTrue(Directory.Exists(path));
 
-        Assert.AreEqual(database.TableDescriptors.Count, 0);
+        DropDatabaseTicket dropTicket = new(
+            name: dbname
+        );
+
+        await executor.DropDatabase(dropTicket);
+
+        path = Path.Combine(CamusConfig.DataDirectory, dbname);
+
+        Assert.IsFalse(Directory.Exists(path));
     }
 }

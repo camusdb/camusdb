@@ -6,8 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Text.RegularExpressions;
-using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsValidator.Validators;
