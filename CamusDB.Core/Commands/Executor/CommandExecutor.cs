@@ -38,6 +38,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly RowInserter rowInserter;
 
+    private readonly RowUpdaterById rowUpdaterById;
+
     private readonly RowUpdater rowUpdater;
 
     private readonly RowDeleter rowDeleter;
@@ -60,6 +62,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableOpener = new(catalogs);
         tableCreator = new(catalogs);
         rowInserter = new();
+        rowUpdaterById = new();
         rowUpdater = new();
         rowDeleter = new();
         queryExecutor = new();
@@ -139,6 +142,17 @@ public sealed class CommandExecutor : IAsyncDisposable
         await rowInserter.InsertWithState(machine, state);
     }
 
+    public async Task<int> Update(UpdateTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+
+        return await rowUpdater.Update(queryExecutor, database, table, ticket);
+    }
+
     public async Task<int> UpdateById(UpdateByIdTicket ticket)
     {
         validator.Validate(ticket);
@@ -147,7 +161,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
-        return await rowUpdater.UpdateById(database, table, ticket);
+        return await rowUpdaterById.UpdateById(database, table, ticket);
     }
 
     public async Task<int> DeleteById(DeleteByIdTicket ticket)
@@ -161,13 +175,18 @@ public sealed class CommandExecutor : IAsyncDisposable
         return await rowDeleter.DeleteById(database, table, ticket);
     }
 
-    public async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> Query(QueryTicket ticket)
+    /// <summary>
+    /// Queries a table data specifying filters and sorts
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
+    public async Task<IAsyncEnumerable<QueryResultRow>> Query(QueryTicket ticket)
     {
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
-        return await queryExecutor.Query(database, table, ticket);
+        return await queryExecutor.Query(database, table, ticket, noLocking: false);
     }    
 
     /// <summary>
@@ -208,7 +227,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <param name="ticket"></param>
     /// <returns></returns>
     /// <exception cref="Exception"></exception>
-    public async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> ExecuteSQLQuery(ExecuteSQLTicket ticket)
+    public async Task<IAsyncEnumerable<QueryResultRow>> ExecuteSQLQuery(ExecuteSQLTicket ticket)
     {
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
@@ -216,7 +235,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, queryTicket.TableName);
 
-        return await queryExecutor.Query(database, table, queryTicket);
+        return await queryExecutor.Query(database, table, queryTicket, noLocking: false);
     }
 
     #endregion    

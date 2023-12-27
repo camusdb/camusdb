@@ -16,13 +16,13 @@ public readonly struct UpdateTicket
 
     public Dictionary<string, ColumnValue> Values { get; }
 
-    public UpdateTicket(
-        string database,
-        string name,
-        Dictionary<string, ColumnValue> values)
+    public List<QueryFilter> Filters { get; }
+
+    public UpdateTicket(string database, string name, Dictionary<string, ColumnValue> values, List<QueryFilter> filters)
     {
         DatabaseName = database;
         TableName = name;
         Values = values;
+        Filters = filters;
     }
 }

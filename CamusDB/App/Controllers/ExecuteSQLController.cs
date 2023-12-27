@@ -45,8 +45,8 @@ public sealed class ExecuteSQLController : CommandsController
 
             List<Dictionary<string, ColumnValue>> rows = new();
 
-            await foreach (Dictionary<string, ColumnValue> row in await executor.ExecuteSQLQuery(ticket))
-                rows.Add(row);
+            await foreach (QueryResultRow row in await executor.ExecuteSQLQuery(ticket))
+                rows.Add(row.Row);
 
             return new JsonResult(new ExecuteSQLResponse("ok", rows));
         }

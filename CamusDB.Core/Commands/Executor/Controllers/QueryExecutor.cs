@@ -22,17 +22,30 @@ internal sealed class QueryExecutor
 
     private readonly QueryPlanner queryPlanner = new();
 
-    public async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    public async Task<IAsyncEnumerable<QueryResultRow>> Query(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        QueryTicket ticket,
+        bool noLocking
+    )
     {
         QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
 
-        return await ExecuteQueryPlan(plan);
+        if (noLocking)
+            return ExecuteQueryPlanInternal(plan);
+
+        return await ExecuteQueryPlanWithLocks(plan);
     }
 
-    private async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> ExecuteQueryPlan(QueryPlan plan)
+    private async Task<IAsyncEnumerable<QueryResultRow>> ExecuteQueryPlanWithLocks(QueryPlan plan)
     {
         using IDisposable readerLock = await plan.Table.ReaderWriterLock.ReaderLockAsync();
 
+        return ExecuteQueryPlanInternal(plan);
+    }
+
+    private IAsyncEnumerable<QueryResultRow> ExecuteQueryPlanInternal(QueryPlan plan)
+    {
         foreach (QueryPlanStep step in plan.Steps)
         {
             Console.WriteLine("Executing step {0}", step.Type);
@@ -65,7 +78,7 @@ internal sealed class QueryExecutor
         return plan.DataCursor;
     }
 
-    private static async IAsyncEnumerable<Dictionary<string, ColumnValue>> SortResultset(QueryTicket ticket, IAsyncEnumerable<Dictionary<string, ColumnValue>> dataCursor)
+    private static async IAsyncEnumerable<QueryResultRow> SortResultset(QueryTicket ticket, IAsyncEnumerable<QueryResultRow> dataCursor)
     {
         if (ticket.OrderBy is null || ticket.OrderBy.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal sort context");
@@ -76,39 +89,41 @@ internal sealed class QueryExecutor
         string firstSortColumn = ticket.OrderBy[0].ColumnName;
         string secondSortColumn = ticket.OrderBy.Count > 1 ? ticket.OrderBy[1].ColumnName : "id";
 
-        SortedDictionary<ColumnValue, SortedDictionary<ColumnValue, List<Dictionary<string, ColumnValue>>>> sortedRows = new();
+        SortedDictionary<ColumnValue, SortedDictionary<ColumnValue, List<QueryResultRow>>> sortedRows = new();
 
-        await foreach (Dictionary<string, ColumnValue> row in dataCursor)
+        await foreach (QueryResultRow resultRow in dataCursor)
         {
+            Dictionary<string, ColumnValue> row = resultRow.Row;
+
             if (!row.TryGetValue(firstSortColumn, out ColumnValue? firstSortColumnValue))
                 continue;
 
             if (!row.TryGetValue(secondSortColumn, out ColumnValue? secondSortColumnValue))
                 continue;
 
-            if (sortedRows.TryGetValue(firstSortColumnValue, out SortedDictionary<ColumnValue, List<Dictionary<string, ColumnValue>>>? existingSortGroup))
+            if (sortedRows.TryGetValue(firstSortColumnValue, out SortedDictionary<ColumnValue, List<QueryResultRow>>? existingSortGroup))
             {
-                if (existingSortGroup.TryGetValue(secondSortColumnValue, out List<Dictionary<string, ColumnValue>>? innerSortGroup))
-                    innerSortGroup.Add(row);
+                if (existingSortGroup.TryGetValue(secondSortColumnValue, out List<QueryResultRow>? innerSortGroup))
+                    innerSortGroup.Add(resultRow);
                 else
-                    existingSortGroup.Add(secondSortColumnValue, new() { row });
+                    existingSortGroup.Add(secondSortColumnValue, new() { resultRow });
             }
             else
             {
-                SortedDictionary<ColumnValue, List<Dictionary<string, ColumnValue>>> secondSortGroup = new()
+                SortedDictionary<ColumnValue, List<QueryResultRow>> secondSortGroup = new()
                 {
-                    { secondSortColumnValue, new() { row } }
+                    { secondSortColumnValue, new() { resultRow } }
                 };
 
                 sortedRows.Add(firstSortColumnValue, secondSortGroup);
             }
         }
 
-        foreach (KeyValuePair<ColumnValue, SortedDictionary<ColumnValue, List<Dictionary<string, ColumnValue>>>> sortedGroup in sortedRows)
+        foreach (KeyValuePair<ColumnValue, SortedDictionary<ColumnValue, List<QueryResultRow>>> sortedGroup in sortedRows)
         {
-            foreach (KeyValuePair<ColumnValue, List<Dictionary<string, ColumnValue>>> secondSortGroup in sortedGroup.Value)
+            foreach (KeyValuePair<ColumnValue, List<QueryResultRow>> secondSortGroup in sortedGroup.Value)
             {
-                foreach (Dictionary<string, ColumnValue> sortedRow in secondSortGroup.Value)
+                foreach (QueryResultRow sortedRow in secondSortGroup.Value)
                     yield return sortedRow;
             }
         }
@@ -158,7 +173,7 @@ internal sealed class QueryExecutor
         yield return rowDeserializer.Deserialize(table.Schema, data);
     }
 
-    private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    private async IAsyncEnumerable<QueryResultRow> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
         BufferPoolHandler tablespace = database.TableSpace;
 
@@ -182,22 +197,22 @@ internal sealed class QueryExecutor
             if (ticket.Filters is not null && ticket.Filters.Count > 0)
             {
                 if (MeetFilters(ticket.Filters, row))
-                    yield return row;
+                    yield return new(new(entry.Key, entry.Value), row);
             }
             else
             {
                 if (ticket.Where is not null)
                 {
                     if (MeetWhere(ticket.Where, row))
-                        yield return row;
+                        yield return new(new(entry.Key, entry.Value), row);
                 }
                 else
-                    yield return row;
+                    yield return new(new(entry.Key, entry.Value), row);
             }
         }
     }
 
-    private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue, BTreeTuple?> index, QueryTicket ticket)
+    private async IAsyncEnumerable<QueryResultRow> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue, BTreeTuple?> index, QueryTicket ticket)
     {
         BufferPoolHandler tablespace = database.TableSpace;
 
@@ -221,17 +236,17 @@ internal sealed class QueryExecutor
             if (ticket.Filters is not null && ticket.Filters.Count > 0)
             {
                 if (MeetFilters(ticket.Filters, row))
-                    yield return row;
+                    yield return new(entry.Value, row);
             }
             else
             {
                 if (ticket.Where is not null)
                 {
                     if (MeetWhere(ticket.Where, row))
-                        yield return row;
+                        yield return new(entry.Value, row);
                 }
                 else
-                    yield return row;
+                    yield return new(entry.Value, row);
             }
         }
     }
@@ -379,7 +394,7 @@ internal sealed class QueryExecutor
         return true;
     }
 
-    private async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
+    private async IAsyncEnumerable<QueryResultRow> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
     {
         BufferPoolHandler tablespace = database.TableSpace;
 
@@ -404,12 +419,12 @@ internal sealed class QueryExecutor
                     continue;
                 }
 
-                yield return rowDeserializer.Deserialize(table.Schema, data);
+                yield return new(new(subEntry.Key, subEntry.Value), rowDeserializer.Deserialize(table.Schema, data));
             }
         }
     }
 
-    private IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryUsingIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    private IAsyncEnumerable<QueryResultRow> QueryUsingIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
         if (!table.Indexes.TryGetValue(ticket.IndexName!, out TableIndexSchema? index))
         {

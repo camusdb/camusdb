@@ -77,13 +77,12 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return height;
     }
 
-    /**
-     * Returns the value associated with the given key.
-     *
-     * @param  key the key
-     * @return the value associated with the given key if the key is in the symbol table
-     *         and {@code null} if the key is not in the symbol table     
-     */
+    /// <summary>
+    /// Returns the value associated with the given key.
+    /// </summary>
+    /// <param name="key"></param>
+    /// <returns>the value associated with the given key if the key is in the symbol table
+    /// and {@code null} if the key is not in the symbol table</returns>
     public async Task<TValue?> Get(TKey key)
     {
         if (root is null)

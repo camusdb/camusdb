@@ -104,7 +104,7 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
     }
 
@@ -120,7 +120,7 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
     }
 
@@ -136,11 +136,11 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
-        foreach (Dictionary<string, ColumnValue> row in result)
-            Assert.AreEqual("true", row["enabled"].Value);
+        foreach (QueryResultRow row in result)
+            Assert.AreEqual("true", row.Row["enabled"].Value);
     }
 
     [Test]
@@ -155,11 +155,11 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
-        foreach (Dictionary<string, ColumnValue> row in result)
-            Assert.AreEqual("true", row["enabled"].Value);
+        foreach (QueryResultRow row in result)
+            Assert.AreEqual("true", row.Row["enabled"].Value);
     }
 
     [Test]
@@ -174,11 +174,11 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
-        foreach (Dictionary<string, ColumnValue> row in result)
-            Assert.AreEqual("false", row["enabled"].Value);
+        foreach (QueryResultRow row in result)
+            Assert.AreEqual("false", row.Row["enabled"].Value);
     }
 
     [Test]
@@ -193,12 +193,12 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
 
-        Assert.AreEqual("2000", result[0]["year"].Value);
+        Assert.AreEqual("2000", result[0].Row["year"].Value);
     }
 
     [Test]
@@ -213,12 +213,12 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
 
-        Assert.AreEqual("2000", result[0]["year"].Value);
+        Assert.AreEqual("2000", result[0].Row["year"].Value);
     }
 
     [Test]
@@ -233,7 +233,7 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
@@ -251,7 +251,7 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
@@ -269,7 +269,7 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(24, result.Count);
@@ -287,7 +287,7 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(24, result.Count);
@@ -305,7 +305,7 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(2, result.Count);
@@ -323,7 +323,7 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(3, result.Count);
@@ -341,7 +341,7 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(4, result.Count);
@@ -359,7 +359,7 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(5, result.Count);
@@ -377,14 +377,14 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(25, result.Count);
 
-        Assert.AreEqual("2000", result[0]["year"].Value);
-        Assert.AreEqual("2001", result[1]["year"].Value);
-        Assert.AreEqual("2024", result[24]["year"].Value);
+        Assert.AreEqual("2000", result[0].Row["year"].Value);
+        Assert.AreEqual("2001", result[1].Row["year"].Value);
+        Assert.AreEqual("2024", result[24].Row["year"].Value);
     }
 
     [Test]
@@ -399,19 +399,14 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(25, result.Count);
 
-        Assert.AreEqual("some name 0", result[0]["name"].Value);
-        Assert.AreEqual("some name 1", result[1]["name"].Value);
-        Assert.AreEqual("some name 9", result[24]["name"].Value);
-
-        foreach (var x in result)
-        {
-            System.Console.WriteLine(x["id"].Value);
-        }
+        Assert.AreEqual("some name 0", result[0].Row["name"].Value);
+        Assert.AreEqual("some name 1", result[1].Row["name"].Value);
+        Assert.AreEqual("some name 9", result[24].Row["name"].Value);
     }
 
     [Test]
@@ -426,19 +421,14 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(25, result.Count);
 
-        Assert.AreEqual("false", result[0]["enabled"].Value);
-        Assert.AreEqual("false", result[1]["enabled"].Value);
-        Assert.AreEqual("true", result[24]["enabled"].Value);
-
-        foreach (var x in result)
-        {
-            System.Console.WriteLine("{0} {1}", x["enabled"].Value, x["id"].Value);
-        }
+        Assert.AreEqual("false", result[0].Row["enabled"].Value);
+        Assert.AreEqual("false", result[1].Row["enabled"].Value);
+        Assert.AreEqual("true", result[24].Row["enabled"].Value);
     }
 
     [Test]
@@ -453,18 +443,13 @@ public class TestExecuteSql
             parameters: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(25, result.Count);
 
-        Assert.AreEqual("false", result[0]["enabled"].Value);
-        Assert.AreEqual("false", result[1]["enabled"].Value);
-        Assert.AreEqual("true", result[24]["enabled"].Value);
-
-        foreach (var x in result)
-        {
-            System.Console.WriteLine("{0} {1}", x["enabled"].Value, x["year"].Value);
-        }
+        Assert.AreEqual("false", result[0].Row["enabled"].Value);
+        Assert.AreEqual("false", result[1].Row["enabled"].Value);
+        Assert.AreEqual("true", result[24].Row["enabled"].Value);        
     }
 }

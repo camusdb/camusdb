@@ -48,8 +48,12 @@ public sealed class QueryController : CommandsController
 
             List<Dictionary<string, ColumnValue>> rows = new();
 
-            await foreach (Dictionary<string, ColumnValue> row in await executor.Query(ticket))
-                rows.Add(row);
+            await foreach (QueryResultRow row in await executor.Query(ticket))
+            {
+                Console.WriteLine("Id={0} Val={1}", row.Tuple.SlotOne, row.Tuple.SlotTwo);
+
+                rows.Add(row.Row);
+            }
 
             return new JsonResult(new QueryResponse("ok", rows));
         }

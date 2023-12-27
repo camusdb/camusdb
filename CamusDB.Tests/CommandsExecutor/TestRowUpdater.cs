@@ -125,7 +125,7 @@ public class TestRowUpdater
             database: dbname,
             name: "unknown_table",
             id: objectsId[0],
-            columnValues: new Dictionary<string, ColumnValue>()
+            values: new Dictionary<string, ColumnValue>()
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
             }
@@ -145,7 +145,7 @@ public class TestRowUpdater
             database: dbname,
             name: "robots",
             id: objectsId[0],
-            columnValues: new Dictionary<string, ColumnValue>()
+            values: new Dictionary<string, ColumnValue>()
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
             }
@@ -176,7 +176,7 @@ public class TestRowUpdater
             database: dbname,
             name: "robots",
             id: "---",
-            columnValues: new Dictionary<string, ColumnValue>()
+            values: new Dictionary<string, ColumnValue>()
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
             }
@@ -197,7 +197,7 @@ public class TestRowUpdater
                 database: dbname,
                 name: "robots",
                 id: objectId,
-                columnValues: new Dictionary<string, ColumnValue>()
+                values: new Dictionary<string, ColumnValue>()
                 {
                     { "name", new ColumnValue(ColumnType.String, "updated value") }
                 }
@@ -236,7 +236,7 @@ public class TestRowUpdater
                 database: dbname,
                 name: "robots",
                 id: objectId,
-                columnValues: new Dictionary<string, ColumnValue>()
+                values: new Dictionary<string, ColumnValue>()
                 {
                     { "name", new ColumnValue(ColumnType.String, "updated value") }
                 }

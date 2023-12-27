@@ -7,7 +7,6 @@
  */
 
 using System.Diagnostics;
-using System.Net.Sockets;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -19,7 +18,7 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-public sealed class RowUpdater
+public sealed class RowUpdaterById
 {
     private readonly IndexSaver indexSaver = new();
 
@@ -33,7 +32,7 @@ public sealed class RowUpdater
     /// <param name="table"></param>
     /// <param name="ticket"></param>
     /// <exception cref="CamusDBException"></exception>
-    private static void Validate(TableDescriptor table, UpdateTicket ticket) // @todo optimize this
+    private static void Validate(TableDescriptor table, UpdateByIdTicket ticket) // @todo optimize this
     {
         List<TableColumnSchema> columns = table.Schema.Columns!;
 
@@ -74,31 +73,30 @@ public sealed class RowUpdater
                 );
             }
         }
-    }    
+    }
 
     /// <summary>
-    /// Schedules a new Update operation by the specified filters
+    /// Schedules a new Update operation by the row id
     /// </summary>
     /// <param name="database"></param>
     /// <param name="table"></param>
     /// <param name="ticket"></param>
     /// <returns></returns>
-    internal async Task<int> Update(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, UpdateTicket ticket)
+    internal async Task<int> UpdateById(DatabaseDescriptor database, TableDescriptor table, UpdateByIdTicket ticket)
     {
         Validate(table, ticket);
 
-        UpdateFluxState state = new(
+        UpdateByIdFluxState state = new(
             database: database,
             table: table,
             ticket: ticket,
-            queryExecutor: queryExecutor,
-            indexes: new UpdateFluxIndexState()
+            indexes: new UpdateByIdFluxIndexState()
         );
 
-        FluxMachine<UpdateFluxSteps, UpdateFluxState> machine = new(state);
+        FluxMachine<UpdateByIdFluxSteps, UpdateByIdFluxState> machine = new(state);
 
-        return await UpdateInternal(machine, state);
-    }
+        return await UpdateByIdInternal(machine, state);
+    }    
 
     /// <summary>
     /// 
@@ -119,33 +117,59 @@ public sealed class RowUpdater
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task<FluxAction> AdquireLocks(UpdateFluxState state)
+    private async Task<FluxAction> AdquireLocks(UpdateByIdFluxState state)
     {
         state.Locks.Add(await state.Table.ReaderWriterLock.WriterLockAsync());
         return FluxAction.Continue;
     }
 
     /// <summary>
-    /// We need to locate the row tuples to Update
+    /// We need to locate the row tuple to Update
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task<FluxAction> LocateTuplesToUpdate(UpdateFluxState state)
+    private async Task<FluxAction> LocateTupleToUpdate(UpdateByIdFluxState state)
     {
-        UpdateTicket ticket = state.Ticket;
+        BufferPoolHandler tablespace = state.Database.TableSpace;
+        TableDescriptor table = state.Table;
+        UpdateByIdTicket ticket = state.Ticket;
 
-        QueryTicket queryTicket = new(
-            database: ticket.DatabaseName,
-            name: ticket.TableName,
-            index: null,
-            filters: ticket.Filters,
-            where: null,
-            orderBy: null
-        );
+        if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Table doesn't have a primary key index"
+            );
+        }
 
-        state.DataCursor = await state.QueryExecutor.Query(state.Database, state.Table, queryTicket, noLocking: true);
-        
-        //Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, state.RowTuple.SlotTwo);*/
+        if (index.UniqueRows is null)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Table doesn't have a primary key index"
+            );
+        }
+
+        ColumnValue columnId = new(ColumnType.Id, ticket.Id);
+
+        state.RowTuple = await index.UniqueRows.Get(columnId);
+
+        if (state.RowTuple is null)
+        {
+            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+            return FluxAction.Abort;
+        }
+
+        byte[] data = await tablespace.GetDataFromPage(state.RowTuple.SlotTwo);
+        if (data.Length == 0)
+        {
+            Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
+            return FluxAction.Abort;
+        }
+
+        state.ColumnValues = rowDeserializer.Deserialize(table.Schema, data);
+
+        Console.WriteLine("Data Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
 
         return FluxAction.Continue;
     }    
@@ -180,7 +204,7 @@ public sealed class RowUpdater
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private Task<FluxAction> ReleaseLocks(UpdateFluxState state)
+    private Task<FluxAction> ReleaseLocks(UpdateByIdFluxState state)
     {
         foreach (IDisposable disposable in state.Locks)
             disposable.Dispose();
@@ -193,7 +217,7 @@ public sealed class RowUpdater
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private Task<FluxAction> UpdateUniqueIndexes(UpdateFluxState state)
+    private Task<FluxAction> UpdateUniqueIndexes(UpdateByIdFluxState state)
     {
         //await UpdateUniqueIndexesInternal(state.Database, state.Table, state.ColumnValues, state.Locks, state.ModifiedPages);
 
@@ -205,7 +229,7 @@ public sealed class RowUpdater
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private Task<FluxAction> UpdateMultiIndexes(UpdateFluxState state)
+    private Task<FluxAction> UpdateMultiIndexes(UpdateByIdFluxState state)
     {
         //await UpdateMultiIndexes(state.Database, state.Table, state.ColumnValues);
 
@@ -217,38 +241,16 @@ public sealed class RowUpdater
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task<FluxAction> UpdateRowsFromDisk(UpdateFluxState state)
+    private Task<FluxAction> UpdateRowFromDisk(UpdateByIdFluxState state)
     {
-        if (state.DataCursor is null)
-        {
-            Console.WriteLine("Invalid rows to update");
-            return FluxAction.Abort;
-        }
-
-        TableDescriptor table = state.Table;
-        UpdateTicket ticket = state.Ticket;
-
-        await foreach (QueryResultRow row in state.DataCursor)
-        {
-            foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)
-                row.Row[keyValuePair.Key] = keyValuePair.Value;
-
-            byte[] buffer = rowSerializer.Serialize(table, row.Row, row.Tuple.SlotOne);
-
-            //await tablespace.WriteDataToPage(state.RowTuple.SlotOne, 0, buffer);
-
-            state.ModifiedPages.Add(new InsertModifiedPage(row.Tuple.SlotTwo, 0, buffer));
-        }
-
-
-        /*if (state.RowTuple is null)
+        if (state.RowTuple is null)
         {
             Console.WriteLine("Invalid row to Update {0}", state.Ticket.Id);
             return Task.FromResult(FluxAction.Abort);
         }
 
         TableDescriptor table = state.Table;
-        UpdateTicket ticket = state.Ticket;
+        UpdateByIdTicket ticket = state.Ticket;
 
         foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)
             state.ColumnValues[keyValuePair.Key] = keyValuePair.Value;
@@ -257,32 +259,32 @@ public sealed class RowUpdater
 
         //await tablespace.WriteDataToPage(state.RowTuple.SlotOne, 0, buffer);
 
-        state.ModifiedPages.Add(new InsertModifiedPage(state.RowTuple.SlotTwo, 0, buffer));*/
+        state.ModifiedPages.Add(new InsertModifiedPage(state.RowTuple.SlotTwo, 0, buffer));
 
-        return FluxAction.Continue;
+        return Task.FromResult(FluxAction.Continue);
     }
 
     /// <summary>
-    /// Executes the flux state machine to update a record by the specified filters
+    /// Executes the flux state machine to update a record by id
     /// </summary>
     /// <param name="machine"></param>
     /// <param name="state"></param>
     /// <returns></returns>
-    internal async Task<int> UpdateInternal(FluxMachine<UpdateFluxSteps, UpdateFluxState> machine, UpdateFluxState state)
+    internal async Task<int> UpdateByIdInternal(FluxMachine<UpdateByIdFluxSteps, UpdateByIdFluxState> machine, UpdateByIdFluxState state)
     {
         DatabaseDescriptor database = state.Database;
         BufferPoolHandler tablespace = state.Database.TableSpace;
         TableDescriptor table = state.Table;
-        UpdateTicket ticket = state.Ticket;
+        UpdateByIdTicket ticket = state.Ticket;
 
         Stopwatch timer = Stopwatch.StartNew();
 
-        machine.When(UpdateFluxSteps.AdquireLocks, AdquireLocks);
-        machine.When(UpdateFluxSteps.LocateTupleToUpdate, LocateTuplesToUpdate);
-        machine.When(UpdateFluxSteps.UpdateUniqueIndexes, UpdateUniqueIndexes);
-        machine.When(UpdateFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
-        machine.When(UpdateFluxSteps.UpdateRow, UpdateRowsFromDisk);
-        machine.When(UpdateFluxSteps.ReleaseLocks, ReleaseLocks);
+        machine.When(UpdateByIdFluxSteps.AdquireLocks, AdquireLocks);
+        machine.When(UpdateByIdFluxSteps.LocateTupleToUpdate, LocateTupleToUpdate);
+        machine.When(UpdateByIdFluxSteps.UpdateUniqueIndexes, UpdateUniqueIndexes);
+        machine.When(UpdateByIdFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
+        machine.When(UpdateByIdFluxSteps.UpdateRow, UpdateRowFromDisk);
+        machine.When(UpdateByIdFluxSteps.ReleaseLocks, ReleaseLocks);
 
         machine.WhenAbort(ReleaseLocks);
 
@@ -293,7 +295,7 @@ public sealed class RowUpdater
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        /*if (state.RowTuple is null)
+        if (state.RowTuple is null)
         {
             Console.WriteLine(
                 "Row pk {0} not found, Time taken: {1}",
@@ -302,18 +304,18 @@ public sealed class RowUpdater
             );
 
             return 0;
-        }*/
+        }
 
         await state.Database.TableSpace.WriteDataToPages(state.ModifiedPages);
 
-        /*Console.WriteLine(
+        Console.WriteLine(
             "Row pk {0} with id {1} updated to page {2}, Time taken: {3}",
             ticket.Id,
             state.RowTuple?.SlotOne,
             state.RowTuple?.SlotTwo,
             timeTaken.ToString(@"m\:ss\.fff")
-        );*/
+        );
 
         return 1;
-    }
+    }    
 }

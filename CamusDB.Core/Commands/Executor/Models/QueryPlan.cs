@@ -1,14 +1,14 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
-
-public enum QueryPlanStepType
-{
-	QueryFromIndex,
-	QueryFromTableIndex,
-	SortBy
-}
 
 public readonly struct QueryPlanStep
 {
@@ -30,7 +30,7 @@ public sealed class QueryPlan
 
 	public QueryTicket Ticket { get; }
 
-	public IAsyncEnumerable<Dictionary<string, ColumnValue>>? DataCursor { get; set; }
+	public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }
 
     public QueryPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
 	{
