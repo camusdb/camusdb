@@ -31,7 +31,7 @@ public class TestRowDeletor
         //SetupDb.Remove("factory");
     }
 
-    private async Task<(string, CommandExecutor)> SetupDatabase()
+    private static async Task<(string, CommandExecutor)> SetupDatabase()
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
@@ -49,7 +49,7 @@ public class TestRowDeletor
         return (dbname, executor);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
+    private static async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
     {
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
@@ -218,7 +218,7 @@ public class TestRowDeletor
            orderBy: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsEmpty(result);
     }
 }

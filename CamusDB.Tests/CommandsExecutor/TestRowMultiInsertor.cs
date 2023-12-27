@@ -114,11 +114,11 @@ internal sealed class TestRowMultiInsertor
             orderBy: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
 
         for (int i = 0; i < 10; i++)
         {
-            Dictionary<string, ColumnValue> row = result[i];
+            Dictionary<string, ColumnValue> row = result[i].Row;
             Assert.AreEqual(3, row.Count);
 
             Assert.AreEqual(ColumnType.Id, row["id"].Type);
@@ -164,12 +164,12 @@ internal sealed class TestRowMultiInsertor
             orderBy: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.AreEqual(10, result.Count);
 
         for (int i = 0; i < 10; i++)
         {
-            Dictionary<string, ColumnValue> row = result[i];
+            Dictionary<string, ColumnValue> row = result[i].Row;
             Assert.AreEqual(3, row.Count);
 
             Assert.AreEqual(row["id"].Type, ColumnType.Id);

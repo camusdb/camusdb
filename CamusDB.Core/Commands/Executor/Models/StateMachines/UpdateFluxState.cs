@@ -30,6 +30,8 @@ internal sealed class UpdateFluxState
 
     public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }
 
+    public int ModifiedRows { get; set; }
+
     public UpdateFluxState(DatabaseDescriptor database, TableDescriptor table, UpdateTicket ticket, QueryExecutor queryExecutor, UpdateFluxIndexState indexes)
     {
         Database = database;

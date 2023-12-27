@@ -74,7 +74,7 @@ public sealed class RowUpdater
                 );
             }
         }
-    }    
+    }
 
     /// <summary>
     /// Schedules a new Update operation by the specified filters
@@ -144,11 +144,11 @@ public sealed class RowUpdater
         );
 
         state.DataCursor = await state.QueryExecutor.Query(state.Database, state.Table, queryTicket, noLocking: true);
-        
+
         //Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, state.RowTuple.SlotTwo);*/
 
         return FluxAction.Continue;
-    }    
+    }
 
     private async Task UpdateMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
@@ -235,35 +235,16 @@ public sealed class RowUpdater
 
             byte[] buffer = rowSerializer.Serialize(table, row.Row, row.Tuple.SlotOne);
 
-            //await tablespace.WriteDataToPage(state.RowTuple.SlotOne, 0, buffer);
-
             state.ModifiedPages.Add(new InsertModifiedPage(row.Tuple.SlotTwo, 0, buffer));
+
+            state.ModifiedRows++;
         }
-
-
-        /*if (state.RowTuple is null)
-        {
-            Console.WriteLine("Invalid row to Update {0}", state.Ticket.Id);
-            return Task.FromResult(FluxAction.Abort);
-        }
-
-        TableDescriptor table = state.Table;
-        UpdateTicket ticket = state.Ticket;
-
-        foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)
-            state.ColumnValues[keyValuePair.Key] = keyValuePair.Value;
-
-        byte[] buffer = rowSerializer.Serialize(table, state.ColumnValues, state.RowTuple.SlotOne);
-
-        //await tablespace.WriteDataToPage(state.RowTuple.SlotOne, 0, buffer);
-
-        state.ModifiedPages.Add(new InsertModifiedPage(state.RowTuple.SlotTwo, 0, buffer));*/
 
         return FluxAction.Continue;
     }
 
     /// <summary>
-    /// Executes the flux state machine to update a record by the specified filters
+    /// Executes the flux state machine to update records by the specified filters
     /// </summary>
     /// <param name="machine"></param>
     /// <param name="state"></param>
@@ -292,28 +273,16 @@ public sealed class RowUpdater
         timer.Stop();
 
         TimeSpan timeTaken = timer.Elapsed;
+        
+        if (state.ModifiedPages.Count > 0)
+            await state.Database.TableSpace.WriteDataToPages(state.ModifiedPages);
 
-        /*if (state.RowTuple is null)
-        {
-            Console.WriteLine(
-                "Row pk {0} not found, Time taken: {1}",
-                ticket.Id,
-                timeTaken.ToString(@"m\:ss\.fff")
-            );
-
-            return 0;
-        }*/
-
-        await state.Database.TableSpace.WriteDataToPages(state.ModifiedPages);
-
-        /*Console.WriteLine(
-            "Row pk {0} with id {1} updated to page {2}, Time taken: {3}",
-            ticket.Id,
-            state.RowTuple?.SlotOne,
-            state.RowTuple?.SlotTwo,
+        Console.WriteLine(
+            "Updated {0} rows, Time taken: {1}",
+            state.ModifiedRows,
             timeTaken.ToString(@"m\:ss\.fff")
-        );*/
+        );
 
-        return 1;
+        return state.ModifiedRows;
     }
 }

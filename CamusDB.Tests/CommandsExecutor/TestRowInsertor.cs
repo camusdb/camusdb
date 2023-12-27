@@ -504,11 +504,11 @@ internal sealed class TestRowInsertor
             orderBy: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
 
         for (int i = 0; i < 50; i++)
         {
-            Dictionary<string, ColumnValue> row = result[i];
+            Dictionary<string, ColumnValue> row = result[i].Row;
 
             Assert.AreEqual(ColumnType.Id, row["id"].Type);
             Assert.AreEqual(24, row["id"].Value.Length);

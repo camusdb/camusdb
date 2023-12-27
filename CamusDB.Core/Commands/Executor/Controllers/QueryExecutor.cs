@@ -12,7 +12,6 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -21,6 +20,10 @@ internal sealed class QueryExecutor
     private readonly RowDeserializer rowDeserializer = new();
 
     private readonly QueryPlanner queryPlanner = new();
+
+    private readonly QueryFilterer queryFilterer = new();
+
+    private readonly QuerySorter querySorter = new();
 
     public async Task<IAsyncEnumerable<QueryResultRow>> Query(
         DatabaseDescriptor database,
@@ -64,7 +67,7 @@ internal sealed class QueryExecutor
                     if (plan.DataCursor is null)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
-                    plan.DataCursor = SortResultset(plan.Ticket, plan.DataCursor);
+                    plan.DataCursor = querySorter.SortResultset(plan.Ticket, plan.DataCursor);
                     break;
 
                 default:
@@ -76,58 +79,7 @@ internal sealed class QueryExecutor
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
         return plan.DataCursor;
-    }
-
-    private static async IAsyncEnumerable<QueryResultRow> SortResultset(QueryTicket ticket, IAsyncEnumerable<QueryResultRow> dataCursor)
-    {
-        if (ticket.OrderBy is null || ticket.OrderBy.Count == 0)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal sort context");
-
-        if (ticket.OrderBy.Count > 2)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "High number of order clauses is not supported");
-
-        string firstSortColumn = ticket.OrderBy[0].ColumnName;
-        string secondSortColumn = ticket.OrderBy.Count > 1 ? ticket.OrderBy[1].ColumnName : "id";
-
-        SortedDictionary<ColumnValue, SortedDictionary<ColumnValue, List<QueryResultRow>>> sortedRows = new();
-
-        await foreach (QueryResultRow resultRow in dataCursor)
-        {
-            Dictionary<string, ColumnValue> row = resultRow.Row;
-
-            if (!row.TryGetValue(firstSortColumn, out ColumnValue? firstSortColumnValue))
-                continue;
-
-            if (!row.TryGetValue(secondSortColumn, out ColumnValue? secondSortColumnValue))
-                continue;
-
-            if (sortedRows.TryGetValue(firstSortColumnValue, out SortedDictionary<ColumnValue, List<QueryResultRow>>? existingSortGroup))
-            {
-                if (existingSortGroup.TryGetValue(secondSortColumnValue, out List<QueryResultRow>? innerSortGroup))
-                    innerSortGroup.Add(resultRow);
-                else
-                    existingSortGroup.Add(secondSortColumnValue, new() { resultRow });
-            }
-            else
-            {
-                SortedDictionary<ColumnValue, List<QueryResultRow>> secondSortGroup = new()
-                {
-                    { secondSortColumnValue, new() { resultRow } }
-                };
-
-                sortedRows.Add(firstSortColumnValue, secondSortGroup);
-            }
-        }
-
-        foreach (KeyValuePair<ColumnValue, SortedDictionary<ColumnValue, List<QueryResultRow>>> sortedGroup in sortedRows)
-        {
-            foreach (KeyValuePair<ColumnValue, List<QueryResultRow>> secondSortGroup in sortedGroup.Value)
-            {
-                foreach (QueryResultRow sortedRow in secondSortGroup.Value)
-                    yield return sortedRow;
-            }
-        }
-    }
+    }    
 
     public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
     {
@@ -196,14 +148,14 @@ internal sealed class QueryExecutor
 
             if (ticket.Filters is not null && ticket.Filters.Count > 0)
             {
-                if (MeetFilters(ticket.Filters, row))
+                if (queryFilterer.MeetFilters(ticket.Filters, row))
                     yield return new(new(entry.Key, entry.Value), row);
             }
             else
             {
                 if (ticket.Where is not null)
                 {
-                    if (MeetWhere(ticket.Where, row))
+                    if (queryFilterer.MeetWhere(ticket.Where, row))
                         yield return new(new(entry.Key, entry.Value), row);
                 }
                 else
@@ -235,164 +187,21 @@ internal sealed class QueryExecutor
 
             if (ticket.Filters is not null && ticket.Filters.Count > 0)
             {
-                if (MeetFilters(ticket.Filters, row))
+                if (queryFilterer.MeetFilters(ticket.Filters, row))
                     yield return new(entry.Value, row);
             }
             else
             {
                 if (ticket.Where is not null)
                 {
-                    if (MeetWhere(ticket.Where, row))
+                    if (queryFilterer.MeetWhere(ticket.Where, row))
                         yield return new(entry.Value, row);
                 }
                 else
                     yield return new(entry.Value, row);
             }
         }
-    }
-
-    private bool MeetWhere(NodeAst where, Dictionary<string, ColumnValue> row)
-    {
-        ColumnValue evaluatedExpr = EvalExpr(where, row);
-
-        switch (evaluatedExpr.Type)
-        {
-            case ColumnType.Null:
-                return false;
-
-            case ColumnType.Bool:
-                //Console.WriteLine(evaluatedExpr.Value);
-                return evaluatedExpr.Value == "True" || evaluatedExpr.Value == "true";
-
-            case ColumnType.Float:
-                if (float.TryParse(evaluatedExpr.Value, out float res))
-                {
-                    if (res != 0)
-                        return true;
-                }
-                return false;
-
-            case ColumnType.Integer64:
-                if (long.TryParse(evaluatedExpr.Value, out long res2))
-                {
-                    if (res2 != 0)
-                        return true;
-                }
-                return false;
-        }
-
-        return false;
-    }
-
-    private ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row)
-    {
-        switch (expr.nodeType)
-        {
-            case NodeType.Number:
-                return new ColumnValue(ColumnType.Integer64, expr.yytext!);
-
-            case NodeType.String:
-                return new ColumnValue(ColumnType.String, expr.yytext!.Trim('"'));
-
-            case NodeType.Bool:
-                return new ColumnValue(ColumnType.Bool, expr.yytext!);
-
-            case NodeType.Identifier:
-
-                if (row.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
-                    return columnValue;
-
-                throw new Exception("Not found column: " + expr.yytext!);
-
-            case NodeType.ExprEquals:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) == 0).ToString());
-                }
-
-            case NodeType.ExprNotEquals:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) != 0).ToString());
-                }
-
-            case NodeType.ExprLessThan:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) < 0).ToString());
-                }
-
-            case NodeType.ExprGreaterThan:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) > 0).ToString());
-                }
-
-            case NodeType.ExprOr:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.Value.ToLowerInvariant() == "true" || rightValue.Value.ToLowerInvariant() == "true").ToString());
-                }
-
-            case NodeType.ExprAnd:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.Value.ToLowerInvariant() == "true" && rightValue.Value.ToLowerInvariant() == "true").ToString());
-                }
-
-            default:
-                Console.WriteLine("ERROR {0}", expr.nodeType);
-                break;
-        }
-
-        return new ColumnValue(ColumnType.Null, "");
-    }
-
-    private static bool MeetFilters(List<QueryFilter> filters, Dictionary<string, ColumnValue> row)
-    {
-        foreach (QueryFilter filter in filters)
-        {
-            if (string.IsNullOrEmpty(filter.ColumnName))
-            {
-                Console.WriteLine("Found empty or null column name in filters");
-                return false;
-            }
-
-            if (!row.TryGetValue(filter.ColumnName, out ColumnValue? value))
-                return false;
-
-            switch (filter.Op)
-            {
-                case "=":
-                    if (value.Value != filter.Value.Value)
-                        return false;
-                    break;
-
-                case "!=":
-                    if (value.Value == filter.Value.Value)
-                        return false;
-                    break;
-
-                default:
-                    Console.WriteLine("Unknown operator");
-                    break;
-            }
-        }
-
-        return true;
-    }
+    }    
 
     private async IAsyncEnumerable<QueryResultRow> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
     {

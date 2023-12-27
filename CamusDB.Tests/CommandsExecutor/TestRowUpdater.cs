@@ -137,7 +137,7 @@ public class TestRowUpdater
 
     [Test]
     [NonParallelizable]
-    public async Task TestBasicUpdate()
+    public async Task TestBasicUpdateById()
     {
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
@@ -168,7 +168,7 @@ public class TestRowUpdater
 
     [Test]
     [NonParallelizable]
-    public async Task TestDeleteUnknownRow()
+    public async Task TestUpdateUnknownRow()
     {
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
@@ -256,11 +256,8 @@ public class TestRowUpdater
            orderBy: null
         );
 
-        List<Dictionary<string, ColumnValue>> result = await (await executor.Query(queryTicket)).ToListAsync();
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsNotEmpty(result);
-
-        foreach (Dictionary<string, ColumnValue> x in result)
-            Assert.AreEqual("updated value", x["name"].Value);
 
         queryTicket = new(
            database: dbname,
@@ -269,16 +266,13 @@ public class TestRowUpdater
            where: null,
            filters: new()
            {
-               new("name", "=", new ColumnValue(ColumnType.String, "updated value")) 
+               new("name", "=", new ColumnValue(ColumnType.String, "updated value"))
            },
            orderBy: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsNotEmpty(result);
-
-        foreach (Dictionary<string, ColumnValue> x in result)
-            Assert.AreEqual("updated value", x["name"].Value);
 
         queryTicket = new(
            database: dbname,
@@ -294,5 +288,129 @@ public class TestRowUpdater
 
         result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestBasicUpdate()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        UpdateTicket ticket = new(
+            database: dbname,
+            name: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "name", new ColumnValue(ColumnType.String, "updated value") }
+            },
+            filters: new()
+            {
+                new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
+            }
+        );
+
+        Assert.AreEqual(1, await executor.Update(ticket));
+
+        QueryByIdTicket queryByIdTicket = new(
+            database: dbname,
+            name: "robots",
+            id: objectsId[0]
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(objectsId[0], result[0]["id"].Value);
+        Assert.AreEqual("updated value", result[0]["name"].Value);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestUpdateMany()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        UpdateTicket ticket = new(
+            database: dbname,
+            name: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "name", new ColumnValue(ColumnType.String, "updated value") }
+            },
+            filters: new()
+            {
+                new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
+            }
+        );
+
+        Assert.AreEqual(14, await executor.Update(ticket));
+
+        QueryTicket queryTicket = new(
+            database: dbname,
+            name: "robots",
+            index: null,
+            where: null,
+            filters: new()
+            {
+                new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
+            },
+            orderBy: null
+        );
+
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        Assert.AreEqual(14, result.Count);
+
+        foreach (QueryResultRow resultRow in result)
+        {
+            Dictionary<string, ColumnValue> row = resultRow.Row;
+
+            Assert.AreEqual(row["name"].Type, ColumnType.String);
+            Assert.AreEqual(row["name"].Value, "updated value");
+        }
+
+        queryTicket = new(
+            database: dbname,
+            name: "robots",
+            index: null,
+            where: null,
+            filters: new()
+            {
+                new("year", "<=", new ColumnValue(ColumnType.Integer64, "2010"))
+            },
+            orderBy: null
+        );
+
+        result = await (await executor.Query(queryTicket)).ToListAsync();
+        Assert.AreEqual(11, result.Count);
+
+        foreach (QueryResultRow resultRow in result)
+        {
+            Dictionary<string, ColumnValue> row = resultRow.Row;
+
+            Assert.AreEqual(row["name"].Type, ColumnType.String);
+            Assert.AreNotEqual(row["name"].Value, "updated value");
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestUpdateNone()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        UpdateTicket ticket = new(
+            database: dbname,
+            name: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "name", new ColumnValue(ColumnType.String, "updated value") }
+            },
+            filters: new()
+            {
+                new("year", ">", new ColumnValue(ColumnType.Integer64, "200010"))
+            }
+        );
+
+        Assert.AreEqual(0, await executor.Update(ticket));
     }
 }

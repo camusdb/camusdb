@@ -142,6 +142,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         await rowInserter.InsertWithState(machine, state);
     }
 
+    /// <summary>
+    /// Updates a table data specifying filters and sorts
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
     public async Task<int> Update(UpdateTicket ticket)
     {
         validator.Validate(ticket);
@@ -153,6 +158,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         return await rowUpdater.Update(queryExecutor, database, table, ticket);
     }
 
+    /// <summary>
+    /// Updates a table data specifying the row's id
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
     public async Task<int> UpdateById(UpdateByIdTicket ticket)
     {
         validator.Validate(ticket);
@@ -164,6 +174,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         return await rowUpdaterById.UpdateById(database, table, ticket);
     }
 
+    /// <summary>
+    /// Deletes a table data specifying thw row's id
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
     public async Task<int> DeleteById(DeleteByIdTicket ticket)
     {
         //validator.Validate(ticket);
