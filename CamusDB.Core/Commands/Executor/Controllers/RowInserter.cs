@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
+using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -206,7 +207,7 @@ internal sealed class RowInserter
         byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket.Values, state.RowTuple.SlotOne);
 
         // Insert data to the page offset
-        state.ModifiedPages.Add(new InsertModifiedPage(state.RowTuple.SlotTwo, state.Sequence, rowBuffer));
+        state.ModifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, state.RowTuple.SlotTwo, state.Sequence, rowBuffer));
 
         return Task.FromResult(FluxAction.Continue);
     }
@@ -296,7 +297,7 @@ internal sealed class RowInserter
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());
 
-        await state.Database.TableSpace.WriteDataToPages(state.ModifiedPages);
+        await state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
 
         TimeSpan timeTaken = timer.Elapsed;
 

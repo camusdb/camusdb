@@ -11,6 +11,7 @@ using Nito.AsyncEx;
 using CamusDB.Core.Storage;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
@@ -51,11 +52,12 @@ internal sealed class DatabaseOpener
         //    throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
 
         StorageManager tablespaceStorage = new(dbHandler);
+        LC logicalClock = new();
 
         DatabaseDescriptor databaseDescriptor = new(
             name: name,
             dbHandler,
-            tableSpace: new BufferPoolHandler(tablespaceStorage)
+            tableSpace: new BufferPoolHandler(tablespaceStorage, logicalClock)
         );
 
         await Task.WhenAll(new Task[]

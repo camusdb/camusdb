@@ -12,8 +12,8 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -36,7 +36,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         await RemoveInternal(tablespace, index, key);
     }
 
-    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value, List<IDisposable> locks, List<InsertModifiedPage> modifiedPages)
+    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value, List<IDisposable> locks, List<BufferPageOperation> modifiedPages)
     {
         Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas = await index.Put(key, value);
 
@@ -56,7 +56,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         BTreeMulti<ColumnValue> index,
         BTreeTuple value,
         List<IDisposable> locks,
-        List<InsertModifiedPage> modifiedPages,
+        List<BufferPageOperation> modifiedPages,
         Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas
     )
     {
@@ -76,7 +76,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         Serializator.WriteObjectId(treeBuffer, index.root!.PageOffset, ref pointer);
 
         //await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
-        modifiedPages.Add(new InsertModifiedPage(index.PageOffset, 0, treeBuffer));
+        modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, index.PageOffset, 0, treeBuffer));
 
         //Console.WriteLine("Will save index at {0}", index.PageOffset);
 
@@ -153,7 +153,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
             }
 
             //await tablespace.WriteDataToPage(node.PageOffset, 0, nodeBuffer);
-            modifiedPages.Add(new InsertModifiedPage(node.PageOffset, 0, nodeBuffer));
+            modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, node.PageOffset, 0, nodeBuffer));
 
             //Console.WriteLine("Node {0} at {1} Length={2}", node.Id, node.PageOffset, nodeBuffer.Length);
             //

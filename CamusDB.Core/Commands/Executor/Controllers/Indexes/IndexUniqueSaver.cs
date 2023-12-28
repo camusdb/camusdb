@@ -12,7 +12,7 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.CommandsExecutor.Models.StateMachines;
+using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -60,7 +60,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         uint sequence,
         uint subSequence,
         BTree<ColumnValue, BTreeTuple?> index,
-        List<InsertModifiedPage> modifiedPages,
+        List<BufferPageOperation> modifiedPages,
         HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas
     )
     {
@@ -89,7 +89,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
         // Write to buffer page
         //await tablespace.WriteDataToPage(index.PageOffset, sequence, treeBuffer);
-        modifiedPages.Add(new InsertModifiedPage(index.PageOffset, sequence, treeBuffer));      
+        modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, index.PageOffset, sequence, treeBuffer));      
 
         //@todo update nodes concurrently
 
@@ -125,7 +125,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
             }
 
             //await tablespace.WriteDataToPage(node.PageOffset, sequence, nodeBuffer);
-            modifiedPages.Add(new InsertModifiedPage(node.PageOffset, sequence, nodeBuffer));
+            modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, node.PageOffset, sequence, nodeBuffer));
 
             //Console.WriteLine("Node {0}/{1} at {2} Length={3}", node.Id, node.KeyCount, node.PageOffset, nodeBuffer.Length);            
         }

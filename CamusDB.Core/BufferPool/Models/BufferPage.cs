@@ -21,7 +21,7 @@ public sealed class BufferPage
 
     public int Accesses { get; set; }
 
-    public DateTime LastAccess { get; set; }
+    public ulong LastAccess { get; set; }
 
     private readonly AsyncReaderWriterLock readerWriterLock = new();
 

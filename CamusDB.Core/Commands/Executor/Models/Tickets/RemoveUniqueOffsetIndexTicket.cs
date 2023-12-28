@@ -8,7 +8,7 @@
  */
 
 using CamusDB.Core.BufferPool;
-using CamusDB.Core.CommandsExecutor.Models.StateMachines;
+using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
 
@@ -24,7 +24,7 @@ public readonly struct RemoveUniqueOffsetIndexTicket
 
     public List<IDisposable> Locks { get; } = new();
 
-    public List<InsertModifiedPage> ModifiedPages { get; }
+    public List<BufferPageOperation> ModifiedPages { get; }
 
     public HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>>? Deltas { get; }
 
@@ -33,7 +33,7 @@ public readonly struct RemoveUniqueOffsetIndexTicket
         BTree<ObjectIdValue, ObjectIdValue> index,
         ObjectIdValue key,
         List<IDisposable> locks,
-        List<InsertModifiedPage> modifiedPages,
+        List<BufferPageOperation> modifiedPages,
         HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>>? deltas = null)
     {
         Tablespace = tablespace;

@@ -7,7 +7,7 @@
  */
 
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.CommandsExecutor.Models.StateMachines;
+using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -23,7 +23,7 @@ public readonly struct SaveMultiKeysIndexTicket
 
     public List<IDisposable> Locks { get; }
 
-    public List<InsertModifiedPage> ModifiedPages { get; }
+    public List<BufferPageOperation> ModifiedPages { get; }
 
     public SaveMultiKeysIndexTicket(
         DatabaseDescriptor database,
@@ -31,7 +31,7 @@ public readonly struct SaveMultiKeysIndexTicket
         InsertTicket ticket,
         BTreeTuple rowTuple,
         List<IDisposable> locks,
-        List<InsertModifiedPage> modifiedPages
+        List<BufferPageOperation> modifiedPages
     )
     {
         Database = database;

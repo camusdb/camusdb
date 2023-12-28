@@ -18,6 +18,7 @@ TTrue           (T|t)(R|r)(U|u)(E|e)
 TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
 TUpdate         (U|u)(P|p)(D|d)(A|a)(T|t)(E|e)
 TSet            (S|s)(E|e)(T|t)
+TDelete 	    (D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
 LParen          \(
 RParen          \)
 Eol             (\r\n?|\n)
@@ -85,6 +86,8 @@ TGreaterEquals  >=
 {TFalse} { return (int)Token.TFALSE; }
 
 {TUpdate} { return (int)Token.TUPDATE; }
+
+{TDelete} { return (int)Token.TDELETE; }
 
 {TSet} { return (int)Token.TSET; }
 

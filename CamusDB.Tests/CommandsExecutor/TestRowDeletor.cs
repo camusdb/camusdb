@@ -20,6 +20,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using System;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -80,6 +81,51 @@ public class TestRowDeletor
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
+                    { "year", new ColumnValue(ColumnType.Integer64, (2000 + i).ToString()) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, "false") },
+                }
+            );
+
+            await executor.Insert(ticket);
+
+            objectsId.Add(objectId);
+        }
+
+        return (dbname, executor, objectsId);
+    }
+
+    private static async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupLargeDataTable()
+    {
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
+
+        CreateTableTicket tableTicket = new(
+            database: dbname,
+            name: "robots2",
+            new ColumnInfo[]
+            {
+                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("name", ColumnType.String, notNull: true),
+                new ColumnInfo("year", ColumnType.Integer64),
+                new ColumnInfo("enabled", ColumnType.Bool)
+            }
+        );
+
+        await executor.CreateTable(tableTicket);
+
+        List<string> objectsId = new(25);
+        string largeData = string.Join("", Enumerable.Repeat("a", 100000));
+
+        for (int i = 0; i < 25; i++)
+        {
+            string objectId = ObjectIdGenerator.Generate().ToString();
+
+            InsertTicket ticket = new(
+                database: dbname,
+                name: "robots2",
+                values: new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, objectId) },
+                    { "name", new ColumnValue(ColumnType.String, largeData) },
                     { "year", new ColumnValue(ColumnType.Integer64, (2000 + i).ToString()) },
                     { "enabled", new ColumnValue(ColumnType.Bool, "false") },
                 }
@@ -185,7 +231,49 @@ public class TestRowDeletor
             );
 
             Assert.AreEqual(1, await executor.DeleteById(ticket));
-        }        
+        }
+
+        QueryTicket queryTicket = new(
+           database: dbname,
+           name: "robots",
+           index: null,
+           where: null,
+           filters: null,
+           orderBy: null
+        );
+
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestMultiDelete2()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupLargeDataTable();
+
+        foreach (string objectId in objectsId)
+        {
+            DeleteByIdTicket ticket = new(
+                database: dbname,
+                name: "robots2",
+                id: objectId
+            );
+
+            Assert.AreEqual(1, await executor.DeleteById(ticket));
+        }
+
+        QueryTicket queryTicket = new(
+           database: dbname,
+           name: "robots2",
+           index: null,
+           where: null,
+           filters: null,
+           orderBy: null
+        );
+
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
     }
 
     [Test]
@@ -220,5 +308,98 @@ public class TestRowDeletor
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestMultiDeleteCriteria()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        
+        DeleteTicket ticket = new(
+            database: dbname,
+            name: "robots",
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
+            }
+        );
+
+        Assert.AreEqual(1, await executor.Delete(ticket));
+
+        QueryTicket queryTicket = new(
+           database: dbname,
+           name: "robots",
+           index: null,
+           where: null,
+           filters: new()
+           {
+                new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
+           },
+           orderBy: null
+        );
+
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestMultiDeleteCriteria2()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        QueryTicket queryTicket = new(
+          database: dbname,
+          name: "robots",
+          index: null,
+          where: null,
+          filters: new()
+          {
+                new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
+          },
+          orderBy: null
+       );
+
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        //Assert.IsEmpty(result);
+
+        foreach (var x in result)
+        {
+            Console.WriteLine("{0} {1}", x.Row["id"].Value, x.Row["year"].Value);
+        }
+
+        DeleteTicket ticket = new(
+            database: dbname,
+            name: "robots",
+            where: null,
+            filters: new()
+            {
+                new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
+            }
+        );
+
+        Assert.AreEqual(14, await executor.Delete(ticket));
+
+        queryTicket = new(
+           database: dbname,
+           name: "robots",
+           index: null,
+           where: null,
+           filters: new()
+           {
+                new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
+           },
+           orderBy: null
+        );
+
+        result = await (await executor.Query(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
+
+        foreach (var x in result)
+        {
+            Console.WriteLine("{0} {1}", x.Row["id"].Value, x.Row["year"].Value);
+        }
     }
 }

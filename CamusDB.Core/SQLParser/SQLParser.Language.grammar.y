@@ -20,7 +20,7 @@
 
 %token TDIGIT TSTRING IDENTIFIER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
-%token TUPDATE TSET
+%token TUPDATE TSET TDELETE
 
 %%
 
@@ -29,6 +29,7 @@ list    : stat { $$.n = $1.n; }
 
 stat    : select_stmt { $$.n = $1.n; }
         | update_stmt { $$.n = $1.n; }
+        | delete_stmt { $$.n = $1.n; }
         ;
 
 select_stmt    : TSELECT field_list TFROM identifier { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, null); }
@@ -38,6 +39,9 @@ select_stmt    : TSELECT field_list TFROM identifier { $$.n = new(NodeType.Selec
                ;
 
 update_stmt    : TUPDATE identifier TSET update_list TWHERE condition { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, null, null); }
+			   ;
+
+delete_stmt    : TDELETE TFROM identifier TWHERE condition { $$.n = new(NodeType.Delete, $3.n, $5.n, null, null, null); }
 			   ;
 
 update_list    : update_list TCOMMA update_item { $$.n = new(NodeType.UpdateList, $1.n, $3.n, null, null, null); }

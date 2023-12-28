@@ -11,8 +11,8 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -40,7 +40,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         BTree<ObjectIdValue, ObjectIdValue> index,
         ObjectIdValue key,
         ObjectIdValue value,
-        List<InsertModifiedPage> modifiedPages,
+        List<BufferPageOperation> modifiedPages,
         HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>>? deltas
     )
     {
@@ -56,7 +56,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         BufferPoolHandler tablespace,
         BTree<ObjectIdValue, ObjectIdValue> index,
         ObjectIdValue key,        
-        List<InsertModifiedPage> modifiedPages,
+        List<BufferPageOperation> modifiedPages,
         HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>>? deltas
     )
     {
@@ -72,7 +72,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     private static void Persist(
         BufferPoolHandler tablespace,
         BTree<ObjectIdValue, ObjectIdValue> index,
-        List<InsertModifiedPage> modifiedPages,
+        List<BufferPageOperation> modifiedPages,
         HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>> deltas
     )
     {
@@ -94,7 +94,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         Serializator.WriteObjectId(treeBuffer, index.root!.PageOffset, ref pointer);
 
         //await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
-        modifiedPages.Add(new InsertModifiedPage(index.PageOffset, 0, treeBuffer));
+        modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, index.PageOffset, 0, treeBuffer));
 
         //@todo update nodes concurrently        
 
@@ -130,9 +130,9 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
             }
 
             //await tablespace.WriteDataToPage(node.PageOffset, 0, nodeBuffer);
-            modifiedPages.Add(new InsertModifiedPage(node.PageOffset, 0, nodeBuffer));
+            modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, node.PageOffset, 0, nodeBuffer));
 
-            Console.WriteLine("Node {0} at {1} KeyCount={2} Length={3}", node.Id, node.PageOffset, node.KeyCount, nodeBuffer.Length);            
+            Console.WriteLine("Modified Node {0} at {1} KeyCount={2} Length={3}", node.Id, node.PageOffset, node.KeyCount, nodeBuffer.Length);            
         }
     }
 }

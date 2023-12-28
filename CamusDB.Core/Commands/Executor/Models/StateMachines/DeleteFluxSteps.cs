@@ -12,7 +12,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
  * The elements in this enum are the steps required to delete a row by id
  * Keeping the order is very important to ensure the proper operation
  */
-public enum DeleteByIdFluxSteps
+public enum DeleteFluxSteps
 {
     NotInitialized = 0,
     AdquireLocks = 1,
@@ -20,6 +20,5 @@ public enum DeleteByIdFluxSteps
     DeleteUniqueIndexes = 3,
     DeleteMultiIndexes = 4,
     DeleteRow = 5,
-    ApplyPageOperations = 6,
-    ReleaseLocks = 7
+    ReleaseLocks = 6
 }

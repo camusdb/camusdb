@@ -10,29 +10,25 @@ using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public readonly struct UpdateTicket
+public readonly struct DeleteTicket
 {
     public string DatabaseName { get; }
 
     public string TableName { get; }
 
-    public Dictionary<string, ColumnValue> Values { get; }
-
     public NodeAst? Where { get; }
 
     public List<QueryFilter>? Filters { get; }
 
-    public UpdateTicket(
+    public DeleteTicket(
         string database,
         string name,
-        Dictionary<string, ColumnValue> values,
         NodeAst? where,
         List<QueryFilter>? filters
     )
     {
         DatabaseName = database;
         TableName = name;
-        Values = values;
         Where = where;
         Filters = filters;
     }

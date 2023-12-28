@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
@@ -25,7 +26,7 @@ public sealed class InsertFluxState
 
     public InsertFluxIndexState Indexes { get; }
 
-    public List<InsertModifiedPage> ModifiedPages { get; } = new();
+    public List<BufferPageOperation> ModifiedPages { get; } = new();
 
     public List<IDisposable> Locks { get; } = new();
 

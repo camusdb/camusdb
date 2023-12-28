@@ -28,4 +28,5 @@ public enum NodeType
     Update,
     UpdateList,
     UpdateItem,
+    Delete
 }

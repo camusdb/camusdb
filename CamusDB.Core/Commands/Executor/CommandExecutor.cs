@@ -42,17 +42,19 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly RowUpdater rowUpdater;
 
+    private readonly RowDeleterById rowDeleterById;
+
     private readonly RowDeleter rowDeleter;
 
     private readonly QueryExecutor queryExecutor;
 
     private readonly SqlExecutor sqlExecutor;
 
-    private readonly CommandValidator validator;
+    private readonly CommandValidator validator;    
 
     public CommandExecutor(CommandValidator validator, CatalogsManager catalogs)
     {
-        this.validator = validator;
+        this.validator = validator;        
 
         databaseDescriptors = new();
         databaseOpener = new(databaseDescriptors);
@@ -64,6 +66,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         rowInserter = new();
         rowUpdaterById = new();
         rowUpdater = new();
+        rowDeleterById = new();
         rowDeleter = new();
         queryExecutor = new();
         sqlExecutor = new();
@@ -143,7 +146,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     /// <summary>
-    /// Updates a table data specifying filters and sorts
+    /// Updates rows specifying filters and sorts
     /// </summary>
     /// <param name="ticket"></param>
     /// <returns></returns>
@@ -159,7 +162,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     /// <summary>
-    /// Updates a table data specifying the row's id
+    /// Updates a set of rows specifying its id
     /// </summary>
     /// <param name="ticket"></param>
     /// <returns></returns>
@@ -175,23 +178,39 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     /// <summary>
-    /// Deletes a table data specifying thw row's id
+    /// Deletes a row specifying its id
     /// </summary>
     /// <param name="ticket"></param>
-    /// <returns></returns>
+    /// <returns>The number of deleted rows</returns>
     public async Task<int> DeleteById(DeleteByIdTicket ticket)
     {
-        //validator.Validate(ticket);
+        validator.Validate(ticket);
 
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
-        return await rowDeleter.DeleteById(database, table, ticket);
+        return await rowDeleterById.DeleteById(database, table, ticket);
     }
 
     /// <summary>
-    /// Queries a table data specifying filters and sorts
+    /// Deletes rows specifying a filter criteria
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <returns>The number of deleted rows</returns>
+    public async Task<int> Delete(DeleteTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+
+        return await rowDeleter.Delete(queryExecutor, database, table, ticket);
+    }
+
+    /// <summary>
+    /// Queries table data specifying filters and sorts
     /// </summary>
     /// <param name="ticket"></param>
     /// <returns></returns>
@@ -222,7 +241,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// Execute a SQL statement that doesn't return rows
     /// </summary>
     /// <param name="ticket"></param>
-    /// <returns></returns>
+    /// <returns>The number of inserted/modified/deleted rows</returns>
     public async Task<int> ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
     {
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
@@ -237,6 +256,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                 TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
 
                 return await rowUpdater.Update(queryExecutor, database, table, updateTicket);
+
+            /*case NodeType.Delete:
+                DeleteTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);
+
+                TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
+
+                return await rowUpdater.Update(queryExecutor, database, table, updateTicket);*/
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown non-query AST stmt: " + ast.nodeType);

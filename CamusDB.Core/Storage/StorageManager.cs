@@ -47,7 +47,17 @@ public sealed class StorageManager
         using WriteBatch batch = new();
 
         foreach (PageToWrite page in pagesToWrite)
-            batch.Put(page.Offset.ToBytes(), page.Buffer);
+            batch.Put(page.Offset.ToBytes(), page.Buffer);        
+
+        dbHandler.Write(batch);
+    }
+
+    internal void DeleteBatch(List<PageToDelete> pagesToDelete)
+    {
+        using WriteBatch batch = new();
+
+        foreach (PageToDelete page in pagesToDelete)
+            batch.Delete(page.Offset.ToBytes());
 
         dbHandler.Write(batch);
     }

@@ -12,8 +12,8 @@ using CamusDB.Core.Storage;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Hashes;
 using CamusDB.Core.BufferPool.Models;
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
@@ -48,7 +48,9 @@ public sealed class BufferPoolHandler : IDisposable
 {
     private readonly StorageManager storage;
 
-    private readonly SortedDictionary<DateTime, ObjectIdValue> lruPages = new();
+    private readonly LC logicalClock;
+
+    private readonly SortedDictionary<ulong, ObjectIdValue> lruPages = new();
 
     private readonly ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> pages = new();
 
@@ -58,19 +60,30 @@ public sealed class BufferPoolHandler : IDisposable
 
     public ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> Pages => pages;
 
-    public BufferPoolHandler(StorageManager storage)
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="storage"></param>
+    /// <param name="logicalClock"></param>
+    public BufferPoolHandler(StorageManager storage, LC logicalClock)
     {
         this.storage = storage;
+        this.logicalClock = logicalClock;
 
         releaser = new(ReleasePages, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
     }
 
+    /// <summary>
+    /// This method is called every 5 seconds and it marks old pages as candidates for release
+    /// </summary>
+    /// <param name="state"></param>
     private void ReleasePages(object? state)
     {
         float percent = Pages.Count / (float)CamusConfig.BufferPoolSize;
         if (percent < 0.8)
             return;
 
+        ulong ticks = logicalClock.GetTicks();
         int numberToFree = (int)(CamusConfig.BufferPoolSize * (1 - (percent > 0.8 ? 0.8 : percent)));               
 
         lruPages.Clear();
@@ -82,6 +95,9 @@ public sealed class BufferPoolHandler : IDisposable
             if (!page.IsValueCreated)
                 continue;
 
+            if (page.Value.LastAccess > (ticks - 65536)) // @todo this number must be choosen based on the actual activity of the database
+                continue;
+
             if (lruPages.Count > (numberToFree * 2)) // fill the red-black tree with twice the pages to release
                 break;
 
@@ -90,7 +106,7 @@ public sealed class BufferPoolHandler : IDisposable
 
         int numberFreed = 0;
 
-        foreach (KeyValuePair<DateTime, ObjectIdValue> keyValue in lruPages)
+        foreach (KeyValuePair<ulong, ObjectIdValue> keyValue in lruPages)
         {
             Pages.TryRemove(keyValue.Value, out _);
 
@@ -119,11 +135,11 @@ public sealed class BufferPoolHandler : IDisposable
         Lazy<BufferPage> lazyBufferPage = pages.GetOrAdd(offset, (x) => new Lazy<BufferPage>(() => LoadPage(offset)));
         BufferPage bufferPage = lazyBufferPage.Value;
         bufferPage.Accesses++;
-        bufferPage.LastAccess = DateTime.UtcNow;
+        bufferPage.LastAccess = logicalClock.Increment();
         return bufferPage;
     }
 
-    private async Task<(int, List<BufferPage>, List<IDisposable>)> GetDataLength(ObjectIdValue offset)
+    public async Task<(int, List<BufferPage>, List<IDisposable>)> GetDataLength(ObjectIdValue offset)
     {
         int length = 0;
         List<BufferPage> pages = new();
@@ -155,58 +171,64 @@ public sealed class BufferPoolHandler : IDisposable
 
         try
         {
-            if (length == 0)
-                return Array.Empty<byte>();
-
-            byte[] data = new byte[length];
-
-            uint checksum;
-            int bufferOffset = 0;
-
-            foreach (BufferPage memoryPage in pages)
-            {
-                byte[] pageBuffer = memoryPage.Buffer.Value; // get a pointer to the buffer to get a consistent read
-
-                int pointer = BConfig.LengthOffset;
-                int dataLength = Serializator.ReadInt32(pageBuffer, ref pointer);
-
-                if (dataLength > (pageBuffer.Length - BConfig.DataOffset))
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidPageLength,
-                        "Page has an invalid data length"
-                    );
-
-                pointer = BConfig.NextPageOffset;
-                offset = Serializator.ReadObjectId(pageBuffer, ref pointer);
-
-                pointer = BConfig.ChecksumOffset;
-                checksum = Serializator.ReadUInt32(pageBuffer, ref pointer);
-
-                /*if (checksum > 0) // check checksum only if available
-                {
-                    byte[] pageData = new byte[dataLength]; // @todo avoid this allocation
-                    Buffer.BlockCopy(pageBuffer, BConfig.DataOffset, pageData, 0, dataLength);
-
-                    uint dataChecksum = XXHash.Compute(pageData, 0, dataLength);
-
-                    if (dataChecksum != checksum)
-                        throw new CamusDBException(
-                            CamusDBErrorCodes.InvalidPageChecksum,
-                            "Page has an invalid data checksum"
-                        );
-                }*/
-
-                Buffer.BlockCopy(pageBuffer, BConfig.DataOffset, data, bufferOffset, dataLength);
-                bufferOffset += dataLength;
-            }
-
-            return data;
+            return GetDataFromPageDirect(length, pages);
         }
         finally
         {
             foreach (IDisposable disposable in disposables)
                 disposable.Dispose();
         }
+    }
+
+    public byte[] GetDataFromPageDirect(int length, List<BufferPage> pages)
+    {
+        if (length == 0)
+            return Array.Empty<byte>();
+
+        ObjectIdValue offset;
+        byte[] data = new byte[length];
+
+        uint checksum;
+        int bufferOffset = 0;
+
+        foreach (BufferPage memoryPage in pages)
+        {
+            byte[] pageBuffer = memoryPage.Buffer.Value; // get a pointer to the buffer to get a consistent read
+
+            int pointer = BConfig.LengthOffset;
+            int dataLength = Serializator.ReadInt32(pageBuffer, ref pointer);
+
+            if (dataLength > (pageBuffer.Length - BConfig.DataOffset))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidPageLength,
+                    "Page has an invalid data length"
+                );
+
+            pointer = BConfig.NextPageOffset;
+            offset = Serializator.ReadObjectId(pageBuffer, ref pointer);
+
+            pointer = BConfig.ChecksumOffset;
+            checksum = Serializator.ReadUInt32(pageBuffer, ref pointer);
+
+            /*if (checksum > 0) // check checksum only if available
+            {
+                byte[] pageData = new byte[dataLength]; // @todo avoid this allocation
+                Buffer.BlockCopy(pageBuffer, BConfig.DataOffset, pageData, 0, dataLength);
+
+                uint dataChecksum = XXHash.Compute(pageData, 0, dataLength);
+
+                if (dataChecksum != checksum)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidPageChecksum,
+                        "Page has an invalid data checksum"
+                    );
+            }*/
+
+            Buffer.BlockCopy(pageBuffer, BConfig.DataOffset, data, bufferOffset, dataLength);
+            bufferOffset += dataLength;
+        }
+
+        return data;
     }
 
     public void FlushPage(BufferPage memoryPage)
@@ -312,12 +334,20 @@ public sealed class BufferPoolHandler : IDisposable
             await WriteDataToPage(nextPage, sequence, data, startOffset + length);
     }
 
-    public async Task WriteDataToPages(List<InsertModifiedPage> modifiedPages)
+    public async Task ApplyPageOperations(List<BufferPageOperation> modifiedPages)
     {
         List<PageToWrite> pagesToWrite = new(modifiedPages.Count);
 
-        foreach (InsertModifiedPage modifiedPage in modifiedPages)
+        foreach (BufferPageOperation modifiedPage in modifiedPages)
+        {
+            if (modifiedPage.Operation == BufferPageOperationType.Delete)
+            {
+                await DeletePage(modifiedPage.Offset);
+                continue;
+            }
+
             await WriteDataToPageBatch(pagesToWrite, modifiedPage.Offset, modifiedPage.Sequence, modifiedPage.Buffer);
+        }
 
         Console.WriteLine("Wrote {0} pages in the batch", pagesToWrite.Count);
 
@@ -342,7 +372,7 @@ public sealed class BufferPoolHandler : IDisposable
 
         BufferPage page = ReadPage(offset);
 
-        using IDisposable writeLock = await page.WriterLockAsync();
+        //using IDisposable writeLock = await page.WriterLockAsync();
 
         int length;
         ObjectIdValue nextPage = new(0, 0, 0);
@@ -405,13 +435,27 @@ public sealed class BufferPoolHandler : IDisposable
                 "Invalid page offset"
             );
 
-        BufferPage page = ReadPage(offset);
+        (int length, List<BufferPage> pagesChain, List<IDisposable> disposables) = await GetDataLength(offset);        
 
-        using IDisposable writeLock = await page.WriterLockAsync();
+        try
+        {
+            List<PageToDelete> pagesToDelete = new(pagesChain.Count);
 
-        storage.Delete(offset);
+            foreach (BufferPage memoryPage in pagesChain)
+            {
+                pagesToDelete.Add(new PageToDelete(memoryPage.Offset));
+                pages.TryRemove(memoryPage.Offset, out _);
+            }
 
-        pages.TryRemove(offset, out _);
+            storage.DeleteBatch(pagesToDelete);
+        }
+        finally
+        {
+            foreach (IDisposable disposable in disposables)
+                disposable.Dispose();
+        }
+
+        Console.WriteLine("Removed {0} pages from disk, length={1}", pagesChain.Count, length);
     }
 
     public void Flush()

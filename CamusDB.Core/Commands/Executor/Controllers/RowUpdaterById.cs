@@ -8,6 +8,7 @@
 
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
+using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
@@ -266,7 +267,7 @@ public sealed class RowUpdaterById
 
         //await tablespace.WriteDataToPage(state.RowTuple.SlotOne, 0, buffer);
 
-        state.ModifiedPages.Add(new InsertModifiedPage(state.RowTuple.SlotTwo, 0, buffer));
+        state.ModifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, state.RowTuple.SlotTwo, 0, buffer));
 
         return Task.FromResult(FluxAction.Continue);
     }
@@ -313,7 +314,7 @@ public sealed class RowUpdaterById
             return 0;
         }
 
-        await state.Database.TableSpace.WriteDataToPages(state.ModifiedPages);
+        await state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
 
         Console.WriteLine(
             "Row pk {0} with id {1} updated to page {2}, Time taken: {3}",

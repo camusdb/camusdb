@@ -8,6 +8,7 @@
 
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
+using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
@@ -23,8 +24,6 @@ public sealed class RowUpdater
     private readonly IndexSaver indexSaver = new();
 
     private readonly RowSerializer rowSerializer = new();
-
-    private readonly RowDeserializer rowDeserializer = new();
 
     /// <summary>
     /// Validates that all columns and values in the update statement are valid
@@ -241,7 +240,7 @@ public sealed class RowUpdater
 
             byte[] buffer = rowSerializer.Serialize(table, row.Row, row.Tuple.SlotOne);
 
-            state.ModifiedPages.Add(new InsertModifiedPage(row.Tuple.SlotTwo, 0, buffer));
+            state.ModifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, row.Tuple.SlotTwo, 0, buffer));
 
             state.ModifiedRows++;
         }
@@ -281,7 +280,7 @@ public sealed class RowUpdater
         TimeSpan timeTaken = timer.Elapsed;
         
         if (state.ModifiedPages.Count > 0)
-            await state.Database.TableSpace.WriteDataToPages(state.ModifiedPages);
+            await state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
 
         Console.WriteLine(
             "Updated {0} rows, Time taken: {1}",

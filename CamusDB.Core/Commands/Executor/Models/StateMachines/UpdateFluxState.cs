@@ -6,9 +6,9 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Trees;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers;
+using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
@@ -24,7 +24,7 @@ internal sealed class UpdateFluxState
 
     public QueryExecutor QueryExecutor { get; }
 
-    public List<InsertModifiedPage> ModifiedPages { get; } = new();
+    public List<BufferPageOperation> ModifiedPages { get; } = new();
 
     public List<IDisposable> Locks { get; } = new();
 

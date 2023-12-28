@@ -271,7 +271,7 @@ public class TestSQLParser
     [Test]
     public void TestParseSimpleUpdate()
     {
-        NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value");
+        NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value WHERE TRUE");
 
         Assert.AreEqual(NodeType.Update, ast.nodeType);
 
@@ -284,7 +284,7 @@ public class TestSQLParser
     [Test]
     public void TestParseUpdateMultiSet()
     {
-        NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value, some_other_field = 100");
+        NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value, some_other_field = 100 WHERE TRUE");
 
         Assert.AreEqual(NodeType.Update, ast.nodeType);
 
@@ -297,7 +297,7 @@ public class TestSQLParser
     [Test]
     public void TestParseUpdateMultiSet2()
     {
-        NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value, some_other_field = 100, bool_field = false");
+        NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value, some_other_field = 100, bool_field = false WHERE TRUE");
 
         Assert.AreEqual(NodeType.Update, ast.nodeType);
 
