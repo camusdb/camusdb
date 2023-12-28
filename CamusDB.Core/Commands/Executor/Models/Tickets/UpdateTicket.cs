@@ -1,4 +1,7 @@
 ﻿
+
+
+using CamusDB.Core.SQLParser;
 /**
  * This file is part of CamusDB  
  *
@@ -16,13 +19,22 @@ public readonly struct UpdateTicket
 
     public Dictionary<string, ColumnValue> Values { get; }
 
-    public List<QueryFilter> Filters { get; }
+    public NodeAst? Where { get; }
 
-    public UpdateTicket(string database, string name, Dictionary<string, ColumnValue> values, List<QueryFilter> filters)
+    public List<QueryFilter>? Filters { get; }
+
+    public UpdateTicket(
+        string database,
+        string name,
+        Dictionary<string, ColumnValue> values,
+        NodeAst? where,
+        List<QueryFilter>? filters
+    )
     {
         DatabaseName = database;
         TableName = name;
         Values = values;
+        Where = where;
         Filters = filters;
     }
 }

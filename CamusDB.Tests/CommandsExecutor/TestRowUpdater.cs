@@ -303,6 +303,7 @@ public class TestRowUpdater
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
             },
+            where: null,
             filters: new()
             {
                 new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
@@ -337,6 +338,7 @@ public class TestRowUpdater
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
             },
+            where: null,
             filters: new()
             {
                 new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
@@ -401,6 +403,7 @@ public class TestRowUpdater
         UpdateTicket ticket = new(
             database: dbname,
             name: "robots",
+            where: null,
             values: new Dictionary<string, ColumnValue>()
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }

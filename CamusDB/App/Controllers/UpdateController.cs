@@ -76,6 +76,7 @@ public sealed class UpdateController : CommandsController
                 database: request.DatabaseName ?? "",
                 name: request.TableName ?? "",                
                 values: request.Values ?? new(),
+                where: null,
                 filters: request.Filters ?? new()
             );
 

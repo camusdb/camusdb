@@ -61,10 +61,10 @@ internal sealed class SqlExecutor
 
         List<(string, ColumnValue)> updateItemList = GetUpdateItemList(ast.rightAst);
 
-        foreach ((string, ColumnValue) x in updateItemList)
-            values[x.Item1] = x.Item2;
+        foreach ((string columnName, ColumnValue value) updateItem in updateItemList)
+            values[updateItem.columnName] = updateItem.value;
 
-        return new(ticket.DatabaseName, tableName, values, null);
+        return new(ticket.DatabaseName, tableName, values, ast.extendedOne, null);
     }
 
     private static List<(string, ColumnValue)> GetUpdateItemList(NodeAst updateItemList)

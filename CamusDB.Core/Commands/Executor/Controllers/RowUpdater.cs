@@ -145,7 +145,7 @@ public sealed class RowUpdater
             name: ticket.TableName,
             index: null,
             filters: ticket.Filters,
-            where: null,
+            where: ticket.Where,
             orderBy: null
         );
 
