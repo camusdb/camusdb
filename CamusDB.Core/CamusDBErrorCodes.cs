@@ -22,12 +22,14 @@ public static class CamusDBErrorCodes
     public const string InvalidPageChecksum = "CADB0098";
     public const string InvalidPageLength = "CADB0097";
 
-    public const string InvalidInput = "CADB0200";
-    public const string UnknownType = "CADB0201";
-    public const string DuplicatePrimaryKey = "CADB0202";
-    public const string DuplicateColumn = "CADB0203";
-    public const string UnknownColumn = "CADB0204";
-    public const string UnknownKey = "CADB0205";
+    public const string InvalidInput = "CADB0400";
+    public const string UnknownType = "CADB0401";
+    public const string DuplicatePrimaryKey = "CADB0402";
+    public const string DuplicateColumn = "CADB0403";
+    public const string UnknownColumn = "CADB0404";
+    public const string UnknownKey = "CADB0405";
+    public const string SqlSyntaxError = "CADB0406";
+    public const string InvalidAstStmt = "CADB0407";
 
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";

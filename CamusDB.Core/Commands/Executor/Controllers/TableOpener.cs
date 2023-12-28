@@ -28,6 +28,9 @@ internal sealed class TableOpener
 
     public async ValueTask<TableDescriptor> Open(DatabaseDescriptor database, string tableName)
     {
+        if (string.IsNullOrEmpty(tableName))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, "Invalid or empty table name");
+
         if (database.TableDescriptors.TryGetValue(tableName, out TableDescriptor? tableDescriptor))
             return tableDescriptor;
 

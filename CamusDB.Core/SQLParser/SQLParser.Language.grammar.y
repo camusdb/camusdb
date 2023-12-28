@@ -37,8 +37,7 @@ select_stmt    : TSELECT field_list TFROM identifier { $$.n = new(NodeType.Selec
                | TSELECT field_list TFROM identifier TWHERE condition TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, null); }
                ;
 
-update_stmt    : TUPDATE identifier TSET update_list { $$.n = new(NodeType.Update, $2.n, $4.n, null, null, null); }
-               | TUPDATE identifier TSET update_list TWHERE condition { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, null, null); }
+update_stmt    : TUPDATE identifier TSET update_list TWHERE condition { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, null, null); }
 			   ;
 
 update_list    : update_list TCOMMA update_item { $$.n = new(NodeType.UpdateList, $1.n, $3.n, null, null, null); }

@@ -202,7 +202,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
         return await queryExecutor.Query(database, table, ticket, noLocking: false);
-    }    
+    }
 
     /// <summary>
     /// Queries a table by the row's id
@@ -223,7 +223,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     /// <param name="ticket"></param>
     /// <returns></returns>
-    public async Task ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
+    public async Task<int> ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
     {
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
 
@@ -231,8 +231,15 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         switch (ast.nodeType)
         {
-            case NodeType.Select:
-                break;
+            case NodeType.Update:
+                UpdateTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);
+
+                TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
+
+                return await rowUpdater.Update(queryExecutor, database, table, updateTicket);
+
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown non-query AST stmt: " + ast.nodeType);
         }
     }
 
@@ -258,5 +265,5 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await databaseCloser.DisposeAsync();
-    }    
+    }
 }

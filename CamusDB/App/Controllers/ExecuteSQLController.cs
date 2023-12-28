@@ -25,8 +25,8 @@ public sealed class ExecuteSQLController : CommandsController
     }
 
     [HttpPost]
-    [Route("/execute-sql")]
-    public async Task<JsonResult> Execute()
+    [Route("/execute-sql-query")]
+    public async Task<JsonResult> ExecuteSQLQuery()
     {
         try
         {
@@ -35,7 +35,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("ExecuteSQL request is not valid");
+                throw new Exception("ExecuteSQLQuery request is not valid");
 
             ExecuteSQLTicket ticket = new(
                 database: request.DatabaseName ?? "",
@@ -48,17 +48,52 @@ public sealed class ExecuteSQLController : CommandsController
             await foreach (QueryResultRow row in await executor.ExecuteSQLQuery(ticket))
                 rows.Add(row.Row);
 
-            return new JsonResult(new ExecuteSQLResponse("ok", rows));
+            return new JsonResult(new ExecuteSQLQueryResponse("ok", rows));
         }
         catch (CamusDBException e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
-            return new JsonResult(new ExecuteSQLResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
+            return new JsonResult(new ExecuteSQLQueryResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
-            return new JsonResult(new ExecuteSQLResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new ExecuteSQLQueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+        }
+    }
+
+    [HttpPost]
+    [Route("/execute-non-sql-query")]
+    public async Task<JsonResult> ExecuteNonSQLQuery()
+    {
+        try
+        {
+            using StreamReader reader = new(Request.Body);
+            string body = await reader.ReadToEndAsync();
+
+            ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
+            if (request == null)
+                throw new Exception("ExecuteNonSQLQuery request is not valid");
+
+            ExecuteSQLTicket ticket = new(
+                database: request.DatabaseName ?? "",
+                sql: request.Sql ?? "",
+                parameters: request.Parameters
+            );
+
+            int modifiedRows = await executor.ExecuteNonSQLQuery(ticket);
+
+            return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows));
+        }
+        catch (CamusDBException e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new ExecuteNonSQLQueryResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new ExecuteNonSQLQueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }
 }

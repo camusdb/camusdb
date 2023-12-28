@@ -7,7 +7,6 @@
  */
 
 using System.Diagnostics;
-using System.Net.Sockets;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -37,6 +36,9 @@ public sealed class RowUpdater
     {
         List<TableColumnSchema> columns = table.Schema.Columns!;
 
+        if (ticket.Values is null || ticket.Values.Count == 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
+
         foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.Values)
         {
             bool hasColumn = false;
@@ -44,6 +46,10 @@ public sealed class RowUpdater
             for (int i = 0; i < columns.Count; i++)
             {
                 TableColumnSchema column = columns[i];
+
+                if (string.IsNullOrEmpty(columnValue.Key))
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid or empty column name in values list");
+
                 if (column.Name == columnValue.Key)
                 {
                     hasColumn = true;

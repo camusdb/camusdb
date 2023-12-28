@@ -17,9 +17,16 @@ internal partial class sqlParser
     public NodeAst Parse(string s)
     {
         byte[] inputBuffer = Encoding.Default.GetBytes(s);
+
         MemoryStream stream = new(inputBuffer);
-        Scanner = new sqlScanner(stream);
+        var scanner = new sqlScanner(stream);
+
+        Scanner = scanner;
+
         Parse();
+
+        if (!string.IsNullOrEmpty(scanner.YYError))
+            throw new CamusDBException(CamusDBErrorCodes.SqlSyntaxError, scanner.YYError);
 
         return CurrentSemanticValue.n;
     }

@@ -10,7 +10,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.App.Models;
 
-public sealed class ExecuteSQLResponse
+public sealed class ExecuteSQLQueryResponse
 {
     public string Status { get; set; }
 
@@ -20,13 +20,13 @@ public sealed class ExecuteSQLResponse
 
     public string? Message { get; set; }
 
-    public ExecuteSQLResponse(string status, List<Dictionary<string, ColumnValue>> rows)
+    public ExecuteSQLQueryResponse(string status, List<Dictionary<string, ColumnValue>> rows)
     {
         Status = status;
         Rows = rows;
     }
 
-    public ExecuteSQLResponse(string status, string code, string message)
+    public ExecuteSQLQueryResponse(string status, string code, string message)
     {
         Status = status;
         Code = code;
