@@ -37,7 +37,7 @@ public sealed class NodeAst
         //if (rightAst is not null)
         //Console.WriteLine("right={0}/{1}", rightAst.nodeType, rightAst.yytext);
 
-        if (!string.IsNullOrEmpty(yytext))		
-			Console.WriteLine("{0}: {1}", nodeType, yytext);
+        //if (!string.IsNullOrEmpty(yytext))		
+		//	Console.WriteLine("{0}: {1}", nodeType, yytext);
 	}
 }

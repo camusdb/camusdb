@@ -229,7 +229,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots WHERE name = \"some name 10\"",
+            sql: "SELECT * FROM robots WHERE name = \"some name 10\"",
             parameters: null
         );
 
@@ -247,7 +247,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots WHERE \"some name 10\"=name",
+            sql: "SELECT * FROM robots WHERE \"some name 10\"=name",
             parameters: null
         );
 
@@ -265,7 +265,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots WHERE year!=2000",
+            sql: "SELECT * FROM robots WHERE year!=2000",
             parameters: null
         );
 
@@ -283,7 +283,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots WHERE 2000!=year",
+            sql: "SELECT * FROM robots WHERE 2000!=year",
             parameters: null
         );
 
@@ -301,7 +301,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots WHERE year=2000 OR year=2001",
+            sql: "SELECT * FROM robots WHERE year=2000 OR year=2001",
             parameters: null
         );
 
@@ -319,7 +319,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots WHERE year=2000 OR year=2001 OR year=2002",
+            sql: "SELECT * FROM robots WHERE year=2000 OR year=2001 OR year=2002",
             parameters: null
         );
 
@@ -337,7 +337,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots WHERE year>2020",
+            sql: "SELECT * FROM robots WHERE year>2020",
             parameters: null
         );
 
@@ -355,7 +355,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots WHERE year<2005",
+            sql: "SELECT * FROM robots WHERE year<2005",
             parameters: null
         );
 
@@ -373,7 +373,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots ORDER BY year",
+            sql: "SELECT * FROM robots ORDER BY year",
             parameters: null
         );
 
@@ -395,7 +395,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots ORDER BY name",
+            sql: "SELECT * FROM robots ORDER BY name",
             parameters: null
         );
 
@@ -417,7 +417,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots ORDER BY enabled",
+            sql: "SELECT * FROM robots ORDER BY enabled",
             parameters: null
         );
 
@@ -439,7 +439,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
-            sql: "SELECT x FROM robots ORDER BY enabled, year",
+            sql: "SELECT * FROM robots ORDER BY enabled, year",
             parameters: null
         );
 
@@ -450,7 +450,7 @@ public class TestExecuteSql
 
         Assert.AreEqual("false", result[0].Row["enabled"].Value);
         Assert.AreEqual("false", result[1].Row["enabled"].Value);
-        Assert.AreEqual("true", result[24].Row["enabled"].Value);        
+        Assert.AreEqual("true", result[24].Row["enabled"].Value);
     }
 
     [Test]
@@ -465,11 +465,11 @@ public class TestExecuteSql
             parameters: null
         );
 
-        Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(updateTicket));        
+        Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(updateTicket));
 
         ExecuteSQLTicket queryTicket = new(
             database: dbname,
-            sql: "SELECT x FROM robots",
+            sql: "SELECT * FROM robots",
             parameters: null
         );
 
@@ -499,7 +499,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket queryTicket = new(
            database: dbname,
-           sql: "SELECT x FROM robots",
+           sql: "SELECT * FROM robots",
            parameters: null
        );
 
@@ -509,7 +509,7 @@ public class TestExecuteSql
         Assert.AreEqual(25, result.Count);
 
         Assert.AreEqual("1000", result[0].Row["year"].Value);
-        Assert.AreEqual("2023", result[1].Row["year"].Value);        
+        Assert.AreEqual("2023", result[1].Row["year"].Value);
     }
 
     [Test]
@@ -528,7 +528,7 @@ public class TestExecuteSql
 
         ExecuteSQLTicket queryTicket = new(
            database: dbname,
-           sql: "SELECT x FROM robots",
+           sql: "SELECT * FROM robots",
            parameters: null
        );
 
@@ -557,11 +557,59 @@ public class TestExecuteSql
 
         ExecuteSQLTicket queryTicket = new(
             database: dbname,
-            sql: "SELECT x FROM robots",
+            sql: "SELECT * FROM robots",
             parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
-        Assert.IsEmpty(result);        
+        Assert.IsEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteDeleteMatchesAll()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket deleteTicket = new(
+            database: dbname,
+            sql: "DELETE FROM robots WHERE year > 0",
+            parameters: null
+        );
+
+        Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(deleteTicket));
+
+        ExecuteSQLTicket queryTicket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteDeleteMatche1()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket deleteTicket = new(
+            database: dbname,
+            sql: "DELETE FROM robots WHERE year = 2000 OR year = 2001",
+            parameters: null
+        );
+
+        Assert.AreEqual(2, await executor.ExecuteNonSQLQuery(deleteTicket));
+
+        ExecuteSQLTicket queryTicket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE year = 2000 OR year = 2001",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
     }
 }

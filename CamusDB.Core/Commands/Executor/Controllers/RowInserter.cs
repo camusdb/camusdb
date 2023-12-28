@@ -39,6 +39,7 @@ internal sealed class RowInserter
     {
         List<TableColumnSchema> columns = table.Schema.Columns!;
 
+        // Step #1. Check for unknown columns
         foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.Values)
         {
             bool hasColumn = false;
@@ -60,6 +61,7 @@ internal sealed class RowInserter
                 );
         }
 
+        // Step #2. Check for not null violations
         foreach (TableColumnSchema columnSchema in columns)
         {
             if (!columnSchema.NotNull)
@@ -73,7 +75,7 @@ internal sealed class RowInserter
                 );
             }
 
-            if (columnValue.Value is null)
+            if (columnValue.Type == ColumnType.Null || columnValue.Value is null)
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.NotNullViolation,
@@ -81,6 +83,7 @@ internal sealed class RowInserter
                 );
             }
         }
+        
     }
 
     /// <summary>

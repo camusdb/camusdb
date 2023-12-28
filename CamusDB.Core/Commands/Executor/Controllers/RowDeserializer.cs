@@ -61,8 +61,10 @@ internal sealed class RowDeserializer
                         }
                         else
                         {
-                            if (columnType != SerializatorTypes.TypeNull)
-                                throw new Exception(columnType.ToString());
+                            if (columnType == SerializatorTypes.TypeNull)
+                                columnValues.Add(column.Name, new(ColumnType.Null, ""));
+                            else
+                                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, columnType.ToString());
                         }
                     }
                     break;
@@ -77,23 +79,48 @@ internal sealed class RowDeserializer
                         }
                         else
                         {
-                            if (columnType != SerializatorTypes.TypeNull)
-                                throw new Exception(columnType.ToString());
+                            if (columnType == SerializatorTypes.TypeNull)
+                                columnValues.Add(column.Name, new(ColumnType.Null, ""));
+                            else
+                                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, columnType.ToString());
                         }
                     }
                     //Console.WriteLine(pointer - rx);
                     break;
 
                 case ColumnType.String:
-                    Serializator.ReadType(data, ref pointer);                    
-                    string str = Serializator.ReadString(data, ref pointer);
-                    columnValues.Add(column.Name, new(ColumnType.String, str));
+                    {
+                        int columnType = Serializator.ReadType(data, ref pointer);
+                        if (columnType == SerializatorTypes.TypeString8 || columnType == SerializatorTypes.TypeString16 || columnType == SerializatorTypes.TypeString32)
+                        {
+                            string str = Serializator.ReadString(data, ref pointer);
+                            columnValues.Add(column.Name, new(ColumnType.String, str));
+                        }
+                        else
+                        {
+                            if (columnType == SerializatorTypes.TypeNull)
+                                columnValues.Add(column.Name, new(ColumnType.Null, ""));
+                            else
+                                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, columnType.ToString());
+                        }
+                    }
                     break;
 
                 case ColumnType.Bool:
-                    Serializator.ReadType(data, ref pointer);
-                    columnValues.Add(column.Name, new(ColumnType.Bool, Serializator.ReadBool(data, ref pointer) ? "true" : "false"));
+                    {
+                        int columnType = Serializator.ReadType(data, ref pointer);
+                        if (columnType == SerializatorTypes.TypeBool)
+                            columnValues.Add(column.Name, new(ColumnType.Bool, Serializator.ReadBool(data, ref pointer) ? "true" : "false"));
+                        else
+                        {
+                            if (columnType == SerializatorTypes.TypeNull)
+                                columnValues.Add(column.Name, new(ColumnType.Null, ""));
+                            else
+                                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, columnType.ToString());
+                        }
+                    }
                     break;
+
 
                 default:
                     throw new CamusDBException(

@@ -15,6 +15,11 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
+/// <summary>
+/// The goal of this controller is to define a single point for opening tables. An open table maintains a descriptor 
+/// in memory that will be subsequently used by all operations on the table and allows knowing the pages 
+/// where the indices are located as well as the history of schemas.
+/// </summary>
 internal sealed class TableOpener
 {
     private readonly IndexReader indexReader = new();
@@ -26,6 +31,13 @@ internal sealed class TableOpener
         Catalogs = catalogsManager;
     }
 
+    /// <summary>
+    /// Opens the specified table and returns a descriptor that contains the table schema and pointers to the indexes
+    /// </summary>
+    /// <param name="database"></param>
+    /// <param name="tableName"></param>
+    /// <returns></returns>
+    /// <exception cref="CamusDBException"></exception>
     public async ValueTask<TableDescriptor> Open(DatabaseDescriptor database, string tableName)
     {
         if (string.IsNullOrEmpty(tableName))

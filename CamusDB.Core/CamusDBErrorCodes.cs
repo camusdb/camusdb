@@ -14,7 +14,8 @@ public static class CamusDBErrorCodes
     public const string TableDoesntExist = "CADB0011";
     public const string DatabaseAlreadyExists = "CADB0012";
     public const string TableAlreadyExists = "CADB0013";
-    public const string SystemSpaceCorrupt = "CADB0014";    
+    public const string SystemSpaceCorrupt = "CADB0014";
+    public const string TableCorrupt = "CADB0015";
 
     public const string InvalidPageOffset = "CADB00297";
 

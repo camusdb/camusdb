@@ -204,6 +204,28 @@ internal sealed class TestRowInsertor
 
     [Test]
     [NonParallelizable]
+    public async Task TestInsertNotNullColumWithNull()
+    {
+        (string dbname, CommandExecutor executor) = await SetupBasicTable();
+
+        InsertTicket ticket = new(
+            database: dbname,
+            name: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                { "name", new ColumnValue(ColumnType.Null, "") },
+                { "year", new ColumnValue(ColumnType.Integer64, "1234") },
+                { "enabled", new ColumnValue(ColumnType.Bool, "false") },
+            }
+        );
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
+        Assert.AreEqual("Column 'name' cannot be null", e!.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestBasicInsert()
     {
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
@@ -333,6 +355,46 @@ internal sealed class TestRowInsertor
 
         Assert.AreEqual(row["year"].Type, ColumnType.Integer64);
         Assert.AreEqual(row["year"].Value, "1234");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCheckSuccessfulInsertWithNulls()
+    {
+        (string dbname, CommandExecutor executor) = await SetupBasicTable();
+
+        InsertTicket insertTicket = new(
+            database: dbname,
+            name: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                { "name", new ColumnValue(ColumnType.String, "some name") },
+                { "year", new ColumnValue(ColumnType.Null, "") },
+                { "enabled", new ColumnValue(ColumnType.Null, "") },
+            }
+        );
+
+        await executor.Insert(insertTicket);
+
+        QueryByIdTicket queryTicket = new(
+            database: dbname,
+            name: "robots",
+            id: "507f1f77bcf86cd799439011"
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryTicket)).ToListAsync();
+
+        Dictionary<string, ColumnValue> row = result[0];
+
+        Assert.AreEqual(row["id"].Type, ColumnType.Id);
+        Assert.AreEqual(row["id"].Value, "507f1f77bcf86cd799439011");
+
+        Assert.AreEqual(row["name"].Type, ColumnType.String);
+        Assert.AreEqual(row["name"].Value, "some name");
+
+        Assert.AreEqual(row["year"].Type, ColumnType.Null);
+        Assert.AreEqual(row["enabled"].Type, ColumnType.Null);
     }
 
     [Test]

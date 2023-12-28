@@ -334,4 +334,18 @@ public class TestSQLParser
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
     }
+
+    [Test]
+    public void TestParseSimpleInsert3()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("INSERT INTO some_table (id, z) VALUES (GEN_ID(), \"aaaa\")");
+
+        Assert.AreEqual(NodeType.Insert, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.IdentifierList, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprList, ast.extendedOne!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
 }

@@ -74,7 +74,7 @@ values_list  : values_list TCOMMA values_item { $$.n = new(NodeType.ExprList, $1
 			 | values_item { $$.n = $1.n; $$.s = $1.s; }
 			 ;
 
-values_item  : simple_expr { $$.n = $1.n; $$.s = $1.s; }
+values_item  : expr { $$.n = $1.n; $$.s = $1.s; }
              ;
 
 order_list  : order_list TCOMMA order_item { $$.n = new(NodeType.IdentifierList, $1.n, $3.n, null, null, null); }

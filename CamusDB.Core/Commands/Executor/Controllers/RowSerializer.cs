@@ -39,6 +39,12 @@ internal sealed class RowSerializer
                 continue;
             }
 
+            if (columnValue.Type == ColumnType.Null)
+            {
+                length += SerializatorTypeSizes.TypeNull; // null (1 byte)
+                continue;
+            }
+
             if (column.Type != columnValue.Type)
                 throw new CamusDBException(
                     CamusDBErrorCodes.UnknownType,
@@ -116,6 +122,10 @@ internal sealed class RowSerializer
 
                 case ColumnType.Bool:
                     Serializator.WriteBool(rowBuffer, columnValue.Value == "true", ref pointer);
+                    break;
+
+                case ColumnType.Null:
+                    Serializator.WriteType(rowBuffer, SerializatorTypes.TypeNull, ref pointer);
                     break;
 
                 default:
