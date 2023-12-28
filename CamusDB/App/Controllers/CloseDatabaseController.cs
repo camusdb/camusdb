@@ -34,7 +34,7 @@ public sealed class CloseDatabaseController : CommandsController
 
             CloseDatabaseRequest? request = JsonSerializer.Deserialize<CloseDatabaseRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("CreateDatabase request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "CreateDatabase request is not valid");
 
             CloseDatabaseTicket ticket = new(
                 name: request.DatabaseName ?? ""

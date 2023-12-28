@@ -60,6 +60,9 @@ internal sealed class QueryFilterer
             case NodeType.Bool:
                 return new ColumnValue(ColumnType.Bool, expr.yytext!);
 
+            case NodeType.Null:
+                return new ColumnValue(ColumnType.Null, "");
+
             case NodeType.Identifier:
 
                 if (row.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
@@ -116,11 +119,8 @@ internal sealed class QueryFilterer
                 }
 
             default:
-                Console.WriteLine("ERROR {0}", expr.nodeType);
-                break;
+                throw new CamusDBException(CamusDBErrorCodes.UnknownType, $"ERROR {expr.nodeType}");
         }
-
-        return new ColumnValue(ColumnType.Null, "");
     }
 
     // @todo : this is a very naive implementation, we should use a proper type conversion and implement all operators

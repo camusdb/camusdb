@@ -37,7 +37,7 @@ public sealed class InsertController : CommandsController
 
             InsertRequest? request = JsonSerializer.Deserialize<InsertRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("Insert request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Insert request is not valid");
 
             InsertTicket ticket = new(
                 database: request.DatabaseName ?? "",

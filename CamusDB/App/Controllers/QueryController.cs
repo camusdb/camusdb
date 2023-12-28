@@ -35,7 +35,7 @@ public sealed class QueryController : CommandsController
 
             QueryRequest? request = JsonSerializer.Deserialize<QueryRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("Query request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Query request is not valid");
 
             QueryTicket ticket = new(
                 database: request.DatabaseName ?? "",
@@ -48,12 +48,8 @@ public sealed class QueryController : CommandsController
 
             List<Dictionary<string, ColumnValue>> rows = new();
 
-            await foreach (QueryResultRow row in await executor.Query(ticket))
-            {
-                Console.WriteLine("Id={0} Val={1}", row.Tuple.SlotOne, row.Tuple.SlotTwo);
-
+            await foreach (QueryResultRow row in await executor.Query(ticket))            
                 rows.Add(row.Row);
-            }
 
             return new JsonResult(new QueryResponse("ok", rows));
         }

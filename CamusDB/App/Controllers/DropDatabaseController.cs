@@ -34,7 +34,7 @@ public sealed class DropDatabaseController : CommandsController
 
             DropDatabaseRequest? request = JsonSerializer.Deserialize<DropDatabaseRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("DropDatabase request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DropDatabase request is not valid");
 
             DropDatabaseTicket ticket = new(
                 name: request.DatabaseName ?? ""                

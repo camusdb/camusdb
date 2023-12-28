@@ -34,7 +34,7 @@ public sealed class UpdateController : CommandsController
 
             UpdateByIdRequest? request = JsonSerializer.Deserialize<UpdateByIdRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("UpdateById request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "UpdateById request is not valid");
 
             UpdateByIdTicket ticket = new(
                 database: request.DatabaseName ?? "",
@@ -70,7 +70,7 @@ public sealed class UpdateController : CommandsController
 
             UpdateRequest? request = JsonSerializer.Deserialize<UpdateRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("Update request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Update request is not valid");
 
             UpdateTicket ticket = new(
                 database: request.DatabaseName ?? "",

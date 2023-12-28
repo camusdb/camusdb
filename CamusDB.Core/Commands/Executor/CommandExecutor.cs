@@ -50,11 +50,11 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly SqlExecutor sqlExecutor;
 
-    private readonly CommandValidator validator;    
+    private readonly CommandValidator validator;
 
     public CommandExecutor(CommandValidator validator, CatalogsManager catalogs)
     {
-        this.validator = validator;        
+        this.validator = validator;
 
         databaseDescriptors = new();
         databaseOpener = new(databaseDescriptors);
@@ -251,18 +251,22 @@ public sealed class CommandExecutor : IAsyncDisposable
         switch (ast.nodeType)
         {
             case NodeType.Update:
-                UpdateTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);
+                {
+                    UpdateTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);
 
-                TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
+                    TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
 
-                return await rowUpdater.Update(queryExecutor, database, table, updateTicket);
+                    return await rowUpdater.Update(queryExecutor, database, table, updateTicket);
+                }
 
-            /*case NodeType.Delete:
-                DeleteTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);
+            case NodeType.Delete:
+                {
+                    DeleteTicket deleteTicket = sqlExecutor.CreateDeleteTicket(ticket, ast);
 
-                TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
+                    TableDescriptor table = await tableOpener.Open(database, deleteTicket.TableName);
 
-                return await rowUpdater.Update(queryExecutor, database, table, updateTicket);*/
+                    return await rowDeleter.Delete(queryExecutor, database, table, deleteTicket);
+                }
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown non-query AST stmt: " + ast.nodeType);

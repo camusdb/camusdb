@@ -13,8 +13,10 @@ public enum NodeType
     Number,
     String,
     Bool,
+    Null,
     Identifier,
     IdentifierList,
+    ExprList,
     ExprEquals,
     ExprNotEquals,
     ExprLessThan,
@@ -24,9 +26,11 @@ public enum NodeType
     ExprOr,
     ExprAnd,
     ExprAllFields,
+    ExprFuncCall,
     Select,
     Update,
     UpdateList,
     UpdateItem,
-    Delete
+    Delete,
+    Insert
 }

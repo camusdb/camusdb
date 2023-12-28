@@ -34,7 +34,7 @@ public sealed class DeleteController : CommandsController
 
             DeleteByIdRequest? request = JsonSerializer.Deserialize<DeleteByIdRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("DeleteById request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DeleteById request is not valid");
 
             DeleteByIdTicket ticket = new(
                 database: request.DatabaseName ?? "",
@@ -69,7 +69,7 @@ public sealed class DeleteController : CommandsController
 
             DeleteRequest? request = JsonSerializer.Deserialize<DeleteRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("Delete request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Delete request is not valid");
 
             DeleteTicket ticket = new(
                 database: request.DatabaseName ?? "",

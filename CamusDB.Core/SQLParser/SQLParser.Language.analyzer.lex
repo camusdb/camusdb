@@ -19,6 +19,9 @@ TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
 TUpdate         (U|u)(P|p)(D|d)(A|a)(T|t)(E|e)
 TSet            (S|s)(E|e)(T|t)
 TDelete 	    (D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
+TInsert 	    (I|i)(N|n)(S|s)(E|e)(R|r)(T|t)
+TInto 		    (I|i)(N|n)(T|t)(O|o)
+TValues         (V|v)(A|a)(L|l)(U|u)(E|e)(S|s)
 LParen          \(
 RParen          \)
 Eol             (\r\n?|\n)
@@ -90,6 +93,12 @@ TGreaterEquals  >=
 {TDelete} { return (int)Token.TDELETE; }
 
 {TSet} { return (int)Token.TSET; }
+
+{TInsert} { return (int)Token.TINSERT; }
+
+{TInto} { return (int)Token.TINTO; }
+
+{TValues} { return (int)Token.TVALUES; }
 
 {TAdd} { return (int)Token.TADD; }
 

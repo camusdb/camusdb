@@ -95,7 +95,7 @@ public sealed class CreateTableController : CommandsController
 
             CreateTableRequest? request = JsonSerializer.Deserialize<CreateTableRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("CreateTable request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "CreateTable request is not valid");
 
             CreateTableTicket ticket = new(
                 database: request.DatabaseName ?? "",

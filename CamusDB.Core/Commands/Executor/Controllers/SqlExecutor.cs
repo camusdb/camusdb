@@ -67,6 +67,16 @@ internal sealed class SqlExecutor
         return new(ticket.DatabaseName, tableName, values, ast.extendedOne, null);
     }
 
+    internal DeleteTicket CreateDeleteTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        string tableName = ast.leftAst!.yytext!;
+
+        if (ast.rightAst is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing delete conditions");
+        
+        return new(ticket.DatabaseName, tableName, ast.rightAst, null);
+    }
+
     private static List<(string, ColumnValue)> GetUpdateItemList(NodeAst updateItemList)
     {
         if (updateItemList.nodeType == NodeType.UpdateItem)

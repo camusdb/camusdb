@@ -35,7 +35,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("ExecuteSQLQuery request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
 
             ExecuteSQLTicket ticket = new(
                 database: request.DatabaseName ?? "",
@@ -73,7 +73,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)
-                throw new Exception("ExecuteNonSQLQuery request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
 
             ExecuteSQLTicket ticket = new(
                 database: request.DatabaseName ?? "",
