@@ -129,10 +129,10 @@ internal sealed class QueryFilterer
         foreach (QueryFilter filter in filters)
         {
             if (string.IsNullOrEmpty(filter.ColumnName))
-            {
-                Console.WriteLine("Found empty or null column name in filters");
-                return false;
-            }
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Found empty or null column name in filters");
+
+            if (string.IsNullOrEmpty(filter.Op))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Found empty or null operator in filters");
 
             if (!row.TryGetValue(filter.ColumnName, out ColumnValue? value))
                 return false;
@@ -149,7 +149,7 @@ internal sealed class QueryFilterer
                         return false;
                     break;
 
-                case ">":                    
+                case ">":
                     if (long.Parse(value.Value) <= long.Parse(filter.Value.Value))
                         return false;
                     break;

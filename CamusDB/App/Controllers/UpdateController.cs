@@ -43,9 +43,9 @@ public sealed class UpdateController : CommandsController
                 values: request.Values ?? new()
             );
 
-            await executor.UpdateById(ticket);
+            int updatedRows = await executor.UpdateById(ticket);
 
-            return new JsonResult(new UpdateResponse("ok"));
+            return new JsonResult(new UpdateResponse("ok", updatedRows));
         }
         catch (CamusDBException e)
         {
@@ -80,9 +80,9 @@ public sealed class UpdateController : CommandsController
                 filters: request.Filters ?? new()
             );
 
-            await executor.Update(ticket);
+            int updatedRows = await executor.Update(ticket);
 
-            return new JsonResult(new UpdateResponse("ok"));
+            return new JsonResult(new UpdateResponse("ok", updatedRows));
         }
         catch (CamusDBException e)
         {

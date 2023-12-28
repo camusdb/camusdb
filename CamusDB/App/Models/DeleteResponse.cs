@@ -12,13 +12,16 @@ public sealed class DeleteResponse
 {
     public string Status { get; set; }
 
+    public int Rows { get; set; }
+
     public string? Code { get; set; }
 
     public string? Message { get; set; }
 
-    public DeleteResponse(string status)
+    public DeleteResponse(string status, int rows)
     {
         Status = status;
+        Rows = rows;
     }
 
     public DeleteResponse(string status, string code, string message)

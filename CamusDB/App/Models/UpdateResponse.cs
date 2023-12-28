@@ -12,13 +12,16 @@ public sealed class UpdateResponse
 {
     public string Status { get; set; }
 
+    public int Rows { get; set; }
+
     public string? Code { get; set; }
 
     public string? Message { get; set; }
 
-    public UpdateResponse(string status)
+    public UpdateResponse(string status, int rows)
     {
         Status = status;
+        Rows = rows;
     }
 
     public UpdateResponse(string status, string code, string message)

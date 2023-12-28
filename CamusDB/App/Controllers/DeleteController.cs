@@ -42,9 +42,45 @@ public sealed class DeleteController : CommandsController
                 id: request.Id ?? ""
             );
 
-            await executor.DeleteById(ticket);
+            int deletedRows = await executor.DeleteById(ticket);
 
-            return new JsonResult(new DeleteResponse("ok"));
+            return new JsonResult(new DeleteResponse("ok", deletedRows));
+        }
+        catch (CamusDBException e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new DeleteResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new DeleteResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+        }
+    }
+
+    [HttpPost]
+    [Route("/delete")]
+    public async Task<JsonResult> Delete()
+    {
+        try
+        {
+            using StreamReader reader = new(Request.Body);
+            string body = await reader.ReadToEndAsync();
+
+            DeleteRequest? request = JsonSerializer.Deserialize<DeleteRequest>(body, jsonOptions);
+            if (request == null)
+                throw new Exception("Delete request is not valid");
+
+            DeleteTicket ticket = new(
+                database: request.DatabaseName ?? "",
+                name: request.TableName ?? "",
+                where: null,
+                filters: request.Filters ?? new()
+            );
+
+            int deletedRows = await executor.Delete(ticket);
+
+            return new JsonResult(new DeleteResponse("ok", deletedRows));
         }
         catch (CamusDBException e)
         {

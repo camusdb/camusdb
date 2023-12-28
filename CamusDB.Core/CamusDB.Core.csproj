@@ -32,15 +32,11 @@
     <Folder Include="Util\Hashes\" />
     <Folder Include="Flux\" />
     <Folder Include="Flux\Models\" />
-    <Folder Include="Commands\Executor\Controllers\" />
-    <Folder Include="Commands\Validator\" />
-    <Folder Include="Commands\Validator\Validators\" />
     <Folder Include="Storage\" />
     <Folder Include="Config\" />
     <Folder Include="Config\Models\" />
     <Folder Include="Statistics\" />
     <Folder Include="Statistics\Models\" />
-    <Folder Include="Util\Time\" />
   </ItemGroup>
 
   <ItemGroup Label="SQLParser">

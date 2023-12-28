@@ -363,12 +363,7 @@ public class TestRowDeletor
        );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
-        //Assert.IsEmpty(result);
-
-        foreach (var x in result)
-        {
-            Console.WriteLine("{0} {1}", x.Row["id"].Value, x.Row["year"].Value);
-        }
+        Assert.IsNotEmpty(result);        
 
         DeleteTicket ticket = new(
             database: dbname,
@@ -396,10 +391,38 @@ public class TestRowDeletor
 
         result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsEmpty(result);
+    }
 
-        foreach (var x in result)
-        {
-            Console.WriteLine("{0} {1}", x.Row["id"].Value, x.Row["year"].Value);
-        }
+    [Test]
+    [NonParallelizable]
+    public async Task TestMultiDeleteCriteriaNoRows()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        DeleteTicket ticket = new(
+            database: dbname,
+            name: "robots",
+            where: null,
+            filters: new()
+            {
+                new("year", "<", new ColumnValue(ColumnType.Integer64, "-1"))
+            }
+        );
+
+        Assert.AreEqual(0, await executor.Delete(ticket));
+
+        QueryTicket queryTicket = new(
+           database: dbname,
+           name: "robots",
+           index: null,
+           where: null,
+           filters: null,
+           orderBy: null
+        );
+
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
     }
 }
