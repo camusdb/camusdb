@@ -22,5 +22,6 @@ public enum InsertFluxSteps
     InsertToPage = 5,
     UpdateTableIndex = 6,
     UpdateMultiIndexes = 7,
-    ReleaseLocks = 8
+    ApplyPageOperations = 8,
+    ReleaseLocks = 9
 }

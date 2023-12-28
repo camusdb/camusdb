@@ -111,7 +111,7 @@ internal sealed class RowDeleterById
             return FluxAction.Abort;
         }
 
-        (int length, List<BufferPage> pages, List<IDisposable> disposables) = await tablespace.GetDataLength(state.RowTuple.SlotTwo);
+        (int length, List<BufferPage> pages, List<IDisposable> disposables) = await tablespace.GetPagesToWrite(state.RowTuple.SlotTwo);
         if (length == 0)
         {
             Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
@@ -279,16 +279,17 @@ internal sealed class RowDeleterById
         return FluxAction.Continue;
     }
 
-    private async Task<FluxAction> ApplyPageOperations(DeleteByIdFluxState state)
+    private Task<FluxAction> ApplyPageOperations(DeleteByIdFluxState state)
     {
         if (state.RowTuple is null || state.Pages is null)
         {
             Console.WriteLine("Invalid row to delete {0}", state.Ticket.Id);
-            return FluxAction.Abort;
+            return Task.FromResult(FluxAction.Abort);
         }
 
-        await state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
-        return FluxAction.Continue;
+        state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
+
+        return Task.FromResult(FluxAction.Continue);
     }
 
     /// <summary>

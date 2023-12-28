@@ -178,20 +178,7 @@ public sealed class RowUpdater
 
             await indexSaver.Remove(tablespace, multiIndex, columnValue);
         }
-    }
-
-    /// <summary>
-    /// All locks are released once the operation is successful
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> ReleaseLocks(UpdateFluxState state)
-    {
-        foreach (IDisposable disposable in state.Locks)
-            disposable.Dispose();
-
-        return Task.FromResult(FluxAction.Continue);
-    }
+    }    
 
     /// <summary>
     /// Updates unique indexes
@@ -232,20 +219,47 @@ public sealed class RowUpdater
 
         TableDescriptor table = state.Table;
         UpdateTicket ticket = state.Ticket;
+        BufferPoolHandler tablespace = state.Database.TableSpace;
 
         await foreach (QueryResultRow row in state.DataCursor)
         {
             foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)
                 row.Row[keyValuePair.Key] = keyValuePair.Value;
 
-            byte[] buffer = rowSerializer.Serialize(table, row.Row, row.Tuple.SlotOne);
+            byte[] buffer = rowSerializer.Serialize(table, row.Row, row.Tuple.SlotOne);            
 
-            state.ModifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, row.Tuple.SlotTwo, 0, buffer));
+            tablespace.WriteDataToPageBatch(state.ModifiedPages, row.Tuple.SlotTwo, 0, buffer);
 
             state.ModifiedRows++;
         }
 
         return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private Task<FluxAction> ApplyPageOperations(UpdateFluxState state)
+    {
+        if (state.ModifiedPages.Count > 0)
+            state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
+
+        return Task.FromResult(FluxAction.Continue);
+    }
+
+    /// <summary>
+    /// All locks are released once the operation is successful
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private Task<FluxAction> ReleaseLocks(UpdateFluxState state)
+    {
+        foreach (IDisposable disposable in state.Locks)
+            disposable.Dispose();
+
+        return Task.FromResult(FluxAction.Continue);
     }
 
     /// <summary>
@@ -268,6 +282,7 @@ public sealed class RowUpdater
         machine.When(UpdateFluxSteps.UpdateUniqueIndexes, UpdateUniqueIndexes);
         machine.When(UpdateFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
         machine.When(UpdateFluxSteps.UpdateRow, UpdateRowsFromDisk);
+        machine.When(UpdateFluxSteps.ApplyPageOperations, ApplyPageOperations);
         machine.When(UpdateFluxSteps.ReleaseLocks, ReleaseLocks);
 
         machine.WhenAbort(ReleaseLocks);
@@ -277,10 +292,7 @@ public sealed class RowUpdater
 
         timer.Stop();
 
-        TimeSpan timeTaken = timer.Elapsed;
-        
-        if (state.ModifiedPages.Count > 0)
-            await state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
+        TimeSpan timeTaken = timer.Elapsed;               
 
         Console.WriteLine(
             "Updated {0} rows, Time taken: {1}",
@@ -289,5 +301,5 @@ public sealed class RowUpdater
         );
 
         return state.ModifiedRows;
-    }
+    }    
 }

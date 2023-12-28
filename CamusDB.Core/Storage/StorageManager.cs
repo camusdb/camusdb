@@ -42,22 +42,19 @@ public sealed class StorageManager
         dbHandler.Put(offset.ToBytes(), buffer);
     }
 
-    internal void WriteBatch(List<PageToWrite> pagesToWrite)
+    internal void WriteBatch(List<BufferPageOperation> pageOperations)
     {
         using WriteBatch batch = new();
 
-        foreach (PageToWrite page in pagesToWrite)
-            batch.Put(page.Offset.ToBytes(), page.Buffer);        
+        foreach (BufferPageOperation pageOperation in pageOperations)
+        {
+            byte[] offset = pageOperation.Offset.ToBytes();
 
-        dbHandler.Write(batch);
-    }
-
-    internal void DeleteBatch(List<PageToDelete> pagesToDelete)
-    {
-        using WriteBatch batch = new();
-
-        foreach (PageToDelete page in pagesToDelete)
-            batch.Delete(page.Offset.ToBytes());
+            if (pageOperation.Operation == BufferPageOperationType.InsertOrUpdate)
+                batch.Put(offset, pageOperation.Buffer);
+            else
+                batch.Delete(offset);
+        }
 
         dbHandler.Write(batch);
     }

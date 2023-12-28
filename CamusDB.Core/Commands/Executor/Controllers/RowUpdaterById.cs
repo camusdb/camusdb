@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.BufferPool.Models;
@@ -259,6 +260,7 @@ public sealed class RowUpdaterById
 
         TableDescriptor table = state.Table;
         UpdateByIdTicket ticket = state.Ticket;
+        BufferPoolHandler tablespace = state.Database.TableSpace;
 
         foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)
             state.ColumnValues[keyValuePair.Key] = keyValuePair.Value;
@@ -266,8 +268,16 @@ public sealed class RowUpdaterById
         byte[] buffer = rowSerializer.Serialize(table, state.ColumnValues, state.RowTuple.SlotOne);
 
         //await tablespace.WriteDataToPage(state.RowTuple.SlotOne, 0, buffer);
+        //state.ModifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, state.RowTuple.SlotTwo, 0, buffer));
 
-        state.ModifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, state.RowTuple.SlotTwo, 0, buffer));
+        tablespace.WriteDataToPageBatch(state.ModifiedPages, state.RowTuple.SlotTwo, 0, buffer);        
+
+        return Task.FromResult(FluxAction.Continue);
+    }
+
+    private Task<FluxAction> ApplyPageOperations(UpdateByIdFluxState state)
+    {
+        state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
 
         return Task.FromResult(FluxAction.Continue);
     }
@@ -292,6 +302,7 @@ public sealed class RowUpdaterById
         machine.When(UpdateByIdFluxSteps.UpdateUniqueIndexes, UpdateUniqueIndexes);
         machine.When(UpdateByIdFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
         machine.When(UpdateByIdFluxSteps.UpdateRow, UpdateRowFromDisk);
+        machine.When(UpdateByIdFluxSteps.ApplyPageOperations, ApplyPageOperations);
         machine.When(UpdateByIdFluxSteps.ReleaseLocks, ReleaseLocks);
 
         machine.WhenAbort(ReleaseLocks);
@@ -313,9 +324,7 @@ public sealed class RowUpdaterById
 
             return 0;
         }
-
-        await state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
-
+       
         Console.WriteLine(
             "Row pk {0} with id {1} updated to page {2}, Time taken: {3}",
             ticket.Id,

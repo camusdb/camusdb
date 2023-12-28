@@ -84,7 +84,7 @@ public sealed class BufferPoolHandler : IDisposable
             return;
 
         ulong ticks = logicalClock.GetTicks();
-        int numberToFree = (int)(CamusConfig.BufferPoolSize * (1 - (percent > 0.8 ? 0.8 : percent)));               
+        int numberToFree = (int)(CamusConfig.BufferPoolSize * (1 - (percent > 0.8 ? 0.8 : percent)));
 
         lruPages.Clear();
 
@@ -139,7 +139,7 @@ public sealed class BufferPoolHandler : IDisposable
         return bufferPage;
     }
 
-    public async Task<(int, List<BufferPage>, List<IDisposable>)> GetDataLength(ObjectIdValue offset)
+    public async Task<(int, List<BufferPage>, List<IDisposable>)> GetPagesToRead(ObjectIdValue offset)
     {
         int length = 0;
         List<BufferPage> pages = new();
@@ -165,9 +165,35 @@ public sealed class BufferPoolHandler : IDisposable
         return (length, pages, disposables);
     }
 
+    public async Task<(int, List<BufferPage>, List<IDisposable>)> GetPagesToWrite(ObjectIdValue offset)
+    {
+        int length = 0;
+        List<BufferPage> pages = new();
+        List<IDisposable> disposables = new();
+
+        do
+        {
+            BufferPage memoryPage = ReadPage(offset);
+            pages.Add(memoryPage);
+
+            disposables.Add(await memoryPage.WriterLockAsync());
+
+            byte[] pageBuffer = memoryPage.Buffer.Value; // get a pointer to the buffer to get a consistent read
+
+            int pointer = BConfig.LengthOffset;
+            length += Serializator.ReadInt32(pageBuffer, ref pointer);
+
+            pointer = BConfig.NextPageOffset;
+            offset = Serializator.ReadObjectId(pageBuffer, ref pointer);
+
+        } while (!offset.IsNull());
+
+        return (length, pages, disposables);
+    }
+
     public async Task<byte[]> GetDataFromPage(ObjectIdValue offset)
     {
-        (int length, List<BufferPage> pages, List<IDisposable> disposables) = await GetDataLength(offset);
+        (int length, List<BufferPage> pages, List<IDisposable> disposables) = await GetPagesToRead(offset);
 
         try
         {
@@ -334,27 +360,14 @@ public sealed class BufferPoolHandler : IDisposable
             await WriteDataToPage(nextPage, sequence, data, startOffset + length);
     }
 
-    public async Task ApplyPageOperations(List<BufferPageOperation> modifiedPages)
+    public void ApplyPageOperations(List<BufferPageOperation> modifiedPages)
     {
-        List<PageToWrite> pagesToWrite = new(modifiedPages.Count);
+        Console.WriteLine("Wrote {0} pages in the batch", modifiedPages.Count);
 
-        foreach (BufferPageOperation modifiedPage in modifiedPages)
-        {
-            if (modifiedPage.Operation == BufferPageOperationType.Delete)
-            {
-                await DeletePage(modifiedPage.Offset);
-                continue;
-            }
-
-            await WriteDataToPageBatch(pagesToWrite, modifiedPage.Offset, modifiedPage.Sequence, modifiedPage.Buffer);
-        }
-
-        Console.WriteLine("Wrote {0} pages in the batch", pagesToWrite.Count);
-
-        storage.WriteBatch(pagesToWrite);
+        storage.WriteBatch(modifiedPages);
     }
 
-    public async Task WriteDataToPageBatch(List<PageToWrite> pagesToWrite, ObjectIdValue offset, uint sequence, byte[] data, int startOffset = 0)
+    public void WriteDataToPageBatch(List<BufferPageOperation> pagesToWrite, ObjectIdValue offset, uint sequence, byte[] data, int startOffset = 0)
     {
         //Console.WriteLine(offset);
 
@@ -407,7 +420,7 @@ public sealed class BufferPoolHandler : IDisposable
 
         Buffer.BlockCopy(data, startOffset, pageBuffer, pointer, length);
         //storage.Write(Config.PageSize * offset, pageBuffer);
-        pagesToWrite.Add(new PageToWrite(offset, pageBuffer));
+        pagesToWrite.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, offset, 0, pageBuffer));
 
         // Replace buffer, this helps to get readers consistent copies
         page.Dirty = true;
@@ -424,7 +437,7 @@ public sealed class BufferPoolHandler : IDisposable
         );*/
 
         if (!nextPage.IsNull())
-            await WriteDataToPageBatch(pagesToWrite, nextPage, sequence, data, startOffset + length);
+            WriteDataToPageBatch(pagesToWrite, nextPage, sequence, data, startOffset + length);
     }
 
     public async Task DeletePage(ObjectIdValue offset)
@@ -435,19 +448,19 @@ public sealed class BufferPoolHandler : IDisposable
                 "Invalid page offset"
             );
 
-        (int length, List<BufferPage> pagesChain, List<IDisposable> disposables) = await GetDataLength(offset);        
+        (int length, List<BufferPage> pagesChain, List<IDisposable> disposables) = await GetPagesToWrite(offset);
 
         try
         {
-            List<PageToDelete> pagesToDelete = new(pagesChain.Count);
+            List<BufferPageOperation> pagesToDelete = new(pagesChain.Count);
 
             foreach (BufferPage memoryPage in pagesChain)
             {
-                pagesToDelete.Add(new PageToDelete(memoryPage.Offset));
+                pagesToDelete.Add(new BufferPageOperation(BufferPageOperationType.Delete, memoryPage.Offset, 0, Array.Empty<byte>()));
                 pages.TryRemove(memoryPage.Offset, out _);
             }
 
-            storage.DeleteBatch(pagesToDelete);
+            storage.WriteBatch(pagesToDelete);
         }
         finally
         {

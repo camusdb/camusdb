@@ -204,10 +204,12 @@ internal sealed class RowInserter
     /// <returns></returns>
     private Task<FluxAction> InsertToPageStep(InsertFluxState state)
     {
+        BufferPoolHandler tablespace = state.Database.TableSpace;
+
         byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket.Values, state.RowTuple.SlotOne);
 
         // Insert data to the page offset
-        state.ModifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, state.RowTuple.SlotTwo, state.Sequence, rowBuffer));
+        tablespace.WriteDataToPageBatch(state.ModifiedPages, state.RowTuple.SlotTwo, 0, rowBuffer);
 
         return Task.FromResult(FluxAction.Continue);
     }
@@ -261,6 +263,18 @@ internal sealed class RowInserter
     }
 
     /// <summary>
+    /// Apply all the changes to the modified pages in an ACID operation
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private Task<FluxAction> ApplyPageOperations(InsertFluxState state)
+    {
+        state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
+
+        return Task.FromResult(FluxAction.Continue);
+    }
+
+    /// <summary>
     /// All locks are released once the operation is successful
     /// </summary>
     /// <param name="state"></param>
@@ -271,7 +285,7 @@ internal sealed class RowInserter
             disposable.Dispose();
 
         return Task.FromResult(FluxAction.Continue);
-    }
+    }    
 
     /// <summary>
     /// Creates a new flux machine and runs all steps in order
@@ -290,14 +304,13 @@ internal sealed class RowInserter
         machine.When(InsertFluxSteps.InsertToPage, InsertToPageStep);
         machine.When(InsertFluxSteps.UpdateTableIndex, UpdateTableIndex);
         machine.When(InsertFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
+        machine.When(InsertFluxSteps.ApplyPageOperations, ApplyPageOperations);
         machine.When(InsertFluxSteps.ReleaseLocks, ReleaseLocks);
 
         machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep());
-
-        await state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
+            await machine.RunStep(machine.NextStep());        
 
         TimeSpan timeTaken = timer.Elapsed;
 
@@ -307,9 +320,7 @@ internal sealed class RowInserter
             state.RowTuple.SlotTwo,
             timeTaken.ToString(@"m\:ss\.fff")
         );
-    }
-
-
+    }    
 }
 
 /*foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)

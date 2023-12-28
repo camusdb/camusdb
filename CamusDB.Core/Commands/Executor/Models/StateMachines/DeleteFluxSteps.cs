@@ -20,5 +20,6 @@ public enum DeleteFluxSteps
     DeleteUniqueIndexes = 3,
     DeleteMultiIndexes = 4,
     DeleteRow = 5,
-    ReleaseLocks = 6
+    ApplyPageOperations = 6,
+    ReleaseLocks = 7
 }

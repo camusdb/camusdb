@@ -89,7 +89,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
         // Write to buffer page
         //await tablespace.WriteDataToPage(index.PageOffset, sequence, treeBuffer);
-        modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, index.PageOffset, sequence, treeBuffer));      
+        //modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, index.PageOffset, sequence, treeBuffer));
+
+        tablespace.WriteDataToPageBatch(modifiedPages, index.PageOffset, 0, treeBuffer);
 
         //@todo update nodes concurrently
 
@@ -125,7 +127,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
             }
 
             //await tablespace.WriteDataToPage(node.PageOffset, sequence, nodeBuffer);
-            modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, node.PageOffset, sequence, nodeBuffer));
+            //modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, node.PageOffset, sequence, nodeBuffer));
+
+            tablespace.WriteDataToPageBatch(modifiedPages, node.PageOffset, 0, nodeBuffer);
 
             //Console.WriteLine("Node {0}/{1} at {2} Length={3}", node.Id, node.KeyCount, node.PageOffset, nodeBuffer.Length);            
         }

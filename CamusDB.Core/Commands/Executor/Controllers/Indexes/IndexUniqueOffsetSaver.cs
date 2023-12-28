@@ -94,7 +94,9 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         Serializator.WriteObjectId(treeBuffer, index.root!.PageOffset, ref pointer);
 
         //await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
-        modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, index.PageOffset, 0, treeBuffer));
+        //modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, index.PageOffset, 0, treeBuffer));
+
+        tablespace.WriteDataToPageBatch(modifiedPages, index.PageOffset, 0, treeBuffer);
 
         //@todo update nodes concurrently        
 
@@ -130,7 +132,9 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
             }
 
             //await tablespace.WriteDataToPage(node.PageOffset, 0, nodeBuffer);
-            modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, node.PageOffset, 0, nodeBuffer));
+            //modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, node.PageOffset, 0, nodeBuffer));
+
+            tablespace.WriteDataToPageBatch(modifiedPages, node.PageOffset, 0, nodeBuffer);
 
             Console.WriteLine("Modified Node {0} at {1} KeyCount={2} Length={3}", node.Id, node.PageOffset, node.KeyCount, nodeBuffer.Length);            
         }

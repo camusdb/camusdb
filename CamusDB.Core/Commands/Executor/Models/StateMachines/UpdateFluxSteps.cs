@@ -20,5 +20,6 @@ public enum UpdateFluxSteps
     UpdateUniqueIndexes = 3,
     UpdateMultiIndexes = 4,
     UpdateRow = 5,
-    ReleaseLocks = 6
+    ApplyPageOperations = 6,
+    ReleaseLocks = 7
 }

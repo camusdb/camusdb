@@ -240,12 +240,20 @@ internal sealed class RowDeleter
 
             await indexSaver.Remove(removeIndexTicket);
 
-            await tablespace.DeletePage(row.Tuple.SlotTwo);
+            //await tablespace.DeletePage(row.Tuple.SlotTwo);
 
             state.DeletedRows++;
         }
         
         return FluxAction.Continue;
+    }
+
+    private Task<FluxAction> ApplyPageOperations(DeleteFluxState state)
+    {
+        if (state.ModifiedPages.Count > 0)
+            state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
+
+        return Task.FromResult(FluxAction.Continue);
     }
 
     /// <summary>
@@ -268,6 +276,7 @@ internal sealed class RowDeleter
         machine.When(DeleteFluxSteps.DeleteUniqueIndexes, DeleteUniqueIndexes);
         //machine.When(DeleteFluxSteps.DeleteMultiIndexes, DeleteMultiIndexes);
         machine.When(DeleteFluxSteps.DeleteRow, DeleteRowsFromDisk);
+        machine.When(DeleteFluxSteps.ApplyPageOperations, ApplyPageOperations);
         machine.When(DeleteFluxSteps.ReleaseLocks, ReleaseLocks);
 
         machine.WhenAbort(ReleaseLocks);
@@ -277,10 +286,7 @@ internal sealed class RowDeleter
 
         timer.Stop();
 
-        TimeSpan timeTaken = timer.Elapsed;
-
-        if (state.ModifiedPages.Count > 0)
-            await state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
+        TimeSpan timeTaken = timer.Elapsed;        
 
         Console.WriteLine(
             "Deleted {0} rows, Time taken: {1}",
@@ -289,5 +295,5 @@ internal sealed class RowDeleter
         );
 
         return state.DeletedRows;
-    }
+    }    
 }
