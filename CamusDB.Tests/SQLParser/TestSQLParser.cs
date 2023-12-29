@@ -348,4 +348,16 @@ public class TestSQLParser
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
     }
+
+    [Test]
+    public void TestParseSimpleCreateTable()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE some_table");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);        
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
 }

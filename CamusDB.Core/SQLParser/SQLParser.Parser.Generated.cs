@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.2
-// DateTime: 12/29/2023 3:01:26 PM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 12/29/2023 3:01:23 PM>
+// DateTime: 12/29/2023 3:06:40 PM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 12/29/2023 3:06:36 PM>
 
 // options: no-lines gplex
 
@@ -59,7 +59,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
   private static State[] states = new State[113];
   private static string[] nonTerms = new string[] {
       "list", "$accept", "stat", "select_stmt", "update_stmt", "delete_stmt", 
-      "insert_stmt", "create_table_item", "select_field_list", "identifier", 
+      "insert_stmt", "create_table_stmt", "select_field_list", "identifier", 
       "condition", "order_list", "insert_field_list", "values_list", "update_list", 
       "update_item", "simple_expr", "select_field_item", "insert_field_item", 
       "values_item", "expr", "order_item", "equals_expr", "not_equals_expr", 
@@ -147,11 +147,11 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
     states[76] = new State(new int[]{16,48,14,52,15,54,29,56,30,57,17,59},new int[]{-11,77,-21,37,-23,38,-24,39,-25,40,-26,41,-27,42,-28,43,-29,44,-30,45,-17,46,-10,47,-33,51,-34,53,-35,55,-31,58,-32,62});
     states[77] = new State(new int[]{6,21,7,23,8,25,9,27,10,29,11,31,5,33,4,35,3,-13});
     states[78] = new State(new int[]{16,19},new int[]{-16,79,-10,80});
-    states[79] = new State(-15);
+    states[79] = new State(-16);
     states[80] = new State(new int[]{6,81});
     states[81] = new State(new int[]{16,19,14,52,15,54,29,56,30,57},new int[]{-17,82,-10,47,-33,51,-34,53,-35,55});
-    states[82] = new State(-17);
-    states[83] = new State(-16);
+    states[82] = new State(-18);
+    states[83] = new State(-17);
     states[84] = new State(-5);
     states[85] = new State(new int[]{23,86});
     states[86] = new State(new int[]{16,19},new int[]{-10,87});
@@ -180,7 +180,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
     states[109] = new State(-24);
     states[110] = new State(-7);
     states[111] = new State(new int[]{16,19},new int[]{-10,112});
-    states[112] = new State(-18);
+    states[112] = new State(-15);
 
     for (int sNo = 0; sNo < states.Length; sNo++) states[sNo].number = sNo;
 
@@ -198,10 +198,10 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
     rules[12] = new Rule(-7, new int[]{34,35,-10,17,-13,18,36,17,-14,18});
     rules[13] = new Rule(-5, new int[]{31,-10,32,-15,24,-11});
     rules[14] = new Rule(-6, new int[]{33,23,-10,24,-11});
-    rules[15] = new Rule(-15, new int[]{-15,19,-16});
-    rules[16] = new Rule(-15, new int[]{-16});
-    rules[17] = new Rule(-16, new int[]{-10,6,-17});
-    rules[18] = new Rule(-8, new int[]{37,-10});
+    rules[15] = new Rule(-8, new int[]{37,-10});
+    rules[16] = new Rule(-15, new int[]{-15,19,-16});
+    rules[17] = new Rule(-15, new int[]{-16});
+    rules[18] = new Rule(-16, new int[]{-10,6,-17});
     rules[19] = new Rule(-9, new int[]{-9,19,-18});
     rules[20] = new Rule(-9, new int[]{-18});
     rules[21] = new Rule(-18, new int[]{-10});
@@ -277,7 +277,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
       case 6: // stat -> insert_stmt
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
         break;
-      case 7: // stat -> create_table_item
+      case 7: // stat -> create_table_stmt
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
         break;
       case 8: // select_stmt -> TSELECT, select_field_list, TFROM, identifier
@@ -304,17 +304,17 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
       case 14: // delete_stmt -> TDELETE, TFROM, identifier, TWHERE, condition
 { CurrentSemanticValue.n = new(NodeType.Delete, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null); }
         break;
-      case 15: // update_list -> update_list, TCOMMA, update_item
+      case 15: // create_table_stmt -> TCREATE, identifier
+{ CurrentSemanticValue.n = new(NodeType.CreateTable, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
+        break;
+      case 16: // update_list -> update_list, TCOMMA, update_item
 { CurrentSemanticValue.n = new(NodeType.UpdateList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null); }
         break;
-      case 16: // update_list -> update_item
+      case 17: // update_list -> update_item
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
         break;
-      case 17: // update_item -> identifier, TEQUALS, simple_expr
+      case 18: // update_item -> identifier, TEQUALS, simple_expr
 { CurrentSemanticValue.n = new(NodeType.UpdateItem, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null); }
-        break;
-      case 18: // create_table_item -> TCREATE, identifier
-{ CurrentSemanticValue.n = new(NodeType.CreateTable, ValueStack[ValueStack.Depth-2].n, null, null, null, null); }
         break;
       case 19: // select_field_list -> select_field_list, TCOMMA, select_field_item
 { CurrentSemanticValue.n = new(NodeType.IdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null); }
