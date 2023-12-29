@@ -28,13 +28,15 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly DatabaseCloser databaseCloser;
 
-    private readonly DatabaseDroper databaseDroper;
+    private readonly DatabaseDropper databaseDroper;
 
     private readonly DatabaseDescriptors databaseDescriptors;
 
     private readonly TableOpener tableOpener;
 
     private readonly TableCreator tableCreator;
+
+    private readonly TableAlterer tableAlterer;
 
     private readonly RowInserter rowInserter;
 
@@ -63,6 +65,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         databaseCreator = new();
         tableOpener = new(catalogs);
         tableCreator = new(catalogs);
+        tableAlterer = new(catalogs);
         rowInserter = new();
         rowUpdaterById = new();
         rowUpdater = new();
@@ -110,13 +113,26 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor descriptor = await databaseOpener.Open(this, ticket.DatabaseName);
-        return await tableCreator.Create(descriptor, ticket);
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+
+        return await tableCreator.Create(database, ticket);
+    }
+
+    public async Task<bool> AlterTable(AlterTableTicket ticket)
+    {
+        //validator.Validate(ticket);
+
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+
+        return await tableAlterer.Alter(queryExecutor, database, table, ticket);
     }
 
     public async Task<TableDescriptor> OpenTable(OpenTableTicket ticket)
     {
         DatabaseDescriptor descriptor = await databaseOpener.Open(this, ticket.DatabaseName);
+
         return await tableOpener.Open(descriptor, ticket.TableName);
     }
 

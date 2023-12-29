@@ -10,7 +10,7 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal abstract class ValidatorBase
 {
-    protected bool HasValidCharacters(string name)
+    protected static bool HasValidCharacters(string name)
     {
         for (int i = 0; i < name.Length; i++)
         {
@@ -34,7 +34,7 @@ internal abstract class ValidatorBase
         return true;
     }
 
-    protected bool IsReservedName(string name)
+    protected static bool IsReservedName(string name)
     {
         return name == "_id";            
     }

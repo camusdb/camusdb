@@ -12,3 +12,6 @@ BufferPool/Storage
 
 Create Table
 - Dont allow null type columns in create table
+
+Drop table
+- Delete all data

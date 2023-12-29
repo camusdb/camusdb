@@ -21,7 +21,7 @@ internal sealed class TestTableCreator
         //SetupDb.Remove("test");
     }
 
-    private async Task<(string, CommandExecutor)> SetupDatabase()
+    private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupDatabase()
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
@@ -34,16 +34,16 @@ internal sealed class TestTableCreator
             ifNotExists: false
         );
 
-        await executor.CreateDatabase(databaseTicket);
+        DatabaseDescriptor descriptor = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, executor);
+        return (dbname, executor, catalogsManager, descriptor);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestCreateTable()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: dbname,
@@ -58,13 +58,32 @@ internal sealed class TestTableCreator
         );
 
         await executor.CreateTable(ticket);
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "my_table");
+
+        Assert.AreEqual("my_table", tableSchema.Name);
+        Assert.AreEqual(0, tableSchema.Version);
+
+        Assert.AreEqual(4, tableSchema.Columns!.Count);
+
+        Assert.AreEqual("id", tableSchema.Columns![0].Name);
+        Assert.AreEqual(ColumnType.Id, tableSchema.Columns![0].Type);
+
+        Assert.AreEqual("name", tableSchema.Columns![1].Name);
+        Assert.AreEqual(ColumnType.String, tableSchema.Columns![1].Type);
+
+        Assert.AreEqual("age", tableSchema.Columns![2].Name);
+        Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![2].Type);
+
+        Assert.AreEqual("enabled", tableSchema.Columns![3].Name);
+        Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestCreateTableNoColumns()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: dbname,
@@ -80,7 +99,7 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableNoDatabase()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: "",
@@ -99,7 +118,7 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableNoTableName()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: dbname,
@@ -118,7 +137,7 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableDuplicateColumn()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: dbname,
@@ -137,7 +156,7 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableDuplicatePrimaryKey()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: dbname,
@@ -156,7 +175,7 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableInvalidTableName()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: dbname,
@@ -175,7 +194,7 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableInvalidTableNameCharacters()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: dbname,
@@ -194,7 +213,7 @@ internal sealed class TestTableCreator
     [NonParallelizable]
     public async Task TestCreateTableTwice()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
             database: dbname,

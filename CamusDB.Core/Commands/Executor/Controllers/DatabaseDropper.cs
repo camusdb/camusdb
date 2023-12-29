@@ -12,11 +12,11 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-internal sealed class DatabaseDroper
+internal sealed class DatabaseDropper
 {
     private readonly DatabaseDescriptors databaseDescriptors;
 
-    public DatabaseDroper(DatabaseDescriptors databaseDescriptors)
+    public DatabaseDropper(DatabaseDescriptors databaseDescriptors)
     {
         this.databaseDescriptors = databaseDescriptors;
     }
@@ -47,7 +47,10 @@ internal sealed class DatabaseDroper
         string dbPath = Path.Combine(CamusConfig.DataDirectory, name);
 
         if (!Directory.Exists(dbPath))
-            throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");        
+            throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
+
+        // The database is not deleted, but its data directory is renamed.
+        // This allows saving data in case it is deleted by mistake.
 
         string newDbPath = Path.Combine(CamusConfig.DataDirectory, "_" + name + "_" + DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss-fffffff"));
 

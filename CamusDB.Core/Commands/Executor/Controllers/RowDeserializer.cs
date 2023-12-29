@@ -33,13 +33,13 @@ internal sealed class RowDeserializer
 
         int pointer = 0;
 
-        Serializator.ReadType(data, ref pointer); // type
-        Serializator.ReadInt32(data, ref pointer); // schema
+        Serializator.ReadType(data, ref pointer); // schema type
+        int schemaVersion = Serializator.ReadInt32(data, ref pointer); // schema
 
-        Serializator.ReadType(data, ref pointer); // type
-        Serializator.ReadObjectId(data, ref pointer); // row id        
+        Serializator.ReadType(data, ref pointer); // row id type
+        Serializator.ReadObjectId(data, ref pointer); // row id
 
-        List<TableColumnSchema> columns = tableSchema.Columns!;
+        List<TableColumnSchema> columns = tableSchema.SchemaHistory![schemaVersion].Columns!;
 
         Dictionary<string, ColumnValue> columnValues = new(columns.Count);
 

@@ -19,7 +19,7 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-internal class TestDatabaseDroper
+internal class TestDatabaseDropper
 {
     [SetUp]
     public void Setup()

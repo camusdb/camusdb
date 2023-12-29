@@ -59,15 +59,15 @@ internal sealed class SqlExecutor
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing or empty field list");
 
         if (ast.extendedOne is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing or empty values list");
-
-        Dictionary<string, ColumnValue> values = new();
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing or empty values list");        
 
         List<string> fieldList = GetIdentifierList(ast.rightAst);
         List<ColumnValue> valuesList = GetInsertItemList(ast.extendedOne);
 
         if (fieldList.Count != valuesList.Count)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"\nThe number of fields is not equal to the number of values.");
+
+        Dictionary<string, ColumnValue> values = new(fieldList.Count);
 
         for (int i = 0; i < fieldList.Count; i++)
             values.Add(fieldList[i], valuesList[i]);
@@ -80,11 +80,11 @@ internal sealed class SqlExecutor
         string tableName = ast.leftAst!.yytext!;
 
         if (ast.rightAst is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
-
-        Dictionary<string, ColumnValue> values = new();
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");        
 
         List<(string, ColumnValue)> updateItemList = GetUpdateItemList(ast.rightAst);
+
+        Dictionary<string, ColumnValue> values = new(updateItemList.Count);
 
         foreach ((string columnName, ColumnValue value) updateItem in updateItemList)
             values[updateItem.columnName] = updateItem.value;

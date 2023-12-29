@@ -8,13 +8,9 @@
 
 namespace CamusDB.Core.Catalogs.Models;
 
-public sealed class TableSchema
+public sealed class TableSchemaHistory
 {
     public int Version { get; set; }
 
-    public string? Name { get; set; }
-
     public List<TableColumnSchema>? Columns { get; set; }
-
-    public List<TableSchemaHistory>? SchemaHistory { get; set; }
 }

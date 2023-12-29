@@ -27,6 +27,7 @@
     <None Remove="Statistics\" />
     <None Remove="Statistics\Models\" />
     <None Remove="Util\Time\" />
+    <None Remove="Commands\Executor\Controllers\DDL\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Util\Hashes\" />
@@ -37,6 +38,7 @@
     <Folder Include="Config\Models\" />
     <Folder Include="Statistics\" />
     <Folder Include="Statistics\Models\" />
+    <Folder Include="Commands\Executor\Controllers\DDL\" />
   </ItemGroup>
 
   <ItemGroup Label="SQLParser">
