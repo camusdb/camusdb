@@ -141,6 +141,28 @@ public sealed class CommandExecutor : IAsyncDisposable
         return await tableOpener.Open(descriptor, ticket.TableName);
     }
 
+    public async Task<bool> ExecuteDDLSQLQuery(ExecuteSQLTicket ticket)
+    {
+        NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
+
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+
+        switch (ast.nodeType)
+        {
+            case NodeType.CreateTable:
+                {
+                    CreateTableTicket createTableTicket = sqlExecutor.CreateCreateTableTicket(ticket, ast);
+
+                    validator.Validate(createTableTicket);
+
+                    return await tableCreator.Create(database, createTableTicket);
+                }
+
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown non-query AST stmt: " + ast.nodeType);
+        }
+    }
+
     #endregion
 
     #region DML
@@ -320,5 +342,5 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await databaseCloser.DisposeAsync();
-    }
+    }    
 }

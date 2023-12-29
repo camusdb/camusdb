@@ -23,6 +23,14 @@ TInsert 	    (I|i)(N|n)(S|s)(E|e)(R|r)(T|t)
 TInto 		    (I|i)(N|n)(T|t)(O|o)
 TValues         (V|v)(A|a)(L|l)(U|u)(E|e)(S|s)
 TCreate         (C|c)(R|r)(E|e)(A|a)(T|t)(E|e)
+TTable          (T|T)(A|a)(B|b)(L|l)(E|e)
+TNot            (N|n)(O|o)(T|t)
+TNull           (N|n)(U|u)(L|l)(L|l)
+TTypeString     (S|s)(T|t)(R|r)(I|i)(N|n)(G|g)
+TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
+TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
+TTypeObjectId   (O|o)(B|b)(J|j)(E|e)(C|c)(T|t)(_)(I|i)(D|d)
+TTypeSObjectId  (O|o)(I|i)(D|d)
 LParen          \(
 RParen          \)
 Eol             (\r\n?|\n)
@@ -102,6 +110,22 @@ TGreaterEquals  >=
 {TValues} { return (int)Token.TVALUES; }
 
 {TCreate} { return (int)Token.TCREATE; }
+
+{TTable} { return (int)Token.TTABLE; }
+
+{TNot} { return (int)Token.TNOT; }
+
+{TNull} { return (int)Token.TNULL; }
+
+{TTypeObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
+
+{TTypeSObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
+
+{TTypeString} { return (int)Token.TTYPE_STRING; }
+
+{TTypeInt64} { return (int)Token.TTYPE_INT64; }
+
+{TTypeFloat64} { return (int)Token.TTYPE_FLOAT64; }
 
 {TAdd} { return (int)Token.TADD; }
 

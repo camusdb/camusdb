@@ -60,7 +60,7 @@ public sealed class ExecuteSQLController : CommandsController
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
             return new JsonResult(new ExecuteSQLQueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
-    }
+    }    
 
     [HttpPost]
     [Route("/execute-non-sql-query")]
@@ -94,6 +94,41 @@ public sealed class ExecuteSQLController : CommandsController
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
             return new JsonResult(new ExecuteNonSQLQueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+        }
+    }
+
+    [HttpPost]
+    [Route("/execute-sql-ddl")]
+    public async Task<JsonResult> ExecuteSQLDDL()
+    {
+        try
+        {
+            using StreamReader reader = new(Request.Body);
+            string body = await reader.ReadToEndAsync();
+
+            ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
+            if (request == null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQL-DDL request is not valid");
+
+            ExecuteSQLTicket ticket = new(
+                database: request.DatabaseName ?? "",
+                sql: request.Sql ?? "",
+                parameters: request.Parameters
+            );
+
+            bool success = await executor.ExecuteDDLSQLQuery(ticket);
+
+            return new JsonResult(new ExecuteDDLSQLResponse("ok"));
+        }
+        catch (CamusDBException e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new ExecuteDDLSQLResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            return new JsonResult(new ExecuteDDLSQLResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }
 }

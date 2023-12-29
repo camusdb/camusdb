@@ -350,13 +350,109 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleCreateTable()
+    public void TestParseSimpleCreateTableOneField()
     {
-        NodeAst ast = SQLParserProcessor.Parse("CREATE some_table");
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table ( id STRING )");
 
         Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
 
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);        
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableOneField1()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table ( id OBJECT_ID )");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableOneField2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table ( id OID )");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableTwoFields()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table ( id STRING, name STRING )");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableTwoFieldsNotNull()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table ( id STRING, name STRING NOT NULL )");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableTwoFieldsBothNotNull()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table ( id STRING NOT NULL, name STRING NOT NULL )");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableTwoFieldsBothNotNull2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table ( id INT64 NOT NULL, name INT64 NOT NULL )");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableTwoFieldsBothNotNull3()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table (\nid INT64 NOT NULL,\nname INT64 NOT NULL, year INT64 )");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableTwoFieldsBothNotNull4()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table (\nid INT64 NOT NULL,\nname INT64 NOT NULL, year INT64 )");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
     }

@@ -102,6 +102,37 @@ internal sealed class SqlExecutor
         return new(ticket.DatabaseName, tableName, ast.rightAst, null);
     }
 
+    internal CreateTableTicket CreateCreateTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        string tableName = ast.leftAst!.yytext!;
+
+        if (ast.rightAst is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing create table fields list");
+
+        return new(ticket.DatabaseName, tableName, Array.Empty<ColumnInfo>());
+    }
+
+    private static List<ColumnInfo> GetCreateTableFieldList(NodeAst fieldList)
+    {
+        if (fieldList.nodeType == NodeType.CreateTableItem)
+            return new() { new ColumnInfo(fieldList.leftAst!.yytext! ?? "", ColumnType.Id) };
+
+        if (fieldList.nodeType == NodeType.CreateTableItemList)
+        {
+            List<ColumnInfo> allIdentifiers = new();
+
+            if (fieldList.leftAst is not null)
+                allIdentifiers.AddRange(GetCreateTableFieldList(fieldList.leftAst));
+
+            if (fieldList.rightAst is not null)
+                allIdentifiers.AddRange(GetCreateTableFieldList(fieldList.rightAst));
+
+            return allIdentifiers;
+        }
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid order by clause");
+    }
+
     private static List<ColumnValue> GetInsertItemList(NodeAst valuesList)
     {
         if (valuesList.nodeType == NodeType.ExprList)

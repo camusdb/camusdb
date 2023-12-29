@@ -33,5 +33,11 @@ public enum NodeType
     UpdateItem,
     Delete,
     Insert,
-    CreateTable
+    CreateTable,
+    CreateTableItem,
+    CreateTableItemList,
+    TypeObjectId,
+    TypeString,
+    TypeInteger64,
+    TypeFloat64
 }

@@ -20,7 +20,7 @@
 
 %token TDIGIT TSTRING IDENTIFIER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
-%token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE
+%token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
 
 %%
 
@@ -34,27 +34,41 @@ stat    : select_stmt { $$.n = $1.n; }
         | create_table_stmt { $$.n = $1.n; }
         ;
 
-select_stmt    : TSELECT select_field_list TFROM identifier { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, null); }
-               | TSELECT select_field_list TFROM identifier TWHERE condition { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, null, null); }
-               | TSELECT select_field_list TFROM identifier TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, null, $7.n, null); }
-               | TSELECT select_field_list TFROM identifier TWHERE condition TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, null); }
-               ;
+select_stmt : TSELECT select_field_list TFROM identifier { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, null); }
+            | TSELECT select_field_list TFROM identifier TWHERE condition { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, null, null); }
+            | TSELECT select_field_list TFROM identifier TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, null, $7.n, null); }
+            | TSELECT select_field_list TFROM identifier TWHERE condition TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, null); }
+            ;
 
-insert_stmt    : TINSERT TINTO identifier LPAREN insert_field_list RPAREN TVALUES LPAREN values_list RPAREN { $$.n = new(NodeType.Insert, $3.n, $5.n, $9.n, null, null); }
-			   ;
+insert_stmt : TINSERT TINTO identifier LPAREN insert_field_list RPAREN TVALUES LPAREN values_list RPAREN { $$.n = new(NodeType.Insert, $3.n, $5.n, $9.n, null, null); }
+			;
 
-update_stmt    : TUPDATE identifier TSET update_list TWHERE condition { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, null, null); }
-			   ;
+update_stmt : TUPDATE identifier TSET update_list TWHERE condition { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, null, null); }
+		    ;
 
-delete_stmt    : TDELETE TFROM identifier TWHERE condition { $$.n = new(NodeType.Delete, $3.n, $5.n, null, null, null); }
-			   ;
+delete_stmt : TDELETE TFROM identifier TWHERE condition { $$.n = new(NodeType.Delete, $3.n, $5.n, null, null, null); }
+			;
 
-create_table_stmt  : TCREATE identifier { $$.n = new(NodeType.CreateTable, $2.n, null, null, null, null); }
-                   ;
+create_table_stmt : TCREATE TTABLE identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, null, null); }                  
+                  ;
 
-update_list    : update_list TCOMMA update_item { $$.n = new(NodeType.UpdateList, $1.n, $3.n, null, null, null); }
-			   | update_item { $$.n = $1.n; $$.s = $1.s; }
-			   ;
+create_table_item_list : create_table_item_list TCOMMA create_table_item { $$.n = new(NodeType.CreateTableItemList, $1.n, $3.n, null, null, null); }
+                       | create_table_item { $$.n = $1.n; $$.s = $1.s; }
+                       ;
+
+create_table_item : identifier field_type { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, null, null, null); }
+                  | identifier field_type TNOT TNULL { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, null, null, null); }
+                  ;
+
+field_type : TTYPE_OBJECT_ID { $$.n = new(NodeType.TypeObjectId, null, null, null, null, null); }
+           | TTYPE_STRING { $$.n = new(NodeType.TypeString, null, null, null, null, null); }
+           | TTYPE_INT64 { $$.n = new(NodeType.TypeInteger64, null, null, null, null, null); }
+           | TTYPE_FLOAT64 { $$.n = new(NodeType.TypeFloat64, null, null, null, null, null); } 
+           ;
+
+update_list : update_list TCOMMA update_item { $$.n = new(NodeType.UpdateList, $1.n, $3.n, null, null, null); }
+		    | update_item { $$.n = $1.n; $$.s = $1.s; }
+		    ;
 
 update_item    : identifier TEQUALS simple_expr { $$.n = new(NodeType.UpdateItem, $1.n, $3.n, null, null, null); }
 			   ;
@@ -112,8 +126,8 @@ and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, 
 or_expr   : condition TOR condition { $$.n = new(NodeType.ExprOr, $1.n, $3.n, null, null, null); }
           ;
 
-equals_expr      : condition TEQUALS condition { $$.n = new(NodeType.ExprEquals, $1.n, $3.n, null, null, null); }
-                 ;
+equals_expr : condition TEQUALS condition { $$.n = new(NodeType.ExprEquals, $1.n, $3.n, null, null, null); }
+            ;
 
 not_equals_expr : condition TNOTEQUALS condition { $$.n = new(NodeType.ExprNotEquals, $1.n, $3.n, null, null, null); }
                 ;
@@ -153,6 +167,9 @@ string  : TSTRING { $$.n = new(NodeType.String, null, null, null, null, $$.s); }
 
 bool    : TTRUE { $$.n = new(NodeType.Bool, null, null, null, null, "true"); }
         | TFALSE { $$.n = new(NodeType.Bool, null, null, null, null, "false"); }
+        ;
+
+null    : TNULL { $$.n = new(NodeType.Null, null, null, null, null, "null"); }
         ;
 
 %%
