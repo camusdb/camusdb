@@ -250,6 +250,15 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         switch (ast.nodeType)
         {
+            case NodeType.Insert:
+                {
+                    InsertTicket updateTicket = sqlExecutor.CreateInsertTicket(ticket, ast);
+
+                    TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
+
+                    return await rowInserter.Insert(database, table, updateTicket);
+                }
+
             case NodeType.Update:
                 {
                     UpdateTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);

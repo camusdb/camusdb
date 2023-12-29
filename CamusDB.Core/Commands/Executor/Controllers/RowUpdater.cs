@@ -8,7 +8,6 @@
 
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
@@ -71,7 +70,7 @@ public sealed class RowUpdater
             if (!ticket.Values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
                 continue;
 
-            if (columnValue.Value is null)
+            if (columnValue.Type == ColumnType.Null || columnValue.Value is null)
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.NotNullViolation,

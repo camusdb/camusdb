@@ -93,7 +93,7 @@ internal sealed class RowInserter
     /// <param name="table"></param>
     /// <param name="ticket"></param>
     /// <returns></returns>
-    public async Task Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
+    public async Task<int> Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
         Validate(table, ticket);
 
@@ -107,6 +107,8 @@ internal sealed class RowInserter
         FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
 
         await InsertInternal(machine, state);
+
+        return 1;
     }
 
     /// <summary>

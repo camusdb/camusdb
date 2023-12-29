@@ -137,6 +137,46 @@ public class TestRowUpdater
 
     [Test]
     [NonParallelizable]
+    public async Task TestUpdateNotNullColumWithNull()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        UpdateByIdTicket ticket = new(
+            database: dbname,
+            name: "robots",
+            id: objectsId[0],
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "name", new ColumnValue(ColumnType.Null, "") }
+            }
+        );
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.UpdateById(ticket));
+        Assert.AreEqual("Column 'name' cannot be null", e!.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestUpdateNotNullColumWithNull2()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        UpdateByIdTicket ticket = new(
+            database: dbname,
+            name: "robots",
+            id: objectsId[0],
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "name", new ColumnValue(ColumnType.String, null!) }
+            }
+        );
+
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.UpdateById(ticket));
+        Assert.AreEqual("Column 'name' cannot be null", e!.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestBasicUpdateById()
     {
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
@@ -170,7 +210,7 @@ public class TestRowUpdater
     [NonParallelizable]
     public async Task TestUpdateUnknownRow()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         UpdateByIdTicket ticket = new(
             database: dbname,

@@ -10,6 +10,7 @@ using CamusDB.Core.SQLParser;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -50,6 +51,30 @@ internal sealed class SqlExecutor
         return orderClauses;
     }
 
+    internal InsertTicket CreateInsertTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        string tableName = ast.leftAst!.yytext!;
+
+        if (ast.rightAst is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing or empty field list");
+
+        if (ast.extendedOne is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing or empty values list");
+
+        Dictionary<string, ColumnValue> values = new();
+
+        List<string> fieldList = GetIdentifierList(ast.rightAst);
+        List<ColumnValue> valuesList = GetInsertItemList(ast.extendedOne);
+
+        if (fieldList.Count != valuesList.Count)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"\nThe number of fields is not equal to the number of values.");
+
+        for (int i = 0; i < fieldList.Count; i++)
+            values.Add(fieldList[i], valuesList[i]);
+
+        return new(ticket.DatabaseName, tableName, values);
+    }
+
     internal UpdateTicket CreateUpdateTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         string tableName = ast.leftAst!.yytext!;
@@ -73,8 +98,26 @@ internal sealed class SqlExecutor
 
         if (ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing delete conditions");
-        
+
         return new(ticket.DatabaseName, tableName, ast.rightAst, null);
+    }
+
+    private static List<ColumnValue> GetInsertItemList(NodeAst valuesList)
+    {
+        if (valuesList.nodeType == NodeType.ExprList)
+        {
+            List<ColumnValue> allUpdateItems = new();
+
+            if (valuesList.leftAst is not null)
+                allUpdateItems.AddRange(GetInsertItemList(valuesList.leftAst));
+
+            if (valuesList.rightAst is not null)
+                allUpdateItems.AddRange(GetInsertItemList(valuesList.rightAst));
+
+            return allUpdateItems;
+        }
+
+        return new() { EvalExpr(valuesList, new()) };
     }
 
     private static List<(string, ColumnValue)> GetUpdateItemList(NodeAst updateItemList)
@@ -93,10 +136,10 @@ internal sealed class SqlExecutor
                 allUpdateItems.AddRange(GetUpdateItemList(updateItemList.rightAst));
 
             return allUpdateItems;
-        }        
+        }
 
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid update values list");
-    }    
+    }
 
     private static List<string> GetIdentifierList(NodeAst orderByAst)
     {
@@ -119,7 +162,7 @@ internal sealed class SqlExecutor
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid order by clause");
     }
 
-    private static ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row)
+    public static ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row)
     {
         switch (expr.nodeType)
         {
@@ -131,6 +174,9 @@ internal sealed class SqlExecutor
 
             case NodeType.Bool:
                 return new ColumnValue(ColumnType.Bool, expr.yytext!);
+
+            case NodeType.Null:
+                return new ColumnValue(ColumnType.Null, "");
 
             case NodeType.Identifier:
 
@@ -187,11 +233,13 @@ internal sealed class SqlExecutor
                     return new ColumnValue(ColumnType.Bool, (leftValue.Value.ToLowerInvariant() == "true" && rightValue.Value.ToLowerInvariant() == "true").ToString());
                 }
 
-            default:
-                Console.WriteLine("ERROR {0}", expr.nodeType);
-                break;
-        }
+            case NodeType.ExprFuncCall:
+                {
+                    return new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString());
+                }
 
-        return new ColumnValue(ColumnType.Null, "");
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.UnknownType, $"ERROR {expr.nodeType}");
+        }
     }
 }

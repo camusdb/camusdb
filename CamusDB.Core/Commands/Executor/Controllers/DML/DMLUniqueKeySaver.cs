@@ -18,6 +18,15 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
 {
     private readonly IndexSaver indexSaver = new();
 
+    /// <summary>
+    /// Checks if a row with the same primary key is already added to table
+    /// </summary>
+    /// <param name="table"></param>
+    /// <param name="uniqueIndex"></param>
+    /// <param name="ticket"></param>
+    /// <param name="name"></param>
+    /// <returns></returns>
+    /// <exception cref="CamusDBException"></exception>
     private static async Task<ColumnValue> CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue, BTreeTuple?> uniqueIndex, InsertTicket ticket, string name)
     {
         ColumnValue? uniqueValue = GetColumnValue(table, ticket, name);
@@ -25,7 +34,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
         if (uniqueValue is null)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
-                "Cannot retrieve primary key for table " + table.Name
+                "The primary key of the table \"" + table.Name + "\" is not present in the list of values."
             );
 
         BTreeTuple? rowTuple = await uniqueIndex.Get(uniqueValue);
@@ -33,7 +42,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
         if (rowTuple is not null)
             throw new CamusDBException(
                 CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                "Duplicate entry for key " + table.Name + " " + uniqueValue.Type + " " + uniqueValue.Value
+                "Duplicate entry for key \"" + table.Name + "\" " + uniqueValue.Type + " " + uniqueValue.Value
             );
 
         return uniqueValue;

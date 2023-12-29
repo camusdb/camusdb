@@ -95,7 +95,7 @@ public sealed class BufferPoolHandler : IDisposable
             if (!page.IsValueCreated)
                 continue;
 
-            if (page.Value.LastAccess > (ticks - 65536)) // @todo this number must be choosen based on the actual activity of the database
+            if (page.Value.LastAccess > (ticks - 655360)) // @todo this number must be choosen based on the actual activity of the database
                 continue;
 
             if (lruPages.Count > (numberToFree * 2)) // fill the red-black tree with twice the pages to release
@@ -116,7 +116,8 @@ public sealed class BufferPoolHandler : IDisposable
                 break;
         }
 
-        Console.WriteLine("Total pages freed: {0}, remaining: {1}", numberFreed, Pages.Count);
+        if (numberFreed > 0)
+            Console.WriteLine("Total pages freed: {0}, remaining: {1}", numberFreed, Pages.Count);
     }
 
     private BufferPage LoadPage(ObjectIdValue offset)

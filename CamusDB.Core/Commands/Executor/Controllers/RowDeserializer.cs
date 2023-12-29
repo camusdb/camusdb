@@ -37,11 +37,11 @@ internal sealed class RowDeserializer
         Serializator.ReadInt32(data, ref pointer); // schema
 
         Serializator.ReadType(data, ref pointer); // type
-        Serializator.ReadObjectId(data, ref pointer); // row id
-
-        Dictionary<string, ColumnValue> columnValues = new();
+        Serializator.ReadObjectId(data, ref pointer); // row id        
 
         List<TableColumnSchema> columns = tableSchema.Columns!;
+
+        Dictionary<string, ColumnValue> columnValues = new(columns.Count);
 
         for (int i = 0; i < columns.Count; i++)
         {

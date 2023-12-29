@@ -16,7 +16,7 @@ internal sealed class QueryFilterer
 {
     internal bool MeetWhere(NodeAst where, Dictionary<string, ColumnValue> row)
     {
-        ColumnValue evaluatedExpr = EvalExpr(where, row);
+        ColumnValue evaluatedExpr = SqlExecutor.EvalExpr(where, row);
 
         switch (evaluatedExpr.Type)
         {
@@ -45,83 +45,7 @@ internal sealed class QueryFilterer
         }
 
         return false;
-    }
-
-    private static ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row)
-    {
-        switch (expr.nodeType)
-        {
-            case NodeType.Number:
-                return new ColumnValue(ColumnType.Integer64, expr.yytext!);
-
-            case NodeType.String:
-                return new ColumnValue(ColumnType.String, expr.yytext!.Trim('"'));
-
-            case NodeType.Bool:
-                return new ColumnValue(ColumnType.Bool, expr.yytext!);
-
-            case NodeType.Null:
-                return new ColumnValue(ColumnType.Null, "");
-
-            case NodeType.Identifier:
-
-                if (row.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
-                    return columnValue;
-
-                throw new Exception("Not found column: " + expr.yytext!);
-
-            case NodeType.ExprEquals:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) == 0).ToString());
-                }
-
-            case NodeType.ExprNotEquals:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) != 0).ToString());
-                }
-
-            case NodeType.ExprLessThan:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) < 0).ToString());
-                }
-
-            case NodeType.ExprGreaterThan:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) > 0).ToString());
-                }
-
-            case NodeType.ExprOr:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.Value.ToLowerInvariant() == "true" || rightValue.Value.ToLowerInvariant() == "true").ToString());
-                }
-
-            case NodeType.ExprAnd:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
-
-                    return new ColumnValue(ColumnType.Bool, (leftValue.Value.ToLowerInvariant() == "true" && rightValue.Value.ToLowerInvariant() == "true").ToString());
-                }
-
-            default:
-                throw new CamusDBException(CamusDBErrorCodes.UnknownType, $"ERROR {expr.nodeType}");
-        }
-    }
+    }    
 
     // @todo : this is a very naive implementation, we should use a proper type conversion and implement all operators
     internal bool MeetFilters(List<QueryFilter> filters, Dictionary<string, ColumnValue> row)

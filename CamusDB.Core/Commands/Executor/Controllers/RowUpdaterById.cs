@@ -41,6 +41,7 @@ public sealed class RowUpdaterById
         if (ticket.Values is null || ticket.Values.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
 
+        // Step #1. Check for unknown columns
         foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.Values)
         {
             bool hasColumn = false;
@@ -66,6 +67,7 @@ public sealed class RowUpdaterById
                 );
         }
 
+        // Step #2. Check for not null violations
         foreach (TableColumnSchema columnSchema in columns)
         {
             if (!columnSchema.NotNull)
@@ -74,7 +76,7 @@ public sealed class RowUpdaterById
             if (!ticket.Values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
                 continue;
 
-            if (columnValue.Value is null)
+            if (columnValue.Type == ColumnType.Null || columnValue.Value is null)
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.NotNullViolation,
