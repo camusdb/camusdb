@@ -11,6 +11,10 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
+/// <summary>
+/// Creates a new database. At this moment, it only creates the data directory where
+/// the storage engine will store the objects and records of the database.
+/// </summary>
 internal sealed class DatabaseCreator
 {
     public bool Create(CreateDatabaseTicket ticket)

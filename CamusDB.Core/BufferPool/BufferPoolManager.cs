@@ -130,7 +130,11 @@ public sealed class BufferPoolHandler : IDisposable
         return storage.Read(offset);
     }
 
-    // Load a page reading its contents
+    /// <summary>
+    /// Load a page reading its contents
+    /// </summary>
+    /// <param name="offset"></param>
+    /// <returns></returns>
     public BufferPage ReadPage(ObjectIdValue offset)
     {
         Lazy<BufferPage> lazyBufferPage = pages.GetOrAdd(offset, (x) => new Lazy<BufferPage>(() => LoadPage(offset)));
@@ -140,6 +144,11 @@ public sealed class BufferPoolHandler : IDisposable
         return bufferPage;
     }
 
+    /// <summary>
+    /// Returns the sequence of pages where a record is stored and its read locks.
+    /// </summary>
+    /// <param name="offset"></param>
+    /// <returns></returns>
     public async Task<(int, List<BufferPage>, List<IDisposable>)> GetPagesToRead(ObjectIdValue offset)
     {
         int length = 0;
@@ -166,6 +175,11 @@ public sealed class BufferPoolHandler : IDisposable
         return (length, pages, disposables);
     }
 
+    /// <summary>
+    /// Returns the sequence of pages where a record is stored and its write locks.
+    /// </summary>
+    /// <param name="offset"></param>
+    /// <returns></returns>
     public async Task<(int, List<BufferPage>, List<IDisposable>)> GetPagesToWrite(ObjectIdValue offset)
     {
         int length = 0;
@@ -192,6 +206,11 @@ public sealed class BufferPoolHandler : IDisposable
         return (length, pages, disposables);
     }
 
+    /// <summary>
+    /// Returns the sequence of pages where a record is stored and its read locks.
+    /// </summary>
+    /// <param name="offset"></param>
+    /// <returns></returns>
     public async Task<byte[]> GetDataFromPage(ObjectIdValue offset)
     {
         (int length, List<BufferPage> pages, List<IDisposable> disposables) = await GetPagesToRead(offset);
@@ -207,6 +226,11 @@ public sealed class BufferPoolHandler : IDisposable
         }
     }
 
+    /// <summary>
+    /// Returns the sequence of pages where a record is stored and without locking any pages.
+    /// </summary>
+    /// <param name="offset"></param>
+    /// <returns></returns>
     public byte[] GetDataFromPageDirect(int length, List<BufferPage> pages)
     {
         if (length == 0)
@@ -258,19 +282,32 @@ public sealed class BufferPoolHandler : IDisposable
         return data;
     }
 
+    /// <summary>
+    /// Forces a page to be written to disk
+    /// </summary>
+    /// <param name="memoryPage"></param>
     public void FlushPage(BufferPage memoryPage)
     {
         storage.Write(memoryPage.Offset, memoryPage.Buffer.Value);
     }
 
+    /// <summary>
+    /// Writes the page header in the page buffer according to the current page schema/format
+    /// </summary>
+    /// <param name="pageBuffer"></param>
+    /// <param name="checksum"></param>
+    /// <param name="lastSequence"></param>
+    /// <param name="nextPage"></param>
+    /// <param name="length"></param>
+    /// <returns></returns>
     public static int WritePageHeader(byte[] pageBuffer, uint checksum, uint lastSequence, ObjectIdValue nextPage, int length)
     {
         int pointer = 0;
         Serializator.WriteInt16(pageBuffer, CamusConfig.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)        
-        Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                 // checksum (4 bytes unsigned integer)        
-        Serializator.WriteUInt32(pageBuffer, lastSequence, ref pointer);             // lastWroteSequence (4 bytes unsigned integer)        
-        Serializator.WriteObjectId(pageBuffer, nextPage, ref pointer);               // next page (12 bytes objectid)        
-        Serializator.WriteInt32(pageBuffer, length, ref pointer);                    // data length (4 bytes integer)                
+        Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                      // checksum (4 bytes unsigned integer)        
+        Serializator.WriteUInt32(pageBuffer, lastSequence, ref pointer);                  // lastWroteSequence (4 bytes unsigned integer)        
+        Serializator.WriteObjectId(pageBuffer, nextPage, ref pointer);                    // next page (12 bytes objectid)        
+        Serializator.WriteInt32(pageBuffer, length, ref pointer);                         // data length (4 bytes integer)                
         return pointer;
     }
 
@@ -361,6 +398,10 @@ public sealed class BufferPoolHandler : IDisposable
             await WriteDataToPage(nextPage, sequence, data, startOffset + length);
     }
 
+    /// <summary>
+    /// Applies the operations queued in the list to the storage in a single atomic operation.
+    /// </summary>
+    /// <param name="modifiedPages"></param>
     public void ApplyPageOperations(List<BufferPageOperation> modifiedPages)
     {
         Console.WriteLine("Wrote {0} pages in the batch", modifiedPages.Count);
@@ -368,6 +409,15 @@ public sealed class BufferPoolHandler : IDisposable
         storage.WriteBatch(modifiedPages);
     }
 
+    /// <summary>
+    /// Converts a buffer into a sequence of multiple pages that will be subsequently sent to storage.
+    /// </summary>
+    /// <param name="pagesToWrite"></param>
+    /// <param name="offset"></param>
+    /// <param name="sequence"></param>
+    /// <param name="data"></param>
+    /// <param name="startOffset"></param>
+    /// <exception cref="CamusDBException"></exception>
     public void WriteDataToPageBatch(List<BufferPageOperation> pagesToWrite, ObjectIdValue offset, uint sequence, byte[] data, int startOffset = 0)
     {
         //Console.WriteLine(offset);
@@ -441,6 +491,12 @@ public sealed class BufferPoolHandler : IDisposable
             WriteDataToPageBatch(pagesToWrite, nextPage, sequence, data, startOffset + length);
     }
 
+    /// <summary>
+    /// Deletes all the pages associated with a record in a single atomic operation
+    /// </summary>
+    /// <param name="offset"></param>
+    /// <returns></returns>
+    /// <exception cref="CamusDBException"></exception>
     public async Task DeletePage(ObjectIdValue offset)
     {
         if (offset.IsNull())

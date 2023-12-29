@@ -10,13 +10,16 @@ using System.Text;
 
 namespace CamusDB.Core.SQLParser;
 
+/// <summary>
+/// Entrypoint for the SQL Parser
+/// </summary>
 internal partial class sqlParser
 {
     public sqlParser() : base(null) { }
 
-    public NodeAst Parse(string s)
+    public NodeAst Parse(string sqlStatement)
     {
-        byte[] inputBuffer = Encoding.Default.GetBytes(s);
+        byte[] inputBuffer = Encoding.Default.GetBytes(sqlStatement);
 
         MemoryStream stream = new(inputBuffer);
         var scanner = new sqlScanner(stream);

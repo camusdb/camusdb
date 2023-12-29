@@ -8,10 +8,18 @@
 
 namespace CamusDB.Core.SQLParser;
 
+/// <summary>
+/// Scanner for the SQL Parser
+/// </summary>
 internal partial class sqlScanner
 {
 	public string? YYError { get; set; }    
 
+	/// <summary>
+	/// Intercepts the yyerror method
+	/// </summary>
+	/// <param name="format"></param>
+	/// <param name="args"></param>
 	public override void yyerror(string format, params object[] args)
 	{
 		base.yyerror(format, args);

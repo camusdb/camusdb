@@ -32,5 +32,6 @@ public enum NodeType
     UpdateList,
     UpdateItem,
     Delete,
-    Insert
+    Insert,
+    CreateTable
 }

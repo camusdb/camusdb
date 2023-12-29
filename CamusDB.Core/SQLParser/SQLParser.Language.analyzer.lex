@@ -22,6 +22,7 @@ TDelete 	    (D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
 TInsert 	    (I|i)(N|n)(S|s)(E|e)(R|r)(T|t)
 TInto 		    (I|i)(N|n)(T|t)(O|o)
 TValues         (V|v)(A|a)(L|l)(U|u)(E|e)(S|s)
+TCreate         (C|c)(R|r)(E|e)(A|a)(T|t)
 LParen          \(
 RParen          \)
 Eol             (\r\n?|\n)
@@ -99,6 +100,8 @@ TGreaterEquals  >=
 {TInto} { return (int)Token.TINTO; }
 
 {TValues} { return (int)Token.TVALUES; }
+
+{TCreate} { return (int)Token.TCREATE; }
 
 {TAdd} { return (int)Token.TADD; }
 

@@ -1,9 +1,9 @@
 
 // ==========================================================================
-//  GPPG error listing for yacc source file <SQLParser\SQLParser.Language.grammar.y - 12/28/2023 2:51:33 PM>
+//  GPPG error listing for yacc source file <SQLParser/SQLParser.Language.grammar.y - 12/29/2023 3:00:32 PM>
 // ==========================================================================
 //  Version:  1.5.2
-//  DateTime: 12/28/2023 2:51:36 PM
+//  DateTime: 12/29/2023 3:00:50 PM
 // ==========================================================================
 
 
@@ -29,11 +29,9 @@
 
 %token TDIGIT TSTRING IDENTIFIER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
-%token TUPDATE TSET TDELETE TINSERT TINTO TVALUES
+%token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE
 
 %%
-// Warning: NonTerminal symbol "fcall_expr" is unreachable
-// -------------------------------------------------------
 
 list    : stat { $$.n = $1.n; }
         ;
@@ -42,6 +40,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | update_stmt { $$.n = $1.n; }
         | delete_stmt { $$.n = $1.n; }
         | insert_stmt { $$.n = $1.n; }
+        | create_table_item { $$.n = $1.n; }
         ;
 
 select_stmt    : TSELECT select_field_list TFROM identifier { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, null); }
@@ -50,7 +49,7 @@ select_stmt    : TSELECT select_field_list TFROM identifier { $$.n = new(NodeTyp
                | TSELECT select_field_list TFROM identifier TWHERE condition TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, null); }
                ;
 
-insert_stmt    : TINSERT TINTO identifier LPAREN insert_field_list RPAREN TVALUES LPAREN values_list RPAREN { $$.n = new(NodeType.Insert, $2.n, $4.n, $6.n, null, null); }
+insert_stmt    : TINSERT TINTO identifier LPAREN insert_field_list RPAREN TVALUES LPAREN values_list RPAREN { $$.n = new(NodeType.Insert, $3.n, $5.n, $9.n, null, null); }
 			   ;
 
 update_stmt    : TUPDATE identifier TSET update_list TWHERE condition { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, null, null); }
@@ -65,6 +64,11 @@ update_list    : update_list TCOMMA update_item { $$.n = new(NodeType.UpdateList
 
 update_item    : identifier TEQUALS simple_expr { $$.n = new(NodeType.UpdateItem, $1.n, $3.n, null, null, null); }
 			   ;
+
+create_table_item  : TCREATE identifier { $$.n = new(NodeType.CreateTable, $1.n, $3.n, null, null, null); }
+// Error: Semantic action index is out of bounds
+// ---------------------------------------------
+                   ;
 
 select_field_list  : select_field_list TCOMMA select_field_item { $$.n = new(NodeType.IdentifierList, $1.n, $3.n, null, null, null); }
                    | select_field_item { $$.n = $1.n; $$.s = $1.s; }
@@ -85,7 +89,7 @@ values_list  : values_list TCOMMA values_item { $$.n = new(NodeType.ExprList, $1
 			 | values_item { $$.n = $1.n; $$.s = $1.s; }
 			 ;
 
-values_item  : simple_expr { $$.n = $1.n; $$.s = $1.s; }
+values_item  : expr { $$.n = $1.n; $$.s = $1.s; }
              ;
 
 order_list  : order_list TCOMMA order_item { $$.n = new(NodeType.IdentifierList, $1.n, $3.n, null, null, null); }
@@ -110,6 +114,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | or_expr { $$.n = $1.n; }
            | simple_expr { $$.n = $1.n; }
            | group_paren_expr { $$.n = $1.n; } 
+           | fcall_expr { $$.n = $1.n; }
            ;
 
 and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, null, null, null); }
@@ -121,11 +126,11 @@ or_expr   : condition TOR condition { $$.n = new(NodeType.ExprOr, $1.n, $3.n, nu
 equals_expr      : condition TEQUALS condition { $$.n = new(NodeType.ExprEquals, $1.n, $3.n, null, null, null); }
                  ;
 
-not_equals_expr  : condition TNOTEQUALS condition { $$.n = new(NodeType.ExprNotEquals, $1.n, $3.n, null, null, null); }
-                 ;
+not_equals_expr : condition TNOTEQUALS condition { $$.n = new(NodeType.ExprNotEquals, $1.n, $3.n, null, null, null); }
+                ;
 
-less_than_expr   : condition TLESSTHAN condition { $$.n = new(NodeType.ExprLessThan, $1.n, $3.n, null, null, null); }
-                 ;
+less_than_expr : condition TLESSTHAN condition { $$.n = new(NodeType.ExprLessThan, $1.n, $3.n, null, null, null); }
+               ;
 
 greater_than_expr : condition TGREATERTHAN condition { $$.n = new(NodeType.ExprGreaterThan, $1.n, $3.n, null, null, null); }
                   ;

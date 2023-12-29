@@ -8,6 +8,9 @@
 
 namespace CamusDB.Core.Catalogs.Models;
 
+/// <summary>
+/// Represents a version of the table schema in the version history.
+/// </summary>
 public sealed class TableSchemaHistory
 {
     public int Version { get; set; }

@@ -10,12 +10,22 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using System.Xml.Linq;
 
 namespace CamusDB.Core.Catalogs;
 
+/// <summary>
+/// Maintains references to all objects in the database.
+/// Allows knowing the description and characteristics of tables, views, indexes, etc.
+/// </summary>
 public sealed class CatalogsManager
 {
+    /// <summary>
+    /// Adds a new table object to the database schema as well as its indexes.    
+    /// </summary>
+    /// <param name="database"></param>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
+    /// <exception cref="CamusDBException"></exception>
     public async Task<TableSchema> CreateTable(DatabaseDescriptor database, CreateTableTicket ticket)
     {
         try
@@ -70,6 +80,13 @@ public sealed class CatalogsManager
         }
     }
 
+    /// <summary>
+    /// Modifies an existing table object allowing to add or remove columns.
+    /// </summary>
+    /// <param name="database"></param>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
+    /// <exception cref="CamusDBException"></exception>
     public async Task<TableSchema> AlterTable(DatabaseDescriptor database, AlterTableTicket ticket)
     {
         try
@@ -115,6 +132,21 @@ public sealed class CatalogsManager
         }
     }
 
+    /// <summary>
+    /// Allows querying the current schema of a table object.
+    /// </summary>
+    /// <param name="database"></param>
+    /// <param name="tableName"></param>
+    /// <returns></returns>
+    /// <exception cref="CamusDBException"></exception>
+    public TableSchema GetTableSchema(DatabaseDescriptor database, string tableName) // @todo return a snapshot instead of the schema
+    {
+        if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema))
+            return tableSchema;
+
+        throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{tableName}' doesn't exist");
+    }
+
     private static void AddColumn(TableSchema tableSchema, ColumnInfo newColumn)
     {
         bool hasColumn = false;
@@ -155,13 +187,5 @@ public sealed class CatalogsManager
             throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Unknown column '{columnName}'");
 
         tableSchema.Columns = tableColumns;
-    }
-
-    public TableSchema GetTableSchema(DatabaseDescriptor database, string tableName) // @todo return a snapshot instead of the schema
-    {
-        if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema))
-            return tableSchema;
-
-        throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{tableName}' doesn't exist");
-    }
+    }    
 }
