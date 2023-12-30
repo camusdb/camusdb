@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace CamusDB.Core.Serializer;
 
@@ -172,6 +173,28 @@ public sealed class Serializator
         pointer += 12;
     }
 
+    public static void WriteHLCTimestamp(byte[] buffer, HLCTimestamp timestamp, ref int pointer)
+    {
+        long physicalTime = timestamp.L;
+        uint counter = timestamp.C;
+
+        buffer[pointer + 0] = (byte)((physicalTime >> 0) & 0xff);
+        buffer[pointer + 1] = (byte)((physicalTime >> 8) & 0xff);
+        buffer[pointer + 2] = (byte)((physicalTime >> 16) & 0xff);
+        buffer[pointer + 3] = (byte)((physicalTime >> 24) & 0xff);
+        buffer[pointer + 4] = (byte)((physicalTime >> 32) & 0xff);
+        buffer[pointer + 5] = (byte)((physicalTime >> 40) & 0xff);
+        buffer[pointer + 6] = (byte)((physicalTime >> 48) & 0xff);
+        buffer[pointer + 7] = (byte)((physicalTime >> 56) & 0xff);
+        pointer += 8;
+
+        buffer[pointer + 0] = (byte)((counter >> 0) & 0xff);
+        buffer[pointer + 1] = (byte)((counter >> 8) & 0xff);
+        buffer[pointer + 2] = (byte)((counter >> 16) & 0xff);
+        buffer[pointer + 3] = (byte)((counter >> 24) & 0xff);
+        pointer += 4;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteString(byte[] buffer, string str, ref int pointer)
     {
@@ -308,9 +331,18 @@ public sealed class Serializator
         return bytes;
     }
 
-    public static HLCTimestamp ReadHLCTimestamp(byte[] data, ref int pointer)
+    public static HLCTimestamp ReadHLCTimestamp(byte[] buffer, ref int pointer)
     {
-        return new HLCTimestamp();
+        long pt = BitConverter.ToInt64(buffer, pointer);
+        pointer += 8;
+
+        uint counter = buffer[pointer];
+        counter += (uint)(buffer[pointer + 1] << 8);
+        counter += (uint)(buffer[pointer + 2] << 16);
+        counter += (uint)(buffer[pointer + 3] << 24);
+        pointer += 4;
+
+        return new HLCTimestamp(pt, counter);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

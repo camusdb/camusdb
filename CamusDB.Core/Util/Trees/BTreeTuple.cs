@@ -21,4 +21,9 @@ public sealed class BTreeTuple
         SlotOne = slotOne;
         SlotTwo = slotTwo;
     }
+
+    public override string ToString()
+    {
+        return string.Format("BTreeTuple({0}:{1})", SlotOne, SlotTwo);
+    }
 }

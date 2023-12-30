@@ -12,9 +12,9 @@ public readonly struct HLCTimestamp : IComparable<HLCTimestamp>
 {
     public long L { get; }
 
-    public int C { get; }
+    public uint C { get; }
 
-    public HLCTimestamp(long l, int c)
+    public HLCTimestamp(long l, uint c)
     {
         L = l;
         C = c;
@@ -42,6 +42,6 @@ public readonly struct HLCTimestamp : IComparable<HLCTimestamp>
 
     public override string ToString()
     {
-        return string.Format("{0}:{1}", L, C);
+        return string.Format("HLC({0}:{1})", L, C);
     }
 }

@@ -11,6 +11,7 @@ using NUnit.Framework;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Serializer.Models;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.Serialization;
 
@@ -225,5 +226,25 @@ public class TestSerializer
         ObjectIdValue readValue = Serializator.ReadObjectId(buffer, ref pointer);
         Assert.AreEqual(pointer, buffer.Length);
         Assert.AreEqual(readValue, writeValue);
+    }
+
+    [Test]
+    [TestCase(0, 0U)]
+    [TestCase(1703970677263, 128U)]
+    [TestCase(1703970677264, 8192U)]
+    public void TestSerializeHLCTimestamp(long pt, uint counter)
+    {
+        HLCTimestamp timestamp = new(pt, counter);
+
+        byte[] buffer = new byte[12];        
+
+        int pointer = 0;
+        Serializator.WriteHLCTimestamp(buffer, timestamp, ref pointer);
+        Assert.AreEqual(pointer, buffer.Length);
+
+        pointer = 0;
+        HLCTimestamp readTimestamp = Serializator.ReadHLCTimestamp(buffer, ref pointer);
+        Assert.AreEqual(pointer, buffer.Length);
+        Assert.AreEqual(readTimestamp, timestamp);
     }
 }

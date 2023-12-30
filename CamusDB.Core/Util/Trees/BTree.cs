@@ -21,6 +21,10 @@ namespace CamusDB.Core.Util.Trees;
  * 
  * The implementation use C# generics to support any type of keys and values in an optimal way.
  * The lazy feature allows to load/unload used/unused nodes to/from disk to save memory.
+ * 
+ * Additionally, the tree implements MVCC (Multi-Version Concurrency Control). 
+ * The entries version the data by timestamp and return a consistent state for 
+ * the same transaction id (timestamp).
  */
 public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 {
@@ -141,7 +145,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         }
 
         return default;
-    }    
+    }
 
     /// <summary>
     /// Allows to traverse all entries in the tree
@@ -270,6 +274,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     /// <summary>
     /// Inserts new nodes in the tree
+    /// This method doesn't allow duplicate keys
     /// </summary>
     /// <param name="txnid"></param>
     /// <param name="key"></param>
@@ -333,7 +338,10 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             for (j = 0; j < node.KeyCount; j++)
             {
                 if (Eq(key, children[j].Key))
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Keys must be unique");
+                {
+                    children[j].SetValue(txnid, val);
+                    return null;
+                }
 
                 if (Less(key, children[j].Key))
                     break;
@@ -398,7 +406,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             newNode.children[j] = current.children[BTreeConfig.MaxChildrenHalf + j];
 
         return newNode;
-    }
+    }    
 
     /// <summary>
     /// Returns the entry associated with the given key.

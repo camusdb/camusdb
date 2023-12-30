@@ -8,9 +8,9 @@ public readonly struct HLClockMessage
 {
     public long L { get; }
 
-    public int C { get; }
+    public uint C { get; }
 
-    public HLClockMessage(long l, int c)
+    public HLClockMessage(long l, uint c)
     {
         L = l;
         C = c;

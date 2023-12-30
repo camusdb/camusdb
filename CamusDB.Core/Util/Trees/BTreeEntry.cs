@@ -16,7 +16,7 @@ namespace CamusDB.Core.Util.Trees;
 // external nodes: only use key and value
 public sealed class BTreeEntry<TKey, TValue>
 {
-    private readonly ConcurrentDictionary<HLCTimestamp, TValue?> mvccValues = new(); // snapshot of the values by seen by each timestamp    
+    private readonly ConcurrentDictionary<HLCTimestamp, TValue?> mvccValues = new(); // snapshot of the values seen by each timestamp    
 
     public TKey Key;
 
@@ -34,14 +34,15 @@ public sealed class BTreeEntry<TKey, TValue>
 
     public void SetValue(HLCTimestamp initialTimestamp, TValue? initialValue)
     {
-        Console.WriteLine("{0} {1}", initialTimestamp, initialValue);
+        //Console.WriteLine("{0} {1}", initialTimestamp, initialValue);
 
-        mvccValues.TryAdd(initialTimestamp, initialValue);
+        if (!mvccValues.TryAdd(initialTimestamp, initialValue))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Keys must be unique");
     }    
 
     public TValue? GetValue(HLCTimestamp timestamp)
     {
-        Console.WriteLine("Get={0}", timestamp);
+        //Console.WriteLine("Get={0}", timestamp);
 
         if (mvccValues.TryGetValue(timestamp, out TValue? snapshotValue))
             return snapshotValue;
@@ -61,7 +62,7 @@ public sealed class BTreeEntry<TKey, TValue>
 
     public bool CanBeSeenBy(HLCTimestamp timestamp)
     {
-        Console.WriteLine("CanBeSeenBy={0}", timestamp);
+        //Console.WriteLine("CanBeSeenBy={0}", timestamp);
 
         if (mvccValues.ContainsKey(timestamp))
             return true;
