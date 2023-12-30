@@ -14,7 +14,7 @@ public readonly struct InsertFluxIndexState
 {
 	public List<TableIndexSchema> UniqueIndexes { get; } = new();
 
-	public List<TableIndexSchema>? multiIndexes { get; } = null;
+	public List<TableIndexSchema>? MultiIndexes { get; } = null;
 
 	public InsertFluxIndexState()
 	{

@@ -15,10 +15,12 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
-using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
+/// <summary>
+/// Inserts a single row into a table
+/// </summary>
 internal sealed class RowInserter
 {
     private readonly IndexSaver indexSaver = new();
@@ -143,7 +145,7 @@ internal sealed class RowInserter
     }
 
     /// <summary>
-    /// Second step is check for unique key violations
+    /// Step #2. Check for unique key violations
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
@@ -180,7 +182,7 @@ internal sealed class RowInserter
     }
 
     /// <summary>
-    /// Unique keys after updated before inserting the actual row
+    /// Unique keys are updated before inserting the actual row
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>

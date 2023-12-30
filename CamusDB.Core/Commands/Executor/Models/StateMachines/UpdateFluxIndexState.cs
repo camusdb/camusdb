@@ -6,9 +6,17 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
+
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
-public sealed class UpdateFluxIndexState
+public readonly struct UpdateFluxIndexState
 {
+    public List<TableIndexSchema> UniqueIndexes { get; } = new();
 
+    public List<TableIndexSchema>? MultiIndexes { get; } = null;
+
+    public UpdateFluxIndexState()
+    {
+    }
 }

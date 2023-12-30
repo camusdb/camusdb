@@ -16,10 +16,7 @@ public enum UpdateFluxSteps
 {
     NotInitialized = 0,
     AdquireLocks = 1,
-    LocateTupleToUpdate = 2,
-    UpdateUniqueIndexes = 3,
-    UpdateMultiIndexes = 4,
-    UpdateRow = 5,
-    ApplyPageOperations = 6,
-    ReleaseLocks = 7
-}
+    LocateTupleToUpdate = 2,    
+    UpdateRowAndIndexes = 3,
+    ApplyPageOperations = 4,
+    ReleaseLocks = 5}

@@ -1,16 +1,20 @@
 ﻿
-
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
 
 using CamusDB.Core.Util.ObjectIds;
-/**
-* This file is part of CamusDB  
-*
-* For the full copyright and license information, please view the LICENSE.txt
-* file that was distributed with this source code.
-*/
+
 namespace CamusDB.Core.Util.Trees;
 
-// helper B-tree node data type
+/// <summary>
+/// Helper B-tree node data type
+/// </summary>
+/// <typeparam name="TKey"></typeparam>
+/// <typeparam name="TValue"></typeparam>
 public sealed class BTreeNode<TKey, TValue>
 {
     private static int CurrentId = -1;
@@ -23,7 +27,10 @@ public sealed class BTreeNode<TKey, TValue>
 
     public BTreeEntry<TKey, TValue>[] children = new BTreeEntry<TKey, TValue>[BTreeConfig.MaxChildren];   // the array of children
 
-    // create a node with k children
+    /// <summary>
+    /// Create a node with k children
+    /// </summary>
+    /// <param name="keyCount"></param>
     public BTreeNode(int keyCount)
     {
         //Console.WriteLine("Allocated new node {0}", keyCount);

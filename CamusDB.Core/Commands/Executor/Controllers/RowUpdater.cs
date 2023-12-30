@@ -18,6 +18,9 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
+/// <summary>
+/// Updates multiple rows by the specified filters
+/// </summary>
 public sealed class RowUpdater
 {
     private readonly IndexSaver indexSaver = new();
@@ -48,8 +51,11 @@ public sealed class RowUpdater
                 if (string.IsNullOrEmpty(columnValue.Key))
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid or empty column name in values list");
 
-                if (column.Name == columnValue.Key)
+                if (string.Equals(column.Name, columnValue.Key))
                 {
+                    if (column.Primary)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key field");
+
                     hasColumn = true;
                     break;
                 }
@@ -96,7 +102,7 @@ public sealed class RowUpdater
             table: table,
             ticket: ticket,
             queryExecutor: queryExecutor,
-            indexes: new UpdateFluxIndexState()
+            indexes: GetIndexUpdatePlan(table, ticket)
         );
 
         FluxMachine<UpdateFluxSteps, UpdateFluxState> machine = new(state);
@@ -108,14 +114,37 @@ public sealed class RowUpdater
     /// 
     /// </summary>
     /// <param name="columnValues"></param>
-    /// <param name="name"></param>
+    /// <param name="columnName"></param>
     /// <returns></returns>
-    private static ColumnValue? GetColumnValue(Dictionary<string, ColumnValue> columnValues, string name)
+    private static ColumnValue? GetColumnValue(Dictionary<string, ColumnValue> columnValues, string columnName)
     {
-        if (columnValues.TryGetValue(name, out ColumnValue? columnValue))
+        if (columnValues.TryGetValue(columnName, out ColumnValue? columnValue))
             return columnValue;
 
         return null;
+    }
+
+    /// <summary>
+    /// Step #1. Creates a new update plan for the table defining which unique indexes will be updated
+    /// </summary>
+    /// <param name="table"></param>
+    /// <returns></returns>
+    private static UpdateFluxIndexState GetIndexUpdatePlan(TableDescriptor table, UpdateTicket ticket)
+    {
+        UpdateFluxIndexState indexState = new();
+
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        {
+            if (index.Value.Type != IndexType.Unique)
+                continue;
+
+            if (!ticket.Values.ContainsKey(index.Value.Column))
+                continue;
+
+            indexState.UniqueIndexes.Add(index.Value);
+        }
+
+        return indexState;
     }
 
     /// <summary>
@@ -126,6 +155,13 @@ public sealed class RowUpdater
     private async Task<FluxAction> AdquireLocks(UpdateFluxState state)
     {
         state.Locks.Add(await state.Table.ReaderWriterLock.WriterLockAsync());
+        return FluxAction.Continue;
+    }
+
+    private async Task<FluxAction> CheckForUniqueKeysViolations(UpdateFluxState state)
+    {
+        await Task.Yield();
+
         return FluxAction.Continue;
     }
 
@@ -177,38 +213,14 @@ public sealed class RowUpdater
 
             await indexSaver.Remove(tablespace, multiIndex, columnValue);
         }
-    }    
-
-    /// <summary>
-    /// Updates unique indexes
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> UpdateUniqueIndexes(UpdateFluxState state)
-    {
-        //await UpdateUniqueIndexesInternal(state.Database, state.Table, state.ColumnValues, state.Locks, state.ModifiedPages);
-
-        return Task.FromResult(FluxAction.Continue);
     }
-
-    /// <summary>
-    /// Updates multi indexes
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> UpdateMultiIndexes(UpdateFluxState state)
-    {
-        //await UpdateMultiIndexes(state.Database, state.Table, state.ColumnValues);
-
-        return Task.FromResult(FluxAction.Continue);
-    }
-
+       
     /// <summary>
     /// Updates the row on the disk
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task<FluxAction> UpdateRowsFromDisk(UpdateFluxState state)
+    private async Task<FluxAction> UpdateRowsAndIndexesToDisk(UpdateFluxState state)
     {
         if (state.DataCursor is null)
         {
@@ -219,13 +231,22 @@ public sealed class RowUpdater
         TableDescriptor table = state.Table;
         UpdateTicket ticket = state.Ticket;
         BufferPoolHandler tablespace = state.Database.TableSpace;
-
+        
         await foreach (QueryResultRow row in state.DataCursor)
-        {
+        {            
             foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)
                 row.Row[keyValuePair.Key] = keyValuePair.Value;
 
-            byte[] buffer = rowSerializer.Serialize(table, row.Row, row.Tuple.SlotOne);            
+            foreach (var x in state.Indexes.UniqueIndexes)
+            {
+                ColumnValue? columnValue = GetColumnValue(row.Row, x.Column);
+                if (columnValue is null)
+                    continue;
+
+                //await indexSaver.Remove(tablespace, x.UniqueRows, columnValue);
+            }
+
+            byte[] buffer = rowSerializer.Serialize(table, row.Row, row.Tuple.SlotOne);
 
             tablespace.WriteDataToPageBatch(state.ModifiedPages, row.Tuple.SlotTwo, 0, buffer);
 
@@ -277,10 +298,8 @@ public sealed class RowUpdater
         Stopwatch timer = Stopwatch.StartNew();
 
         machine.When(UpdateFluxSteps.AdquireLocks, AdquireLocks);
-        machine.When(UpdateFluxSteps.LocateTupleToUpdate, LocateTuplesToUpdate);
-        machine.When(UpdateFluxSteps.UpdateUniqueIndexes, UpdateUniqueIndexes);
-        machine.When(UpdateFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
-        machine.When(UpdateFluxSteps.UpdateRow, UpdateRowsFromDisk);
+        machine.When(UpdateFluxSteps.LocateTupleToUpdate, LocateTuplesToUpdate);        
+        machine.When(UpdateFluxSteps.UpdateRowAndIndexes, UpdateRowsAndIndexesToDisk);
         machine.When(UpdateFluxSteps.ApplyPageOperations, ApplyPageOperations);
         machine.When(UpdateFluxSteps.ReleaseLocks, ReleaseLocks);
 
@@ -291,7 +310,7 @@ public sealed class RowUpdater
 
         timer.Stop();
 
-        TimeSpan timeTaken = timer.Elapsed;               
+        TimeSpan timeTaken = timer.Elapsed;
 
         Console.WriteLine(
             "Updated {0} rows, Time taken: {1}",
@@ -300,5 +319,5 @@ public sealed class RowUpdater
         );
 
         return state.ModifiedRows;
-    }    
+    }
 }

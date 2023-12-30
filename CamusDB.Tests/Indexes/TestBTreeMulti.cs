@@ -387,10 +387,10 @@ public class TestBTreeMulti
         Assert.AreEqual(255, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        int? search = await tree.Get(11);
+        int? search = await tree.Get(0, 11);
         Assert.IsNull(search);
 
-        search = await tree.Get(10);
+        search = await tree.Get(0, 10);
         Assert.IsNotNull(search);
     }
 

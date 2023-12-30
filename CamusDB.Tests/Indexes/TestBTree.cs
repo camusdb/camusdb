@@ -71,7 +71,7 @@ internal sealed class TestBTree
 
         await tree.Put(5, 100);
 
-        int? values = await tree.Get(5);
+        int? values = await tree.Get(0, 5);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
@@ -85,7 +85,7 @@ internal sealed class TestBTree
 
         await tree.Put(5, 100);
 
-        int? values = await tree.Get(11);
+        int? values = await tree.Get(0, 11);
 
         Assert.Null(values);
     }
@@ -102,13 +102,13 @@ internal sealed class TestBTree
         await tree.Put(8, 103);
         await tree.Put(9, 104);
 
-        int? values = await tree.Get(5);
+        int? values = await tree.Get(0, 5);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
         //Assert.AreEqual(values[0], 100);
 
-        values = await tree.Get(7);
+        values = await tree.Get(0, 7);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
@@ -215,7 +215,7 @@ internal sealed class TestBTree
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
 
-        int? search = await tree.Get(5);
+        int? search = await tree.Get(0, 5);
         Assert.IsNull(search);
     }
 
@@ -237,22 +237,22 @@ internal sealed class TestBTree
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
 
-        int? search = await tree.Get(5);
+        int? search = await tree.Get(0, 5);
         Assert.IsNull(search);
 
-        search = await tree.Get(4);
+        search = await tree.Get(0, 4);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(6);
+        search = await tree.Get(0, 6);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(7);
+        search = await tree.Get(0, 7);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(8);
+        search = await tree.Get(0, 8);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(9);
+        search = await tree.Get(0, 9);
         Assert.IsNotNull(search);
     }
 
@@ -273,7 +273,7 @@ internal sealed class TestBTree
         Assert.AreEqual(64, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        int? search = await tree.Get(5);
+        int? search = await tree.Get(0, 5);
         Assert.IsNull(search);
     }
 
@@ -294,10 +294,10 @@ internal sealed class TestBTree
         Assert.AreEqual(64, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        int? search = await tree.Get(64);
+        int? search = await tree.Get(0, 64);
         Assert.IsNull(search);
 
-        search = await tree.Get(63);
+        search = await tree.Get(0, 63);
         Assert.IsNotNull(search);
     }
 
@@ -321,19 +321,19 @@ internal sealed class TestBTree
         Assert.AreEqual(6144, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
-        int? search = await tree.Get(4);
+        int? search = await tree.Get(0, 4);
         Assert.IsNull(search);
 
-        search = await tree.Get(7);
+        search = await tree.Get(0, 7);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(41);
+        search = await tree.Get(0, 41);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(49);
+        search = await tree.Get(0, 49);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(256);
+        search = await tree.Get(0, 256);
         Assert.IsNull(search);
     }
 
@@ -361,7 +361,7 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 8192; i++)
         {
-            int? search = await tree.Get(i);
+            int? search = await tree.Get(0, i);
             if (search is not null)
                 count++;
         }
@@ -393,7 +393,7 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 8100; i++)
         {
-            int? search = await tree.Get(i);
+            int? search = await tree.Get(0, i);
             if (search is not null)
                 count++;
         }
@@ -425,7 +425,7 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 8192; i++)
         {
-            int? search = await tree.Get(i);
+            int? search = await tree.Get(0, i);
             if (search is not null)
                 count++;
         }

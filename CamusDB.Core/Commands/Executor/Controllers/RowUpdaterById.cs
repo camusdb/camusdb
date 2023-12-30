@@ -6,10 +6,8 @@
  * file that was distributed with this source code.
  */
 
-using System;
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
@@ -20,6 +18,10 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
+/// <summary>
+/// Updates a single row specified by the id
+/// Should be faster than using the Query Executor
+/// </summary>
 public sealed class RowUpdaterById
 {
     private readonly IndexSaver indexSaver = new();
@@ -53,8 +55,11 @@ public sealed class RowUpdaterById
                 if (string.IsNullOrEmpty(columnValue.Key))
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid or empty column name in values list");
 
-                if (column.Name == columnValue.Key)
+                if (string.Equals(column.Name, columnValue.Key))
                 {
+                    if (column.Primary)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key field");
+
                     hasColumn = true;
                     break;
                 }
@@ -107,7 +112,7 @@ public sealed class RowUpdaterById
         FluxMachine<UpdateByIdFluxSteps, UpdateByIdFluxState> machine = new(state);
 
         return await UpdateByIdInternal(machine, state);
-    }    
+    }
 
     /// <summary>
     /// 
@@ -163,7 +168,7 @@ public sealed class RowUpdaterById
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        state.RowTuple = await index.UniqueRows.Get(columnId);
+        state.RowTuple = await index.UniqueRows.Get(0, columnId);
 
         if (state.RowTuple is null)
         {
@@ -183,7 +188,7 @@ public sealed class RowUpdaterById
         Console.WriteLine("Data Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
 
         return FluxAction.Continue;
-    }    
+    }
 
     private async Task UpdateMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
@@ -272,7 +277,7 @@ public sealed class RowUpdaterById
         //await tablespace.WriteDataToPage(state.RowTuple.SlotOne, 0, buffer);
         //state.ModifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, state.RowTuple.SlotTwo, 0, buffer));
 
-        tablespace.WriteDataToPageBatch(state.ModifiedPages, state.RowTuple.SlotTwo, 0, buffer);        
+        tablespace.WriteDataToPageBatch(state.ModifiedPages, state.RowTuple.SlotTwo, 0, buffer);
 
         return Task.FromResult(FluxAction.Continue);
     }
@@ -326,7 +331,7 @@ public sealed class RowUpdaterById
 
             return 0;
         }
-       
+
         Console.WriteLine(
             "Row pk {0} with id {1} updated to page {2}, Time taken: {3}",
             ticket.Id,
@@ -336,5 +341,5 @@ public sealed class RowUpdaterById
         );
 
         return 1;
-    }    
+    }
 }

@@ -37,7 +37,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
                 "The primary key of the table \"" + table.Name + "\" is not present in the list of values."
             );
 
-        BTreeTuple? rowTuple = await uniqueIndex.Get(uniqueValue);
+        BTreeTuple? rowTuple = await uniqueIndex.Get(0, uniqueValue);
 
         if (rowTuple is not null)
             throw new CamusDBException(

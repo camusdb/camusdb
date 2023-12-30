@@ -39,9 +39,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     public readonly IBTreeNodeReader<TKey, TValue>? Reader; // lazy node reader
 
-    /**
-     * Initializes an empty B-tree.
-     */
+    /// <summary>
+    /// Initializes an empty B-tree.
+    /// </summary>
+    /// <param name="rootOffset"></param>
+    /// <param name="reader"></param>
     public BTree(ObjectIdValue rootOffset, IBTreeNodeReader<TKey, TValue>? reader = null)
     {
         Reader = reader;
@@ -49,29 +51,28 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         Id = Interlocked.Increment(ref CurrentId);
     }
 
-    /**
-     * Returns true if this symbol table is empty.
-     * @return {@code true} if this symbol table is empty; {@code false} otherwise
-     */
+    /// <summary>
+    /// Returns true if this symbol table is empty.
+    /// </summary>
+    /// <returns></returns>
     public bool IsEmpty()
     {
         return Size() == 0;
     }
 
-    /**
-     * Returns the number of key-value pairs in this symbol table.
-     * @return the number of key-value pairs in this symbol table
-     */
+    /// <summary>
+    /// Returns the number of key-value pairs in this symbol table.
+    /// </summary>
+    /// <returns></returns>
     public int Size()
     {
         return size;
     }
 
-    /**
-     * Returns the height of this B-tree (for debugging).
-     *
-     * @return the height of this B-tree
-     */
+    /// <summary>
+    /// Returns the height of this B-tree (for debugging).
+    /// </summary>
+    /// <returns></returns>
     public int Height()
     {
         return height;
@@ -83,15 +84,15 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <param name="key"></param>
     /// <returns>the value associated with the given key if the key is in the symbol table
     /// and {@code null} if the key is not in the symbol table</returns>
-    public async Task<TValue?> Get(TKey key)
+    public async Task<TValue?> Get(ulong txnid, TKey key)
     {
         if (root is null)
             return default;
 
-        return await Search(root, key, height);
+        return await Search(root, txnid, key, height);
     }
 
-    private async ValueTask<TValue?> Search(BTreeNode<TKey, TValue>? node, TKey key, int ht)
+    private async ValueTask<TValue?> Search(BTreeNode<TKey, TValue>? node, ulong txnid, TKey key, int ht)
     {
         if (node is null)
             return default;
@@ -103,6 +104,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             for (int j = 0; j < node.KeyCount; j++)
             {
+                // verify if children can be seen by MVCC
+
                 if (Eq(key, children[j].Key))
                     return children[j].Value;
             }
@@ -120,13 +123,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                     if (entry.Next is null && !entry.NextPageOffset.IsNull())
                     {
                         if (Reader is null)
-                            throw new Exception("Cannot read lazy node because reader is null");
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
                         entry.Next = await Reader.GetNode(entry.NextPageOffset);
                         loaded++;
                     }
 
-                    return await Search(entry.Next, key, ht - 1);
+                    return await Search(entry.Next, txnid, key, ht - 1);
                 }
             }
         }
@@ -134,6 +137,10 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return default;
     }
 
+    /// <summary>
+    /// Allows to traverse all entries in the tree
+    /// </summary>
+    /// <returns></returns>
     public async IAsyncEnumerable<BTreeEntry<TKey, TValue>> EntriesTraverse()
     {
         await foreach (BTreeEntry<TKey, TValue> entry in EntriesTraverseInternal(root, height))
@@ -164,7 +171,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                 if (entry.Next is null && !entry.NextPageOffset.IsNull())
                 {
                     if (Reader is null)
-                        throw new Exception("Cannot read lazy node because reader is null");
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
                     entry.Next = await Reader.GetNode(entry.NextPageOffset);
                     loaded++;
@@ -176,6 +183,10 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         }
     }
 
+    /// <summary>
+    /// Returns all keys in the symbol table as an <tt>Iterable</tt>.
+    /// </summary>
+    /// <returns></returns>
     public async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesTraverse()
     {
         await foreach (BTreeNode<TKey, TValue> node in NodesTraverseInternal(root, height))
@@ -199,7 +210,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             if (entry.Next is null && !entry.NextPageOffset.IsNull())
             {
                 if (Reader is null)
-                    throw new Exception("Cannot read lazy node because reader is null");
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
                 entry.Next = await Reader.GetNode(entry.NextPageOffset);
                 loaded++;
@@ -210,6 +221,10 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         }
     }
 
+    /// <summary>
+    /// Returns the entries in the tree in descending order.
+    /// </summary>
+    /// <returns></returns>
     public async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesReverseTraverse()
     {
         await foreach (BTreeNode<TKey, TValue> node in NodesReverseTraverseInternal(root, height))
@@ -228,7 +243,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             if (entry.Next is null && !entry.NextPageOffset.IsNull())
             {
                 if (Reader is null)
-                    throw new Exception("Cannot read lazy node because reader is null");
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
                 entry.Next = await Reader.GetNode(entry.NextPageOffset);
                 loaded++;
@@ -241,6 +256,12 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         yield return node;
     }
 
+    /// <summary>
+    /// Inserts new nodes in the tree
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="value"></param>
+    /// <returns></returns>
     public async Task<HashSet<BTreeNode<TKey, TValue>>> Put(TKey key, TValue? value)
     {
         HashSet<BTreeNode<TKey, TValue>> deltas = new();
@@ -295,7 +316,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             for (j = 0; j < node.KeyCount; j++)
             {
                 if (Eq(key, children[j].Key))
-                    throw new Exception("Keys must be unique");
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Keys must be unique");
 
                 if (Less(key, children[j].Key))
                     break;
@@ -314,7 +335,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                     if (entry.Next is null && !entry.NextPageOffset.IsNull())
                     {
                         if (Reader is null)
-                            throw new Exception("Cannot read lazy node because reader is null");
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
                         entry.Next = await Reader.GetNode(entry.NextPageOffset);
                         loaded++;
@@ -362,11 +383,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return newNode;
     }
 
-    /**
-     * Returns the entry associated with the given key.
-     *
-     * @param  key the key
-     */
+    /// <summary>
+    /// Returns the entry associated with the given key.
+    /// </summary>
+    /// <param name="key"></param>
+    /// <returns></returns>
     public async Task<(bool found, HashSet<BTreeNode<TKey, TValue>> deltas)> Remove(TKey key)
     {
         HashSet<BTreeNode<TKey, TValue>> deltas = new();
@@ -379,11 +400,15 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return (found, deltas);
     }
 
-    /**
-     * Delete node entries by key, it doesn't merge yet
-     * 
-     * @param node the node where to search the value
-     */
+    /// <summary>
+    /// Delete node entries by key, it doesn't merge yet
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="key"></param>
+    /// <param name="ht"></param>
+    /// <param name="deltas"></param>
+    /// <returns></returns>
+    /// <exception cref="Exception"></exception>
     private async Task<bool> Delete(BTreeNode<TKey, TValue>? node, TKey key, int ht, HashSet<BTreeNode<TKey, TValue>> deltas)
     {
         if (node is null)
@@ -427,7 +452,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                     if (children[j].Next is null && !children[j].NextPageOffset.IsNull())
                     {
                         if (Reader is null)
-                            throw new Exception("Cannot read lazy node because reader is null");
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
                         children[j].Next = await Reader.GetNode(children[j].NextPageOffset);
                         loaded++;

@@ -103,7 +103,7 @@ internal sealed class RowDeleterById
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        state.RowTuple = await index.UniqueRows.Get(columnId);
+        state.RowTuple = await index.UniqueRows.Get(0, columnId);
 
         if (state.RowTuple is null)
         {
@@ -333,7 +333,7 @@ internal sealed class RowDeleterById
             );
 
             return 0;
-        }        
+        }
 
         Console.WriteLine(
             "Row pk {0} with id {1} deleted from page offset {2}, Time taken: {3}, Modified pages: {4}",
@@ -345,5 +345,5 @@ internal sealed class RowDeleterById
         );
 
         return 1;
-    }    
+    }
 }

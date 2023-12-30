@@ -31,7 +31,7 @@ public class TestRowUpdater
         //SetupDb.Remove("factory");
     }
 
-    private async Task<(string, CommandExecutor)> SetupDatabase()
+    private static async Task<(string, CommandExecutor)> SetupDatabase()
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
@@ -49,7 +49,7 @@ public class TestRowUpdater
         return (dbname, executor);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
+    private static async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
     {
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
