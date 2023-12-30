@@ -611,5 +611,5 @@ public class TestExecuteSql
 
         List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
         Assert.IsEmpty(result);
-    }
+    }    
 }

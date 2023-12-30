@@ -66,4 +66,22 @@ public sealed class CommandValidator
         DeleteValidator validator = new();
         validator.Validate(ticket);
     }
+
+    public void Validate(QueryTicket ticket)
+    {
+        QueryValidator validator = new();
+        validator.Validate(ticket);
+    }
+
+    public void Validate(QueryByIdTicket ticket)
+    {
+        QueryByIdValidator validator = new();
+        validator.Validate(ticket);
+    }
+
+    public void Validate(ExecuteSQLTicket ticket)
+    {
+        ExecuteSQLValidator validator = new();
+        validator.Validate(ticket);
+    }
 }

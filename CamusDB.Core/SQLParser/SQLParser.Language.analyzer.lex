@@ -26,6 +26,14 @@ TCreate         (C|c)(R|r)(E|e)(A|a)(T|t)(E|e)
 TTable          (T|T)(A|a)(B|b)(L|l)(E|e)
 TNot            (N|n)(O|o)(T|t)
 TNull           (N|n)(U|u)(L|l)(L|l)
+TPrimary 	    (P|p)(R|r)(I|i)(M|m)(A|a)(R|r)(Y|y)
+TKey 		    (K|k)(E|e)(Y|y)
+TUnique 	    (U|u)(N|n)(I|i)(Q|q)(U|u)(E|e)
+TIndex 		    (I|i)(N|n)(D|d)(E|e)(X|x)	
+TAlter 		    (A|a)(L|l)(T|t)(E|e)(R|r)
+TWAdd 		    (A|a)(D|d)(D|d)
+TDrop 		    (D|d)(R|r)(O|o)(P|p)
+TColumn 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)
 TTypeString     (S|s)(T|t)(R|r)(I|i)(N|n)(G|g)
 TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
 TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
@@ -116,6 +124,22 @@ TGreaterEquals  >=
 {TNot} { return (int)Token.TNOT; }
 
 {TNull} { return (int)Token.TNULL; }
+
+{TPrimary} { return (int)Token.TPRIMARY; }
+
+{TKey} { return (int)Token.TKEY; }
+
+{TUnique} { return (int)Token.TUNIQUE; }
+
+{TIndex} { return (int)Token.TINDEX; }
+
+{TAlter} { return (int)Token.TALTER; }
+
+{TWAdd} { return (int)Token.TWADD; }
+
+{TDrop} { return (int)Token.TDROP; }
+
+{TColumn} { return (int)Token.TCOLUMN; }
 
 {TTypeObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
 

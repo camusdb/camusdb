@@ -141,8 +141,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         return await tableOpener.Open(descriptor, ticket.TableName);
     }
 
-    public async Task<bool> ExecuteDDLSQLQuery(ExecuteSQLTicket ticket)
+    public async Task<bool> ExecuteDDLSQL(ExecuteSQLTicket ticket)
     {
+        validator.Validate(ticket);
+
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
 
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
@@ -159,7 +161,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 }
 
             default:
-                throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown non-query AST stmt: " + ast.nodeType);
+                throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown DDL AST stmt: " + ast.nodeType);
         }
     }
 
@@ -254,6 +256,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <returns></returns>
     public async Task<IAsyncEnumerable<QueryResultRow>> Query(QueryTicket ticket)
     {
+        validator.Validate(ticket);
+
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
@@ -268,6 +272,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <returns></returns>
     public async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> QueryById(QueryByIdTicket ticket)
     {
+        validator.Validate(ticket);
+
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
@@ -282,6 +288,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <returns>The number of inserted/modified/deleted rows</returns>
     public async Task<int> ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
     {
+        validator.Validate(ticket);
+
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
 
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
@@ -328,6 +336,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <exception cref="Exception"></exception>
     public async Task<IAsyncEnumerable<QueryResultRow>> ExecuteSQLQuery(ExecuteSQLTicket ticket)
     {
+        validator.Validate(ticket);
+
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         QueryTicket queryTicket = sqlExecutor.CreateQueryTicket(ticket);

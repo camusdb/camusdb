@@ -10,6 +10,8 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -231,5 +233,45 @@ internal sealed class TestTableCreator
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
         Assert.AreEqual("Table 'my_table' already exists", e!.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteCreateTableWithSQL()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+
+        ExecuteSQLTicket createTableTicket = new(
+            database: dbname,
+            sql: "CREATE TABLE robots (id OID PRIMARY KEY NOT NULL, name STRING NOT NULL, year INT64 NOT NULL)",
+            parameters: null
+        );
+
+        Assert.IsTrue(await executor.ExecuteDDLSQL(createTableTicket));
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
+
+        Assert.AreEqual("robots", tableSchema.Name);
+        Assert.AreEqual(0, tableSchema.Version);
+
+        Assert.AreEqual(3, tableSchema.Columns!.Count);
+
+        Assert.AreEqual("id", tableSchema.Columns![0].Name);
+        Assert.AreEqual(ColumnType.Id, tableSchema.Columns![0].Type);
+
+        Assert.AreEqual("name", tableSchema.Columns![1].Name);
+        Assert.AreEqual(ColumnType.String, tableSchema.Columns![1].Type);
+
+        Assert.AreEqual("year", tableSchema.Columns![2].Name);
+        Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![2].Type);
+
+        ExecuteSQLTicket queryTicket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
     }
 }

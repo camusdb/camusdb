@@ -21,6 +21,7 @@
 %token TDIGIT TSTRING IDENTIFIER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
 %token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
+%token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN
 
 %%
 
@@ -57,8 +58,18 @@ create_table_item_list : create_table_item_list TCOMMA create_table_item { $$.n 
                        ;
 
 create_table_item : identifier field_type { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, null, null, null); }
-                  | identifier field_type TNOT TNULL { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, null, null, null); }
+                  | identifier field_type create_table_constraint_list { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, $3.n, null, null); }
                   ;
+
+create_table_constraint_list : create_table_constraint_list create_table_constraint { $$.n = new(NodeType.CreateTableConstraintList, $1.n, $2.n, null, null, null); }
+							 | create_table_constraint { $$.n = $1.n; $$.s = $1.s; }
+							 ;
+
+create_table_constraint : TNULL { $$.n = new(NodeType.ConstraintNull, null, null, null, null, null); }
+                        | TNOT TNULL { $$.n = new(NodeType.ConstraintNotNull, null, null, null, null, null); }
+						| TPRIMARY TKEY { $$.n = new(NodeType.ConstraintPrimaryKey, null, null, null, null, null); }
+                        | TUNIQUE { $$.n = new(NodeType.ConstraintUnique, null, null, null, null, null); }
+                        ;
 
 field_type : TTYPE_OBJECT_ID { $$.n = new(NodeType.TypeObjectId, null, null, null, null, null); }
            | TTYPE_STRING { $$.n = new(NodeType.TypeString, null, null, null, null, null); }

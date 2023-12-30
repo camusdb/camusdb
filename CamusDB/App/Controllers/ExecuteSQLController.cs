@@ -116,7 +116,7 @@ public sealed class ExecuteSQLController : CommandsController
                 parameters: request.Parameters
             );
 
-            bool success = await executor.ExecuteDDLSQLQuery(ticket);
+            bool success = await executor.ExecuteDDLSQL(ticket);
 
             return new JsonResult(new ExecuteDDLSQLResponse("ok"));
         }

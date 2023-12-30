@@ -14,6 +14,9 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
+/// <summary>
+/// Transforms the records from their disk format into a native C# representation, which is easier to handle and manipulate.
+/// </summary>
 internal sealed class RowDeserializer
 {
     public Dictionary<string, ColumnValue> Deserialize(TableSchema tableSchema, byte[] data)

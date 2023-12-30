@@ -3,7 +3,7 @@
 //  GPLEX error listing for lex source file <SQLParser.Language.analyzer.lex>
 // ==========================================================================
 //  Version:  1.2.2
-//  DateTime: 11/25/2023 10:49:53 PM
+//  DateTime: 12/29/2023 7:03:34 PM
 // ==========================================================================
 
 
@@ -12,22 +12,42 @@
 %visibility internal
 %tokentype Token
 
-%option stack, minimize, parser, verbose, persistbuffer, noembedbuffers, caseless
-//-----^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-// Error: Unrecognized "%option" command  <caseless> 
-// --------------------------------------------------
+%option stack, minimize, parser, verbose, persistbuffer, noembedbuffers
 
-TSelect         "SELECT"
-TFrom           "FROM"
-TWhere          "WHERE"
-TOrder          "ORDER"
-TBy             "BY"
-TAnd            "AND"
-TOr             "OR"
-TDesc           "DESC"
-TAsc            "ASC"
-TTrue           "TRUE"
-TFalse          "FALSE"
+TSelect         (S|s)(E|e)(L|l)(E|e)(C|c)(T|t)
+TFrom           (F|f)(R|r)(O|o)(M|m)
+TWhere          (W|w)(H|h)(E|e)(R|r)(E|e)
+TOrder          (O|o)(R|r)(D|d)(E|e)(R|r)
+TBy             (B|b)(Y|y)
+TAnd            (A|a)(N|n)(D|d)
+TOr             (O|o)(R|r)
+TDesc           (D|d)(E|e)(S|s)(C|c)
+TAsc            (A|a)(S|s)(C|c)
+TTrue           (T|t)(R|r)(U|u)(E|e)
+TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
+TUpdate         (U|u)(P|p)(D|d)(A|a)(T|t)(E|e)
+TSet            (S|s)(E|e)(T|t)
+TDelete 	    (D|d)(E|e)(L|l)(E|e)(T|t)(E|e)
+TInsert 	    (I|i)(N|n)(S|s)(E|e)(R|r)(T|t)
+TInto 		    (I|i)(N|n)(T|t)(O|o)
+TValues         (V|v)(A|a)(L|l)(U|u)(E|e)(S|s)
+TCreate         (C|c)(R|r)(E|e)(A|a)(T|t)(E|e)
+TTable          (T|T)(A|a)(B|b)(L|l)(E|e)
+TNot            (N|n)(O|o)(T|t)
+TNull           (N|n)(U|u)(L|l)(L|l)
+TPrimary 	    (P|p)(R|r)(I|i)(M|m)(A|a)(R|r)(Y|y)
+TKey 		    (K|k)(E|e)(Y|y)
+TUnique 	    (U|u)(N|n)(I|i)(Q|q)(U|u)(E|e)
+TIndex 		    (I|i)(N|n)(D|d)(E|e)(X|x)	
+TAlter 		    (A|a)(L|l)(T|t)(E|e)(R|r)
+TAdd 		    (A|a)(D|d)(D|d)
+TDrop 		    (D|d)(R|r)(O|o)(P|p)
+TColumn 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)
+TTypeString     (S|s)(T|t)(R|r)(I|i)(N|n)(G|g)
+TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
+TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
+TTypeObjectId   (O|o)(B|b)(J|j)(E|e)(C|c)(T|t)(_)(I|i)(D|d)
+TTypeSObjectId  (O|o)(I|i)(D|d)
 LParen          \(
 RParen          \)
 Eol             (\r\n?|\n)
@@ -46,6 +66,9 @@ UNIESC          \\U{HexDig}{8}
 String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\"
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
 TAdd            \+
+//^^
+// Error: Lexical category <TAdd> already defined
+// ----------------------------------------------
 TMult           \*
 TMinus          \-
 TDiv            /
@@ -93,6 +116,52 @@ TGreaterEquals  >=
 {TTrue} { return (int)Token.TTRUE; }
 
 {TFalse} { return (int)Token.TFALSE; }
+
+{TUpdate} { return (int)Token.TUPDATE; }
+
+{TDelete} { return (int)Token.TDELETE; }
+
+{TSet} { return (int)Token.TSET; }
+
+{TInsert} { return (int)Token.TINSERT; }
+
+{TInto} { return (int)Token.TINTO; }
+
+{TValues} { return (int)Token.TVALUES; }
+
+{TCreate} { return (int)Token.TCREATE; }
+
+{TTable} { return (int)Token.TTABLE; }
+
+{TNot} { return (int)Token.TNOT; }
+
+{TNull} { return (int)Token.TNULL; }
+
+{TPrimary} { return (int)Token.TPRIMARY; }
+
+{TKey} { return (int)Token.TKEY; }
+
+{TUnique} { return (int)Token.TUNIQUE; }
+
+{TIndex} { return (int)Token.TINDEX; }
+
+{TAlter} { return (int)Token.TALTER; }
+
+{TAdd} { return (int)Token.TADD; }
+
+{TDrop} { return (int)Token.TDROP; }
+
+{TColumn} { return (int)Token.TCOLUMN; }
+
+{TTypeObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
+
+{TTypeSObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
+
+{TTypeString} { return (int)Token.TTYPE_STRING; }
+
+{TTypeInt64} { return (int)Token.TTYPE_INT64; }
+
+{TTypeFloat64} { return (int)Token.TTYPE_FLOAT64; }
 
 {TAdd} { return (int)Token.TADD; }
 
