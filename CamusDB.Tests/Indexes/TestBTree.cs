@@ -40,7 +40,7 @@ internal sealed class TestBTree
 
         BTree<int, int?> tree = new(new());
 
-        await tree.Put(txnid, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
         Assert.AreEqual(tree.Size(), 1);
         Assert.AreEqual(tree.Height(), 0);
@@ -53,12 +53,12 @@ internal sealed class TestBTree
 
         BTree<int, int?> tree = new(new());
 
-        await tree.Put(txnid, 4, 100);
-        await tree.Put(txnid, 5, 100);
-        await tree.Put(txnid, 6, 101);
-        await tree.Put(txnid, 7, 102);
-        await tree.Put(txnid, 8, 103);
-        await tree.Put(txnid, 9, 104);
+        await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 6, 101);
+        await tree.Put(txnid, BTreeCommitState.Committed, 7, 102);
+        await tree.Put(txnid, BTreeCommitState.Committed, 8, 103);
+        await tree.Put(txnid, BTreeCommitState.Committed, 9, 104);
 
         Assert.AreEqual(tree.Size(), 6);
         Assert.AreEqual(tree.Height(), 0);
@@ -72,7 +72,7 @@ internal sealed class TestBTree
         BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 65; i++)
-            await tree.Put(txnid, i, 100 + i);
+            await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
         Assert.AreEqual(tree.Size(), 65);
         Assert.AreEqual(tree.Height(), 1);
@@ -85,7 +85,7 @@ internal sealed class TestBTree
 
         BTree<int, int?> tree = new(new());
 
-        await tree.Put(txnid, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
         int? values = await tree.Get(txnid, 5);        
 
@@ -101,7 +101,7 @@ internal sealed class TestBTree
 
         BTree<int, int?> tree = new(new());
 
-        await tree.Put(txnid, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
         int? values = await tree.Get(txnid, 11);
 
@@ -115,12 +115,12 @@ internal sealed class TestBTree
 
         BTree<int, int?> tree = new(new());
 
-        await tree.Put(txnid, 4, 100);
-        await tree.Put(txnid, 5, 100);
-        await tree.Put(txnid, 6, 101);
-        await tree.Put(txnid, 7, 102);
-        await tree.Put(txnid, 8, 103);
-        await tree.Put(txnid, 9, 104);
+        await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 6, 101);
+        await tree.Put(txnid, BTreeCommitState.Committed, 7, 102);
+        await tree.Put(txnid, BTreeCommitState.Committed, 8, 103);
+        await tree.Put(txnid, BTreeCommitState.Committed, 9, 104);
 
         int? values = await tree.Get(txnid, 5);
 
@@ -144,28 +144,28 @@ internal sealed class TestBTree
 
         BTree<int, int?> tree = new(new());
 
-        deltas = await tree.Put(txnid, 4, 100);
+        deltas = await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = await tree.Put(txnid, 5, 100);
+        deltas = await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = await tree.Put(txnid, 6, 101);
+        deltas = await tree.Put(txnid, BTreeCommitState.Committed, 6, 101);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = await tree.Put(txnid, 7, 102);
+        deltas = await tree.Put(txnid, BTreeCommitState.Committed, 7, 102);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = await tree.Put(txnid, 8, 103);
+        deltas = await tree.Put(txnid, BTreeCommitState.Committed, 8, 103);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = await tree.Put(txnid, 9, 104);
+        deltas = await tree.Put(txnid, BTreeCommitState.Committed, 9, 104);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = await tree.Put(txnid, 10, 105);
+        deltas = await tree.Put(txnid, BTreeCommitState.Committed, 10, 105);
         Assert.AreEqual(1, deltas.Count);        
 
-        deltas = await tree.Put(txnid, 11, 105);
+        deltas = await tree.Put(txnid, BTreeCommitState.Committed, 11, 105);
         Assert.AreEqual(1, deltas.Count);        
 
         Assert.AreEqual(tree.Size(), 8);
@@ -179,7 +179,7 @@ internal sealed class TestBTree
 
         BTree<int, int?> tree = new(new());
 
-        await tree.Put(txnid, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
         (bool found, _) = await tree.Remove(5);
         Assert.IsTrue(found);
@@ -195,7 +195,7 @@ internal sealed class TestBTree
 
         BTree<int, int?> tree = new(new());
 
-        await tree.Put(txnid, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
         (bool found, _) = await tree.Remove(10);
         Assert.IsFalse(found);
@@ -211,12 +211,12 @@ internal sealed class TestBTree
 
         BTree<int, int?> tree = new(new());
 
-        await tree.Put(txnid, 4, 100);
-        await tree.Put(txnid, 5, 100);
-        await tree.Put(txnid, 6, 101);
-        await tree.Put(txnid, 7, 102);
-        await tree.Put(txnid, 8, 103);
-        await tree.Put(txnid, 9, 104);
+        await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 6, 101);
+        await tree.Put(txnid, BTreeCommitState.Committed, 7, 102);
+        await tree.Put(txnid, BTreeCommitState.Committed, 8, 103);
+        await tree.Put(txnid, BTreeCommitState.Committed, 9, 104);
 
         (bool found, _) = await tree.Remove(5);
         Assert.IsTrue(found);
@@ -232,12 +232,12 @@ internal sealed class TestBTree
 
         BTree<int, int?> tree = new(new());
 
-        await tree.Put(txnid, 4, 100);
-        await tree.Put(txnid, 5, 100);
-        await tree.Put(txnid, 6, 101);
-        await tree.Put(txnid, 7, 102);
-        await tree.Put(txnid, 8, 103);
-        await tree.Put(txnid, 9, 104);
+        await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 6, 101);
+        await tree.Put(txnid, BTreeCommitState.Committed, 7, 102);
+        await tree.Put(txnid, BTreeCommitState.Committed, 8, 103);
+        await tree.Put(txnid, BTreeCommitState.Committed, 9, 104);
 
         (bool found, _) = await tree.Remove(5);
         Assert.IsTrue(found);
@@ -256,12 +256,12 @@ internal sealed class TestBTree
 
         BTree<int, int?> tree = new(new());
 
-        await tree.Put(txnid, 4, 100);
-        await tree.Put(txnid, 5, 100);
-        await tree.Put(txnid, 6, 101);
-        await tree.Put(txnid, 7, 102);
-        await tree.Put(txnid, 8, 103);
-        await tree.Put(txnid, 9, 104);
+        await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 6, 101);
+        await tree.Put(txnid, BTreeCommitState.Committed, 7, 102);
+        await tree.Put(txnid, BTreeCommitState.Committed, 8, 103);
+        await tree.Put(txnid, BTreeCommitState.Committed, 9, 104);
 
         (bool found, _) = await tree.Remove(5);
         Assert.IsTrue(found);
@@ -296,7 +296,7 @@ internal sealed class TestBTree
         BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 65; i++)
-            await tree.Put(txnid, i, 100 + i);
+            await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
         Assert.AreEqual(65, tree.Size());
         Assert.AreEqual(1, tree.Height());
@@ -319,7 +319,7 @@ internal sealed class TestBTree
         BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 65; i++)
-            await tree.Put(txnid, i, 100 + i);
+            await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
         Assert.AreEqual(65, tree.Size());
         Assert.AreEqual(1, tree.Height());
@@ -345,7 +345,7 @@ internal sealed class TestBTree
         BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 8192; i++)
-            await tree.Put(txnid, i, 100 + i);
+            await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
         Assert.AreEqual(8192, tree.Size());
         Assert.AreEqual(2, tree.Height());
@@ -383,7 +383,7 @@ internal sealed class TestBTree
         BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 8192; i++)
-            await tree.Put(txnid, i, 100 + i);
+            await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
         Assert.AreEqual(8192, tree.Size());
         Assert.AreEqual(2, tree.Height());
@@ -417,7 +417,7 @@ internal sealed class TestBTree
         BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 8100; i++)
-            await tree.Put(txnid, i, 100 + i);
+            await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
         Assert.AreEqual(8100, tree.Size());
         Assert.AreEqual(2, tree.Height());
@@ -451,7 +451,7 @@ internal sealed class TestBTree
         BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 8192; i++)
-            await tree.Put(txnid, i, 100 + i);
+            await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
         Assert.AreEqual(8192, tree.Size());
         Assert.AreEqual(2, tree.Height());

@@ -16,27 +16,27 @@ namespace CamusDB.Core.Util.Trees;
 // external nodes: only use key and value
 public sealed class BTreeEntry<TKey, TValue>
 {
-    private readonly ConcurrentDictionary<HLCTimestamp, TValue?> mvccValues = new(); // snapshot of the values seen by each timestamp    
+    private readonly ConcurrentDictionary<HLCTimestamp, (BTreeCommitState, TValue?)> mvccValues = new(); // snapshot of the values seen by each timestamp    
 
     public TKey Key;
 
     public BTreeNode<TKey, TValue>? Next; // helper field to iterate over array entries
 
-    public ObjectIdValue NextPageOffset; // the address of the next page offset    
+    public ObjectIdValue NextPageOffset; // the address of the next page offset
 
-    public BTreeEntry(TKey key, HLCTimestamp initialTimestamp, TValue? initialValue, BTreeNode<TKey, TValue>? next)
+    public BTreeEntry(TKey key, HLCTimestamp initialTimestamp, BTreeCommitState commitState, TValue? initialValue, BTreeNode<TKey, TValue>? next)
     {
         Key = key;
         Next = next;
 
-        SetValue(initialTimestamp, initialValue);
+        SetValue(initialTimestamp, commitState, initialValue);
     }
 
-    public void SetValue(HLCTimestamp initialTimestamp, TValue? initialValue)
+    public void SetValue(HLCTimestamp initialTimestamp, BTreeCommitState commitState, TValue? initialValue)
     {
         //Console.WriteLine("{0} {1}", initialTimestamp, initialValue);
 
-        if (!mvccValues.TryAdd(initialTimestamp, initialValue))
+        if (!mvccValues.TryAdd(initialTimestamp, (commitState, initialValue)))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Keys must be unique");
     }    
 
@@ -44,18 +44,18 @@ public sealed class BTreeEntry<TKey, TValue>
     {
         //Console.WriteLine("Get={0}", timestamp);
 
-        if (mvccValues.TryGetValue(timestamp, out TValue? snapshotValue))
-            return snapshotValue;
+        if (mvccValues.TryGetValue(timestamp, out (BTreeCommitState commitState, TValue? value) snapshotValue))
+            return snapshotValue.value;
 
         TValue? newestValue = default;
 
-        foreach (KeyValuePair<HLCTimestamp, TValue?> keyValue in mvccValues)
+        foreach (KeyValuePair<HLCTimestamp, (BTreeCommitState commitState, TValue? value)> keyValue in mvccValues)
         {
-            if (keyValue.Key.CompareTo(timestamp) < 0)
-                newestValue = keyValue.Value;
+            if (keyValue.Value.commitState == BTreeCommitState.Committed &&  keyValue.Key.CompareTo(timestamp) < 0)
+                newestValue = keyValue.Value.value;
         }
 
-        mvccValues.TryAdd(timestamp, newestValue);
+        mvccValues.TryAdd(timestamp, (BTreeCommitState.Uncommitted, newestValue));
 
         return newestValue;
     }
@@ -67,9 +67,9 @@ public sealed class BTreeEntry<TKey, TValue>
         if (mvccValues.ContainsKey(timestamp))
             return true;
 
-        foreach (KeyValuePair<HLCTimestamp, TValue?> keyValue in mvccValues)
+        foreach (KeyValuePair<HLCTimestamp, (BTreeCommitState commitState, TValue? value)> keyValue in mvccValues)
         {
-            if (keyValue.Key.CompareTo(timestamp) < 0)
+            if (keyValue.Value.commitState == BTreeCommitState.Committed && keyValue.Key.CompareTo(timestamp) < 0)
                 return true;
         }
 

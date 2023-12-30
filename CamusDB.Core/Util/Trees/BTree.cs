@@ -273,14 +273,14 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     }
 
     /// <summary>
-    /// Inserts new nodes in the tree
-    /// This method doesn't allow duplicate keys
+    /// Inserts new nodes in the tree. In case of dublicate key the value is overriden    
     /// </summary>
     /// <param name="txnid"></param>
     /// <param name="key"></param>
+    /// <param name="commitState"></param>
     /// <param name="value"></param>
     /// <returns></returns>
-    public async Task<HashSet<BTreeNode<TKey, TValue>>> Put(HLCTimestamp txnid, TKey key, TValue? value)
+    public async Task<HashSet<BTreeNode<TKey, TValue>>> Put(HLCTimestamp txnid, BTreeCommitState commitState, TKey key, TValue? value)
     {
         HashSet<BTreeNode<TKey, TValue>> deltas = new();
 
@@ -291,7 +291,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             loaded++;
         }
 
-        BTreeNode<TKey, TValue>? split = await Insert(root, txnid, key, value, height, deltas);
+        BTreeNode<TKey, TValue>? split = await Insert(root, txnid, key, commitState, value, height, deltas);
         size++;
 
         if (split is null)
@@ -306,8 +306,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         deltas.Add(newRoot);
         loaded++;
 
-        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, txnid, default, root);
-        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, txnid, default, split);
+        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, txnid, BTreeCommitState.Committed, default, root);
+        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, txnid, BTreeCommitState.Committed, default, split);
 
         deltas.Add(root);
 
@@ -321,7 +321,15 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return deltas;
     }
 
-    private async Task<BTreeNode<TKey, TValue>?> Insert(BTreeNode<TKey, TValue>? node, HLCTimestamp txnid, TKey key, TValue? val, int ht, HashSet<BTreeNode<TKey, TValue>> deltas)
+    private async Task<BTreeNode<TKey, TValue>?> Insert(
+        BTreeNode<TKey, TValue>? node, 
+        HLCTimestamp txnid, 
+        TKey key,
+        BTreeCommitState commitState,
+        TValue? value,         
+        int ht, 
+        HashSet<BTreeNode<TKey, TValue>> deltas
+    )
     {
         if (node is null)
             throw new ArgumentException("node cannot be null");
@@ -329,7 +337,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         using IDisposable disposable = await node.WriterLockAsync();
 
         int j;
-        BTreeEntry<TKey, TValue> newEntry = new(key, txnid, val, null);
+        BTreeEntry<TKey, TValue> newEntry = new(key, txnid, commitState, value, null);
         BTreeEntry<TKey, TValue>[] children = node.children;
 
         // external node
@@ -339,7 +347,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 if (Eq(key, children[j].Key))
                 {
-                    children[j].SetValue(txnid, val);
+                    children[j].SetValue(txnid, commitState, value);
                     return null;
                 }
 
@@ -366,7 +374,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                         loaded++;
                     }
 
-                    BTreeNode<TKey, TValue>? split = await Insert(entry.Next, txnid, key, val, ht - 1, deltas);
+                    BTreeNode<TKey, TValue>? split = await Insert(entry.Next, txnid, key, commitState, value, ht - 1, deltas);
 
                     if (split == null)
                         return null;
