@@ -8,6 +8,7 @@
 
 using System.Runtime.CompilerServices;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -218,12 +219,12 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         }
     }
 
-    public async Task<Dictionary<int, BTreeMultiDelta<TKey>>> Put(TKey key, ObjectIdValue value)
+    public async Task<Dictionary<int, BTreeMultiDelta<TKey>>> Put(HLCTimestamp txnid, TKey key, ObjectIdValue value)
     {
-        return await Put(key, new BTreeTuple(value, new()));
+        return await Put(txnid, key, new BTreeTuple(value, new()));
     }
 
-    public async Task<Dictionary<int, BTreeMultiDelta<TKey>>> Put(TKey key, BTreeTuple value)
+    public async Task<Dictionary<int, BTreeMultiDelta<TKey>>> Put(HLCTimestamp txnid, TKey key, BTreeTuple value)
     {
         Dictionary<int, BTreeMultiDelta<TKey>> deltas = new();
 
@@ -233,7 +234,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             deltas.Add(root.Id, new BTreeMultiDelta<TKey>(root, null));
         }
 
-        BTreeMultiNode<TKey>? split = await Insert(root, key, value, height, deltas);
+        BTreeMultiNode<TKey>? split = await Insert(txnid, root, key, value, height, deltas);
         denseSize++;
 
         if (split == null)
@@ -259,7 +260,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         return deltas;
     }
 
-    private async Task<BTreeMultiNode<TKey>?> Insert(BTreeMultiNode<TKey>? node, TKey key, BTreeTuple val, int ht, Dictionary<int, BTreeMultiDelta<TKey>> deltas)
+    private async Task<BTreeMultiNode<TKey>?> Insert(HLCTimestamp txnid, BTreeMultiNode<TKey>? node, TKey key, BTreeTuple val, int ht, Dictionary<int, BTreeMultiDelta<TKey>> deltas)
     {
         if (node is null)
             throw new ArgumentException("node cannot be null " + ht + " " + (root is null ? "null" : "no null"));
@@ -283,7 +284,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
                 //if (val is null)
                 //    throw new ArgumentException("val cannot be null");
 
-                innerDeltas = await child.Value!.Put(val.SlotOne, val.SlotTwo);
+                innerDeltas = await child.Value!.Put(txnid, val.SlotOne, val.SlotTwo);
 
                 if (deltas.TryGetValue(node.Id, out multiDelta))
                     multiDelta.InnerDeltas = innerDeltas;
@@ -307,7 +308,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
-                    BTreeMultiNode<TKey>? split = await Insert(children[j++].Next, key, val, ht - 1, deltas);
+                    BTreeMultiNode<TKey>? split = await Insert(txnid, children[j++].Next, key, val, ht - 1, deltas);
 
                     if (split == null)
                         return null;
@@ -335,7 +336,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             size++;
         }
 
-        innerDeltas = await newEntry.Value!.Put(val.SlotOne, val.SlotTwo);
+        innerDeltas = await newEntry.Value!.Put(txnid, val.SlotOne, val.SlotTwo);
 
         if (innerDeltas is null)
             throw new Exception("inner deltas cannot be null");

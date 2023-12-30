@@ -16,9 +16,7 @@ public readonly struct UpdateUniqueIndexTicket
 {
 	public DatabaseDescriptor Database { get; }
 
-	public TableDescriptor Table { get; }
-
-	public uint Sequence { get; }
+	public TableDescriptor Table { get; }	
 
 	public BTreeTuple RowTuple { get; }
 
@@ -32,8 +30,7 @@ public readonly struct UpdateUniqueIndexTicket
 
     public UpdateUniqueIndexTicket(
 		DatabaseDescriptor database,
-		TableDescriptor table,
-		uint sequence,
+		TableDescriptor table,		
 		BTreeTuple rowTuple,
 		InsertTicket ticket,
 		List<TableIndexSchema> indexes,
@@ -42,8 +39,7 @@ public readonly struct UpdateUniqueIndexTicket
     )
 	{
 		Database = database;
-		Table = table;
-		Sequence = sequence;
+		Table = table;		
 		RowTuple = rowTuple;
 		InsertTicket = ticket;
 		Indexes = indexes;

@@ -1,4 +1,11 @@
 ﻿
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using System;
 using System.Threading.Tasks;
 using CamusDB.Core.Util.Time;
@@ -11,21 +18,21 @@ public class TestTime
     [Test]
     public async Task TestParseSimpleSelect()
     {
-        HybridLogicalClock x = new();
+        HybridLogicalClock hlc = new();
 
-        Timestamp t1 = x.SendOrLocalEvent();
-        Timestamp t2 = x.SendOrLocalEvent();
-        Timestamp t3 = x.SendOrLocalEvent();
-        Timestamp t4 = x.SendOrLocalEvent();
+        HLCTimestamp t1 = await hlc.SendOrLocalEvent();
+        HLCTimestamp t2 = await hlc.SendOrLocalEvent();
+        HLCTimestamp t3 = await hlc.SendOrLocalEvent();
+        HLCTimestamp t4 = await hlc.SendOrLocalEvent();
 
         await Task.Delay(1000);
 
-        Timestamp t5 = x.SendOrLocalEvent();
-        Timestamp t6 = x.SendOrLocalEvent();
-        Timestamp t7 = x.SendOrLocalEvent();
-        Timestamp t8 = x.SendOrLocalEvent();
+        HLCTimestamp t5 = await hlc.SendOrLocalEvent();
+        HLCTimestamp t6 = await hlc.SendOrLocalEvent();
+        HLCTimestamp t7 = await hlc.SendOrLocalEvent();
+        HLCTimestamp t8 = await hlc.SendOrLocalEvent();
 
-        Timestamp[] events = new[] { t1, t5, t6, t7, t2, t3, t4, t8 };
+        HLCTimestamp[] events = new[] { t1, t5, t6, t7, t2, t3, t4, t8 };
 
         Array.Sort(events);
 

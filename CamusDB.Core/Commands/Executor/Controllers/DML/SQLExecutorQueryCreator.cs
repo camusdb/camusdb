@@ -15,7 +15,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
 {
-    public QueryTicket CreateQueryTicket(ExecuteSQLTicket ticket)
+    public async Task<QueryTicket> CreateQueryTicket(CommandExecutor executor, ExecuteSQLTicket ticket)
     {
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
 
@@ -25,7 +25,15 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
 
                 string tableName = ast.rightAst!.yytext!;
 
-                return new(ticket.DatabaseName, tableName, null, null, ast.extendedOne, GetQueryClause(ast));
+                return new(
+                    txnId: await executor.NextTxnId(),
+                    databaseName: ticket.DatabaseName,
+                    tableName: tableName,
+                    index: null,
+                    filters: null,
+                    where: ast.extendedOne,
+                    orderBy: GetQueryClause(ast)
+                );
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown query AST stmt: " + ast.nodeType);

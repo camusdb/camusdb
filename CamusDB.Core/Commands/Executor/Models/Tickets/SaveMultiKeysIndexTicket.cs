@@ -6,13 +6,14 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct SaveMultiKeysIndexTicket
-{
+{    
     public DatabaseDescriptor Database { get; }
 
     public TableDescriptor Table { get; }
@@ -25,7 +26,7 @@ public readonly struct SaveMultiKeysIndexTicket
 
     public List<BufferPageOperation> ModifiedPages { get; }
 
-    public SaveMultiKeysIndexTicket(
+    public SaveMultiKeysIndexTicket(        
         DatabaseDescriptor database,
         TableDescriptor table,
         InsertTicket ticket,
@@ -33,7 +34,7 @@ public readonly struct SaveMultiKeysIndexTicket
         List<IDisposable> locks,
         List<BufferPageOperation> modifiedPages
     )
-    {
+    {        
         Database = database;
         Table = table;
         Ticket = ticket;

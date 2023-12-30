@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.BufferPool.Models;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -28,7 +29,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
     public async Task Save(SaveMultiKeyIndexTicket ticket)
     {
-        await SaveInternal(ticket.Tablespace, ticket.Index, ticket.MultiKeyValue, ticket.RowTuple, ticket.Locks, ticket.ModifiedPages);
+        await SaveInternal(ticket.Tablespace, ticket.Index, ticket.TxnId, ticket.MultiKeyValue, ticket.RowTuple, ticket.Locks, ticket.ModifiedPages);
     }
 
     public async Task Remove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
@@ -36,11 +37,11 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         await RemoveInternal(tablespace, index, key);
     }
 
-    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key, BTreeTuple value, List<IDisposable> locks, List<BufferPageOperation> modifiedPages)
+    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, HLCTimestamp txnid, ColumnValue key, BTreeTuple value, List<IDisposable> locks, List<BufferPageOperation> modifiedPages)
     {
-        Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas = await index.Put(key, value);
+        Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas = await index.Put(txnid, key, value);
 
-        await PersistSave(tablespace, index, value, locks, modifiedPages, deltas);
+        await PersistSave(tablespace, index, txnid, value, locks, modifiedPages, deltas);
     }
 
     private static async Task RemoveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
@@ -54,6 +55,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
     private async Task PersistSave(
         BufferPoolHandler tablespace,
         BTreeMulti<ColumnValue> index,
+        HLCTimestamp txnid,
         BTreeTuple value,
         List<IDisposable> locks,
         List<BufferPageOperation> modifiedPages,
@@ -136,6 +138,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
                     SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
                         tablespace: tablespace,
                         index: subTree,
+                        txnId: txnid,
                         key: value.SlotOne,
                         value.SlotTwo,
                         locks: locks,

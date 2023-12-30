@@ -7,11 +7,14 @@
  */
 
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct UpdateTicket
 {
+    public HLCTimestamp TxnId { get; }
+
     public string DatabaseName { get; }
 
     public string TableName { get; }
@@ -23,15 +26,17 @@ public readonly struct UpdateTicket
     public List<QueryFilter>? Filters { get; }
 
     public UpdateTicket(
-        string database,
-        string name,
+        HLCTimestamp txnId,
+        string databaseName,
+        string tableName,
         Dictionary<string, ColumnValue> values,
         NodeAst? where,
         List<QueryFilter>? filters
     )
     {
-        DatabaseName = database;
-        TableName = name;
+        TxnId = txnId;
+        DatabaseName = databaseName;
+        TableName = tableName;
         Values = values;
         Where = where;
         Filters = filters;

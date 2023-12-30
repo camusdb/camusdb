@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Core.CommandsExecutor;
 
@@ -22,6 +23,8 @@ namespace CamusDB.Core.CommandsExecutor;
 /// </summary>
 public sealed class CommandExecutor : IAsyncDisposable
 {
+    private readonly HybridLogicalClock hybridLogicalClock;
+
     private readonly DatabaseOpener databaseOpener;
 
     private readonly DatabaseCreator databaseCreator;
@@ -56,8 +59,15 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly CommandValidator validator;
 
-    public CommandExecutor(CommandValidator validator, CatalogsManager catalogs)
+    /// <summary>
+    /// Initializes the command executor
+    /// </summary>
+    /// <param name="hybridLogicalClock"></param>
+    /// <param name="validator"></param>
+    /// <param name="catalogs"></param>
+    public CommandExecutor(HybridLogicalClock hybridLogicalClock, CommandValidator validator, CatalogsManager catalogs)
     {
+        this.hybridLogicalClock = hybridLogicalClock;
         this.validator = validator;
 
         databaseDescriptors = new();
@@ -321,7 +331,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             case NodeType.Insert:
                 {
-                    InsertTicket updateTicket = sqlExecutor.CreateInsertTicket(ticket, ast);
+                    InsertTicket updateTicket = await sqlExecutor.CreateInsertTicket(this, ticket, ast);
 
                     TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
 
@@ -330,7 +340,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.Update:
                 {
-                    UpdateTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);
+                    UpdateTicket updateTicket = await sqlExecutor.CreateUpdateTicket(this, ticket, ast);
 
                     TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
 
@@ -339,7 +349,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.Delete:
                 {
-                    DeleteTicket deleteTicket = sqlExecutor.CreateDeleteTicket(ticket, ast);
+                    DeleteTicket deleteTicket = await sqlExecutor.CreateDeleteTicket(this, ticket, ast);
 
                     TableDescriptor table = await tableOpener.Open(database, deleteTicket.TableName);
 
@@ -363,14 +373,23 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
-        QueryTicket queryTicket = sqlExecutor.CreateQueryTicket(ticket);
+        QueryTicket queryTicket = await sqlExecutor.CreateQueryTicket(this, ticket);
 
         TableDescriptor table = await tableOpener.Open(database, queryTicket.TableName);
 
         return await queryExecutor.Query(database, table, queryTicket, noLocking: false);
     }
 
-    #endregion    
+    #endregion
+
+    /// <summary>
+    /// Generates a unique global TransactionId using the HLC
+    /// </summary>
+    /// <returns></returns>
+    public async Task<HLCTimestamp> NextTxnId()
+    {
+        return await hybridLogicalClock.SendOrLocalEvent();
+    }
 
     public async ValueTask DisposeAsync()
     {

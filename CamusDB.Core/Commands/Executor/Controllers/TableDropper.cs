@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Serializer;
@@ -16,18 +15,25 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class TableDropper
 {
-    private CatalogsManager Catalogs { get; set; }
+    private readonly CatalogsManager catalogs;
 
     public TableDropper(CatalogsManager catalogsManager)
     {
-        Catalogs = catalogsManager;
+        catalogs = catalogsManager;
     }
 
-    public async Task<bool> Drop(QueryExecutor queryExecutor, RowDeleter rowDeleter, DatabaseDescriptor database, TableDescriptor table, DropTableTicket ticket)
+    public async Task<bool> Drop(
+        QueryExecutor queryExecutor,
+        RowDeleter rowDeleter,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        DropTableTicket ticket
+    )
     {        
         DeleteTicket deleteTicket = new(
-            database: ticket.DatabaseName,
-            name: ticket.TableName,
+            txnId: ticket.TxnId,
+            databaseName: ticket.DatabaseName,
+            tableName: ticket.TableName,
             where: null,
             filters: null
         );

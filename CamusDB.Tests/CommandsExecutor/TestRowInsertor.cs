@@ -20,6 +20,7 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -35,9 +36,10 @@ internal sealed class TestRowInsertor
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
+        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
+        CommandExecutor executor = new(hlc, validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -54,8 +56,8 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
-            database: dbname,
-            name: "robots",
+            databaseName: dbname,
+            tableName: "robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -77,8 +79,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Integer64, "1") },
@@ -99,8 +102,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Integer64, "1") },
@@ -121,8 +125,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Integer64, "1") },
@@ -144,7 +149,7 @@ internal sealed class TestRowInsertor
 
         InsertTicket ticket = new(
             database: "another_factory",
-            name: "robots",
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -165,8 +170,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "unknown_table",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "unknown_table",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -187,8 +193,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -209,8 +216,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -231,8 +239,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -252,8 +261,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -266,8 +276,9 @@ internal sealed class TestRowInsertor
         await executor.Insert(ticket);
 
         ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
@@ -287,8 +298,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -299,8 +311,9 @@ internal sealed class TestRowInsertor
         );
 
         InsertTicket ticket2 = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
@@ -324,8 +337,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket insertTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -338,8 +352,9 @@ internal sealed class TestRowInsertor
         await executor.Insert(insertTicket);
 
         QueryByIdTicket queryTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: "507f1f77bcf86cd799439011"
         );
 
@@ -364,8 +379,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket insertTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -378,8 +394,9 @@ internal sealed class TestRowInsertor
         await executor.Insert(insertTicket);
 
         QueryByIdTicket queryTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: "507f1f77bcf86cd799439011"
         );
 
@@ -404,8 +421,9 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -416,8 +434,9 @@ internal sealed class TestRowInsertor
         );
 
         InsertTicket ticket2 = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
@@ -434,8 +453,9 @@ internal sealed class TestRowInsertor
         });
 
         QueryByIdTicket queryTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: "507f191e810c19729de860ea"
         );
 
@@ -456,8 +476,9 @@ internal sealed class TestRowInsertor
         Assert.AreEqual(row["enabled"].Value, "true");
 
         QueryByIdTicket queryTicket2 = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: "507f1f77bcf86cd799439011"
         );
 
@@ -493,8 +514,9 @@ internal sealed class TestRowInsertor
             objectIds.Add(objectId);
 
             InsertTicket insertTicket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
@@ -512,8 +534,9 @@ internal sealed class TestRowInsertor
         foreach (string objectId in objectIds)
         {
             QueryByIdTicket queryTicket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 id: objectId
             );
 
@@ -543,8 +566,9 @@ internal sealed class TestRowInsertor
         for (int i = 0; i < 50; i++)
         {
             InsertTicket insertTicket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
                     { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
@@ -558,8 +582,9 @@ internal sealed class TestRowInsertor
         }
 
         QueryTicket queryTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             index: null,
             where: null,
             filters: null,

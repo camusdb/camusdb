@@ -13,6 +13,7 @@ using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.BufferPool.Models;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -27,7 +28,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
     public async Task Save(SaveUniqueOffsetIndexTicket ticket)
     {        
-        await SaveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.Value, ticket.ModifiedPages, ticket.Deltas);
+        await SaveInternal(ticket.Tablespace, ticket.Index, ticket.TxnId, ticket.Key, ticket.Value, ticket.ModifiedPages, ticket.Deltas);
     }
 
     public async Task Remove(RemoveUniqueOffsetIndexTicket ticket)
@@ -38,6 +39,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     private static async Task SaveInternal(
         BufferPoolHandler tablespace,
         BTree<ObjectIdValue, ObjectIdValue> index,
+        HLCTimestamp txnid,
         ObjectIdValue key,
         ObjectIdValue value,
         List<BufferPageOperation> modifiedPages,
@@ -46,7 +48,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     {
         if (deltas is null)
         {
-            deltas = await index.Put(key, value);
+            deltas = await index.Put(txnid, key, value);
 
             Persist(tablespace, index, modifiedPages, deltas);
         }
@@ -119,7 +121,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
                 if (entry is not null)
                 {
                     Serializator.WriteObjectId(nodeBuffer, entry.Key, ref pointer);
-                    Serializator.WriteObjectId(nodeBuffer, entry.Value, ref pointer);
+                    //Serializator.WriteObjectId(nodeBuffer, entry.LastValue, ref pointer); @todo LastValue
                     Serializator.WriteObjectId(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : new(), ref pointer);
                     //Console.WriteLine(pointer);
                 }

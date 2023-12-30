@@ -42,9 +42,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     private static async Task SaveInternal(SaveUniqueIndexTicket ticket)
     {
-        HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas = await ticket.Index.Put(ticket.Key, ticket.Value);
+        HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas = await ticket.Index.Put(ticket.TxnId, ticket.Key, ticket.Value);
 
-        Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, ticket.ModifiedPages, deltas);
+        Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
@@ -52,13 +52,11 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         (bool found, HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas) = await ticket.Index.Remove(ticket.Key);
 
         if (found)
-            Persist(ticket.Tablespace, ticket.Sequence, ticket.SubSequence, ticket.Index, ticket.ModifiedPages, deltas);
+            Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
     private static void Persist(
-        BufferPoolHandler tablespace,
-        uint sequence,
-        uint subSequence,
+        BufferPoolHandler tablespace,        
         BTree<ColumnValue, BTreeTuple?> index,
         List<BufferPageOperation> modifiedPages,
         HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas
@@ -114,7 +112,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 if (entry is not null)
                 {
                     SerializeKey(nodeBuffer, entry.Key, ref pointer);
-                    SerializeTuple(nodeBuffer, entry.Value, ref pointer);
+                    //SerializeTuple(nodeBuffer, entry.LastValue, ref pointer); @todo LastValue
                     Serializator.WriteObjectId(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : new(), ref pointer);
                 }
                 else

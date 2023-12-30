@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -32,9 +33,10 @@ public class TestDatabaseOpener
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
+        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
+        CommandExecutor executor = new(hlc, validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,

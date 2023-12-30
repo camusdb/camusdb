@@ -14,6 +14,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Core.Serializer;
 
@@ -307,6 +308,11 @@ public sealed class Serializator
         return bytes;
     }
 
+    public static HLCTimestamp ReadHLCTimestamp(byte[] data, ref int pointer)
+    {
+        return new HLCTimestamp();
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool ReadBool(byte[] buffer, ref int pointer)
     {
@@ -317,5 +323,5 @@ public sealed class Serializator
     public static bool ReadBoolAhead(byte[] buffer, ref int pointer)
     {
         return (buffer[pointer++] & 0xf) == 1;
-    }
+    }    
 }

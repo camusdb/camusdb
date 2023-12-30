@@ -37,8 +37,9 @@ public sealed class DeleteController : CommandsController
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DeleteById request is not valid");
 
             DeleteByIdTicket ticket = new(
-                database: request.DatabaseName ?? "",
-                name: request.TableName ?? "",
+                txnId: await executor.NextTxnId(),
+                databaseName: request.DatabaseName ?? "",
+                tableName: request.TableName ?? "",
                 id: request.Id ?? ""
             );
 
@@ -72,8 +73,8 @@ public sealed class DeleteController : CommandsController
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Delete request is not valid");
 
             DeleteTicket ticket = new(
-                database: request.DatabaseName ?? "",
-                name: request.TableName ?? "",
+                databaseName: request.DatabaseName ?? "",
+                tableName: request.TableName ?? "",
                 where: null,
                 filters: request.Filters ?? new()
             );

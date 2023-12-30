@@ -11,6 +11,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
@@ -22,6 +23,11 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
     public IndexUniqueNodeReader(BufferPoolHandler bufferpool)
     {
         this.bufferpool = bufferpool;
+    }
+
+    private static HLCTimestamp UnserializeTimestamp(byte[] nodeBuffer, ref int pointer)
+    {
+        return new();
     }
 
     private static ColumnValue UnserializeKey(byte[] nodeBuffer, ref int pointer)
@@ -79,11 +85,12 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
         //Console.WriteLine("KeyCount={0} PageOffset={1}", node.KeyCount, node.PageOffset);
 
         for (int i = 0; i < node.KeyCount; i++)
-        {
+        {            
             ColumnValue key = UnserializeKey(data, ref pointer);
+            HLCTimestamp timestamp = UnserializeTimestamp(data, ref pointer);
             BTreeTuple? tuple = UnserializeTuple(data, ref pointer);
 
-            BTreeEntry<ColumnValue, BTreeTuple?> entry = new(key, tuple, null)
+            BTreeEntry<ColumnValue, BTreeTuple?> entry = new(key, timestamp, tuple, null)
             {
                 NextPageOffset = Serializator.ReadObjectId(data, ref pointer)
             };

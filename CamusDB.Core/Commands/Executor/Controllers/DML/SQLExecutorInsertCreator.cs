@@ -15,7 +15,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
 {
-    internal InsertTicket CreateInsertTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    internal async Task<InsertTicket> CreateInsertTicket(CommandExecutor commandExecutor, ExecuteSQLTicket ticket, NodeAst ast)
     {
         string tableName = ast.leftAst!.yytext!;
 
@@ -36,7 +36,12 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         for (int i = 0; i < fieldList.Count; i++)
             values.Add(fieldList[i], valuesList[i]);
 
-        return new(ticket.DatabaseName, tableName, values);
+        return new InsertTicket(
+            txnId: await commandExecutor.NextTxnId(),
+            databaseName: ticket.DatabaseName,
+            tableName: tableName,
+            values: values
+        );
     }
 
     static List<ColumnValue> GetInsertItemList(NodeAst valuesList)

@@ -20,6 +20,7 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -31,13 +32,14 @@ internal sealed class TestRowInsertorCloseDb
         //SetupDb.Remove("factory");
     }
 
-    private async Task<(string, CommandExecutor)> SetupDatabase()
+    private static async Task<(string, CommandExecutor)> SetupDatabase()
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
+        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
+        CommandExecutor executor = new(hlc, validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -49,13 +51,13 @@ internal sealed class TestRowInsertorCloseDb
         return (dbname, executor);
     }
 
-    private async Task<(string, CommandExecutor)> SetupMultiIndexTable()
+    private static async Task<(string, CommandExecutor)> SetupMultiIndexTable()
     {
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
-            database: dbname,
-            name: "user_robots",
+            databaseName: dbname,
+            tableName: "user_robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -76,8 +78,9 @@ internal sealed class TestRowInsertorCloseDb
         (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "user_robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -96,8 +99,9 @@ internal sealed class TestRowInsertorCloseDb
         (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "user_robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
@@ -107,8 +111,9 @@ internal sealed class TestRowInsertorCloseDb
         );
 
         InsertTicket ticket2 = new(
-            database: dbname,
-            name: "user_robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
@@ -127,8 +132,9 @@ internal sealed class TestRowInsertorCloseDb
         await executor.CloseDatabase(closeTicket);
 
         QueryByIdTicket queryTicket = new(
-            database: dbname,
-            name: "user_robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "user_robots",
             id: "507f191e810c19729de860ea"
         );
 
@@ -150,8 +156,9 @@ internal sealed class TestRowInsertorCloseDb
         Assert.AreEqual(row[3].Value, "true");*/
 
         QueryByIdTicket queryTicket2 = new(
-            database: dbname,
-            name: "user_robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "user_robots",
             id: "507f1f77bcf86cd799439011"
         );
 
@@ -191,8 +198,9 @@ internal sealed class TestRowInsertorCloseDb
             objectIds.Add(objectId);
 
             InsertTicket insertTicket = new(
-                database: dbname,
-                name: "user_robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "user_robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },

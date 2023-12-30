@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-
 using NUnit.Framework;
 using CamusDB.Core.SQLParser;
 

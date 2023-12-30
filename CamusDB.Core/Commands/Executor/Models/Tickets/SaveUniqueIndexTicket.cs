@@ -8,19 +8,18 @@
 
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.BufferPool.Models;
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct SaveUniqueIndexTicket
 {
-    public BufferPoolHandler Tablespace { get; }
-
-    public uint Sequence { get; }
-
-    public uint SubSequence { get; }
+    public BufferPoolHandler Tablespace { get; }    
 
     public BTree<ColumnValue, BTreeTuple?> Index { get; }
+
+    public HLCTimestamp TxnId { get; }
 
     public ColumnValue Key { get; }
 
@@ -29,19 +28,17 @@ public readonly struct SaveUniqueIndexTicket
     public List<BufferPageOperation> ModifiedPages { get; }
 
     public SaveUniqueIndexTicket(
-        BufferPoolHandler tablespace,
-        uint sequence,
-        uint subSequence,
+        BufferPoolHandler tablespace,        
         BTree<ColumnValue, BTreeTuple?> index,
+        HLCTimestamp txnId,
         ColumnValue key,
         BTreeTuple value,
         List<BufferPageOperation> modifiedPages
     )
     {
-        Tablespace = tablespace;
-        Sequence = sequence;
-        SubSequence = subSequence;
+        Tablespace = tablespace;        
         Index = index;
+        TxnId = txnId;
         Key = key;
         Value = value;
         ModifiedPages = modifiedPages;

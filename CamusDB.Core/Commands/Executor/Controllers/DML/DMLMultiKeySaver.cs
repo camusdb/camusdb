@@ -18,11 +18,11 @@ internal sealed class DMLMultiKeySaver : DMLKeyBase
 {
     private readonly IndexSaver indexSaver = new();    
 
-    public async Task UpdateMultiKeys(SaveMultiKeysIndexTicket saveMultiKeysIndex)
+    public async Task UpdateMultiKeys(SaveMultiKeysIndexTicket saveMultiKeysIndexTicket)
     {
-        BufferPoolHandler tablespace = saveMultiKeysIndex.Database.TableSpace;
+        BufferPoolHandler tablespace = saveMultiKeysIndexTicket.Database.TableSpace;
 
-        foreach (KeyValuePair<string, TableIndexSchema> index in saveMultiKeysIndex.Table.Indexes)
+        foreach (KeyValuePair<string, TableIndexSchema> index in saveMultiKeysIndexTicket.Table.Indexes)
         {
             if (index.Value.Type != IndexType.Multi)
                 continue;
@@ -35,17 +35,18 @@ internal sealed class DMLMultiKeySaver : DMLKeyBase
 
             BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
 
-            ColumnValue? multiKeyValue = GetColumnValue(saveMultiKeysIndex.Table, saveMultiKeysIndex.Ticket, index.Value.Column);
+            ColumnValue? multiKeyValue = GetColumnValue(saveMultiKeysIndexTicket.Table, saveMultiKeysIndexTicket.Ticket, index.Value.Column);
             if (multiKeyValue is null)
                 continue;
 
             SaveMultiKeyIndexTicket multiKeyTicket = new(
-                tablespace,
-                multiIndex,
-                multiKeyValue,
-                saveMultiKeysIndex.RowTuple,
-                locks: saveMultiKeysIndex.Locks,
-                modifiedPages: saveMultiKeysIndex.ModifiedPages
+                tablespace: tablespace,
+                multiIndex: multiIndex,
+                txnId: saveMultiKeysIndexTicket.Ticket.TxnId,
+                multiKeyValue: multiKeyValue,
+                rowTuple: saveMultiKeysIndexTicket.RowTuple,
+                locks: saveMultiKeysIndexTicket.Locks,
+                modifiedPages: saveMultiKeysIndexTicket.ModifiedPages
             );
 
             await indexSaver.Save(multiKeyTicket);

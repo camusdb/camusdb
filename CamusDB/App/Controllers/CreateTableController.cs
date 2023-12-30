@@ -98,8 +98,8 @@ public sealed class CreateTableController : CommandsController
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "CreateTable request is not valid");
 
             CreateTableTicket ticket = new(
-                database: request.DatabaseName ?? "",
-                name: request.TableName ?? "",
+                databaseName: request.DatabaseName ?? "",
+                tableName: request.TableName ?? "",
                 columns: GetColumnInfos(request.Columns)
             );
 

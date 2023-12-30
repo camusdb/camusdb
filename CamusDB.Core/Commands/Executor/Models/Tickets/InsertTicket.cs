@@ -6,10 +6,14 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Util.Time;
+
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct InsertTicket
 {
+    public HLCTimestamp TxnId { get; }
+
     public string DatabaseName { get; }
     
     public string TableName { get; }
@@ -17,12 +21,14 @@ public readonly struct InsertTicket
     public Dictionary<string, ColumnValue> Values { get; }    
 
     public InsertTicket(
-        string database,
-        string name,
+        HLCTimestamp txnId,
+        string databaseName,
+        string tableName,
         Dictionary<string, ColumnValue> values)
     {
-        DatabaseName = database;
-        TableName = name;
+        TxnId = txnId;
+        DatabaseName = databaseName;
+        TableName = tableName;
         Values = values;
     }
 }

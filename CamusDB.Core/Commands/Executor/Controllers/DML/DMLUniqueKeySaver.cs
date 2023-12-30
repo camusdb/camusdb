@@ -37,7 +37,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
                 "The primary key of the table \"" + table.Name + "\" is not present in the list of values."
             );
 
-        BTreeTuple? rowTuple = await uniqueIndex.Get(0, uniqueValue);
+        BTreeTuple? rowTuple = await uniqueIndex.Get(ticket.TxnId, uniqueValue);
 
         if (rowTuple is not null)
             throw new CamusDBException(
@@ -94,9 +94,8 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
 
             SaveUniqueIndexTicket saveUniqueIndexTicket = new(
                 tablespace: tablespace,
-                sequence: ticket.Sequence,
-                subSequence: 0,
                 index: uniqueIndex,
+                txnId: ticket.InsertTicket.TxnId,
                 key: uniqueKeyValue,
                 value: ticket.RowTuple,
                 modifiedPages: ticket.ModifiedPages

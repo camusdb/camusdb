@@ -32,29 +32,35 @@ internal sealed class SqlExecutor
 
     }
 
-    public QueryTicket CreateQueryTicket(ExecuteSQLTicket ticket)
+    public async Task<QueryTicket> CreateQueryTicket(CommandExecutor executor, ExecuteSQLTicket ticket)
     {
-        return sqlExecutorQueryCreator.CreateQueryTicket(ticket);
+        return await sqlExecutorQueryCreator.CreateQueryTicket(executor, ticket);
     }
 
-    internal InsertTicket CreateInsertTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    internal async Task<InsertTicket> CreateInsertTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return sqlExecutorInsertCreator.CreateInsertTicket(ticket, ast);
+        return await sqlExecutorInsertCreator.CreateInsertTicket(executor, ticket, ast);
     }
 
-    internal UpdateTicket CreateUpdateTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    internal async Task<UpdateTicket> CreateUpdateTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return sqlExecutorUpdateCreator.CreateUpdateTicket(ticket, ast);
+        return await sqlExecutorUpdateCreator.CreateUpdateTicket(executor, ticket, ast);
     }
 
-    internal DeleteTicket CreateDeleteTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    internal async Task<DeleteTicket> CreateDeleteTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
     {
         string tableName = ast.leftAst!.yytext!;
 
         if (ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing delete conditions");
 
-        return new(ticket.DatabaseName, tableName, ast.rightAst, null);
+        return new(
+            txnId: await executor.NextTxnId(),
+            databaseName: ticket.DatabaseName,
+            tableName: tableName,
+            where: ast.rightAst,
+            filters: null
+        );
     }
 
     internal CreateTableTicket CreateCreateTableTicket(ExecuteSQLTicket ticket, NodeAst ast)

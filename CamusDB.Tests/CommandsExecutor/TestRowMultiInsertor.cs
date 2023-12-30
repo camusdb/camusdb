@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -27,9 +28,10 @@ internal sealed class TestRowMultiInsertor
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
+        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
+        CommandExecutor executor = new(hlc, validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -46,8 +48,8 @@ internal sealed class TestRowMultiInsertor
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
-            database: dbname,
-            name: "user_robots",
+            databaseName: dbname,
+            tableName: "user_robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -69,8 +71,9 @@ internal sealed class TestRowMultiInsertor
         (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
 
         InsertTicket ticket = new(
-            database: dbname,
-            name: "user_robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "user_robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "id", new ColumnValue(ColumnType.Id, "5bc30818bc6a4e7b6c441308") },
@@ -92,8 +95,9 @@ internal sealed class TestRowMultiInsertor
         for (int i = 0; i < 10; i++)
         {
             InsertTicket insertTicket = new(
-                database: dbname,
-                name: "user_robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "user_robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
                     { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
@@ -106,8 +110,9 @@ internal sealed class TestRowMultiInsertor
         }
 
         QueryTicket queryTicket = new(
-            database: dbname,
-            name: "user_robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "user_robots",
             index: "robots_id",
             where: null,
             filters: null,
@@ -142,8 +147,9 @@ internal sealed class TestRowMultiInsertor
         for (int i = 0; i < 10; i++)
         {
             InsertTicket insertTicket = new(
-                database: dbname,
-                name: "user_robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "user_robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
                     { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
@@ -156,8 +162,9 @@ internal sealed class TestRowMultiInsertor
         }
 
         QueryTicket queryTicket = new(
-            database: dbname,
-            name: "user_robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "user_robots",
             index: "robots_id",
             where: null,
             filters: null,

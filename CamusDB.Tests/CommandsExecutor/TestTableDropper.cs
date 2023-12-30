@@ -11,6 +11,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using System.Collections.Generic;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -26,9 +27,10 @@ internal sealed class TestTableDropper
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
+        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
+        CommandExecutor executor = new(hlc, validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -45,8 +47,8 @@ internal sealed class TestTableDropper
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket createTicket = new(
-            database: dbname,
-            name: "robots",
+            databaseName: dbname,
+            tableName: "robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -65,8 +67,9 @@ internal sealed class TestTableDropper
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
@@ -91,8 +94,9 @@ internal sealed class TestTableDropper
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupBasicTable();
 
         DropTableTicket dropTableTicket = new(
-            database: dbname,
-            name: "robots"
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots"
         );
 
         await executor.DropTable(dropTableTicket);

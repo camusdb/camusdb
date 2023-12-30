@@ -20,6 +20,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -35,9 +36,10 @@ public class TestRowUpdaterUnique
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
+        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
+        CommandExecutor executor = new(hlc, validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -54,8 +56,8 @@ public class TestRowUpdaterUnique
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
-            database: dbname,
-            name: "robots",
+            databaseName: dbname,
+            tableName: "robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -74,8 +76,9 @@ public class TestRowUpdaterUnique
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
@@ -100,8 +103,9 @@ public class TestRowUpdaterUnique
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         UpdateTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }

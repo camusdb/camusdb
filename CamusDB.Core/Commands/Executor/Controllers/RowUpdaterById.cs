@@ -168,7 +168,7 @@ public sealed class RowUpdaterById
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        state.RowTuple = await index.UniqueRows.Get(0, columnId);
+        state.RowTuple = await index.UniqueRows.Get(ticket.TxnId, columnId);
 
         if (state.RowTuple is null)
         {

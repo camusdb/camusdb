@@ -83,8 +83,9 @@ public sealed class TableColumnAdder
         AlterColumnTicket ticket = state.Ticket;
 
         QueryTicket queryTicket = new(
-            database: ticket.DatabaseName,
-            name: ticket.TableName,
+            txnId: ticket.TxnId,
+            databaseName: ticket.DatabaseName,
+            tableName: ticket.TableName,
             index: null,
             filters: null,
             where: null,

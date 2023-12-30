@@ -16,10 +16,10 @@ public readonly struct CreateTableTicket
 
     public ColumnInfo[] Columns { get; }
 
-    public CreateTableTicket(string database, string name, ColumnInfo[] columns)
+    public CreateTableTicket(string databaseName, string tableName, ColumnInfo[] columns)
     {
-        DatabaseName = database;
-        TableName = name;
+        DatabaseName = databaseName;
+        TableName = tableName;
         Columns = columns;
     }
 }

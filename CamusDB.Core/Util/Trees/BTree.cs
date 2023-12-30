@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Time;
 using System.Runtime.CompilerServices;
 
 namespace CamusDB.Core.Util.Trees;
@@ -81,10 +82,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <summary>
     /// Returns the value associated with the given key.
     /// </summary>
+    /// <param name="txnid"></param>
     /// <param name="key"></param>
     /// <returns>the value associated with the given key if the key is in the symbol table
     /// and {@code null} if the key is not in the symbol table</returns>
-    public async Task<TValue?> Get(ulong txnid, TKey key)
+    public async Task<TValue?> Get(HLCTimestamp txnid, TKey key)
     {
         if (root is null)
             return default;
@@ -92,10 +94,12 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return await Search(root, txnid, key, height);
     }
 
-    private async ValueTask<TValue?> Search(BTreeNode<TKey, TValue>? node, ulong txnid, TKey key, int ht)
+    private async ValueTask<TValue?> Search(BTreeNode<TKey, TValue>? node, HLCTimestamp txnid, TKey key, int ht)
     {
         if (node is null)
             return default;
+
+        using IDisposable disposable = await node.ReaderLockAsync();
 
         BTreeEntry<TKey, TValue>[] children = node.children;
 
@@ -104,10 +108,12 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             for (int j = 0; j < node.KeyCount; j++)
             {
-                // verify if children can be seen by MVCC
+                // verify if key can be seen by MVCC
+                if (!children[j].CanBeSeenBy(txnid))
+                    continue;
 
                 if (Eq(key, children[j].Key))
-                    return children[j].Value;
+                    return children[j].GetValue(txnid);
             }
         }
 
@@ -135,7 +141,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         }
 
         return default;
-    }
+    }    
 
     /// <summary>
     /// Allows to traverse all entries in the tree
@@ -151,6 +157,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     {
         if (node is null)
             yield break;
+
+        using IDisposable disposable = await node.ReaderLockAsync();
 
         BTreeEntry<TKey, TValue>[] children = node.children;
 
@@ -203,6 +211,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (ht == 0)
             yield break;
 
+        using IDisposable disposable = await node.ReaderLockAsync();
+
         for (int j = 0; j < node.KeyCount; j++)
         {
             BTreeEntry<TKey, TValue> entry = node.children[j];
@@ -236,6 +246,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (node is null)
             yield break;
 
+        using IDisposable disposable = await node.ReaderLockAsync();
+
         for (int j = node.KeyCount; j >= 0; j--)
         {
             BTreeEntry<TKey, TValue> entry = node.children[j];
@@ -259,10 +271,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <summary>
     /// Inserts new nodes in the tree
     /// </summary>
+    /// <param name="txnid"></param>
     /// <param name="key"></param>
     /// <param name="value"></param>
     /// <returns></returns>
-    public async Task<HashSet<BTreeNode<TKey, TValue>>> Put(TKey key, TValue? value)
+    public async Task<HashSet<BTreeNode<TKey, TValue>>> Put(HLCTimestamp txnid, TKey key, TValue? value)
     {
         HashSet<BTreeNode<TKey, TValue>> deltas = new();
 
@@ -273,7 +286,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             loaded++;
         }
 
-        BTreeNode<TKey, TValue>? split = await Insert(root, key, value, height, deltas);
+        BTreeNode<TKey, TValue>? split = await Insert(root, txnid, key, value, height, deltas);
         size++;
 
         if (split is null)
@@ -281,13 +294,15 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         //Console.WriteLine("need to split root");
 
+        using IDisposable disposable = await root.WriterLockAsync();
+
         // need to split root
         BTreeNode<TKey, TValue> newRoot = new(2);
         deltas.Add(newRoot);
         loaded++;
 
-        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, default, root);
-        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, default, split);
+        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, txnid, default, root);
+        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, txnid, default, split);
 
         deltas.Add(root);
 
@@ -301,13 +316,15 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         return deltas;
     }
 
-    private async Task<BTreeNode<TKey, TValue>?> Insert(BTreeNode<TKey, TValue>? node, TKey key, TValue? val, int ht, HashSet<BTreeNode<TKey, TValue>> deltas)
+    private async Task<BTreeNode<TKey, TValue>?> Insert(BTreeNode<TKey, TValue>? node, HLCTimestamp txnid, TKey key, TValue? val, int ht, HashSet<BTreeNode<TKey, TValue>> deltas)
     {
         if (node is null)
             throw new ArgumentException("node cannot be null");
 
+        using IDisposable disposable = await node.WriterLockAsync();
+
         int j;
-        BTreeEntry<TKey, TValue> newEntry = new(key, val, null);
+        BTreeEntry<TKey, TValue> newEntry = new(key, txnid, val, null);
         BTreeEntry<TKey, TValue>[] children = node.children;
 
         // external node
@@ -341,7 +358,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                         loaded++;
                     }
 
-                    BTreeNode<TKey, TValue>? split = await Insert(entry.Next, key, val, ht - 1, deltas);
+                    BTreeNode<TKey, TValue>? split = await Insert(entry.Next, txnid, key, val, ht - 1, deltas);
 
                     if (split == null)
                         return null;
@@ -413,6 +430,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     {
         if (node is null)
             return false;
+
+        using IDisposable disposable = await node.WriterLockAsync();
 
         BTreeEntry<TKey, TValue>[] children = node.children;
 

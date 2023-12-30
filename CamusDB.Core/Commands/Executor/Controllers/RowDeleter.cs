@@ -84,8 +84,9 @@ internal sealed class RowDeleter
         DeleteTicket ticket = state.Ticket;
 
         QueryTicket queryTicket = new(
-            database: ticket.DatabaseName,
-            name: ticket.TableName,
+            txnId: ticket.TxnId,
+            databaseName: ticket.DatabaseName,
+            tableName: ticket.TableName,
             index: null,
             filters: ticket.Filters,
             where: ticket.Where,

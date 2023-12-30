@@ -20,6 +20,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -35,9 +36,10 @@ public class TestRowUpdater
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
+        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
+        CommandExecutor executor = new(hlc, validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -54,8 +56,8 @@ public class TestRowUpdater
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
-            database: dbname,
-            name: "robots",
+            databaseName: dbname,
+            tableName: "robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -74,8 +76,9 @@ public class TestRowUpdater
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
@@ -122,8 +125,9 @@ public class TestRowUpdater
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
         UpdateByIdTicket ticket = new(
-            database: dbname,
-            name: "unknown_table",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "unknown_table",
             id: objectsId[0],
             values: new Dictionary<string, ColumnValue>()
             {
@@ -142,8 +146,9 @@ public class TestRowUpdater
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
         UpdateByIdTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: objectsId[0],
             values: new Dictionary<string, ColumnValue>()
             {
@@ -162,8 +167,9 @@ public class TestRowUpdater
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
         UpdateByIdTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: objectsId[0],
             values: new Dictionary<string, ColumnValue>()
             {
@@ -182,8 +188,9 @@ public class TestRowUpdater
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
         UpdateByIdTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: objectsId[0],
             values: new Dictionary<string, ColumnValue>()
             {
@@ -194,8 +201,9 @@ public class TestRowUpdater
         Assert.AreEqual(1, await executor.UpdateById(ticket));
 
         QueryByIdTicket queryByIdTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: objectsId[0]
         );
 
@@ -213,8 +221,9 @@ public class TestRowUpdater
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         UpdateByIdTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: "---",
             values: new Dictionary<string, ColumnValue>()
             {
@@ -234,8 +243,9 @@ public class TestRowUpdater
         foreach (string objectId in objectsId)
         {
             UpdateByIdTicket ticket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 id: objectId,
                 values: new Dictionary<string, ColumnValue>()
                 {
@@ -249,8 +259,9 @@ public class TestRowUpdater
         foreach (string objectId in objectsId)
         {
             QueryByIdTicket queryByIdTicket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 id: objectId
             );
 
@@ -273,8 +284,9 @@ public class TestRowUpdater
         foreach (string objectId in objectsId)
         {
             UpdateByIdTicket ticket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 id: objectId,
                 values: new Dictionary<string, ColumnValue>()
                 {
@@ -288,42 +300,45 @@ public class TestRowUpdater
         await Task.WhenAll(tasks);
 
         QueryTicket queryTicket = new(
-           database: dbname,
-           name: "robots",
-           index: null,
-           where: null,
-           filters: null,
-           orderBy: null
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            where: null,
+            filters: null,
+            orderBy: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         queryTicket = new(
-           database: dbname,
-           name: "robots",
-           index: null,
-           where: null,
-           filters: new()
-           {
-               new("name", "=", new ColumnValue(ColumnType.String, "updated value"))
-           },
-           orderBy: null
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            where: null,
+            filters: new()
+            {
+                new("name", "=", new ColumnValue(ColumnType.String, "updated value"))
+            },
+            orderBy: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
         queryTicket = new(
-           database: dbname,
-           name: "robots",
-           index: null,
-           where: null,
-           filters: new()
-           {
-               new("name", "=", new ColumnValue(ColumnType.String, "another updated value"))
-           },
-           orderBy: null
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            where: null,
+            filters: new()
+            {
+                new("name", "=", new ColumnValue(ColumnType.String, "another updated value"))
+            },
+            orderBy: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -337,8 +352,9 @@ public class TestRowUpdater
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
         UpdateTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
@@ -353,8 +369,9 @@ public class TestRowUpdater
         Assert.AreEqual(1, await executor.Update(ticket));
 
         QueryByIdTicket queryByIdTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: objectsId[0]
         );
 
@@ -372,8 +389,9 @@ public class TestRowUpdater
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         UpdateTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
@@ -388,8 +406,9 @@ public class TestRowUpdater
         Assert.AreEqual(14, await executor.Update(ticket));
 
         QueryTicket queryTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             index: null,
             where: null,
             filters: new()
@@ -411,8 +430,9 @@ public class TestRowUpdater
         }
 
         queryTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             index: null,
             where: null,
             filters: new()
@@ -441,8 +461,9 @@ public class TestRowUpdater
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         UpdateTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             where: null,
             values: new Dictionary<string, ColumnValue>()
             {

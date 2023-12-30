@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -15,7 +14,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
 {
-    internal UpdateTicket CreateUpdateTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    internal async Task<UpdateTicket> CreateUpdateTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
     {
         string tableName = ast.leftAst!.yytext!;
 
@@ -29,7 +28,14 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
         foreach ((string columnName, ColumnValue value) updateItem in updateItemList)
             values[updateItem.columnName] = updateItem.value;
 
-        return new(ticket.DatabaseName, tableName, values, ast.extendedOne, null);
+        return new(
+            txnId: await executor.NextTxnId(),
+            databaseName: ticket.DatabaseName,
+            tableName: tableName,
+            values: values,
+            where: ast.extendedOne,
+            filters: null
+        );
     }
 
     private static List<(string, ColumnValue)> GetUpdateItemList(NodeAst updateItemList)

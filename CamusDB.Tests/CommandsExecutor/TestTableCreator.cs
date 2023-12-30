@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -27,9 +28,10 @@ internal sealed class TestTableCreator
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
+        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
+        CommandExecutor executor = new(hlc, validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -48,8 +50,8 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: dbname,
-            name: "my_table",
+            databaseName: dbname,
+            tableName: "my_table",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -88,8 +90,8 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: dbname,
-            name: "my_table",
+            databaseName: dbname,
+            tableName: "my_table",
             new ColumnInfo[] { }
         );
 
@@ -104,8 +106,8 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: "",
-            name: "my_table",
+            databaseName: "",
+            tableName: "my_table",
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
@@ -123,8 +125,8 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: dbname,
-            name: "",
+            databaseName: dbname,
+            tableName: "",
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
@@ -142,8 +144,8 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: dbname,
-            name: "my_table",
+            databaseName: dbname,
+            tableName: "my_table",
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("id", ColumnType.String, notNull: true),
@@ -161,8 +163,8 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: dbname,
-            name: "my_table",
+            databaseName: dbname,
+            tableName: "my_table",
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, primary: true),
@@ -180,8 +182,8 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: dbname,
-            name: new string('a', 300),
+            databaseName: dbname,
+            tableName: new string('a', 300),
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String),
@@ -199,8 +201,8 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: dbname,
-            name: "my_täble",
+            databaseName: dbname,
+            tableName: "my_täble",
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String),
@@ -218,8 +220,8 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: dbname,
-            name: "my_table",
+            databaseName: dbname,
+            tableName: "my_table",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),

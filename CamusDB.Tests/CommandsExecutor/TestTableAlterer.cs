@@ -13,6 +13,7 @@ using System.Collections.Generic;
 using CamusDB.Core.Util.ObjectIds;
 using System.Linq;
 using CamusDB.Core;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -28,9 +29,11 @@ internal sealed class TestTableAlterer
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
+        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
+        CatalogsManager catalogs = new();
+
+        CommandExecutor executor = new(hlc, validator, catalogs);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -39,7 +42,7 @@ internal sealed class TestTableAlterer
 
         DatabaseDescriptor descriptor = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, executor, catalogsManager, descriptor);
+        return (dbname, executor, catalogs, descriptor);
     }
 
     private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupBasicTable()
@@ -47,8 +50,8 @@ internal sealed class TestTableAlterer
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket createTicket = new(
-            database: dbname,
-            name: "robots",
+            databaseName: dbname,
+            tableName: "robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -67,8 +70,9 @@ internal sealed class TestTableAlterer
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
@@ -93,8 +97,8 @@ internal sealed class TestTableAlterer
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            databaseName: dbname,
+            tableName: "robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -126,8 +130,9 @@ internal sealed class TestTableAlterer
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
 
         AlterTableTicket alterTableTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             operation: AlterTableOperation.DropColumn,
             new ColumnInfo("name", ColumnType.Null)
         );
@@ -168,8 +173,9 @@ internal sealed class TestTableAlterer
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
 
         AlterTableTicket alterTableTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             operation: AlterTableOperation.DropColumn,
             new ColumnInfo("name", ColumnType.Null)
         );
@@ -184,8 +190,9 @@ internal sealed class TestTableAlterer
         Assert.AreEqual(3, tableSchema.Columns!.Count);
 
         QueryTicket queryTicket = new(
-           database: dbname,
-           name: "robots",
+           txnId: await executor.NextTxnId(),
+           databaseName: dbname,
+           tableName: "robots",
            index: null,
            where: null,
            filters: null,
@@ -206,8 +213,8 @@ internal sealed class TestTableAlterer
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            databaseName: dbname,
+            tableName: "robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -239,8 +246,9 @@ internal sealed class TestTableAlterer
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
 
         AlterTableTicket alterTableTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             operation: AlterTableOperation.AddColumn,
             new ColumnInfo("name", ColumnType.Integer64)
         );
@@ -256,8 +264,8 @@ internal sealed class TestTableAlterer
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            databaseName: dbname,
+            tableName: "robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -289,8 +297,9 @@ internal sealed class TestTableAlterer
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
 
         AlterTableTicket alterTableTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             operation: AlterTableOperation.AddColumn,
             new ColumnInfo("type", ColumnType.Integer64)
         );
@@ -334,8 +343,9 @@ internal sealed class TestTableAlterer
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
 
         AlterTableTicket alterTableTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             operation: AlterTableOperation.AddColumn,
             new ColumnInfo("type", ColumnType.Integer64)
         );
@@ -353,8 +363,9 @@ internal sealed class TestTableAlterer
         Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![4].Type);
 
         QueryTicket queryTicket = new(
-           database: dbname,
-           name: "robots",
+           txnId: await executor.NextTxnId(),
+           databaseName: dbname,
+           tableName: "robots",
            index: null,
            where: null,
            filters: null,
@@ -371,8 +382,9 @@ internal sealed class TestTableAlterer
         }
 
         UpdateTicket updateTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
                 { "type", new ColumnValue(ColumnType.Integer64, "100") }

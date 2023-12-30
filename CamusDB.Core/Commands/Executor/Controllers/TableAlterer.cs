@@ -41,7 +41,12 @@ internal sealed class TableAlterer
 
     private async Task<bool> AddColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
     {
-        AlterColumnTicket alterColumnTicket = new(database.Name, table.Name, ticket.Column.Name);
+        AlterColumnTicket alterColumnTicket = new(
+            txnId: ticket.TxnId,
+            databaseName: database.Name,
+            tableName: table.Name,
+            columnName: ticket.Column.Name
+        );
 
         await tableColumnAdder.AddColumn(queryExecutor, database, table, alterColumnTicket);
 
@@ -50,7 +55,12 @@ internal sealed class TableAlterer
 
     private async Task<bool> DropColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
     {
-        AlterColumnTicket alterColumnTicket = new(database.Name, table.Name, ticket.Column.Name);
+        AlterColumnTicket alterColumnTicket = new(
+            txnId: ticket.TxnId,
+            databaseName: database.Name,
+            tableName: table.Name,
+            columnName: ticket.Column.Name
+        );
 
         await tableColumnDropper.DropColumn(queryExecutor, database, table, alterColumnTicket);
 

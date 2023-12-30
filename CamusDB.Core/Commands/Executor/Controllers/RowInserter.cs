@@ -190,8 +190,7 @@ internal sealed class RowInserter
     {
         UpdateUniqueIndexTicket ticket = new(
             database: state.Database,
-            table: state.Table,
-            sequence: state.Sequence,
+            table: state.Table,            
             rowTuple: state.RowTuple,
             ticket: state.Ticket,
             indexes: state.Indexes.UniqueIndexes,
@@ -234,6 +233,7 @@ internal sealed class RowInserter
         SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
             tablespace: tablespace,
             index: state.Table.Rows,
+            txnId: state.Ticket.TxnId,
             key: state.RowTuple.SlotOne,
             value: state.RowTuple.SlotTwo,
             locks: state.Locks,

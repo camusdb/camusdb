@@ -40,7 +40,8 @@ public sealed class IndexUniqueOffsetNodeReader : IBTreeNodeReader<ObjectIdValue
         {
             BTreeEntry<ObjectIdValue, ObjectIdValue> entry = new(
                 key: Serializator.ReadObjectId(data, ref pointer),
-                value: Serializator.ReadObjectId(data, ref pointer),
+                initialTimestamp: Serializator.ReadHLCTimestamp(data, ref pointer),
+                initialValue: Serializator.ReadObjectId(data, ref pointer),
                 next: null
             )
             {

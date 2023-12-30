@@ -20,7 +20,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
-using System;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -36,9 +36,10 @@ public class TestRowDeletor
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
+        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(validator, catalogsManager);
+        CommandExecutor executor = new(hlc, validator, catalogsManager);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -55,8 +56,8 @@ public class TestRowDeletor
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
-            database: dbname,
-            name: "robots",
+            databaseName: dbname,
+            tableName: "robots",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -75,8 +76,9 @@ public class TestRowDeletor
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 values: new Dictionary<string, ColumnValue>()
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
@@ -99,8 +101,8 @@ public class TestRowDeletor
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
-            database: dbname,
-            name: "robots2",
+            databaseName: dbname,
+            tableName: "robots2",
             new ColumnInfo[]
             {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
@@ -120,8 +122,9 @@ public class TestRowDeletor
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                database: dbname,
-                name: "robots2",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots2",
                 values: new Dictionary<string, ColumnValue>()
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
@@ -168,8 +171,9 @@ public class TestRowDeletor
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
         DeleteByIdTicket ticket = new(
-            database: dbname,
-            name: "unknown_table",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "unknown_table",
             id: objectsId[0]
         );
 
@@ -184,16 +188,18 @@ public class TestRowDeletor
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
         DeleteByIdTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: objectsId[0]
         );
 
         Assert.AreEqual(1, await executor.DeleteById(ticket));
 
         QueryByIdTicket queryByIdTicket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: objectsId[0]
         );
 
@@ -208,8 +214,9 @@ public class TestRowDeletor
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
         DeleteByIdTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             id: "---"
         );
 
@@ -225,8 +232,9 @@ public class TestRowDeletor
         foreach (string objectId in objectsId)
         {
             DeleteByIdTicket ticket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 id: objectId
             );
 
@@ -234,8 +242,9 @@ public class TestRowDeletor
         }
 
         QueryTicket queryTicket = new(
-           database: dbname,
-           name: "robots",
+           txnId: await executor.NextTxnId(),
+           databaseName: dbname,
+           tableName: "robots",
            index: null,
            where: null,
            filters: null,
@@ -255,8 +264,9 @@ public class TestRowDeletor
         foreach (string objectId in objectsId)
         {
             DeleteByIdTicket ticket = new(
-                database: dbname,
-                name: "robots2",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots2",
                 id: objectId
             );
 
@@ -264,8 +274,9 @@ public class TestRowDeletor
         }
 
         QueryTicket queryTicket = new(
-           database: dbname,
-           name: "robots2",
+           txnId: await executor.NextTxnId(),
+           databaseName: dbname,
+           tableName: "robots2",
            index: null,
            where: null,
            filters: null,
@@ -287,8 +298,9 @@ public class TestRowDeletor
         foreach (string objectId in objectsId)
         {
             DeleteByIdTicket ticket = new(
-                database: dbname,
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
                 id: objectId
             );
 
@@ -298,8 +310,9 @@ public class TestRowDeletor
         await Task.WhenAll(tasks);
 
         QueryTicket queryTicket = new(
-           database: dbname,
-           name: "robots",
+           txnId: await executor.NextTxnId(),
+           databaseName: dbname,
+           tableName: "robots",
            index: null,
            where: null,
            filters: null,
@@ -317,8 +330,9 @@ public class TestRowDeletor
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
         
         DeleteTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             where: null,
             filters: new()
             {
@@ -329,15 +343,16 @@ public class TestRowDeletor
         Assert.AreEqual(1, await executor.Delete(ticket));
 
         QueryTicket queryTicket = new(
-           database: dbname,
-           name: "robots",
-           index: null,
-           where: null,
-           filters: new()
-           {
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            where: null,
+            filters: new()
+            {
                 new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
-           },
-           orderBy: null
+            },
+            orderBy: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -351,23 +366,25 @@ public class TestRowDeletor
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
         QueryTicket queryTicket = new(
-          database: dbname,
-          name: "robots",
-          index: null,
-          where: null,
-          filters: new()
-          {
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            where: null,
+            filters: new()
+            {
                 new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
-          },
-          orderBy: null
+            },
+            orderBy: null
        );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsNotEmpty(result);        
 
         DeleteTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             where: null,
             filters: new()
             {
@@ -378,15 +395,16 @@ public class TestRowDeletor
         Assert.AreEqual(14, await executor.Delete(ticket));
 
         queryTicket = new(
-           database: dbname,
-           name: "robots",
-           index: null,
-           where: null,
-           filters: new()
-           {
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            where: null,
+            filters: new()
+            {
                 new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
-           },
-           orderBy: null
+            },
+            orderBy: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -400,8 +418,9 @@ public class TestRowDeletor
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
         DeleteTicket ticket = new(
-            database: dbname,
-            name: "robots",
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
             where: null,
             filters: new()
             {
@@ -412,12 +431,13 @@ public class TestRowDeletor
         Assert.AreEqual(0, await executor.Delete(ticket));
 
         QueryTicket queryTicket = new(
-           database: dbname,
-           name: "robots",
-           index: null,
-           where: null,
-           filters: null,
-           orderBy: null
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            where: null,
+            filters: null,
+            orderBy: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();

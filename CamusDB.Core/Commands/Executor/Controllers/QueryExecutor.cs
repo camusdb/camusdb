@@ -105,7 +105,7 @@ internal sealed class QueryExecutor
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        BTreeTuple? pageOffset = await index.UniqueRows.Get(0, columnId);
+        BTreeTuple? pageOffset = await index.UniqueRows.Get(ticket.TxnId, columnId);
 
         if (pageOffset is null)
         {
@@ -131,13 +131,15 @@ internal sealed class QueryExecutor
 
         await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse())
         {
-            if (entry.Value.IsNull())
+            ObjectIdValue dataOffset = entry.GetValue(ticket.TxnId);
+
+            if (dataOffset.IsNull())
             {
                 Console.WriteLine("Index RowId={0} has no page offset value", entry.Key);
                 continue;
             }
 
-            byte[] data = await tablespace.GetDataFromPage(entry.Value);
+            byte[] data = await tablespace.GetDataFromPage(dataOffset);
             if (data.Length == 0)
             {
                 Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
@@ -149,17 +151,17 @@ internal sealed class QueryExecutor
             if (ticket.Filters is not null && ticket.Filters.Count > 0)
             {
                 if (queryFilterer.MeetFilters(ticket.Filters, row))
-                    yield return new(new(entry.Key, entry.Value), row);
+                    yield return new(new(entry.Key, dataOffset), row);
             }
             else
             {
                 if (ticket.Where is not null)
                 {
                     if (queryFilterer.MeetWhere(ticket.Where, row))
-                        yield return new(new(entry.Key, entry.Value), row);
+                        yield return new(new(entry.Key, dataOffset), row);
                 }
                 else
-                    yield return new(new(entry.Key, entry.Value), row);
+                    yield return new(new(entry.Key, dataOffset), row);
             }
         }
     }
@@ -170,13 +172,15 @@ internal sealed class QueryExecutor
 
         await foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse())
         {
-            if (entry.Value is null)
+            BTreeTuple? txnValue = entry.GetValue(ticket.TxnId);
+
+            if (txnValue is null)
             {
                 Console.WriteLine("Index RowId={0} has no page offset value", entry.Key);
                 continue;
             }
 
-            byte[] data = await tablespace.GetDataFromPage(entry.Value.SlotOne);
+            byte[] data = await tablespace.GetDataFromPage(txnValue.SlotOne);
             if (data.Length == 0)
             {
                 Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
@@ -188,22 +192,22 @@ internal sealed class QueryExecutor
             if (ticket.Filters is not null && ticket.Filters.Count > 0)
             {
                 if (queryFilterer.MeetFilters(ticket.Filters, row))
-                    yield return new(entry.Value, row);
+                    yield return new(txnValue, row);
             }
             else
             {
                 if (ticket.Where is not null)
                 {
                     if (queryFilterer.MeetWhere(ticket.Where, row))
-                        yield return new(entry.Value, row);
+                        yield return new(txnValue, row);
                 }
                 else
-                    yield return new(entry.Value, row);
+                    yield return new(txnValue, row);
             }
         }
     }    
 
-    private async IAsyncEnumerable<QueryResultRow> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index)
+    private async IAsyncEnumerable<QueryResultRow> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index, QueryTicket ticket)
     {
         BufferPoolHandler tablespace = database.TableSpace;
 
@@ -215,20 +219,22 @@ internal sealed class QueryExecutor
             {
                 //Console.WriteLine(" > Index Key={0} PageOffset={1}", subEntry.Key, subEntry.Value);
 
-                if (subEntry.Value.IsNull())
+                ObjectIdValue dataOffset = subEntry.GetValue(ticket.TxnId);
+
+                if (dataOffset.IsNull())
                 {
                     Console.WriteLine("Index RowId={0} has no page offset value", subEntry.Key);
                     continue;
                 }
 
-                byte[] data = await tablespace.GetDataFromPage(subEntry.Value);
+                byte[] data = await tablespace.GetDataFromPage(dataOffset);
                 if (data.Length == 0)
                 {
                     Console.WriteLine("Index RowId={0} has an empty page data", subEntry.Key);
                     continue;
                 }
 
-                yield return new(new(subEntry.Key, subEntry.Value), rowDeserializer.Deserialize(table.Schema, data));
+                yield return new(new(subEntry.Key, dataOffset), rowDeserializer.Deserialize(table.Schema, data));
             }
         }
     }
@@ -246,6 +252,6 @@ internal sealed class QueryExecutor
         if (index.Type == IndexType.Unique)
             return QueryUsingUniqueIndex(database, table, index.UniqueRows!, ticket);
 
-        return QueryUsingMultiIndex(database, table, index.MultiRows!);
+        return QueryUsingMultiIndex(database, table, index.MultiRows!, ticket);
     }
 }
