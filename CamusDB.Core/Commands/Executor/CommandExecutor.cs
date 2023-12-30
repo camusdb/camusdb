@@ -38,6 +38,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly TableAlterer tableAlterer;
 
+    private readonly TableDropper tableDropper;
+
     private readonly RowInserter rowInserter;
 
     private readonly RowUpdaterById rowUpdaterById;
@@ -66,6 +68,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableOpener = new(catalogs);
         tableCreator = new(catalogs);
         tableAlterer = new(catalogs);
+        tableDropper = new(catalogs);
         rowInserter = new();
         rowUpdaterById = new();
         rowUpdater = new();
@@ -120,13 +123,24 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     public async Task<bool> AlterTable(AlterTableTicket ticket)
     {
-        //validator.Validate(ticket);
+        validator.Validate(ticket);
 
         DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
         return await tableAlterer.Alter(queryExecutor, database, table, ticket);
+    }
+
+    public async Task<bool> DropTable(DropTableTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+
+        return await tableDropper.Drop(queryExecutor, rowDeleter, database, table, ticket);
     }
 
     public async Task<TableDescriptor> OpenTable(OpenTableTicket ticket)
@@ -159,6 +173,15 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     return await tableCreator.Create(database, createTableTicket);
                 }
+
+            /*case NodeType.DropTable:
+                {
+                    DropTableTicket dropTableTicket = sqlExecutor.CreateDropTableTicket(ticket, ast);
+
+                    validator.Validate(dropTableTicket);
+
+                    return await tableDropper.Drop(rowDeleter, database, table, dropTableTicket);
+                }*/
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown DDL AST stmt: " + ast.nodeType);

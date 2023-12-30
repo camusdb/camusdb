@@ -94,7 +94,7 @@ public sealed class CatalogsManager
             await database.Schema.Semaphore.WaitAsync();
 
             if (!database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema))
-                throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{ticket.TableName}' already exists");
+                throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{ticket.TableName}' does not exist");
 
             tableSchema.Version++;
 
