@@ -33,6 +33,8 @@ stat    : select_stmt { $$.n = $1.n; }
         | delete_stmt { $$.n = $1.n; }
         | insert_stmt { $$.n = $1.n; }
         | create_table_stmt { $$.n = $1.n; }
+        | drop_table_stmt { $$.n = $1.n; }
+        | alter_table_stmt { $$.n = $1.n; }
         ;
 
 select_stmt : TSELECT select_field_list TFROM identifier { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, null); }
@@ -52,6 +54,15 @@ delete_stmt : TDELETE TFROM identifier TWHERE condition { $$.n = new(NodeType.De
 
 create_table_stmt : TCREATE TTABLE identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, null, null); }                  
                   ;
+
+drop_table_stmt : TDROP TTABLE identifier { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null); }
+				;
+
+alter_table_stmt : TALTER TTABLE identifier TWADD identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, null, null, null); }
+                 | TALTER TTABLE identifier TWADD TCOLUMN identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, null, null, null); }
+				 | TALTER TTABLE identifier TDROP identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $5.n, null, null, null); }
+                 | TALTER TTABLE identifier TDROP TCOLUMN identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $5.n, null, null, null); }
+				 ;
 
 create_table_item_list : create_table_item_list TCOMMA create_table_item { $$.n = new(NodeType.CreateTableItemList, $1.n, $3.n, null, null, null); }
                        | create_table_item { $$.n = $1.n; $$.s = $1.s; }
@@ -165,6 +176,7 @@ simple_expr : identifier { $$.n = $1.n; $$.s = $1.s; }
 			| number { $$.n = $1.n; $$.s = $1.s; }
             | string { $$.n = $1.n; $$.s = $1.s; }
             | bool { $$.n = $1.n; $$.s = $1.s; }
+            | null { $$.n = $1.n; $$.s = $1.s; }
 			;
 
 identifier  : IDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, $$.s); }

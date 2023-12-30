@@ -1,7 +1,9 @@
 ﻿
 using NUnit.Framework;
 
+using System.Linq;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs;
@@ -10,8 +12,6 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using System.Collections.Generic;
-using System.Linq;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
