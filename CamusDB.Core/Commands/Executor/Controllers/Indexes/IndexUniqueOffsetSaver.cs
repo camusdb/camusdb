@@ -117,12 +117,12 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
                 if (entry is not null)
                 {
                     (HLCTimestamp timestamp, ObjectIdValue value) = entry.GetMaxCommitedValue();
-                    Console.WriteLine("{0} {1} {2}", entry.Key, timestamp, value);
+                    //Console.WriteLine("{0} {1} {2}", entry.Key, timestamp, value);
 
                     Serializator.WriteObjectId(nodeBuffer, entry.Key, ref pointer);
                     Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer); // @todo LastValue
                     Serializator.WriteObjectId(nodeBuffer, value, ref pointer); // @todo LastValue
-                    Serializator.WriteObjectId(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : new(), ref pointer);
+                    Serializator.WriteObjectId(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : nullAddressValue, ref pointer);
                 }
                 else
                 {

@@ -10,7 +10,6 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.BufferPool;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
@@ -65,46 +64,5 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
 
             await CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
         }
-    }
-
-    public async Task<List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>> UpdateUniqueKeys(UpdateUniqueIndexTicket ticket)
-    {
-        InsertTicket insertTicket = ticket.InsertTicket;
-        BufferPoolHandler tablespace = ticket.Database.TableSpace;
-
-        List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> deltas = new();
-
-        foreach (TableIndexSchema index in ticket.Indexes)
-        {
-            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.UniqueRows;
-
-            if (uniqueIndex is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A unique index tree wasn't found"
-                );
-
-            ColumnValue? uniqueKeyValue = GetColumnValue(ticket.Table, insertTicket, index.Column);
-
-            if (uniqueKeyValue is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A null value was found for unique key field " + index.Column
-                );            
-
-            SaveUniqueIndexTicket saveUniqueIndexTicket = new(
-                tablespace: tablespace,
-                index: uniqueIndex,
-                txnId: ticket.InsertTicket.TxnId,
-                commitState: BTreeCommitState.Uncommitted,
-                key: uniqueKeyValue,
-                value: ticket.RowTuple,
-                modifiedPages: ticket.ModifiedPages
-            );
-
-            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
-        }
-
-        return deltas;
     }
 }

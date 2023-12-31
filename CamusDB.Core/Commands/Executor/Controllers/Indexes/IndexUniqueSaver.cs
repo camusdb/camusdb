@@ -28,20 +28,13 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
     }
 
     public async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple?>> Save(SaveUniqueIndexTicket ticket)
-    {        
-        return await SaveInternal(ticket);
+    {
+        return await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value);
     }    
 
     public async Task Remove(RemoveUniqueIndexTicket ticket)
     {        
         await RemoveInternal(ticket);
-    }
-
-    private static async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple?>> SaveInternal(SaveUniqueIndexTicket ticket)
-    {
-        return await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value);
-
-        //Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
@@ -114,7 +107,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                     SerializeKey(nodeBuffer, entry.Key, ref pointer);
                     Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer);
                     SerializeTuple(nodeBuffer, tuple, ref pointer); // @todo LastValue
-                    Serializator.WriteObjectId(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : new(), ref pointer);
+                    Serializator.WriteObjectId(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : nullValue, ref pointer);
                 }
                 else
                 {

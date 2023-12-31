@@ -17,6 +17,7 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
+using System.Net.Sockets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -170,7 +171,7 @@ internal sealed class RowInserter
         state.RowTuple.SlotTwo = tablespace.GetNextFreeOffset();
 
         return Task.FromResult(FluxAction.Continue);
-    }    
+    }
 
     /// <summary>
     /// Allocate a new page in the buffer pool and insert the serializated row into it
@@ -210,6 +211,25 @@ internal sealed class RowInserter
         return FluxAction.Continue;
     }
 
+    protected static ColumnValue? GetColumnValue(TableDescriptor table, InsertTicket ticket, string name)
+    {
+        List<TableColumnSchema> columns = table.Schema.Columns!;
+
+        for (int i = 0; i < columns.Count; i++)
+        {
+            TableColumnSchema column = columns[i];
+
+            if (column.Name == name)
+            {
+                if (ticket.Values.TryGetValue(column.Name, out ColumnValue? value))
+                    return value;
+                break;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// Unique keys are updated before inserting the actual row
     /// </summary>
@@ -217,16 +237,40 @@ internal sealed class RowInserter
     /// <returns></returns>
     private async Task<FluxAction> UpdateUniqueIndexes(InsertFluxState state)
     {
-        UpdateUniqueIndexTicket ticket = new(
-            database: state.Database,
-            table: state.Table,
-            rowTuple: state.RowTuple,
-            ticket: state.Ticket,
-            indexes: state.Indexes.UniqueIndexes,
-            modifiedPages: state.ModifiedPages
-        );
+        InsertTicket insertTicket = state.Ticket;        
 
-        state.Indexes.UniqueIndexDeltas = await insertUniqueKeySaver.UpdateUniqueKeys(ticket);
+        List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> deltas = new();
+
+        foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
+        {
+            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.UniqueRows;
+
+            if (uniqueIndex is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A unique index tree wasn't found"
+                );
+
+            ColumnValue? uniqueKeyValue = GetColumnValue(state.Table, insertTicket, index.Column);
+
+            if (uniqueKeyValue is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for unique key field " + index.Column
+                );
+
+            SaveUniqueIndexTicket saveUniqueIndexTicket = new(
+                index: uniqueIndex,
+                txnId: insertTicket.TxnId,
+                commitState: BTreeCommitState.Uncommitted,
+                key: uniqueKeyValue,
+                value: state.RowTuple
+            );
+
+            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
+        }
+
+        state.Indexes.UniqueIndexDeltas = deltas;
 
         return FluxAction.Continue;
     }

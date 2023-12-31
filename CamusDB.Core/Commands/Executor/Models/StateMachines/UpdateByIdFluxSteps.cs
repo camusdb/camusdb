@@ -14,10 +14,12 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
  */
 public enum UpdateByIdFluxSteps
 {
-    NotInitialized = 0,    
+    NotInitialized = 0,
     LocateTupleToUpdate = 1,
-    UpdateUniqueIndexes = 2,
-    UpdateMultiIndexes = 3,
-    UpdateRow = 4,
-    ApplyPageOperations = 5
+    UpdateRow = 2,
+    UpdateTableIndex = 3,
+    UpdateUniqueIndexes = 4,
+    UpdateMultiIndexes = 5,
+    PersistIndexChanges = 6,
+    ApplyPageOperations = 7
 }

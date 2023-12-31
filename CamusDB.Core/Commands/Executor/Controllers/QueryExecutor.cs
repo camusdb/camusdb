@@ -86,7 +86,7 @@ internal sealed class QueryExecutor
             );
         }
 
-        Console.WriteLine(ticket.TxnId);
+        //Console.WriteLine(ticket.TxnId);
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 

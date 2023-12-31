@@ -110,22 +110,22 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         BTreeEntry<TKey, TValue>[] children = node.children;
 
-        Console.WriteLine("F-1={0}", ht);
+        //Console.WriteLine("F-1={0}", ht);
 
         // external node
         if (ht == 0)
         {
-            Console.WriteLine("F0={0}", node.KeyCount);
+            //Console.WriteLine("F0={0}", node.KeyCount);
 
             for (int j = 0; j < node.KeyCount; j++)
             {
-                Console.WriteLine("F1={0}", txnid);
+                //Console.WriteLine("F1={0}", txnid);
 
                 // verify if key can be seen by MVCC
                 if (!children[j].CanBeSeenBy(txnid))
                     continue;
 
-                Console.WriteLine("F2={0} {1}", txnid, key);
+                //Console.WriteLine("F2={0} {1}", txnid, key);
 
                 if (Eq(key, children[j].Key))
                     return children[j].GetValue(txnid);
@@ -358,6 +358,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 if (Eq(key, children[j].Key))
                 {
+                    deltas.Nodes.Add(node);
                     deltas.Entries.Add(children[j].SetValue(txnid, commitState, value));                    
                     return null;
                 }

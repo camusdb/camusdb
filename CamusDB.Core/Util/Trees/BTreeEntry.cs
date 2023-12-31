@@ -32,7 +32,7 @@ public sealed class BTreeEntry<TKey, TValue>
 
     public BTreeMvccEntry<TValue> SetValue(HLCTimestamp timestamp, BTreeCommitState commitState, TValue? value)
     {
-        Console.WriteLine("SetV={0} {1} {2}", timestamp, commitState, value);
+        //Console.WriteLine("SetV={0} {1} {2}", timestamp, commitState, value);
 
         if (mvccValues.TryGetValue(timestamp, out BTreeMvccEntry<TValue>? mvccEntry))
         {
@@ -51,7 +51,7 @@ public sealed class BTreeEntry<TKey, TValue>
 
     public TValue? GetValue(HLCTimestamp timestamp)
     {
-        Console.WriteLine("Get={0}", timestamp);
+        //Console.WriteLine("Get={0}", timestamp);
 
         if (mvccValues.TryGetValue(timestamp, out BTreeMvccEntry<TValue>? snapshotValue))
             return snapshotValue.Value;
@@ -60,13 +60,13 @@ public sealed class BTreeEntry<TKey, TValue>
 
         foreach (KeyValuePair<HLCTimestamp, BTreeMvccEntry<TValue>> keyValue in mvccValues)
         {
-            Console.WriteLine("Get={0} {1} {2}", timestamp, keyValue.Value.CommitState, keyValue.Key.CompareTo(timestamp));
+            //Console.WriteLine("Get={0} {1} {2}", timestamp, keyValue.Value.CommitState, keyValue.Key.CompareTo(timestamp));
 
             if (keyValue.Value.CommitState == BTreeCommitState.Committed && keyValue.Key.CompareTo(timestamp) < 0)
                 newestValue = keyValue.Value.Value;
         }
 
-        Console.WriteLine("GetX={0} {1}", timestamp, newestValue);
+        //Console.WriteLine("GetX={0} {1}", timestamp, newestValue);
 
         mvccValues.TryAdd(timestamp, new(BTreeCommitState.Uncommitted, newestValue));
 
