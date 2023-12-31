@@ -7,6 +7,7 @@
  */
 
 using System.Diagnostics;
+using System.Net.Sockets;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs.Models;
@@ -15,7 +16,9 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
+using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
+using QUT.Gppg;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -41,12 +44,32 @@ internal sealed class RowDeleterById
             database: database,
             table: table,
             ticket: ticket,
-            indexes: new DeleteByIdFluxIndexState()
+            indexes: GetIndexDeletePlan(table)
         );
 
         FluxMachine<DeleteByIdFluxSteps, DeleteByIdFluxState> machine = new(state);
 
         return await DeleteByIdInternal(machine, state);
+    }
+
+    /// <summary>
+    /// Step #1. Creates a new delete index plan for the table defining which unique indexes will be updated
+    /// </summary>
+    /// <param name="table"></param>
+    /// <returns></returns>
+    private static DeleteByIdFluxIndexState GetIndexDeletePlan(TableDescriptor table)
+    {
+        DeleteByIdFluxIndexState indexState = new();
+
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        {
+            if (index.Value.Type != IndexType.Unique)
+                continue;
+
+            indexState.UniqueIndexes.Add(index.Value);
+        }
+
+        return indexState;
     }
 
     /// <summary>
@@ -94,84 +117,87 @@ internal sealed class RowDeleterById
 
         state.RowTuple = await index.UniqueRows.Get(ticket.TxnId, columnId);
 
-        if (state.RowTuple is null)
+        if (state.RowTuple is null || state.RowTuple.IsNull())
         {
             Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
             return FluxAction.Abort;
         }
 
-        (int length, List<BufferPage> pages, List<IDisposable> disposables) = await tablespace.GetPagesToWrite(state.RowTuple.SlotTwo);
-        if (length == 0)
-        {
-            Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
-            return FluxAction.Abort;
-        }
-
-        state.Locks.AddRange(disposables);
-
-        byte[] data = tablespace.GetDataFromPageDirect(length, pages);
+        byte[] data = await tablespace.GetDataFromPage(state.RowTuple.SlotTwo);
         if (data.Length == 0)
         {
             Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
             return FluxAction.Abort;
         }
 
-        state.Pages = pages;
-        state.ColumnValues = rowDeserializer.Deserialize(table.Schema!, data);
+        state.ColumnValues = rowDeserializer.Deserialize(table.Schema, data);
 
-        Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, state.RowTuple.SlotTwo);
+        Console.WriteLine("Data to Delete Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
 
         return FluxAction.Continue;
     }
 
     /// <summary>
-    /// Remove the references to the row from the unique indexes
+    /// Deletes references to the row from the unique indexes
     /// </summary>
-    /// <param name="database"></param>
-    /// <param name="table"></param>
-    /// <param name="columnValues"></param>
-    /// <param name="modifiedPages"></param>
+    /// <param name="state"></param>
     /// <returns></returns>
-    /// <exception cref="CamusDBException"></exception>
-    private async Task DeleteUniqueIndexesInternal(
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        Dictionary<string, ColumnValue> columnValues,
-        List<IDisposable> locks,
-        List<BufferPageOperation> modifiedPages
-    )
+    private async Task<FluxAction> DeleteUniqueIndexes(DeleteByIdFluxState state)
     {
-        BufferPoolHandler tablespace = database.TableSpace;
+        DeleteByIdTicket ticket = state.Ticket;
 
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
+        if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            if (index.Value.Type != IndexType.Unique)
-                continue;
+            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+            return FluxAction.Abort;
+        }
 
-            if (index.Value.UniqueRows is null)
+        List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> deltas = new();
+
+        foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
+        {
+            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.UniqueRows;
+
+            if (uniqueIndex is null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     "A unique index tree wasn't found"
                 );
 
-            ColumnValue? columnKey = GetColumnValue(columnValues, index.Value.Column);
-            if (columnKey is null) // @todo check what to to here
-                continue;
+            ColumnValue? uniqueKeyValue = GetColumnValue(state.ColumnValues, index.Column);
 
-            BTree<ColumnValue, BTreeTuple?> uniqueIndex = index.Value.UniqueRows;
+            if (uniqueKeyValue is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for unique key field " + index.Column
+                );
 
-            RemoveUniqueIndexTicket ticket = new(
-                tablespace: tablespace,
-                sequence: 0,
-                subSequence: 0,
+            SaveUniqueIndexTicket saveUniqueIndexTicket = new(
                 index: uniqueIndex,
-                key: columnKey,
-                locks: locks,
-                modifiedPages: modifiedPages
+                txnId: ticket.TxnId,
+                commitState: BTreeCommitState.Uncommitted,
+                key: uniqueKeyValue,
+                value: new BTreeTuple(new(), new())
             );
 
-            await indexSaver.Remove(ticket);
+            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
         }
+
+        state.Indexes.UniqueIndexDeltas = deltas;
+
+        return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// Deletes multi indexes
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private async Task<FluxAction> DeleteMultiIndexes(DeleteByIdFluxState state)
+    {
+        await DeleteMultiIndexes(state.Database, state.Table, state.ColumnValues);
+
+        return FluxAction.Continue;
     }
 
     private async Task DeleteMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
@@ -200,77 +226,69 @@ internal sealed class RowDeleterById
     }
 
     /// <summary>
-    /// All locks are released once the operation is successful
+    /// Every table has a B+Tree index where the data can be easily located by rowid
+    /// We update the rowid to point to a null offset
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private Task<FluxAction> ReleaseLocks(DeleteByIdFluxState state)
+    private async Task<FluxAction> UpdateTableIndex(DeleteByIdFluxState state)
     {
-        foreach (IDisposable disposable in state.Locks)
-            disposable.Dispose();
+        if (state.RowTuple is null || state.RowTuple.IsNull())
+        {
+            Console.WriteLine("Invalid row to Update {0}", state.Ticket.Id);
+            return FluxAction.Abort;
+        }
+
+        SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
+            index: state.Table.Rows,
+            txnId: state.Ticket.TxnId,
+            key: state.RowTuple.SlotOne,
+            value: new ObjectIdValue()
+        );
+
+        // Main table index stores rowid pointing to null offset
+        state.Indexes.MainIndexDeltas = await indexSaver.Save(saveUniqueOffsetIndex);
+
+        return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private Task<FluxAction> PersistIndexChanges(DeleteByIdFluxState state)
+    {
+        if (state.Indexes.MainIndexDeltas is null)
+            return Task.FromResult(FluxAction.Abort);
+
+        foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in state.Indexes.MainIndexDeltas.Entries)
+            btreeEntry.CommitState = BTreeCommitState.Committed;
+
+        indexSaver.Persist(state.Database.TableSpace, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas);
+
+        if (state.Indexes.UniqueIndexDeltas is null)
+            return Task.FromResult(FluxAction.Continue);
+
+        foreach ((BTree<ColumnValue, BTreeTuple?> index, BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+        {
+            foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.Entries)
+                uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
+
+            indexSaver.Persist(state.Database.TableSpace, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+        }
 
         return Task.FromResult(FluxAction.Continue);
     }
 
     /// <summary>
-    /// Deletes unique indexes
+    /// Write changes to the modified pages to disk
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task<FluxAction> DeleteUniqueIndexes(DeleteByIdFluxState state)
-    {
-        await DeleteUniqueIndexesInternal(state.Database, state.Table, state.ColumnValues, state.Locks, state.ModifiedPages);
-
-        return FluxAction.Continue;
-    }
-
-    /// <summary>
-    /// Deletes multi indexes
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> DeleteMultiIndexes(DeleteByIdFluxState state)
-    {
-        await DeleteMultiIndexes(state.Database, state.Table, state.ColumnValues);
-
-        return FluxAction.Continue;
-    }
-
-    /// <summary>
-    /// Deletes the row from disk
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> DeleteRowFromDisk(DeleteByIdFluxState state)
-    {
-        if (state.RowTuple is null || state.Pages is null)
-        {
-            Console.WriteLine("Invalid row to delete {0}", state.Ticket.Id);
-            return FluxAction.Abort;
-        }
-
-        BufferPoolHandler tablespace = state.Database.TableSpace;
-        TableDescriptor table = state.Table;
-
-        RemoveUniqueOffsetIndexTicket ticket = new(
-            tablespace: tablespace,
-            index: table.Rows,
-            key: state.RowTuple.SlotOne,
-            locks: state.Locks,
-            modifiedPages: state.ModifiedPages
-        );
-
-        await indexSaver.Remove(ticket);
-
-        foreach (BufferPage page in state.Pages)
-            state.ModifiedPages.Add(new BufferPageOperation(BufferPageOperationType.Delete, page.Offset, 0, page.Buffer.Value));
-
-        return FluxAction.Continue;
-    }
-
     private Task<FluxAction> ApplyPageOperations(DeleteByIdFluxState state)
     {
-        if (state.RowTuple is null || state.Pages is null)
+        if (state.RowTuple is null || state.RowTuple.IsNull())
         {
             Console.WriteLine("Invalid row to delete {0}", state.Ticket.Id);
             return Task.FromResult(FluxAction.Abort);
@@ -299,7 +317,8 @@ internal sealed class RowDeleterById
         machine.When(DeleteByIdFluxSteps.LocateTupleToDelete, LocateTupleToDelete);
         machine.When(DeleteByIdFluxSteps.DeleteUniqueIndexes, DeleteUniqueIndexes);
         machine.When(DeleteByIdFluxSteps.DeleteMultiIndexes, DeleteMultiIndexes);
-        machine.When(DeleteByIdFluxSteps.DeleteRow, DeleteRowFromDisk);
+        machine.When(DeleteByIdFluxSteps.UpdateTableIndex, UpdateTableIndex);
+        machine.When(DeleteByIdFluxSteps.PersistIndexChanges, PersistIndexChanges);
         machine.When(DeleteByIdFluxSteps.ApplyPageOperations, ApplyPageOperations);
 
         // machine.WhenAbort(ReleaseLocks);

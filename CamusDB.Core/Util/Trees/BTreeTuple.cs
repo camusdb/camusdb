@@ -10,6 +10,10 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.Util.Trees;
 
+/// <summary>
+/// Represents a tuple of two <see cref="ObjectIdValue"/> values
+/// Usually SlotOne is the address of the rowid and SlotTwo is the address of the data
+/// </summary>
 public sealed class BTreeTuple
 {
     public ObjectIdValue SlotOne { get; set; }
@@ -22,8 +26,13 @@ public sealed class BTreeTuple
         SlotTwo = slotTwo;
     }
 
+    public bool IsNull()
+    {
+        return SlotOne.IsNull() && SlotTwo.IsNull();
+    }
+
     public override string ToString()
     {
         return string.Format("BTreeTuple({0}:{1})", SlotOne, SlotTwo);
-    }
+    }    
 }

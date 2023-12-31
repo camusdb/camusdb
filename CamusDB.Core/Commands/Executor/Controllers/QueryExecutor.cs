@@ -92,7 +92,7 @@ internal sealed class QueryExecutor
 
         BTreeTuple? pageOffset = await index.UniqueRows.Get(ticket.TxnId, columnId);
 
-        if (pageOffset is null)
+        if (pageOffset is null || pageOffset.IsNull())
         {
             Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
             yield break;
@@ -159,7 +159,7 @@ internal sealed class QueryExecutor
         {
             BTreeTuple? txnValue = entry.GetValue(ticket.TxnId);
 
-            if (txnValue is null)
+            if (txnValue is null || txnValue.IsNull())
             {
                 Console.WriteLine("Index RowId={0} has no page offset value", entry.Key);
                 continue;

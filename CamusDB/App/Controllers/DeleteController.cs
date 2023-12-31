@@ -73,6 +73,7 @@ public sealed class DeleteController : CommandsController
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Delete request is not valid");
 
             DeleteTicket ticket = new(
+                txnId: await executor.NextTxnId(),
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 where: null,

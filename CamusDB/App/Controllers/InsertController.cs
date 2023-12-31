@@ -40,10 +40,10 @@ public sealed class InsertController : CommandsController
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Insert request is not valid");
 
             InsertTicket ticket = new(
-                database: request.DatabaseName ?? "",
-                name: request.TableName ?? "",
-                values: request.Values ?? new Dictionary<string, ColumnValue>() //,
-                //forceFailureType: JournalFailureTypes.PreUpdateUniqueCheckpoint
+                txnId: await executor.NextTxnId(),
+                databaseName: request.DatabaseName ?? "",
+                tableName: request.TableName ?? "",
+                values: request.Values ?? new Dictionary<string, ColumnValue>()
             );
 
             await executor.Insert(ticket);

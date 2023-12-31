@@ -201,4 +201,79 @@ public class TestRowUpdaterCloseDb
             Assert.AreEqual("updated value", result[0]["name"].Value);
         }
     }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestBasicUpdateByIdTwice()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        UpdateByIdTicket updateTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            id: objectsId[0],
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "name", new ColumnValue(ColumnType.String, "updated value") }
+            }
+        );
+
+        Assert.AreEqual(1, await executor.UpdateById(updateTicket));
+
+        QueryByIdTicket queryByIdTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            id: objectsId[0]
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(objectsId[0], result[0]["id"].Value);
+        Assert.AreEqual("updated value", result[0]["name"].Value);
+
+        CloseDatabaseTicket closeTicket = new(dbname);
+        await executor.CloseDatabase(closeTicket);
+
+        queryByIdTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            id: objectsId[0]
+        );
+
+        result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(objectsId[0], result[0]["id"].Value);
+        Assert.AreEqual("updated value", result[0]["name"].Value);
+
+        updateTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            id: objectsId[0],
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "name", new ColumnValue(ColumnType.String, "new updated value") }
+            }
+        );
+
+        Assert.AreEqual(1, await executor.UpdateById(updateTicket));
+
+        queryByIdTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            id: objectsId[0]
+        );
+
+        result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(objectsId[0], result[0]["id"].Value);
+        Assert.AreEqual("new updated value", result[0]["name"].Value);
+    }
 }

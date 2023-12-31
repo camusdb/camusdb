@@ -22,15 +22,11 @@ public sealed class DeleteByIdFluxState
 
     public DeleteByIdFluxIndexState Indexes { get; }
 
-    public List<BufferPageOperation> ModifiedPages { get; } = new();
-
-    public List<IDisposable> Locks { get; } = new();
+    public List<BufferPageOperation> ModifiedPages { get; } = new();    
 
     public Dictionary<string, ColumnValue> ColumnValues { get; set; } = new();
 
     public BTreeTuple? RowTuple { get; set; } = new(new(), new());
-
-    public List<BufferPage>? Pages { get; internal set; }
 
     public DeleteByIdFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteByIdTicket ticket, DeleteByIdFluxIndexState indexes)
     {

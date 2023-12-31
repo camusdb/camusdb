@@ -74,8 +74,9 @@ public sealed class UpdateController : CommandsController
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Update request is not valid");
 
             UpdateTicket ticket = new(
-                database: request.DatabaseName ?? "",
-                name: request.TableName ?? "",                
+                txnId: await executor.NextTxnId(),
+                databaseName: request.DatabaseName ?? "",
+                tableName: request.TableName ?? "",                
                 values: request.Values ?? new(),
                 where: null,
                 filters: request.Filters ?? new()

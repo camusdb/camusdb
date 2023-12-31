@@ -93,7 +93,7 @@ public sealed class RowUpdaterById
     }
 
     /// <summary>
-    /// Step #1. Creates a new insert plan for the table defining which unique indexes will be updated
+    /// Step #1. Creates a new update plan for the table defining which unique indexes will be updated
     /// </summary>
     /// <param name="table"></param>
     /// <returns></returns>
@@ -180,7 +180,7 @@ public sealed class RowUpdaterById
 
         state.RowTuple = await index.UniqueRows.Get(ticket.TxnId, columnId);
 
-        if (state.RowTuple is null)
+        if (state.RowTuple is null || state.RowTuple.IsNull())
         {
             Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
             return FluxAction.Abort;
@@ -195,7 +195,7 @@ public sealed class RowUpdaterById
 
         state.ColumnValues = rowDeserializer.Deserialize(table.Schema, data);
 
-        Console.WriteLine("Data Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
+        Console.WriteLine("Data to Update Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
 
         return FluxAction.Continue;
     }
@@ -209,7 +209,7 @@ public sealed class RowUpdaterById
     {
         UpdateByIdTicket ticket = state.Ticket;
 
-        if (state.RowTuple is null)
+        if (state.RowTuple is null || state.RowTuple.IsNull())
         {
             Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
             return FluxAction.Abort;
@@ -320,13 +320,13 @@ public sealed class RowUpdaterById
 
     /// <summary>
     /// Every table has a B+Tree index where the data can be easily located by rowid
-    /// We take the page created in the previous step and insert it into the tree
+    /// We update the rowid to point to the new page offset
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
     private async Task<FluxAction> UpdateTableIndex(UpdateByIdFluxState state)
     {
-        if (state.RowTuple is null)
+        if (state.RowTuple is null || state.RowTuple.IsNull())
         {
             Console.WriteLine("Invalid row to Update {0}", state.Ticket.Id);
             return FluxAction.Abort;
@@ -339,7 +339,7 @@ public sealed class RowUpdaterById
             value: state.RowTuple.SlotTwo
         );
 
-        // Main table index stores rowid pointing to page offeset
+        // Main table index stores rowid pointing to page offset
         state.Indexes.MainIndexDeltas = await indexSaver.Save(saveUniqueOffsetIndex);
 
         return FluxAction.Continue;

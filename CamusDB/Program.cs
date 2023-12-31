@@ -10,13 +10,14 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
-using CamusDB.Core.SQLParser;
+using CamusDB.Core.Util.Time;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddRazorPages();
 
+builder.Services.AddSingleton<HybridLogicalClock>();
 builder.Services.AddSingleton<CommandExecutor>();
 builder.Services.AddSingleton<CommandValidator>();
 builder.Services.AddSingleton<CatalogsManager>();

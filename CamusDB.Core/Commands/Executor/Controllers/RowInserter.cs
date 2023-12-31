@@ -211,7 +211,7 @@ internal sealed class RowInserter
         return FluxAction.Continue;
     }
 
-    protected static ColumnValue? GetColumnValue(TableDescriptor table, InsertTicket ticket, string name)
+    private static ColumnValue? GetColumnValue(TableDescriptor table, InsertTicket ticket, string name)
     {
         List<TableColumnSchema> columns = table.Schema.Columns!;
 

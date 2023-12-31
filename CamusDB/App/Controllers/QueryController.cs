@@ -38,8 +38,9 @@ public sealed class QueryController : CommandsController
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Query request is not valid");
 
             QueryTicket ticket = new(
-                database: request.DatabaseName ?? "",
-                name: request.TableName ?? "",
+                txnId: await executor.NextTxnId(),
+                databaseName: request.DatabaseName ?? "",
+                tableName: request.TableName ?? "",
                 index: null,
                 where: null,
                 filters: request.Filters,
@@ -79,8 +80,9 @@ public sealed class QueryController : CommandsController
                 throw new Exception("QueryById request is not valid");
 
             QueryByIdTicket ticket = new(
-                database: request.DatabaseName ?? "",
-                name: request.TableName ?? "",
+                txnId: await executor.NextTxnId(),
+                databaseName: request.DatabaseName ?? "",
+                tableName: request.TableName ?? "",
                 id: request.Id ?? ""
             );
 
