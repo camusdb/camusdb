@@ -202,7 +202,8 @@ internal sealed class RowDeleter
         TableDescriptor table = state.Table;        
         BufferPoolHandler tablespace = state.Database.TableSpace;
 
-        // @todo we need to take a snapshot of the data but probably need to optimize this for larger datasets
+        // @todo we need to take a snapshot of the data to prevent deadlocks
+        // but probably need to optimize this for larger datasets
         List<QueryResultRow> rowsToDelete = await state.DataCursor.ToListAsync(); 
 
         foreach (QueryResultRow row in rowsToDelete)

@@ -295,7 +295,7 @@ public sealed class RowUpdaterById
     /// <returns></returns>
     private Task<FluxAction> UpdateRowToDisk(UpdateByIdFluxState state)
     {
-        if (state.RowTuple is null)
+        if (state.RowTuple is null || state.RowTuple.IsNull())
         {
             Console.WriteLine("Invalid row to Update {0}", state.Ticket.Id);
             return Task.FromResult(FluxAction.Abort);

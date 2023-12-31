@@ -17,7 +17,6 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
-using System.Net.Sockets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
