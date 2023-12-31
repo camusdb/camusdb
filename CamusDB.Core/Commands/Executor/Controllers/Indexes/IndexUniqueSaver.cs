@@ -13,6 +13,8 @@ using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.BufferPool.Models;
+using CamusDB.Core.Util.Time;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -25,50 +27,45 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task Save(SaveUniqueIndexTicket ticket)
+    public async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple?>> Save(SaveUniqueIndexTicket ticket)
     {        
-        await SaveInternal(ticket);
-    }
-
-    public async Task NoLockingSave(SaveUniqueIndexTicket ticket)
-    {
-        await SaveInternal(ticket);
-    }
+        return await SaveInternal(ticket);
+    }    
 
     public async Task Remove(RemoveUniqueIndexTicket ticket)
     {        
         await RemoveInternal(ticket);
     }
 
-    private static async Task SaveInternal(SaveUniqueIndexTicket ticket)
+    private static async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple?>> SaveInternal(SaveUniqueIndexTicket ticket)
     {
-        HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas = await ticket.Index.Put(ticket.TxnId, ticket.Key, ticket.Value);
+        return await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value);
 
-        Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
+        //Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
     {
-        (bool found, HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas) = await ticket.Index.Remove(ticket.Key);
+        (bool found, BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas) = await ticket.Index.Remove(ticket.Key);
 
-        if (found)
-            Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
+        //if (found)
+        //    Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
-    private static void Persist(
+    public void Persist(
         BufferPoolHandler tablespace,        
         BTree<ColumnValue, BTreeTuple?> index,
         List<BufferPageOperation> modifiedPages,
-        HashSet<BTreeNode<ColumnValue, BTreeTuple?>> deltas
+        BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas
     )
     {
-        if (deltas.Count == 0)
+        if (deltas.Nodes.Count == 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 "Deltas cannot be null or empty"
             );
 
-        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas)
+        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas.Nodes)
         {
             if (node.PageOffset.IsNull())
                 node.PageOffset = tablespace.GetNextFreeOffset();
@@ -92,8 +89,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         tablespace.WriteDataToPageBatch(modifiedPages, index.PageOffset, 0, treeBuffer);
 
         //@todo update nodes concurrently
+        ObjectIdValue nullValue = new();
 
-        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas)
+        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas.Nodes)
         {
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // keyCount(4 byte) + 
@@ -111,16 +109,20 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
                 if (entry is not null)
                 {
+                    (HLCTimestamp timestamp, BTreeTuple? tuple) = entry.GetMaxCommitedValue();
+
                     SerializeKey(nodeBuffer, entry.Key, ref pointer);
-                    //SerializeTuple(nodeBuffer, entry.LastValue, ref pointer); @todo LastValue
+                    Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer);
+                    SerializeTuple(nodeBuffer, tuple, ref pointer); // @todo LastValue
                     Serializator.WriteObjectId(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : new(), ref pointer);
                 }
                 else
                 {
                     Serializator.WriteInt8(nodeBuffer, 0, ref pointer);
-                    Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
-                    Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
-                    Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
+                    Serializator.WriteHLCTimestamp(nodeBuffer, new(), ref pointer);
+                    Serializator.WriteObjectId(nodeBuffer, nullValue, ref pointer);
+                    Serializator.WriteObjectId(nodeBuffer, nullValue, ref pointer);
+                    Serializator.WriteObjectId(nodeBuffer, nullValue, ref pointer);
                 }
             }
 

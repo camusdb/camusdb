@@ -64,17 +64,6 @@ internal sealed class RowDeleterById
     }
 
     /// <summary>
-    /// Adquire locks
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> AdquireLocks(DeleteByIdFluxState state)
-    {
-        state.Locks.Add(await state.Table.ReaderWriterLock.WriterLockAsync());
-        return FluxAction.Continue;
-    }
-
-    /// <summary>
     /// We need to locate the row tuple to delete
     /// </summary>
     /// <param name="state"></param>
@@ -306,16 +295,14 @@ internal sealed class RowDeleterById
         DeleteByIdTicket ticket = state.Ticket;
 
         Stopwatch timer = Stopwatch.StartNew();
-
-        machine.When(DeleteByIdFluxSteps.AdquireLocks, AdquireLocks);
+        
         machine.When(DeleteByIdFluxSteps.LocateTupleToDelete, LocateTupleToDelete);
         machine.When(DeleteByIdFluxSteps.DeleteUniqueIndexes, DeleteUniqueIndexes);
         machine.When(DeleteByIdFluxSteps.DeleteMultiIndexes, DeleteMultiIndexes);
         machine.When(DeleteByIdFluxSteps.DeleteRow, DeleteRowFromDisk);
         machine.When(DeleteByIdFluxSteps.ApplyPageOperations, ApplyPageOperations);
-        machine.When(DeleteByIdFluxSteps.ReleaseLocks, ReleaseLocks);
 
-        machine.WhenAbort(ReleaseLocks);
+        // machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());

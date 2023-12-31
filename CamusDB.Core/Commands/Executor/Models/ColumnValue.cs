@@ -41,4 +41,9 @@ public sealed class ColumnValue : IComparable<ColumnValue>
 
         return Value.CompareTo(other.Value);
     }
+
+    public override string ToString()
+    {
+        return string.Format("ColumnValue({0}:{1})", Type, Value);
+    }
 }

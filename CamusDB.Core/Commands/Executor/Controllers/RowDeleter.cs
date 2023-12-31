@@ -64,22 +64,11 @@ internal sealed class RowDeleter
     }
 
     /// <summary>
-    /// Adquire locks
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> AdquireLocks(DeleteFluxState state)
-    {
-        state.Locks.Add(await state.Table.ReaderWriterLock.WriterLockAsync());
-        return FluxAction.Continue;
-    }
-
-    /// <summary>
     /// We need to locate the row tuples to delete
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task<FluxAction> LocateTupleToDelete(DeleteFluxState state)
+    private Task<FluxAction> LocateTupleToDelete(DeleteFluxState state)
     {
         DeleteTicket ticket = state.Ticket;
 
@@ -93,9 +82,9 @@ internal sealed class RowDeleter
             orderBy: null
         );
 
-        state.DataCursor = await state.QueryExecutor.Query(state.Database, state.Table, queryTicket, noLocking: true);
+        state.DataCursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
-        return FluxAction.Continue;
+        return Task.FromResult(FluxAction.Continue);
     }
 
     /// <summary>
@@ -171,19 +160,6 @@ internal sealed class RowDeleter
 
             await indexSaver.Remove(tablespace, multiIndex, columnValue);
         }
-    }
-
-    /// <summary>
-    /// All locks are released once the operation is successful
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> ReleaseLocks(DeleteFluxState state)
-    {
-        foreach (IDisposable disposable in state.Locks)
-            disposable.Dispose();
-
-        return Task.FromResult(FluxAction.Continue);
     }
 
     /// <summary>
@@ -271,16 +247,14 @@ internal sealed class RowDeleter
         DeleteTicket ticket = state.Ticket;
 
         Stopwatch timer = Stopwatch.StartNew();
-
-        machine.When(DeleteFluxSteps.AdquireLocks, AdquireLocks);
+        
         machine.When(DeleteFluxSteps.LocateTupleToDelete, LocateTupleToDelete);
         machine.When(DeleteFluxSteps.DeleteUniqueIndexes, DeleteUniqueIndexes);
         //machine.When(DeleteFluxSteps.DeleteMultiIndexes, DeleteMultiIndexes);
         machine.When(DeleteFluxSteps.DeleteRow, DeleteRowsFromDisk);
-        machine.When(DeleteFluxSteps.ApplyPageOperations, ApplyPageOperations);
-        machine.When(DeleteFluxSteps.ReleaseLocks, ReleaseLocks);
+        machine.When(DeleteFluxSteps.ApplyPageOperations, ApplyPageOperations);        
 
-        machine.WhenAbort(ReleaseLocks);
+        // machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());

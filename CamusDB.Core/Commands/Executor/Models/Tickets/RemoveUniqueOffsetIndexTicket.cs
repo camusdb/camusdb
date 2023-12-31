@@ -26,7 +26,7 @@ public readonly struct RemoveUniqueOffsetIndexTicket
 
     public List<BufferPageOperation> ModifiedPages { get; }
 
-    public HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>>? Deltas { get; }
+    public BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? Deltas { get; }
 
     public RemoveUniqueOffsetIndexTicket(
         BufferPoolHandler tablespace,
@@ -34,7 +34,7 @@ public readonly struct RemoveUniqueOffsetIndexTicket
         ObjectIdValue key,
         List<IDisposable> locks,
         List<BufferPageOperation> modifiedPages,
-        HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>>? deltas = null)
+        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? deltas = null)
     {
         Tablespace = tablespace;
         Index = index;

@@ -295,7 +295,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
-        return await queryExecutor.Query(database, table, ticket, noLocking: false);
+        return queryExecutor.Query(database, table, ticket);
     }
 
     /// <summary>
@@ -377,7 +377,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, queryTicket.TableName);
 
-        return await queryExecutor.Query(database, table, queryTicket, noLocking: false);
+        return queryExecutor.Query(database, table, queryTicket);
     }
 
     #endregion

@@ -44,9 +44,9 @@ internal abstract class IndexBaseSaver
             BTreeEntry<ColumnValue, BTreeTuple?> entry = node.children[i];
 
             if (entry is null)
-                length += 2 + 12 * 3; // type(2 byte) + tuple(12 byte + 12 byte) + nextPage(12 byte)
+                length += 2 + 12 * 4; // type(2 byte) + tuple(12 byte + 12 byte) + nextPage(12 byte)
             else
-                length += 12 * 3 + GetKeySize(entry.Key);
+                length += 12 * 4 + GetKeySize(entry.Key);
         }
 
         return length;

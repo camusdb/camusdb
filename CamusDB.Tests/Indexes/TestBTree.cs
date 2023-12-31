@@ -11,6 +11,7 @@ using CamusDB.Core.Util.Trees;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.Indexes;
 
@@ -140,33 +141,33 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        HashSet<BTreeNode<int, int?>> deltas;
+        BTreeMutationDeltas<int, int?> deltas;
 
         BTree<int, int?> tree = new(new());
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
-        Assert.AreEqual(1, deltas.Count);        
+        Assert.AreEqual(1, deltas.Nodes.Count);        
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
-        Assert.AreEqual(1, deltas.Count);        
+        Assert.AreEqual(1, deltas.Nodes.Count);        
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 6, 101);
-        Assert.AreEqual(1, deltas.Count);        
+        Assert.AreEqual(1, deltas.Nodes.Count);        
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 7, 102);
-        Assert.AreEqual(1, deltas.Count);        
+        Assert.AreEqual(1, deltas.Nodes.Count);        
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 8, 103);
-        Assert.AreEqual(1, deltas.Count);        
+        Assert.AreEqual(1, deltas.Nodes.Count);        
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 9, 104);
-        Assert.AreEqual(1, deltas.Count);        
+        Assert.AreEqual(1, deltas.Nodes.Count);        
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 10, 105);
-        Assert.AreEqual(1, deltas.Count);        
+        Assert.AreEqual(1, deltas.Nodes.Count);        
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 11, 105);
-        Assert.AreEqual(1, deltas.Count);        
+        Assert.AreEqual(1, deltas.Nodes.Count);        
 
         Assert.AreEqual(tree.Size(), 8);
         Assert.AreEqual(tree.Height(), 0);

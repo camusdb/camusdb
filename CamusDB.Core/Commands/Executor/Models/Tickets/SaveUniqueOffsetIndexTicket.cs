@@ -6,8 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.BufferPool;
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
@@ -15,41 +13,26 @@ using CamusDB.Core.Util.Trees;
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct SaveUniqueOffsetIndexTicket
-{
-	public BufferPoolHandler Tablespace { get; }
-
+{	
 	public BTree<ObjectIdValue, ObjectIdValue> Index { get; }
 
 	public HLCTimestamp TxnId { get; }
 
 	public ObjectIdValue Key { get; }
 
-	public ObjectIdValue Value { get; }
+	public ObjectIdValue Value { get; }    
 
-    public List<IDisposable> Locks { get; } = new();
-
-    public List<BufferPageOperation> ModifiedPages { get; }
-
-    public HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>>? Deltas { get; }    
-
-    public SaveUniqueOffsetIndexTicket(
-		BufferPoolHandler tablespace,
+    public SaveUniqueOffsetIndexTicket(		
 		BTree<ObjectIdValue, ObjectIdValue> index,
         HLCTimestamp txnId,
         ObjectIdValue key,
-        ObjectIdValue value,
-        List<IDisposable> locks,
-        List<BufferPageOperation> modifiedPages,
-        HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>>? deltas = null)
-	{
-		Tablespace = tablespace;
+        ObjectIdValue value
+	)
+	{		
 		Index = index;
 		TxnId = txnId;
 		Key = key;
 		Value = value;
-		Locks = locks;
-		ModifiedPages = modifiedPages;
-		Deltas = deltas;
 	}
 }
 

@@ -9,6 +9,7 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
@@ -40,13 +41,20 @@ public sealed class IndexUniqueOffsetNodeReader : IBTreeNodeReader<ObjectIdValue
         {
             BTreeEntry<ObjectIdValue, ObjectIdValue> entry = new(
                 key: Serializator.ReadObjectId(data, ref pointer),
-                initialTimestamp: Serializator.ReadHLCTimestamp(data, ref pointer),
-                initialValue: Serializator.ReadObjectId(data, ref pointer),
                 next: null
-            )
-            {
-                NextPageOffset = Serializator.ReadObjectId(data, ref pointer)
-            };
+            );
+
+            HLCTimestamp timestamp = Serializator.ReadHLCTimestamp(data, ref pointer);
+            ObjectIdValue value = Serializator.ReadObjectId(data, ref pointer);
+
+            if (!timestamp.IsNull())
+                entry.SetValue(
+                    timestamp: timestamp,
+                    commitState: BTreeCommitState.Committed,
+                    value: value 
+                );
+
+            entry.NextPageOffset = Serializator.ReadObjectId(data, ref pointer);
 
             node.children[i] = entry;
         }

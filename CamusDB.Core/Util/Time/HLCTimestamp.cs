@@ -40,6 +40,11 @@ public readonly struct HLCTimestamp : IComparable<HLCTimestamp>
         return 1;
     }
 
+    public bool IsNull()
+    {
+        return L == 0 && C == 0;
+    }
+
     public override string ToString()
     {
         return string.Format("HLC({0}:{1})", L, C);

@@ -21,6 +21,8 @@ public readonly struct SaveUniqueIndexTicket
 
     public HLCTimestamp TxnId { get; }
 
+    public BTreeCommitState CommitState { get; }
+
     public ColumnValue Key { get; }
 
     public BTreeTuple Value { get; }
@@ -31,6 +33,7 @@ public readonly struct SaveUniqueIndexTicket
         BufferPoolHandler tablespace,        
         BTree<ColumnValue, BTreeTuple?> index,
         HLCTimestamp txnId,
+        BTreeCommitState commitState,
         ColumnValue key,
         BTreeTuple value,
         List<BufferPageOperation> modifiedPages
@@ -39,6 +42,7 @@ public readonly struct SaveUniqueIndexTicket
         Tablespace = tablespace;        
         Index = index;
         TxnId = txnId;
+        CommitState = commitState;
         Key = key;
         Value = value;
         ModifiedPages = modifiedPages;

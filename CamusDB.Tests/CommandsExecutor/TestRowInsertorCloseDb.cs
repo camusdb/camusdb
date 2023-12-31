@@ -90,6 +90,27 @@ internal sealed class TestRowInsertorCloseDb
         );
 
         await executor.Insert(ticket);
+
+        CloseDatabaseTicket closeTicket = new(dbname);
+        await executor.CloseDatabase(closeTicket);
+
+        QueryByIdTicket queryTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "user_robots",
+            id: "507f1f77bcf86cd799439011"
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryTicket)).ToListAsync();
+        Assert.AreEqual(1, result.Count);
+
+        Dictionary<string, ColumnValue> row = result[0];
+
+        Assert.AreEqual(row["id"].Type, ColumnType.Id);
+        Assert.AreEqual(row["id"].Value, "507f1f77bcf86cd799439011");
+
+        Assert.AreEqual(row["usersId"].Type, ColumnType.Id);
+        Assert.AreEqual(row["usersId"].Value, "5e353cf5e95f1e3a432e49aa");
     }
 
     [Test]

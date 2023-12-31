@@ -27,7 +27,7 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
 
     private static HLCTimestamp UnserializeTimestamp(byte[] nodeBuffer, ref int pointer)
     {
-        return new();
+        return Serializator.ReadHLCTimestamp(nodeBuffer, ref pointer);
     }
 
     private static ColumnValue UnserializeKey(byte[] nodeBuffer, ref int pointer)
@@ -90,10 +90,13 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
             HLCTimestamp timestamp = UnserializeTimestamp(data, ref pointer);
             BTreeTuple? tuple = UnserializeTuple(data, ref pointer);
 
-            BTreeEntry<ColumnValue, BTreeTuple?> entry = new(key, timestamp, tuple, null)
+            BTreeEntry<ColumnValue, BTreeTuple?> entry = new(key, null)
             {
                 NextPageOffset = Serializator.ReadObjectId(data, ref pointer)
             };
+
+            if (!timestamp.IsNull())
+                entry.SetValue(timestamp, BTreeCommitState.Committed, tuple);
 
             node.children[i] = entry;
         }

@@ -63,22 +63,11 @@ public sealed class TableColumnAdder
     }
 
     /// <summary>
-    /// Adquire locks
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> AdquireLocks(AlterColumnFluxState state)
-    {
-        state.Locks.Add(await state.Table.ReaderWriterLock.WriterLockAsync());
-        return FluxAction.Continue;
-    }
-
-    /// <summary>
     /// We need to locate the row tuples to AlterColumn
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task<FluxAction> LocateTuplesToAlterColumn(AlterColumnFluxState state)
+    private Task<FluxAction> LocateTuplesToAlterColumn(AlterColumnFluxState state)
     {
         AlterColumnTicket ticket = state.Ticket;
 
@@ -92,11 +81,11 @@ public sealed class TableColumnAdder
             orderBy: null
         );
 
-        state.DataCursor = await state.QueryExecutor.Query(state.Database, state.Table, queryTicket, noLocking: true);
+        state.DataCursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
         //Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, state.RowTuple.SlotTwo);*/
 
-        return FluxAction.Continue;
+        return Task.FromResult(FluxAction.Continue);
     }
 
     private async Task AlterColumnMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
@@ -194,19 +183,6 @@ public sealed class TableColumnAdder
     }
 
     /// <summary>
-    /// All locks are released once the operation is successful
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> ReleaseLocks(AlterColumnFluxState state)
-    {
-        foreach (IDisposable disposable in state.Locks)
-            disposable.Dispose();
-
-        return Task.FromResult(FluxAction.Continue);
-    }
-
-    /// <summary>
     /// Executes the flux state machine to AlterColumn records by the specified filters
     /// </summary>
     /// <param name="machine"></param>
@@ -220,16 +196,14 @@ public sealed class TableColumnAdder
         AlterColumnTicket ticket = state.Ticket;
 
         Stopwatch timer = Stopwatch.StartNew();
-
-        machine.When(AlterColumnFluxSteps.AdquireLocks, AdquireLocks);
+        
         machine.When(AlterColumnFluxSteps.LocateTupleToAlterColumn, LocateTuplesToAlterColumn);
         machine.When(AlterColumnFluxSteps.UpdateUniqueIndexes, AlterColumnUniqueIndexes);
         machine.When(AlterColumnFluxSteps.UpdateMultiIndexes, AlterColumnMultiIndexes);
         machine.When(AlterColumnFluxSteps.AlterColumnRow, AlterColumnRowsFromDisk);
-        machine.When(AlterColumnFluxSteps.ApplyPageOperations, ApplyPageOperations);
-        machine.When(AlterColumnFluxSteps.ReleaseLocks, ReleaseLocks);
+        machine.When(AlterColumnFluxSteps.ApplyPageOperations, ApplyPageOperations);        
 
-        machine.WhenAbort(ReleaseLocks);
+        //machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());

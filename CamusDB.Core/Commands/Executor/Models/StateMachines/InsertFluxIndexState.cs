@@ -7,16 +7,22 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
-public readonly struct InsertFluxIndexState
+public sealed class InsertFluxIndexState
 {
 	public List<TableIndexSchema> UniqueIndexes { get; } = new();
 
 	public List<TableIndexSchema>? MultiIndexes { get; } = null;
 
-	public InsertFluxIndexState()
+    public BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? MainIndexDeltas { get; set; }
+
+    public List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>? UniqueIndexDeltas { get; set; }
+
+    public InsertFluxIndexState()
 	{
 	}
 }

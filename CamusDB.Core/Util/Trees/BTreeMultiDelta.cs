@@ -14,9 +14,9 @@ public sealed class BTreeMultiDelta<TKey> where TKey : IComparable<TKey>
 {
     public BTreeMultiNode<TKey> Node { get; } // dirty node
 
-    public HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>>? InnerDeltas { get; set; } // deltas changed in the inner tree
+    public BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? InnerDeltas { get; set; } // deltas changed in the inner tree
 
-    public BTreeMultiDelta(BTreeMultiNode<TKey> node, HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>>? innerDeltas)
+    public BTreeMultiDelta(BTreeMultiNode<TKey> node, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? innerDeltas)
     {
         Node = node;
         InnerDeltas = innerDeltas;

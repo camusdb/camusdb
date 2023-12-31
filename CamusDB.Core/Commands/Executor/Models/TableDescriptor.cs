@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using Nito.AsyncEx;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.ObjectIds;
@@ -21,11 +20,7 @@ public sealed class TableDescriptor
 
     public BTree<ObjectIdValue, ObjectIdValue> Rows { get; }
 
-    public Dictionary<string, TableIndexSchema> Indexes { get; set; } = new();
-
-    public AsyncReaderWriterLock ReaderWriterLock { get; } = new();
-
-    //public SemaphoreSlim WriteLock { get; } = new(1, 1);
+    public Dictionary<string, TableIndexSchema> Indexes { get; set; } = new();    
 
     public TableDescriptor(string name, TableSchema schema, BTree<ObjectIdValue, ObjectIdValue> rows)
     {

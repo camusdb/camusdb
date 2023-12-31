@@ -25,26 +25,11 @@ internal sealed class QueryExecutor
 
     private readonly QuerySorter querySorter = new();
 
-    public async Task<IAsyncEnumerable<QueryResultRow>> Query(
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        QueryTicket ticket,
-        bool noLocking
-    )
+    public IAsyncEnumerable<QueryResultRow> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
         QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
-
-        if (noLocking)
-            return ExecuteQueryPlanInternal(plan);
-
-        return await ExecuteQueryPlanWithLocks(plan);
-    }
-
-    private async Task<IAsyncEnumerable<QueryResultRow>> ExecuteQueryPlanWithLocks(QueryPlan plan)
-    {
-        using IDisposable readerLock = await plan.Table.ReaderWriterLock.ReaderLockAsync();
-
-        return ExecuteQueryPlanInternal(plan);
+        
+        return ExecuteQueryPlanInternal(plan);        
     }
 
     private IAsyncEnumerable<QueryResultRow> ExecuteQueryPlanInternal(QueryPlan plan)
@@ -83,9 +68,7 @@ internal sealed class QueryExecutor
 
     public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
     {
-        BufferPoolHandler tablespace = database.TableSpace;
-
-        using IDisposable readerLock = await table.ReaderWriterLock.ReaderLockAsync();
+        BufferPoolHandler tablespace = database.TableSpace;        
 
         if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
         {
@@ -102,6 +85,8 @@ internal sealed class QueryExecutor
                 "Table doesn't have a primary key index"
             );
         }
+
+        Console.WriteLine(ticket.TxnId);
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 

@@ -426,7 +426,7 @@ public class TestBTreeMulti
         BTree<int, int?> tree = new(new());
 
         for (int i = 0; i < 256; i++)
-            await tree.Put(txnid, i, i + 100);
+            await tree.Put(txnid, BTreeCommitState.Committed, i, i + 100);
 
         Assert.AreEqual(256, tree.Size());
         Assert.AreEqual(1, tree.Height());

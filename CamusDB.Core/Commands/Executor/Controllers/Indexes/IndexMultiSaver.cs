@@ -135,18 +135,15 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
                     //Console.WriteLine("Saved deltas for {0} {1}", delta.Value.Node.Id, subTree.Id);
 
-                    SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
-                        tablespace: tablespace,
+                    SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(                        
                         index: subTree,
                         txnId: txnid,
                         key: value.SlotOne,
-                        value.SlotTwo,
-                        locks: locks,
-                        modifiedPages: modifiedPages,
-                        deltas: delta.Value.InnerDeltas
+                        value.SlotTwo
                     );
 
-                    await indexSaver.Save(saveUniqueOffsetIndex);
+                    // @todo fix this
+                    delta.Value.InnerDeltas = await indexSaver.Save(saveUniqueOffsetIndex);
                 }
 
                 //Console.WriteLine("Write Tree={0} PageOffset={1}", subTree.Id, subTree.PageOffset);

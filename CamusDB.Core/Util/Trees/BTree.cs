@@ -93,7 +93,10 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     public async Task<TValue?> Get(HLCTimestamp txnid, TKey key)
     {
         if (root is null)
+        {
+            Console.WriteLine("root is null");
             return default;
+        }
 
         return await Search(root, txnid, key, height);
     }
@@ -107,14 +110,22 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         BTreeEntry<TKey, TValue>[] children = node.children;
 
+        Console.WriteLine("F-1={0}", ht);
+
         // external node
         if (ht == 0)
         {
+            Console.WriteLine("F0={0}", node.KeyCount);
+
             for (int j = 0; j < node.KeyCount; j++)
             {
+                Console.WriteLine("F1={0}", txnid);
+
                 // verify if key can be seen by MVCC
                 if (!children[j].CanBeSeenBy(txnid))
                     continue;
+
+                Console.WriteLine("F2={0} {1}", txnid, key);
 
                 if (Eq(key, children[j].Key))
                     return children[j].GetValue(txnid);
@@ -280,14 +291,14 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <param name="commitState"></param>
     /// <param name="value"></param>
     /// <returns></returns>
-    public async Task<HashSet<BTreeNode<TKey, TValue>>> Put(HLCTimestamp txnid, BTreeCommitState commitState, TKey key, TValue? value)
+    public async Task<BTreeMutationDeltas<TKey, TValue>> Put(HLCTimestamp txnid, BTreeCommitState commitState, TKey key, TValue? value)
     {
-        HashSet<BTreeNode<TKey, TValue>> deltas = new();
+        BTreeMutationDeltas<TKey, TValue> deltas = new();
 
         if (root is null) // create root
         {
             root = new BTreeNode<TKey, TValue>(0);
-            deltas.Add(root);
+            deltas.Nodes.Add(root);
             loaded++;
         }
 
@@ -303,13 +314,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         // need to split root
         BTreeNode<TKey, TValue> newRoot = new(2);
-        deltas.Add(newRoot);
+        deltas.Nodes.Add(newRoot);
         loaded++;
 
-        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, txnid, BTreeCommitState.Committed, default, root);
-        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, txnid, BTreeCommitState.Committed, default, split);
+        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, root);
+        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, split);
 
-        deltas.Add(root);
+        deltas.Nodes.Add(root);
 
         root = newRoot;
 
@@ -327,8 +338,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         TKey key,
         BTreeCommitState commitState,
         TValue? value,         
-        int ht, 
-        HashSet<BTreeNode<TKey, TValue>> deltas
+        int ht,
+        BTreeMutationDeltas<TKey, TValue> deltas
     )
     {
         if (node is null)
@@ -337,7 +348,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         using IDisposable disposable = await node.WriterLockAsync();
 
         int j;
-        BTreeEntry<TKey, TValue> newEntry = new(key, txnid, commitState, value, null);
+        BTreeEntry<TKey, TValue>? newEntry = null;
         BTreeEntry<TKey, TValue>[] children = node.children;
 
         // external node
@@ -347,18 +358,21 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 if (Eq(key, children[j].Key))
                 {
-                    children[j].SetValue(txnid, commitState, value);
+                    deltas.Entries.Add(children[j].SetValue(txnid, commitState, value));                    
                     return null;
                 }
 
                 if (Less(key, children[j].Key))
                     break;
             }
+
+            newEntry = new(key, null);
+            deltas.Entries.Add(newEntry.SetValue(txnid, commitState, value));            
         }
 
         // internal node
         else
-        {
+        {            
             for (j = 0; j < node.KeyCount; j++)
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
@@ -379,12 +393,18 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                     if (split == null)
                         return null;
 
+                    newEntry = new(key, null);                    
                     newEntry.Key = split.children[0].Key;
                     newEntry.Next = split;
+
+                    deltas.Entries.Add(newEntry.SetValue(txnid, commitState, value));
                     break;
                 }
             }
         }
+
+        if (newEntry is null)
+            throw new Exception("?");
 
         for (int i = node.KeyCount; i > j; i--)
             node.children[i] = node.children[i - 1];
@@ -392,7 +412,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         node.children[j] = newEntry;
         node.KeyCount++;
 
-        deltas.Add(node);
+        deltas.Nodes.Add(node);
 
         if (node.KeyCount < BTreeConfig.MaxChildren)
             return null;
@@ -401,14 +421,14 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     }
 
     // split node in half
-    private BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, HashSet<BTreeNode<TKey, TValue>> deltas)
+    private BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, BTreeMutationDeltas<TKey, TValue> deltas)
     {
         BTreeNode<TKey, TValue> newNode = new(BTreeConfig.MaxChildrenHalf);
-        deltas.Add(newNode);
+        deltas.Nodes.Add(newNode);
         loaded++;
 
         current.KeyCount = BTreeConfig.MaxChildrenHalf;
-        deltas.Add(current);
+        deltas.Nodes.Add(current);
 
         for (int j = 0; j < BTreeConfig.MaxChildrenHalf; j++)
             newNode.children[j] = current.children[BTreeConfig.MaxChildrenHalf + j];
@@ -421,9 +441,9 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// </summary>
     /// <param name="key"></param>
     /// <returns></returns>
-    public async Task<(bool found, HashSet<BTreeNode<TKey, TValue>> deltas)> Remove(TKey key)
+    public async Task<(bool found, BTreeMutationDeltas<TKey, TValue> deltas)> Remove(TKey key)
     {
-        HashSet<BTreeNode<TKey, TValue>> deltas = new();
+        BTreeMutationDeltas<TKey, TValue> deltas = new();
 
         bool found = await Delete(root, key, height, deltas);
 
@@ -442,7 +462,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <param name="deltas"></param>
     /// <returns></returns>
     /// <exception cref="Exception"></exception>
-    private async Task<bool> Delete(BTreeNode<TKey, TValue>? node, TKey key, int ht, HashSet<BTreeNode<TKey, TValue>> deltas)
+    private async Task<bool> Delete(BTreeNode<TKey, TValue>? node, TKey key, int ht, BTreeMutationDeltas<TKey, TValue> deltas)
     {
         if (node is null)
             return false;
@@ -472,7 +492,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                 node.children[j] = node.children[j + 1];
 
             node.KeyCount--;
-            deltas.Add(node);
+            deltas.Nodes.Add(node);
 
             return true;
         }

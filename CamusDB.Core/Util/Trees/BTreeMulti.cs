@@ -9,6 +9,7 @@
 using System.Runtime.CompilerServices;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
+using YamlDotNet.Core.Tokens;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -268,8 +269,8 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         int j;
         BTreeMultiDelta<TKey>? multiDelta;
         BTreeMultiEntry<TKey>? newEntry = null;
-        BTreeMultiEntry<TKey>[] children = node.children;
-        HashSet<BTreeNode<ObjectIdValue, ObjectIdValue>> innerDeltas;
+        BTreeMultiEntry<TKey>[] children = node.children;        
+        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> innerDeltas;
 
         // external node at height 0
         if (ht == 0)
@@ -284,7 +285,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
                 //if (val is null)
                 //    throw new ArgumentException("val cannot be null");
 
-                innerDeltas = await child.Value!.Put(txnid, val.SlotOne, val.SlotTwo);
+                innerDeltas = await child.Value!.Put(txnid, BTreeCommitState.Committed, val.SlotOne, val.SlotTwo);
 
                 if (deltas.TryGetValue(node.Id, out multiDelta))
                     multiDelta.InnerDeltas = innerDeltas;
@@ -336,7 +337,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
             size++;
         }
 
-        innerDeltas = await newEntry.Value!.Put(txnid, val.SlotOne, val.SlotTwo);
+        innerDeltas = await newEntry.Value!.Put(txnid, BTreeCommitState.Committed, val.SlotOne, val.SlotTwo);
 
         if (innerDeltas is null)
             throw new Exception("inner deltas cannot be null");

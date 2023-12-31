@@ -22,9 +22,7 @@ public readonly struct UpdateUniqueIndexTicket
 
 	public InsertTicket InsertTicket { get; }
 
-	public List<TableIndexSchema> Indexes { get; }
-
-    public List<IDisposable> Locks { get; }
+	public List<TableIndexSchema> Indexes { get; }    
 
     public List<BufferPageOperation> ModifiedPages { get; }
 
@@ -33,8 +31,7 @@ public readonly struct UpdateUniqueIndexTicket
 		TableDescriptor table,		
 		BTreeTuple rowTuple,
 		InsertTicket ticket,
-		List<TableIndexSchema> indexes,
-		List<IDisposable> locks,
+		List<TableIndexSchema> indexes,		
         List<BufferPageOperation> modifiedPages
     )
 	{
@@ -42,8 +39,7 @@ public readonly struct UpdateUniqueIndexTicket
 		Table = table;		
 		RowTuple = rowTuple;
 		InsertTicket = ticket;
-		Indexes = indexes;
-		Locks = locks;
+		Indexes = indexes;		
 		ModifiedPages = modifiedPages;
 	}
 }

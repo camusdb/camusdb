@@ -126,18 +126,7 @@ public sealed class RowUpdaterById
             return columnValue;
 
         return null;
-    }
-
-    /// <summary>
-    /// Adquire locks
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> AdquireLocks(UpdateByIdFluxState state)
-    {
-        state.Locks.Add(await state.Table.ReaderWriterLock.WriterLockAsync());
-        return FluxAction.Continue;
-    }
+    }    
 
     /// <summary>
     /// We need to locate the row tuple to Update
@@ -216,19 +205,6 @@ public sealed class RowUpdaterById
     }
 
     /// <summary>
-    /// All locks are released once the operation is successful
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> ReleaseLocks(UpdateByIdFluxState state)
-    {
-        foreach (IDisposable disposable in state.Locks)
-            disposable.Dispose();
-
-        return Task.FromResult(FluxAction.Continue);
-    }
-
-    /// <summary>
     /// Updates unique indexes
     /// </summary>
     /// <param name="state"></param>
@@ -282,6 +258,11 @@ public sealed class RowUpdaterById
         return Task.FromResult(FluxAction.Continue);
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private Task<FluxAction> ApplyPageOperations(UpdateByIdFluxState state)
     {
         state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
@@ -303,16 +284,14 @@ public sealed class RowUpdaterById
         UpdateByIdTicket ticket = state.Ticket;
 
         Stopwatch timer = Stopwatch.StartNew();
-
-        machine.When(UpdateByIdFluxSteps.AdquireLocks, AdquireLocks);
+        
         machine.When(UpdateByIdFluxSteps.LocateTupleToUpdate, LocateTupleToUpdate);
         machine.When(UpdateByIdFluxSteps.UpdateUniqueIndexes, UpdateUniqueIndexes);
         machine.When(UpdateByIdFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
         machine.When(UpdateByIdFluxSteps.UpdateRow, UpdateRowFromDisk);
-        machine.When(UpdateByIdFluxSteps.ApplyPageOperations, ApplyPageOperations);
-        machine.When(UpdateByIdFluxSteps.ReleaseLocks, ReleaseLocks);
+        machine.When(UpdateByIdFluxSteps.ApplyPageOperations, ApplyPageOperations);        
 
-        machine.WhenAbort(ReleaseLocks);
+        //machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());

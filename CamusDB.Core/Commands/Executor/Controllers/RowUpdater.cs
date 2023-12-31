@@ -145,18 +145,7 @@ public sealed class RowUpdater
         }
 
         return indexState;
-    }
-
-    /// <summary>
-    /// Adquire locks
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> AdquireLocks(UpdateFluxState state)
-    {
-        state.Locks.Add(await state.Table.ReaderWriterLock.WriterLockAsync());
-        return FluxAction.Continue;
-    }
+    }   
 
     private async Task<FluxAction> CheckForUniqueKeysViolations(UpdateFluxState state)
     {
@@ -170,7 +159,7 @@ public sealed class RowUpdater
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task<FluxAction> LocateTuplesToUpdate(UpdateFluxState state)
+    private Task<FluxAction> LocateTuplesToUpdate(UpdateFluxState state)
     {
         UpdateTicket ticket = state.Ticket;
 
@@ -184,11 +173,11 @@ public sealed class RowUpdater
             orderBy: null
         );
 
-        state.DataCursor = await state.QueryExecutor.Query(state.Database, state.Table, queryTicket, noLocking: true);
+        state.DataCursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
         //Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, state.RowTuple.SlotTwo);*/
 
-        return FluxAction.Continue;
+        return Task.FromResult(FluxAction.Continue);
     }
 
     private async Task UpdateMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
@@ -271,19 +260,6 @@ public sealed class RowUpdater
     }
 
     /// <summary>
-    /// All locks are released once the operation is successful
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> ReleaseLocks(UpdateFluxState state)
-    {
-        foreach (IDisposable disposable in state.Locks)
-            disposable.Dispose();
-
-        return Task.FromResult(FluxAction.Continue);
-    }
-
-    /// <summary>
     /// Executes the flux state machine to update records by the specified filters
     /// </summary>
     /// <param name="machine"></param>
@@ -297,14 +273,12 @@ public sealed class RowUpdater
         UpdateTicket ticket = state.Ticket;
 
         Stopwatch timer = Stopwatch.StartNew();
-
-        machine.When(UpdateFluxSteps.AdquireLocks, AdquireLocks);
+        
         machine.When(UpdateFluxSteps.LocateTupleToUpdate, LocateTuplesToUpdate);        
         machine.When(UpdateFluxSteps.UpdateRowAndIndexes, UpdateRowsAndIndexesToDisk);
         machine.When(UpdateFluxSteps.ApplyPageOperations, ApplyPageOperations);
-        machine.When(UpdateFluxSteps.ReleaseLocks, ReleaseLocks);
 
-        machine.WhenAbort(ReleaseLocks);
+        //machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());

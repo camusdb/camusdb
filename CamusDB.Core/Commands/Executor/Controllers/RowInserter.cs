@@ -15,6 +15,8 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
+using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -85,7 +87,6 @@ internal sealed class RowInserter
                 );
             }
         }
-        
     }
 
     /// <summary>
@@ -152,17 +153,7 @@ internal sealed class RowInserter
     private async Task<FluxAction> CheckUniqueKeysStep(InsertFluxState state)
     {
         await insertUniqueKeySaver.CheckUniqueKeys(state.Table, state.Ticket);
-        return FluxAction.Continue;
-    }
 
-    /// <summary>
-    /// Adquire locks
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> AdquireLocks(InsertFluxState state)
-    {
-        state.Locks.Add(await state.Table.ReaderWriterLock.WriterLockAsync());
         return FluxAction.Continue;
     }
 
@@ -179,29 +170,7 @@ internal sealed class RowInserter
         state.RowTuple.SlotTwo = tablespace.GetNextFreeOffset();
 
         return Task.FromResult(FluxAction.Continue);
-    }
-
-    /// <summary>
-    /// Unique keys are updated before inserting the actual row
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> UpdateUniqueKeysStep(InsertFluxState state)
-    {
-        UpdateUniqueIndexTicket ticket = new(
-            database: state.Database,
-            table: state.Table,            
-            rowTuple: state.RowTuple,
-            ticket: state.Ticket,
-            indexes: state.Indexes.UniqueIndexes,
-            locks: state.Locks,
-            modifiedPages: state.ModifiedPages
-        );
-
-        await insertUniqueKeySaver.UpdateUniqueKeys(ticket);
-
-        return FluxAction.Continue;
-    }
+    }    
 
     /// <summary>
     /// Allocate a new page in the buffer pool and insert the serializated row into it
@@ -228,22 +197,36 @@ internal sealed class RowInserter
     /// <returns></returns>
     private async Task<FluxAction> UpdateTableIndex(InsertFluxState state)
     {
-        BufferPoolHandler tablespace = state.Database.TableSpace;
-
         SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
-            tablespace: tablespace,
             index: state.Table.Rows,
             txnId: state.Ticket.TxnId,
             key: state.RowTuple.SlotOne,
-            value: state.RowTuple.SlotTwo,
-            locks: state.Locks,
+            value: state.RowTuple.SlotTwo
+        );
+
+        // Main table index stores rowid pointing to page offeset
+        state.Indexes.MainIndexDeltas = await indexSaver.Save(saveUniqueOffsetIndex);
+
+        return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// Unique keys are updated before inserting the actual row
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private async Task<FluxAction> UpdateUniqueIndexes(InsertFluxState state)
+    {
+        UpdateUniqueIndexTicket ticket = new(
+            database: state.Database,
+            table: state.Table,
+            rowTuple: state.RowTuple,
+            ticket: state.Ticket,
+            indexes: state.Indexes.UniqueIndexes,
             modifiedPages: state.ModifiedPages
         );
 
-        //Console.WriteLine("{0}", state.Table.Rows.loaded);
-
-        // Main table index stores rowid pointing to page offeset
-        await indexSaver.Save(saveUniqueOffsetIndex);
+        state.Indexes.UniqueIndexDeltas = await insertUniqueKeySaver.UpdateUniqueKeys(ticket);
 
         return FluxAction.Continue;
     }
@@ -270,6 +253,35 @@ internal sealed class RowInserter
     }
 
     /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private Task<FluxAction> PersistIndexChanges(InsertFluxState state)
+    {
+        if (state.Indexes.MainIndexDeltas is null)
+            return Task.FromResult(FluxAction.Abort);
+
+        foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in state.Indexes.MainIndexDeltas.Entries)
+            btreeEntry.CommitState = BTreeCommitState.Committed;
+
+        indexSaver.Persist(state.Database.TableSpace, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas);
+
+        if (state.Indexes.UniqueIndexDeltas is null)
+            return Task.FromResult(FluxAction.Continue);
+
+        foreach ((BTree<ColumnValue, BTreeTuple?> index, BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+        {
+            foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.Entries)
+                uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
+
+            indexSaver.Persist(state.Database.TableSpace, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+        }
+
+        return Task.FromResult(FluxAction.Continue);
+    }
+
+    /// <summary>
     /// Apply all the changes to the modified pages in an ACID operation
     /// </summary>
     /// <param name="state"></param>
@@ -282,19 +294,6 @@ internal sealed class RowInserter
     }
 
     /// <summary>
-    /// All locks are released once the operation is successful
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> ReleaseLocks(InsertFluxState state)
-    {
-        foreach (IDisposable disposable in state.Locks)
-            disposable.Dispose();
-
-        return Task.FromResult(FluxAction.Continue);
-    }    
-
-    /// <summary>
     /// Creates a new flux machine and runs all steps in order
     /// </summary>
     /// <param name="machine"></param>
@@ -305,19 +304,18 @@ internal sealed class RowInserter
         Stopwatch timer = Stopwatch.StartNew();
 
         machine.When(InsertFluxSteps.CheckUniqueKeys, CheckUniqueKeysStep);
-        machine.When(InsertFluxSteps.AdquireLocks, AdquireLocks);
-        machine.When(InsertFluxSteps.UpdateUniqueKeys, UpdateUniqueKeysStep);
         machine.When(InsertFluxSteps.AllocateInsertTuple, AllocateInsertTuple);
         machine.When(InsertFluxSteps.InsertToPage, InsertToPageStep);
         machine.When(InsertFluxSteps.UpdateTableIndex, UpdateTableIndex);
+        machine.When(InsertFluxSteps.UpdateUniqueIndexes, UpdateUniqueIndexes);
         machine.When(InsertFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
+        machine.When(InsertFluxSteps.PersistIndexChanges, PersistIndexChanges);
         machine.When(InsertFluxSteps.ApplyPageOperations, ApplyPageOperations);
-        machine.When(InsertFluxSteps.ReleaseLocks, ReleaseLocks);
 
-        machine.WhenAbort(ReleaseLocks);
+        // machine.WhenAbort(ReleaseLocks);?
 
         while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep());        
+            await machine.RunStep(machine.NextStep());
 
         TimeSpan timeTaken = timer.Elapsed;
 
@@ -327,7 +325,7 @@ internal sealed class RowInserter
             state.RowTuple.SlotTwo,
             timeTaken.ToString(@"m\:ss\.fff")
         );
-    }    
+    }
 }
 
 /*foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)

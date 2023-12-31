@@ -67,10 +67,12 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
         }
     }
 
-    public async Task<BTreeTuple> UpdateUniqueKeys(UpdateUniqueIndexTicket ticket)
+    public async Task<List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>> UpdateUniqueKeys(UpdateUniqueIndexTicket ticket)
     {
         InsertTicket insertTicket = ticket.InsertTicket;
         BufferPoolHandler tablespace = ticket.Database.TableSpace;
+
+        List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> deltas = new();
 
         foreach (TableIndexSchema index in ticket.Indexes)
         {
@@ -88,22 +90,21 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     "A null value was found for unique key field " + index.Column
-                );
-
-            // save index save to journal                
+                );            
 
             SaveUniqueIndexTicket saveUniqueIndexTicket = new(
                 tablespace: tablespace,
                 index: uniqueIndex,
                 txnId: ticket.InsertTicket.TxnId,
+                commitState: BTreeCommitState.Uncommitted,
                 key: uniqueKeyValue,
                 value: ticket.RowTuple,
                 modifiedPages: ticket.ModifiedPages
             );
 
-            await indexSaver.NoLockingSave(saveUniqueIndexTicket);
+            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
         }
 
-        return ticket.RowTuple;
+        return deltas;
     }
 }
