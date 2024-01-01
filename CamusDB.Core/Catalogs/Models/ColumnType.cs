@@ -15,5 +15,5 @@ public enum ColumnType
     Integer64 = 2,
     String = 3,
     Bool = 4,
-    Float = 5,
+    Float64 = 5,
 }

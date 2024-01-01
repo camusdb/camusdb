@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.Serializer;
-using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -31,7 +30,7 @@ internal abstract class IndexBaseReader
             case ColumnType.Integer64:
                 {
                     long value = Serializator.ReadInt64(nodeBuffer, ref pointer);
-                    return new ColumnValue(ColumnType.Integer64, value.ToString());
+                    return new ColumnValue(ColumnType.Integer64, value);
                 }
 
             /*case ColumnType.String:
@@ -41,7 +40,7 @@ internal abstract class IndexBaseReader
                 break;*/
 
             default:
-                throw new Exception("Can't use this type as index");
+                throw new Exception("Can't use this type as index: " + type);
         }
     }
 }

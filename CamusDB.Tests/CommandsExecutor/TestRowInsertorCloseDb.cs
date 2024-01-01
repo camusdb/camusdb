@@ -85,7 +85,7 @@ internal sealed class TestRowInsertorCloseDb
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                { "amount", new ColumnValue(ColumnType.Integer64, "100") }
+                { "amount", new ColumnValue(ColumnType.Integer64, 100) }
             }
         );
 
@@ -107,10 +107,10 @@ internal sealed class TestRowInsertorCloseDb
         Dictionary<string, ColumnValue> row = result[0];
 
         Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "507f1f77bcf86cd799439011");
+        Assert.AreEqual(row["id"].StrValue, "507f1f77bcf86cd799439011");
 
         Assert.AreEqual(row["usersId"].Type, ColumnType.Id);
-        Assert.AreEqual(row["usersId"].Value, "5e353cf5e95f1e3a432e49aa");
+        Assert.AreEqual(row["usersId"].StrValue, "5e353cf5e95f1e3a432e49aa");
     }
 
     [Test]
@@ -127,7 +127,7 @@ internal sealed class TestRowInsertorCloseDb
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                { "amount", new ColumnValue(ColumnType.Integer64, "50") },
+                { "amount", new ColumnValue(ColumnType.Integer64, 50) },
             }
         );
 
@@ -139,7 +139,7 @@ internal sealed class TestRowInsertorCloseDb
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
                 { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                { "amount", new ColumnValue(ColumnType.Integer64, "50") },
+                { "amount", new ColumnValue(ColumnType.Integer64, 50) },
             }
         );
 
@@ -165,10 +165,10 @@ internal sealed class TestRowInsertorCloseDb
         Dictionary<string, ColumnValue> row = result[0];
 
         Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "507f191e810c19729de860ea");
+        Assert.AreEqual(row["id"].StrValue, "507f191e810c19729de860ea");
 
         Assert.AreEqual(row["usersId"].Type, ColumnType.Id);
-        Assert.AreEqual(row["usersId"].Value, "5e353cf5e95f1e3a432e49aa");
+        Assert.AreEqual(row["usersId"].StrValue, "5e353cf5e95f1e3a432e49aa");
 
         /*Assert.AreEqual(row[2].Type, ColumnType.Integer);
         Assert.AreEqual(row[2].Value, "4567");
@@ -188,7 +188,7 @@ internal sealed class TestRowInsertorCloseDb
         row = result[0];
 
         Assert.AreEqual(row["id"].Type, ColumnType.Id);
-        Assert.AreEqual(row["id"].Value, "507f1f77bcf86cd799439011");
+        Assert.AreEqual(row["id"].StrValue, "507f1f77bcf86cd799439011");
 
         /*Assert.AreEqual(row[1].Type, ColumnType.String);
         Assert.AreEqual(row[1].Value, "some name 1");
@@ -226,7 +226,7 @@ internal sealed class TestRowInsertorCloseDb
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "usersId", new ColumnValue(ColumnType.Id, userIds[i % 5]) },
-                    { "amount", new ColumnValue(ColumnType.Integer64, "50") },
+                    { "amount", new ColumnValue(ColumnType.Integer64, 50) },
                 }
             );
 

@@ -60,7 +60,7 @@ internal sealed class RowSerializer
                 ColumnType.Integer64 => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger64,
 
                 // type 1 byte + 4 byte length + strLength
-                ColumnType.String => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + GetStringLengthInBytes(columnValue.Value),
+                ColumnType.String => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + GetStringLengthInBytes(columnValue.StrValue!),
 
                 // bool (1 byte)
                 ColumnType.Bool => SerializatorTypeSizes.TypeInteger8,
@@ -105,23 +105,23 @@ internal sealed class RowSerializer
             switch (columnValue.Type)
             {
                 case ColumnType.Id:
-                    ObjectIdValue objectId = ObjectId.ToValue(columnValue.Value);
+                    ObjectIdValue objectId = ObjectId.ToValue(columnValue.StrValue!);
                     Serializator.WriteType(rowBuffer, SerializatorTypes.TypeId, ref pointer);
                     Serializator.WriteObjectId(rowBuffer, objectId, ref pointer);
                     break;
 
-                case ColumnType.Integer64: // @todo use int.TryParse
+                case ColumnType.Integer64:
                     Serializator.WriteType(rowBuffer, SerializatorTypes.TypeInteger64, ref pointer);
-                    Serializator.WriteInt64(rowBuffer, long.Parse(columnValue.Value), ref pointer);
+                    Serializator.WriteInt64(rowBuffer, columnValue.LongValue, ref pointer);
                     break;
 
                 case ColumnType.String:
                     Serializator.WriteType(rowBuffer, SerializatorTypes.TypeString32, ref pointer);
-                    Serializator.WriteString(rowBuffer, columnValue.Value, ref pointer);
+                    Serializator.WriteString(rowBuffer, columnValue.StrValue!, ref pointer);
                     break;
 
                 case ColumnType.Bool:
-                    Serializator.WriteBool(rowBuffer, columnValue.Value == "true", ref pointer);
+                    Serializator.WriteBool(rowBuffer, columnValue.BoolValue, ref pointer);
                     break;
 
                 case ColumnType.Null:

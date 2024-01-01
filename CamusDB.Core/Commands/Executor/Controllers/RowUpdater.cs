@@ -79,7 +79,7 @@ public sealed class RowUpdater
             if (!ticket.Values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
                 continue;
 
-            if (columnValue.Type == ColumnType.Null || columnValue.Value is null)
+            if (columnValue.Type == ColumnType.Null)
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.NotNullViolation,
@@ -229,7 +229,7 @@ public sealed class RowUpdater
         if (rowTuple is not null)
             throw new CamusDBException(
                 CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                "Duplicate entry for key \"" + table.Name + "." + keyName + "\" " + uniqueValue.Type + " " + uniqueValue.Value
+                "Duplicate entry for key \"" + table.Name + "." + keyName + "\" " + uniqueValue.Type + " " + uniqueValue
             );
     }
 

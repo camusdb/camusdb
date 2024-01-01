@@ -77,8 +77,8 @@ internal sealed class TestTableAlterer
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, (2000 + i).ToString()) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, "false") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
                 }
             );
 
@@ -387,13 +387,23 @@ internal sealed class TestTableAlterer
             tableName: "robots",
             values: new Dictionary<string, ColumnValue>()
             {
-                { "type", new ColumnValue(ColumnType.Integer64, "100") }
+                { "type", new ColumnValue(ColumnType.Integer64, 100) }
             },
             where: null,
             filters: null
         );
 
         Assert.AreEqual(25, await executor.Update(updateTicket));
+
+        queryTicket = new(
+           txnId: await executor.NextTxnId(),
+           databaseName: dbname,
+           tableName: "robots",
+           index: null,
+           where: null,
+           filters: null,
+           orderBy: null
+        );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();
         Assert.IsNotEmpty(result);
@@ -402,7 +412,7 @@ internal sealed class TestTableAlterer
         {
             Assert.AreEqual(5, resultRow.Row.Count);
             Assert.AreEqual(ColumnType.Integer64, resultRow.Row["type"].Type);
-            Assert.AreEqual("100", resultRow.Row["type"].Value);
+            Assert.AreEqual(100, resultRow.Row["type"].LongValue);
         }
     }
 }

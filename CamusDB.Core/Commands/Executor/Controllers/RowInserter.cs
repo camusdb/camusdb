@@ -79,7 +79,7 @@ internal sealed class RowInserter
                 );
             }
 
-            if (columnValue.Type == ColumnType.Null || columnValue.Value is null)
+            if (columnValue.Type == ColumnType.Null)
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.NotNullViolation,

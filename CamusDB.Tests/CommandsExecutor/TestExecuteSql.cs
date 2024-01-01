@@ -82,8 +82,8 @@ public class TestExecuteSql
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, (2024 - i).ToString()) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0 ? "true" : "false") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 2024 - i) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0) },
                 }
             );
 
@@ -143,7 +143,7 @@ public class TestExecuteSql
         Assert.IsNotEmpty(result);
 
         foreach (QueryResultRow row in result)
-            Assert.AreEqual("true", row.Row["enabled"].Value);
+            Assert.AreEqual(true, row.Row["enabled"].BoolValue);
     }
 
     [Test]
@@ -162,7 +162,7 @@ public class TestExecuteSql
         Assert.IsNotEmpty(result);
 
         foreach (QueryResultRow row in result)
-            Assert.AreEqual("true", row.Row["enabled"].Value);
+            Assert.AreEqual(true, row.Row["enabled"].BoolValue);
     }
 
     [Test]
@@ -181,7 +181,7 @@ public class TestExecuteSql
         Assert.IsNotEmpty(result);
 
         foreach (QueryResultRow row in result)
-            Assert.AreEqual("false", row.Row["enabled"].Value);
+            Assert.AreEqual(false, row.Row["enabled"].BoolValue);
     }
 
     [Test]
@@ -201,7 +201,7 @@ public class TestExecuteSql
 
         Assert.AreEqual(1, result.Count);
 
-        Assert.AreEqual("2000", result[0].Row["year"].Value);
+        Assert.AreEqual(2000, result[0].Row["year"].LongValue);
     }
 
     [Test]
@@ -221,7 +221,7 @@ public class TestExecuteSql
 
         Assert.AreEqual(1, result.Count);
 
-        Assert.AreEqual("2000", result[0].Row["year"].Value);
+        Assert.AreEqual(2000, result[0].Row["year"].LongValue);
     }
 
     [Test]
@@ -385,9 +385,9 @@ public class TestExecuteSql
 
         Assert.AreEqual(25, result.Count);
 
-        Assert.AreEqual("2000", result[0].Row["year"].Value);
-        Assert.AreEqual("2001", result[1].Row["year"].Value);
-        Assert.AreEqual("2024", result[24].Row["year"].Value);
+        Assert.AreEqual(2000, result[0].Row["year"].LongValue);
+        Assert.AreEqual(2001, result[1].Row["year"].LongValue);
+        Assert.AreEqual(2024, result[24].Row["year"].LongValue);
     }
 
     [Test]
@@ -407,9 +407,9 @@ public class TestExecuteSql
 
         Assert.AreEqual(25, result.Count);
 
-        Assert.AreEqual("some name 0", result[0].Row["name"].Value);
-        Assert.AreEqual("some name 1", result[1].Row["name"].Value);
-        Assert.AreEqual("some name 9", result[24].Row["name"].Value);
+        Assert.AreEqual("some name 0", result[0].Row["name"].StrValue);
+        Assert.AreEqual("some name 1", result[1].Row["name"].StrValue);
+        Assert.AreEqual("some name 9", result[24].Row["name"].StrValue);
     }
 
     [Test]
@@ -429,9 +429,9 @@ public class TestExecuteSql
 
         Assert.AreEqual(25, result.Count);
 
-        Assert.AreEqual("false", result[0].Row["enabled"].Value);
-        Assert.AreEqual("false", result[1].Row["enabled"].Value);
-        Assert.AreEqual("true", result[24].Row["enabled"].Value);
+        Assert.AreEqual(false, result[0].Row["enabled"].BoolValue);
+        Assert.AreEqual(false, result[1].Row["enabled"].BoolValue);
+        Assert.AreEqual(true, result[24].Row["enabled"].BoolValue);
     }
 
     [Test]
@@ -451,9 +451,9 @@ public class TestExecuteSql
 
         Assert.AreEqual(25, result.Count);
 
-        Assert.AreEqual("false", result[0].Row["enabled"].Value);
-        Assert.AreEqual("false", result[1].Row["enabled"].Value);
-        Assert.AreEqual("true", result[24].Row["enabled"].Value);
+        Assert.AreEqual(false, result[0].Row["enabled"].BoolValue);
+        Assert.AreEqual(false, result[1].Row["enabled"].BoolValue);
+        Assert.AreEqual(true, result[24].Row["enabled"].BoolValue);
     }
 
     [Test]
@@ -483,8 +483,8 @@ public class TestExecuteSql
 
         foreach (QueryResultRow row in result)
         {
-            if (row.Row["year"].Value == "3000")
-                Assert.AreEqual("astro boy", row.Row["name"].Value);
+            if (row.Row["year"].LongValue == 3000)
+                Assert.AreEqual("astro boy", row.Row["name"].StrValue);
         }
     }
 
@@ -515,11 +515,43 @@ public class TestExecuteSql
 
         foreach (QueryResultRow row in result)
         {
-            if (row.Row["year"].Value == "3000")
+            if (row.Row["year"].LongValue == 3000)
             {
-                Assert.AreEqual("507f1f77bcf86cd799439011", row.Row["id"].Value);
-                Assert.AreEqual("astro boy", row.Row["name"].Value);
+                Assert.AreEqual("507f1f77bcf86cd799439011", row.Row["id"].StrValue);
+                Assert.AreEqual("astro boy", row.Row["name"].StrValue);
             }
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteInsert3()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "INSERT INTO robots (id, name, year, enabled) VALUES (STR_ID(\"507f1f77bcf86cd799439011\"), \"astro boy\", 3000, false)",
+            parameters: null
+        );
+
+        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+
+        ExecuteSQLTicket queryTicket = new(
+           database: dbname,
+           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
+           parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(1, result.Count);
+
+        foreach (QueryResultRow row in result)
+        {
+            Assert.AreEqual("507f1f77bcf86cd799439011", row.Row["id"].StrValue);
+            Assert.AreEqual("astro boy", row.Row["name"].StrValue);
         }
     }
 
@@ -548,9 +580,9 @@ public class TestExecuteSql
 
         Assert.AreEqual(25, result.Count);
 
-        Assert.AreEqual("1000", result[0].Row["year"].Value);
-        Assert.AreEqual("1000", result[1].Row["year"].Value);
-        Assert.AreEqual("1000", result[24].Row["year"].Value);
+        Assert.AreEqual(1000, result[0].Row["year"].LongValue);
+        Assert.AreEqual(1000, result[1].Row["year"].LongValue);
+        Assert.AreEqual(1000, result[24].Row["year"].LongValue);
     }
 
     [Test]
@@ -578,8 +610,8 @@ public class TestExecuteSql
 
         Assert.AreEqual(25, result.Count);
 
-        Assert.AreEqual("1000", result[0].Row["year"].Value);
-        Assert.AreEqual("2023", result[1].Row["year"].Value);
+        Assert.AreEqual(1000, result[0].Row["year"].LongValue);
+        Assert.AreEqual(2023, result[1].Row["year"].LongValue);
     }
 
     [Test]
@@ -608,7 +640,7 @@ public class TestExecuteSql
         Assert.AreEqual(25, result.Count);
 
         foreach (QueryResultRow row in result)
-            Assert.AreNotEqual("3000", row.Row["year"].Value);
+            Assert.AreNotEqual(3000, row.Row["year"].LongValue);
     }
 
     [Test]

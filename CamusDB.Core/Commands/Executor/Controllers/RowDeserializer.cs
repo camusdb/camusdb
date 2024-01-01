@@ -78,12 +78,12 @@ internal sealed class RowDeserializer
                         if (columnType == SerializatorTypes.TypeInteger64)
                         {
                             long value = Serializator.ReadInt64(data, ref pointer);
-                            columnValues.Add(column.Name, new(ColumnType.Integer64, value.ToString()));
+                            columnValues.Add(column.Name, new(ColumnType.Integer64, value));
                         }
                         else
                         {
                             if (columnType == SerializatorTypes.TypeNull)
-                                columnValues.Add(column.Name, new(ColumnType.Null, ""));
+                                columnValues.Add(column.Name, new(ColumnType.Null, 0));
                             else
                                 throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, columnType.ToString());
                         }
@@ -102,7 +102,7 @@ internal sealed class RowDeserializer
                         else
                         {
                             if (columnType == SerializatorTypes.TypeNull)
-                                columnValues.Add(column.Name, new(ColumnType.Null, ""));
+                                columnValues.Add(column.Name, new(ColumnType.Null, 0));
                             else
                                 throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, columnType.ToString());
                         }
@@ -113,11 +113,11 @@ internal sealed class RowDeserializer
                     {
                         int columnType = Serializator.ReadType(data, ref pointer);
                         if (columnType == SerializatorTypes.TypeBool)
-                            columnValues.Add(column.Name, new(ColumnType.Bool, Serializator.ReadBool(data, ref pointer) ? "true" : "false"));
+                            columnValues.Add(column.Name, new(ColumnType.Bool, Serializator.ReadBool(data, ref pointer)));
                         else
                         {
                             if (columnType == SerializatorTypes.TypeNull)
-                                columnValues.Add(column.Name, new(ColumnType.Null, ""));
+                                columnValues.Add(column.Name, new(ColumnType.Null, 0));
                             else
                                 throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, columnType.ToString());
                         }

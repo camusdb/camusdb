@@ -82,7 +82,7 @@ public sealed class RowUpdaterById
             if (!ticket.Values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
                 continue;
 
-            if (columnValue.Type == ColumnType.Null || columnValue.Value is null)
+            if (columnValue.Type == ColumnType.Null)
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.NotNullViolation,

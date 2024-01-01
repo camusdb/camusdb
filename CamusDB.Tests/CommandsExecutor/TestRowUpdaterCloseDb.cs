@@ -124,8 +124,8 @@ public class TestRowUpdaterCloseDb
         List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
-        Assert.AreEqual(objectsId[0], result[0]["id"].Value);
-        Assert.AreEqual("updated value", result[0]["name"].Value);
+        Assert.AreEqual(objectsId[0], result[0]["id"].StrValue);
+        Assert.AreEqual("updated value", result[0]["name"].StrValue);
 
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
@@ -140,8 +140,8 @@ public class TestRowUpdaterCloseDb
         result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
-        Assert.AreEqual(objectsId[0], result[0]["id"].Value);
-        Assert.AreEqual("updated value", result[0]["name"].Value);
+        Assert.AreEqual(objectsId[0], result[0]["id"].StrValue);
+        Assert.AreEqual("updated value", result[0]["name"].StrValue);
     }
 
     [Test]
@@ -178,8 +178,8 @@ public class TestRowUpdaterCloseDb
             List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
             Assert.IsNotEmpty(result);
 
-            Assert.AreEqual(objectId, result[0]["id"].Value);
-            Assert.AreEqual("updated value", result[0]["name"].Value);
+            Assert.AreEqual(objectId, result[0]["id"].StrValue);
+            Assert.AreEqual("updated value", result[0]["name"].StrValue);
         }
 
         CloseDatabaseTicket closeTicket = new(dbname);
@@ -197,8 +197,8 @@ public class TestRowUpdaterCloseDb
             List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
             Assert.IsNotEmpty(result);
 
-            Assert.AreEqual(objectId, result[0]["id"].Value);
-            Assert.AreEqual("updated value", result[0]["name"].Value);
+            Assert.AreEqual(objectId, result[0]["id"].StrValue);
+            Assert.AreEqual("updated value", result[0]["name"].StrValue);
         }
     }
 
@@ -231,8 +231,8 @@ public class TestRowUpdaterCloseDb
         List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
-        Assert.AreEqual(objectsId[0], result[0]["id"].Value);
-        Assert.AreEqual("updated value", result[0]["name"].Value);
+        Assert.AreEqual(objectsId[0], result[0]["id"].StrValue);
+        Assert.AreEqual("updated value", result[0]["name"].StrValue);
 
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
@@ -247,8 +247,8 @@ public class TestRowUpdaterCloseDb
         result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
-        Assert.AreEqual(objectsId[0], result[0]["id"].Value);
-        Assert.AreEqual("updated value", result[0]["name"].Value);
+        Assert.AreEqual(objectsId[0], result[0]["id"].StrValue);
+        Assert.AreEqual("updated value", result[0]["name"].StrValue);
 
         updateTicket = new(
             txnId: await executor.NextTxnId(),
@@ -273,7 +273,7 @@ public class TestRowUpdaterCloseDb
         result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
-        Assert.AreEqual(objectsId[0], result[0]["id"].Value);
-        Assert.AreEqual("new updated value", result[0]["name"].Value);
+        Assert.AreEqual(objectsId[0], result[0]["id"].StrValue);
+        Assert.AreEqual("new updated value", result[0]["name"].StrValue);
     }
 }

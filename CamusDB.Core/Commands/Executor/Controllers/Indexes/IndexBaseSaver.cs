@@ -30,7 +30,7 @@ internal abstract class IndexBaseSaver
         {
             ColumnType.Id => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeObjectId,
             ColumnType.Integer64 => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger64,
-            ColumnType.String => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger32 + GetStringLengthInBytes(columnValue.Value),
+            ColumnType.String => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger32 + GetStringLengthInBytes(columnValue.StrValue!),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Can't use this type as index"),
         };
     }
@@ -75,17 +75,17 @@ internal abstract class IndexBaseSaver
         {
             case ColumnType.Id:
                 Serializator.WriteInt16(nodeBuffer, (int)ColumnType.Id, ref pointer);
-                Serializator.WriteObjectId(nodeBuffer, ObjectId.ToValue(columnValue.Value), ref pointer);
+                Serializator.WriteObjectId(nodeBuffer, ObjectId.ToValue(columnValue.StrValue!), ref pointer);
                 break;
 
             case ColumnType.Integer64:
                 Serializator.WriteInt16(nodeBuffer, (int)ColumnType.Integer64, ref pointer);
-                Serializator.WriteInt64(nodeBuffer, long.Parse(columnValue.Value), ref pointer);
+                Serializator.WriteInt64(nodeBuffer, columnValue.LongValue, ref pointer);
                 break;
 
             case ColumnType.String:
                 Serializator.WriteInt16(nodeBuffer, (int)ColumnType.String, ref pointer);
-                Serializator.WriteString(nodeBuffer, columnValue.Value, ref pointer);
+                Serializator.WriteString(nodeBuffer, columnValue.StrValue!, ref pointer);
                 break;
 
             default:

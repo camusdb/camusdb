@@ -39,29 +39,12 @@ internal sealed class InsertValidator : ValidatorBase
             switch (columnValue.Value.Type)
             {
                 case ColumnType.Id: // @todo validate alphanumeric digits
-                    if (!string.IsNullOrEmpty(columnValue.Value.Value) && columnValue.Value.Value.Length != 24)
+                    if (!string.IsNullOrEmpty(columnValue.Value.StrValue) && columnValue.Value.StrValue.Length != 24)
                         throw new CamusDBException(
                             CamusDBErrorCodes.InvalidInput,
                             "Invalid id value for field '" + columnValue.Key + "'"
                         );
-                    break;
-
-                case ColumnType.Integer64:
-                    if (!long.TryParse(columnValue.Value.Value, out long _))
-                        throw new CamusDBException(
-                            CamusDBErrorCodes.InvalidInput,
-                            "Invalid numeric integer format for field '" + columnValue.Key + "'"
-                        );
-                    break;
-
-                case ColumnType.Bool:
-                    string boolValue = columnValue.Value.Value.ToLowerInvariant();
-                    if (boolValue != "true" && boolValue != "false")
-                        throw new CamusDBException(
-                            CamusDBErrorCodes.InvalidInput,
-                            "Invalid bool value for field '" + columnValue.Key + "'"
-                        );
-                    break;
+                    break;                
             }
         }
     }

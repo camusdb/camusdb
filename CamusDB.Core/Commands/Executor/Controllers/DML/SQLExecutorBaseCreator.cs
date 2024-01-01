@@ -42,16 +42,16 @@ internal abstract class SQLExecutorBaseCreator
         switch (expr.nodeType)
         {
             case NodeType.Number:
-                return new ColumnValue(ColumnType.Integer64, expr.yytext!);
+                return new ColumnValue(ColumnType.Integer64, long.Parse(expr.yytext!));
 
             case NodeType.String:
                 return new ColumnValue(ColumnType.String, expr.yytext!.Trim('"'));
 
             case NodeType.Bool:
-                return new ColumnValue(ColumnType.Bool, expr.yytext!);
+                return new ColumnValue(ColumnType.Bool, bool.Parse(expr.yytext!));
 
             case NodeType.Null:
-                return new ColumnValue(ColumnType.Null, "");
+                return new ColumnValue(ColumnType.Null, 0);
 
             case NodeType.Identifier:
 
@@ -65,7 +65,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
 
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) == 0).ToString());
+                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) == 0);
                 }
 
             case NodeType.ExprNotEquals:
@@ -73,7 +73,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
 
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) != 0).ToString());
+                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) != 0);
                 }
 
             case NodeType.ExprLessThan:
@@ -81,7 +81,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
 
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) < 0).ToString());
+                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) < 0);
                 }
 
             case NodeType.ExprGreaterThan:
@@ -89,7 +89,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
 
-                    return new ColumnValue(ColumnType.Bool, (leftValue.CompareTo(rightValue) > 0).ToString());
+                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) > 0);
                 }
 
             case NodeType.ExprOr:
@@ -97,7 +97,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
 
-                    return new ColumnValue(ColumnType.Bool, (leftValue.Value.ToLowerInvariant() == "true" || rightValue.Value.ToLowerInvariant() == "true").ToString());
+                    return new ColumnValue(ColumnType.Bool, leftValue.BoolValue || rightValue.BoolValue);
                 }
 
             case NodeType.ExprAnd:
@@ -105,7 +105,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
 
-                    return new ColumnValue(ColumnType.Bool, (leftValue.Value.ToLowerInvariant() == "true" && rightValue.Value.ToLowerInvariant() == "true").ToString());
+                    return new ColumnValue(ColumnType.Bool, leftValue.BoolValue && rightValue.BoolValue);
                 }
 
             case NodeType.ExprFuncCall:
@@ -123,7 +123,7 @@ internal abstract class SQLExecutorBaseCreator
 
                             GetArgumentList(expr.rightAst!, row, argumentList);
 
-                            return new ColumnValue(ColumnType.Id, argumentList.FirstOrDefault()!.Value);
+                            return new ColumnValue(ColumnType.Id, argumentList.FirstOrDefault()!.StrValue ?? "");
 
                         case "now":
                             return new ColumnValue(ColumnType.String, DateTime.UtcNow.ToString());

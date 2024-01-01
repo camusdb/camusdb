@@ -83,8 +83,8 @@ public class TestRowDeletor
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, (2000 + i).ToString()) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, "false") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
                 }
             );
 
@@ -129,8 +129,8 @@ public class TestRowDeletor
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, largeData) },
-                    { "year", new ColumnValue(ColumnType.Integer64, (2000 + i).ToString()) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, "false") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
                 }
             );
 
@@ -388,7 +388,7 @@ public class TestRowDeletor
             where: null,
             filters: new()
             {
-                new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
+                new("year", ">", new ColumnValue(ColumnType.Integer64, 2010))
             }
         );
 
@@ -402,7 +402,7 @@ public class TestRowDeletor
             where: null,
             filters: new()
             {
-                new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
+                new("year", ">", new ColumnValue(ColumnType.Integer64, 2010))
             },
             orderBy: null
         );
@@ -415,7 +415,7 @@ public class TestRowDeletor
     [NonParallelizable]
     public async Task TestMultiDeleteCriteriaNoRows()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         DeleteTicket ticket = new(
             txnId: await executor.NextTxnId(),
@@ -424,7 +424,7 @@ public class TestRowDeletor
             where: null,
             filters: new()
             {
-                new("year", "<", new ColumnValue(ColumnType.Integer64, "-1"))
+                new("year", "<", new ColumnValue(ColumnType.Integer64, -1))
             }
         );
 

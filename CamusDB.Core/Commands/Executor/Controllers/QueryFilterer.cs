@@ -24,28 +24,17 @@ internal sealed class QueryFilterer
                 return false;
 
             case ColumnType.Bool:
-                //Console.WriteLine(evaluatedExpr.Value);
-                return evaluatedExpr.Value == "True" || evaluatedExpr.Value == "true";
+                return evaluatedExpr.BoolValue;
 
-            case ColumnType.Float:
-                if (float.TryParse(evaluatedExpr.Value, out float res))
-                {
-                    if (res != 0)
-                        return true;
-                }
-                return false;
+            case ColumnType.Float64:
+                return evaluatedExpr.LongValue != 0;
 
             case ColumnType.Integer64:
-                if (long.TryParse(evaluatedExpr.Value, out long res2))
-                {
-                    if (res2 != 0)
-                        return true;
-                }
-                return false;
+                return evaluatedExpr.LongValue != 0;
         }
 
         return false;
-    }    
+    }
 
     // @todo : this is a very naive implementation, we should use a proper type conversion and implement all operators
     internal bool MeetFilters(List<QueryFilter> filters, Dictionary<string, ColumnValue> row)
@@ -64,34 +53,26 @@ internal sealed class QueryFilterer
             switch (filter.Op)
             {
                 case "=":
-                    if (value.Value != filter.Value.Value)
+                    if (value.StrValue != filter.Value.StrValue)
                         return false;
                     break;
 
                 case "!=":
-                    if (value.Value == filter.Value.Value)
+                    if (value.StrValue == filter.Value.StrValue)
                         return false;
                     break;
 
                 case ">":
-                    if (long.Parse(value.Value) <= long.Parse(filter.Value.Value))
-                        return false;
-                    break;
+                    return value.CompareTo(filter.Value) == 1;
 
                 case ">=":
-                    if (long.Parse(value.Value) < long.Parse(filter.Value.Value))
-                        return false;
-                    break;
+                    return value.CompareTo(filter.Value) >= 0;
 
                 case "<":
-                    if (long.Parse(value.Value) >= long.Parse(filter.Value.Value))
-                        return false;
-                    break;
+                    return value.CompareTo(filter.Value) == -1;
 
                 case "<=":
-                    if (long.Parse(value.Value) > long.Parse(filter.Value.Value))
-                        return false;
-                    break;
+                    return value.CompareTo(filter.Value) <= 0;
 
                 default:
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown operator :" + filter.Op);

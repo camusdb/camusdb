@@ -45,7 +45,7 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
             case ColumnType.Integer64:
                 {
                     long value = Serializator.ReadInt64(nodeBuffer, ref pointer);
-                    return new ColumnValue(ColumnType.Integer64, value.ToString());
+                    return new ColumnValue(ColumnType.Integer64, value);
                 }
 
             /*case ColumnType.String:
