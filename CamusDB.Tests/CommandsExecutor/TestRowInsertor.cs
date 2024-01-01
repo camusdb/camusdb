@@ -606,5 +606,5 @@ internal sealed class TestRowInsertor
             Assert.AreEqual(ColumnType.Integer64, row["year"].Type);
             Assert.AreEqual((i * 1000).ToString(), row["year"].Value);
         }
-    }
+    }    
 }

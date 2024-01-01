@@ -8,6 +8,9 @@
 
 namespace CamusDB.Core.Util.Time;
 
+/// <summary>
+/// Represents a unique point in time given by the Hybrid Logical Clock (HLC)
+/// </summary>
 public readonly struct HLCTimestamp : IComparable<HLCTimestamp>
 {
     public long L { get; }

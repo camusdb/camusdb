@@ -27,6 +27,7 @@ public enum NodeType
     ExprAnd,
     ExprAllFields,
     ExprFuncCall,
+    ExprArgumentList,
     Select,
     Update,
     UpdateList,

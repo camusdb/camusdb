@@ -166,8 +166,16 @@ greater_equals_than_expr : condition TGREATERTHANEQUALS condition { $$.n = new(N
 less_equals_than_expr : condition TLESSTHANEQUALS condition { $$.n = new(NodeType.ExprLessEqualsThan, $1.n, $3.n, null, null, null); }
                       ;
 
-fcall_expr : IDENTIFIER LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, null, null, null, null); }
-           ;         
+fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, null, null, null, null); }
+           | identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, $3.n, null, null, null); }
+           ;
+
+fcall_argument_list  : fcall_argument_list TCOMMA fcall_argument_item { $$.n = new(NodeType.ExprArgumentList, $1.n, $3.n, null, null, null); }
+                     | fcall_argument_item { $$.n = $1.n; $$.s = $1.s; }
+                     ;
+
+fcall_argument_item : expr { $$.n = $1.n; $$.s = $1.s; }
+                    ;
 
 group_paren_expr : LPAREN condition RPAREN { $$.n = $2.n; $$.s = $2.s; }
                  ;

@@ -349,6 +349,21 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSimpleInsert4()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("INSERT INTO some_table (id, z) VALUES (STR_ID(\"507f1f77bcf86cd799439011\"), \"aaaa\")");
+
+        Assert.AreEqual(NodeType.Insert, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.IdentifierList, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprList, ast.extendedOne!.nodeType);
+        Assert.AreEqual(NodeType.ExprFuncCall, ast.extendedOne!.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
     public void TestParseSimpleCreateTableOneField()
     {
         NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table ( id STRING )");

@@ -30,6 +30,14 @@ public sealed class BTreeEntry<TKey, TValue>
         Next = next;
     }
 
+    /// <summary>
+    /// Sets or replaces the value and commit state for a specific timestamp
+    /// </summary>
+    /// <param name="timestamp"></param>
+    /// <param name="commitState"></param>
+    /// <param name="value"></param>
+    /// <returns></returns>
+    /// <exception cref="CamusDBException"></exception>
     public BTreeMvccEntry<TValue> SetValue(HLCTimestamp timestamp, BTreeCommitState commitState, TValue? value)
     {
         //Console.WriteLine("SetV={0} {1} {2}", timestamp, commitState, value);
@@ -77,6 +85,11 @@ public sealed class BTreeEntry<TKey, TValue>
         return newestValue;
     }
 
+    /// <summary>
+    /// Checks whether a value can be seen by a specific timestamp
+    /// </summary>
+    /// <param name="timestamp"></param>
+    /// <returns></returns>
     public bool CanBeSeenBy(HLCTimestamp timestamp)
     {
         //Console.WriteLine("CanBeSeenBy={0}", timestamp);
@@ -93,6 +106,10 @@ public sealed class BTreeEntry<TKey, TValue>
         return false;
     }
 
+    /// <summary>
+    /// Returns the maximum commited value to the entry
+    /// </summary>
+    /// <returns></returns>
     internal (HLCTimestamp, TValue?) GetMaxCommitedValue()
     {
         TValue? value = default;

@@ -183,7 +183,7 @@ public class TestRowUpdater
 
     [Test]
     [NonParallelizable]
-    public async Task TestBasicUpdateById()
+    public async Task TestUpdateByIdSingleRow()
     {
         (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
@@ -232,6 +232,65 @@ public class TestRowUpdater
         );
 
         Assert.AreEqual(0, await executor.UpdateById(ticket));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestUpdateByIdSingleRowTwice()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        UpdateByIdTicket ticket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            id: objectsId[0],
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "name", new ColumnValue(ColumnType.String, "updated value") }
+            }
+        );
+
+        Assert.AreEqual(1, await executor.UpdateById(ticket));
+
+        QueryByIdTicket queryByIdTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            id: objectsId[0]
+        );
+
+        List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(objectsId[0], result[0]["id"].Value);
+        Assert.AreEqual("updated value", result[0]["name"].Value);
+
+        ticket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            id: objectsId[0],
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "name", new ColumnValue(ColumnType.String, "updated value 2") }
+            }
+        );
+
+        Assert.AreEqual(1, await executor.UpdateById(ticket));
+
+        queryByIdTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            id: objectsId[0]
+        );
+
+        result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(objectsId[0], result[0]["id"].Value);
+        Assert.AreEqual("updated value 2", result[0]["name"].Value);
     }
 
     [Test]

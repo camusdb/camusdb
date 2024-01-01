@@ -110,11 +110,47 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprFuncCall:
                 {
-                    return new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString());
+                    string funcCall = expr.leftAst!.yytext!.ToLowerInvariant();
+
+                    switch (funcCall)
+                    {
+                        case "gen_id":
+                            return new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString());
+
+                        case "str_id":
+
+                            LinkedList<ColumnValue> argumentList = new();
+
+                            GetArgumentList(expr.rightAst!, row, argumentList);
+
+                            return new ColumnValue(ColumnType.Id, argumentList.FirstOrDefault()!.Value);
+
+                        case "now":
+                            return new ColumnValue(ColumnType.String, DateTime.UtcNow.ToString());
+
+                        default:
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidPageOffset, "Unknown function '" + funcCall + "'");
+                    }
                 }
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.UnknownType, $"ERROR {expr.nodeType}");
         }
+    }
+
+    private static void GetArgumentList(NodeAst argumentAst, Dictionary<string, ColumnValue> row, LinkedList<ColumnValue> argumentList)
+    {        
+        if (argumentAst.nodeType == NodeType.ExprArgumentList)
+        {
+            if (argumentAst.leftAst != null)
+                GetArgumentList(argumentAst.leftAst, row, argumentList);
+
+            if (argumentAst.rightAst != null)
+                GetArgumentList(argumentAst.rightAst, row, argumentList);
+
+            return;
+        }
+
+        argumentList.AddLast(EvalExpr(argumentAst, row));
     }
 }
