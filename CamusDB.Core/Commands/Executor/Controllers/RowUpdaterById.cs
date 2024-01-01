@@ -311,7 +311,12 @@ public sealed class RowUpdaterById
         byte[] buffer = rowSerializer.Serialize(table, state.ColumnValues, state.RowTuple.SlotOne);
 
         // Allocate a new page for the row
-        state.RowTuple.SlotTwo = tablespace.GetNextFreeOffset();
+        BTreeTuple tuple = new(
+            slotOne: state.RowTuple.SlotOne,
+            slotTwo: tablespace.GetNextFreeOffset()
+        );
+
+        state.RowTuple = tuple;
 
         tablespace.WriteDataToPageBatch(state.ModifiedPages, state.RowTuple.SlotTwo, 0, buffer);
 

@@ -28,9 +28,7 @@ public sealed class RowUpdater
 {
     private readonly IndexSaver indexSaver = new();
 
-    private readonly RowSerializer rowSerializer = new();
-
-    private readonly DMLUniqueKeySaver insertUniqueKeySaver = new();
+    private readonly RowSerializer rowSerializer = new();    
 
     /// <summary>
     /// Validates that all columns and values in the update statement are valid

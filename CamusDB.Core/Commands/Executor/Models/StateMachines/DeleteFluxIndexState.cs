@@ -1,4 +1,7 @@
 ﻿
+
+
+using CamusDB.Core.Catalogs.Models;
 /**
  * This file is part of CamusDB
  *
@@ -8,7 +11,13 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
-public sealed class DeleteFluxIndexState
+public readonly struct DeleteFluxIndexState
 {
+    public List<TableIndexSchema> UniqueIndexes { get; } = new();
 
+    public List<TableIndexSchema>? MultiIndexes { get; } = null;
+
+    public DeleteFluxIndexState()
+    {
+    }
 }

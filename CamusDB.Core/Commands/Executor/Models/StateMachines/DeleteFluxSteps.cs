@@ -18,6 +18,6 @@ public enum DeleteFluxSteps
     LocateTupleToDelete = 1,
     DeleteUniqueIndexes = 2,
     //DeleteMultiIndexes = 4,
-    DeleteRow = 3,
+    DeleteRows = 3,
     ApplyPageOperations = 4    
 }

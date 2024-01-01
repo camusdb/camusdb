@@ -7,6 +7,7 @@
  */
 
 using System.Diagnostics;
+using System.Net.Sockets;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs.Models;
@@ -15,6 +16,7 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
+using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -25,7 +27,27 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 internal sealed class RowDeleter
 {
     private readonly IndexSaver indexSaver = new();
-    
+
+    /// <summary>
+    /// Step #1. Creates a new delete plan for the table defining which unique indexes will be updated
+    /// </summary>
+    /// <param name="table"></param>
+    /// <returns></returns>
+    private static DeleteFluxIndexState GetIndexDeletePlan(TableDescriptor table, DeleteTicket ticket)
+    {
+        DeleteFluxIndexState indexState = new();
+
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        {
+            if (index.Value.Type != IndexType.Unique)
+                continue;
+
+            indexState.UniqueIndexes.Add(index.Value);
+        }
+
+        return indexState;
+    }
+
     /// <summary>
     /// Schedules a new delete operation by the specified filter criteria
     /// </summary>
@@ -41,7 +63,7 @@ internal sealed class RowDeleter
             database: database,
             table: table,
             ticket: ticket,
-            indexes: new DeleteFluxIndexState()
+            indexes: GetIndexDeletePlan(table, ticket)
         );
 
         FluxMachine<DeleteFluxSteps, DeleteFluxState> machine = new(state);
@@ -85,57 +107,7 @@ internal sealed class RowDeleter
         state.DataCursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
         return Task.FromResult(FluxAction.Continue);
-    }
-
-    /// <summary>
-    /// Remove the references to the row from the unique indexes
-    /// </summary>
-    /// <param name="database"></param>
-    /// <param name="table"></param>
-    /// <param name="columnValues"></param>
-    /// <param name="modifiedPages"></param>
-    /// <returns></returns>
-    /// <exception cref="CamusDBException"></exception>
-    private async Task DeleteUniqueIndexesInternal(
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        Dictionary<string, ColumnValue> columnValues,
-        List<IDisposable> locks,
-        List<BufferPageOperation> modifiedPages
-    )
-    {
-        BufferPoolHandler tablespace = database.TableSpace;
-
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
-        {
-            if (index.Value.Type != IndexType.Unique)
-                continue;
-
-            if (index.Value.UniqueRows is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A unique index tree wasn't found"
-                );
-
-            ColumnValue? columnKey = GetColumnValue(columnValues, index.Value.Column);
-            if (columnKey is null) // @todo check what to to here
-                continue;
-
-            BTree<ColumnValue, BTreeTuple?> uniqueIndex = index.Value.UniqueRows;
-
-            RemoveUniqueIndexTicket ticket = new(
-                tablespace: tablespace,
-                sequence: 0,
-                subSequence: 0,
-                index: uniqueIndex,
-                key: columnKey,
-                locks: locks,
-                modifiedPages: modifiedPages
-            );
-
-            await indexSaver.Remove(ticket);
-        }
-    }
+    }    
 
     private async Task DeleteMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
@@ -163,35 +135,11 @@ internal sealed class RowDeleter
     }
 
     /// <summary>
-    /// Deletes unique indexes
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> DeleteUniqueIndexes(DeleteFluxState state)
-    {
-        //await DeleteUniqueIndexesInternal(state.Database, state.Table, state.ColumnValues, state.Locks, state.ModifiedPages);
-
-        return Task.FromResult(FluxAction.Continue);
-    }
-
-    /// <summary>
-    /// Deletes multi indexes
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> DeleteMultiIndexes(DeleteByIdFluxState state)
-    {
-        //await DeleteMultiIndexes(state.Database, state.Table, state.ColumnValues);        
-
-        return Task.FromResult(FluxAction.Continue);
-    }
-
-    /// <summary>
     /// Deletes the row from disk
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task<FluxAction> DeleteRowsFromDisk(DeleteFluxState state)
+    private async Task<FluxAction> DeleteRowsAndIndexesFromDisk(DeleteFluxState state)
     {
         if (state.DataCursor is null)
         {
@@ -199,26 +147,33 @@ internal sealed class RowDeleter
             return FluxAction.Abort;
         }
 
+        DeleteTicket ticket = state.Ticket;
         TableDescriptor table = state.Table;        
         BufferPoolHandler tablespace = state.Database.TableSpace;
+        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
+        List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>? uniqueIndexDeltas;
 
         // @todo we need to take a snapshot of the data to prevent deadlocks
         // but probably need to optimize this for larger datasets
-        List<QueryResultRow> rowsToDelete = await state.DataCursor.ToListAsync(); 
+        List<QueryResultRow> rowsToDelete = await state.DataCursor.ToListAsync();
+
+        ObjectIdValue nullPageOffset = new();
 
         foreach (QueryResultRow row in rowsToDelete)
-        {           
-            RemoveUniqueOffsetIndexTicket removeIndexTicket = new(
-                tablespace: tablespace,
-                index: table.Rows,
-                key: row.Tuple.SlotOne,
-                locks: state.Locks,
-                modifiedPages: state.ModifiedPages
+        {
+            BTreeTuple tuple = new(row.Tuple.SlotOne, nullPageOffset);
+            
+            mainTableDeltas = await DeleteFromTableIndex(state, tuple);
+
+            uniqueIndexDeltas = await UpdateUniqueIndexes(state, ticket, tuple, row);
+
+            PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas);
+
+            Console.WriteLine(
+                "Row with rowid {0} deleted to page {1}",
+                tuple.SlotOne,
+                tuple.SlotTwo
             );
-
-            await indexSaver.Remove(removeIndexTicket);
-
-            //await tablespace.DeletePage(row.Tuple.SlotTwo);
 
             state.DeletedRows++;
         }
@@ -226,6 +181,91 @@ internal sealed class RowDeleter
         return FluxAction.Continue;
     }
 
+    private async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>?> DeleteFromTableIndex(DeleteFluxState state, BTreeTuple tuple)
+    {
+        SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
+            index: state.Table.Rows,
+            txnId: state.Ticket.TxnId,
+            key: tuple.SlotOne,
+            value: tuple.SlotTwo
+        );
+
+        // Main table index stores rowid pointing to page offset
+        return await indexSaver.Save(saveUniqueOffsetIndex);
+    }
+
+    private async Task<List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>> UpdateUniqueIndexes(DeleteFluxState state, DeleteTicket ticket, BTreeTuple tuple, QueryResultRow row)
+    {
+        List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> deltas = new();
+
+        //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
+
+        foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
+        {
+            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.UniqueRows;
+
+            if (uniqueIndex is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A unique index tree wasn't found"
+                );
+
+            ColumnValue? uniqueKeyValue = GetColumnValue(row.Row, index.Column);
+
+            if (uniqueKeyValue is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for unique key field " + index.Column
+                );
+
+            SaveUniqueIndexTicket saveUniqueIndexTicket = new(
+                index: uniqueIndex,
+                txnId: ticket.TxnId,
+                commitState: BTreeCommitState.Uncommitted,
+                key: uniqueKeyValue,
+                value: tuple
+            );
+
+            //Console.WriteLine("Saving unique index {0} {1} {2}", uniqueIndex, uniqueKeyValue, tuple);
+
+            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
+        }
+
+        return deltas;
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private void PersistIndexChanges(DeleteFluxState state, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> uniqueIndexDeltas)
+    {
+        if (mainIndexDeltas is null)
+            return;
+
+        foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in mainIndexDeltas.Entries)
+            btreeEntry.CommitState = BTreeCommitState.Committed;
+
+        indexSaver.Persist(state.Database.TableSpace, state.Table.Rows, state.ModifiedPages, mainIndexDeltas);
+
+        if (uniqueIndexDeltas is null)
+            return;
+
+        foreach ((BTree<ColumnValue, BTreeTuple?> index, BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas) uniqueIndex in uniqueIndexDeltas)
+        {
+            foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.Entries)
+                uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
+
+            indexSaver.Persist(state.Database.TableSpace, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+        }
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private Task<FluxAction> ApplyPageOperations(DeleteFluxState state)
     {
         if (state.ModifiedPages.Count > 0)
@@ -249,10 +289,8 @@ internal sealed class RowDeleter
 
         Stopwatch timer = Stopwatch.StartNew();
         
-        machine.When(DeleteFluxSteps.LocateTupleToDelete, LocateTupleToDelete);
-        machine.When(DeleteFluxSteps.DeleteUniqueIndexes, DeleteUniqueIndexes);
-        //machine.When(DeleteFluxSteps.DeleteMultiIndexes, DeleteMultiIndexes);
-        machine.When(DeleteFluxSteps.DeleteRow, DeleteRowsFromDisk);
+        machine.When(DeleteFluxSteps.LocateTupleToDelete, LocateTupleToDelete);        
+        machine.When(DeleteFluxSteps.DeleteRows, DeleteRowsAndIndexesFromDisk);
         machine.When(DeleteFluxSteps.ApplyPageOperations, ApplyPageOperations);        
 
         // machine.WhenAbort(ReleaseLocks);

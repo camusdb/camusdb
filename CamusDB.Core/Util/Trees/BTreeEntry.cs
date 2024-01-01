@@ -32,7 +32,7 @@ public sealed class BTreeEntry<TKey, TValue>
 
     public BTreeMvccEntry<TValue> SetValue(HLCTimestamp timestamp, BTreeCommitState commitState, TValue? value)
     {
-        Console.WriteLine("SetV={0} {1} {2}", timestamp, commitState, value);
+        //Console.WriteLine("SetV={0} {1} {2}", timestamp, commitState, value);
 
         if (mvccValues.TryGetValue(timestamp, out BTreeMvccEntry<TValue>? mvccEntry))
         {
