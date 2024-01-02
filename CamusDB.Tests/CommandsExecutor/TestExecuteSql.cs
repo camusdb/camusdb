@@ -458,6 +458,25 @@ public class TestExecuteSql
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectBoundParameters1()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT x FROM robots WHERE enabled=@enabled",
+            parameters: new() { { "@enabled", new ColumnValue(ColumnType.Bool, true) } }
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+            Assert.AreEqual(true, row.Row["enabled"].BoolValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteInsert1()
     {
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();

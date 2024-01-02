@@ -78,7 +78,8 @@ public sealed class TableColumnDropper
             index: null,
             filters: null,
             where: null,
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         state.DataCursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);

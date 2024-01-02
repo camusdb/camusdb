@@ -248,7 +248,8 @@ public class TestRowDeletor
            index: null,
            where: null,
            filters: null,
-           orderBy: null
+           orderBy: null,
+           parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -280,7 +281,8 @@ public class TestRowDeletor
            index: null,
            where: null,
            filters: null,
-           orderBy: null
+           orderBy: null,
+           parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -316,7 +318,8 @@ public class TestRowDeletor
            index: null,
            where: null,
            filters: null,
-           orderBy: null
+           orderBy: null,
+           parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -352,7 +355,8 @@ public class TestRowDeletor
             {
                 new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
             },
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -375,7 +379,8 @@ public class TestRowDeletor
             {
                 new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
             },
-            orderBy: null
+            orderBy: null,
+            parameters: null
        );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -404,7 +409,8 @@ public class TestRowDeletor
             {
                 new("year", ">", new ColumnValue(ColumnType.Integer64, 2010))
             },
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -437,7 +443,8 @@ public class TestRowDeletor
             index: null,
             where: null,
             filters: null,
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();

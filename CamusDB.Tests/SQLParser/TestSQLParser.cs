@@ -188,6 +188,16 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSimpleSelectWhere13()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table WHERE ((xx >= @xx) AND (x <= @x)) OR x = @x");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+    }
+
+    [Test]
     public void TestParseSimpleSelectOrderBy()
     {
         NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table ORDER BY xx");

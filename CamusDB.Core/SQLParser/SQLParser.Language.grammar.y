@@ -18,10 +18,10 @@
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
 
-%token TDIGIT TSTRING IDENTIFIER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
+%token TDIGIT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
 %token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
-%token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN
+%token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN 
 
 %%
 
@@ -138,8 +138,8 @@ expr       : equals_expr { $$.n = $1.n; }
            | and_expr { $$.n = $1.n; }
            | or_expr { $$.n = $1.n; }
            | simple_expr { $$.n = $1.n; }
-           | group_paren_expr { $$.n = $1.n; } 
-           | fcall_expr { $$.n = $1.n; }
+           | group_paren_expr { $$.n = $1.n; }
+           | fcall_expr { $$.n = $1.n; }           
            ;
 
 and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, null, null, null); }
@@ -185,9 +185,10 @@ simple_expr : identifier { $$.n = $1.n; $$.s = $1.s; }
             | string { $$.n = $1.n; $$.s = $1.s; }
             | bool { $$.n = $1.n; $$.s = $1.s; }
             | null { $$.n = $1.n; $$.s = $1.s; }
+            | placeholder { $$.n = $1.n; $$.s = $1.s; }
 			;
-
-identifier  : IDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, $$.s); }
+           
+identifier  : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, $$.s); }
             ;
 
 number  : TDIGIT { $$.n = new(NodeType.Number, null, null, null, null, $$.s); }
@@ -202,5 +203,8 @@ bool    : TTRUE { $$.n = new(NodeType.Bool, null, null, null, null, "true"); }
 
 null    : TNULL { $$.n = new(NodeType.Null, null, null, null, null, "null"); }
         ;
+
+placeholder : TPLACEHOLDER { $$.n = new(NodeType.Placeholder, null, null, null, null, $$.s); }
+            ;
 
 %%

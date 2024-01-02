@@ -16,33 +16,37 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal abstract class SQLExecutorBaseCreator
 {
-    protected static List<string> GetIdentifierList(NodeAst orderByAst)
+    protected static void GetIdentifierList(NodeAst orderByAst, LinkedList<string> identifierList)
     {
         if (orderByAst.nodeType == NodeType.Identifier)
-            return new() { orderByAst.yytext ?? "" };
+        {
+            identifierList.AddLast(orderByAst.yytext ?? "");
+            return;
+        }
 
         if (orderByAst.nodeType == NodeType.IdentifierList)
-        {
-            List<string> allIdentifiers = new();
-
+        {            
             if (orderByAst.leftAst is not null)
-                allIdentifiers.AddRange(GetIdentifierList(orderByAst.leftAst));
+                GetIdentifierList(orderByAst.leftAst, identifierList);
 
             if (orderByAst.rightAst is not null)
-                allIdentifiers.AddRange(GetIdentifierList(orderByAst.rightAst));
+                GetIdentifierList(orderByAst.rightAst, identifierList);
 
-            return allIdentifiers;
+            return;
         }
 
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid order by clause");
     }
 
-    public static ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row)
+    public static ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters)
     {
         switch (expr.nodeType)
         {
             case NodeType.Number:
-                return new ColumnValue(ColumnType.Integer64, long.Parse(expr.yytext!));
+                if (long.TryParse(expr.yytext!, out long longValue))
+                    throw new Exception("Invalid Int64: " + expr.yytext!);
+
+                return new ColumnValue(ColumnType.Integer64, longValue);                
 
             case NodeType.String:
                 return new ColumnValue(ColumnType.String, expr.yytext!.Trim('"'));
@@ -54,56 +58,68 @@ internal abstract class SQLExecutorBaseCreator
                 return new ColumnValue(ColumnType.Null, 0);
 
             case NodeType.Identifier:
+                {
+                    if (row.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
+                        return columnValue;
 
-                if (row.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
-                    return columnValue;
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown column: " + expr.yytext!);
+                }
 
-                throw new Exception("Not found column: " + expr.yytext!);
+            case NodeType.Placeholder:
+                {
+                    if (parameters is null)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing placeholders to replace:" + expr.yytext!);
+
+                    if (parameters.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
+                        return columnValue;
+
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown placeholder: " + expr.yytext!);
+                }
 
             case NodeType.ExprEquals:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) == 0);
                 }
 
             case NodeType.ExprNotEquals:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) != 0);
                 }
 
             case NodeType.ExprLessThan:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) < 0);
                 }
 
             case NodeType.ExprGreaterThan:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) > 0);
                 }
 
             case NodeType.ExprOr:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.BoolValue || rightValue.BoolValue);
                 }
 
             case NodeType.ExprAnd:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.BoolValue && rightValue.BoolValue);
                 }
@@ -121,7 +137,7 @@ internal abstract class SQLExecutorBaseCreator
 
                             LinkedList<ColumnValue> argumentList = new();
 
-                            GetArgumentList(expr.rightAst!, row, argumentList);
+                            GetArgumentList(expr.rightAst!, row, parameters, argumentList);
 
                             return new ColumnValue(ColumnType.Id, argumentList.FirstOrDefault()!.StrValue ?? "");
 
@@ -138,19 +154,19 @@ internal abstract class SQLExecutorBaseCreator
         }
     }
 
-    private static void GetArgumentList(NodeAst argumentAst, Dictionary<string, ColumnValue> row, LinkedList<ColumnValue> argumentList)
+    private static void GetArgumentList(NodeAst argumentAst, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters, LinkedList<ColumnValue> argumentList)
     {        
         if (argumentAst.nodeType == NodeType.ExprArgumentList)
         {
             if (argumentAst.leftAst != null)
-                GetArgumentList(argumentAst.leftAst, row, argumentList);
+                GetArgumentList(argumentAst.leftAst, row, parameters, argumentList);
 
             if (argumentAst.rightAst != null)
-                GetArgumentList(argumentAst.rightAst, row, argumentList);
+                GetArgumentList(argumentAst.rightAst, row, parameters, argumentList);
 
             return;
         }
 
-        argumentList.AddLast(EvalExpr(argumentAst, row));
+        argumentList.AddLast(EvalExpr(argumentAst, row, parameters));
     }
 }

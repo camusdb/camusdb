@@ -21,7 +21,7 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
         if (ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
 
-        List<(string, ColumnValue)> updateItemList = GetUpdateItemList(ast.rightAst);
+        List<(string, ColumnValue)> updateItemList = GetUpdateItemList(ast.rightAst, new(), new());
 
         Dictionary<string, ColumnValue> values = new(updateItemList.Count);
 
@@ -38,20 +38,22 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
         );
     }
 
-    private static List<(string, ColumnValue)> GetUpdateItemList(NodeAst updateItemList)
+    // @todo expressions here must be evaluated at a later stage
+    // to take into account the row's values so that we can do: amount = amount + 1
+    private static List<(string, ColumnValue)> GetUpdateItemList(NodeAst updateItemList, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue> parameters)
     {
         if (updateItemList.nodeType == NodeType.UpdateItem)
-            return new() { (updateItemList.leftAst!.yytext ?? "", EvalExpr(updateItemList.rightAst!, new())) };
+            return new() { (updateItemList.leftAst!.yytext ?? "", EvalExpr(updateItemList.rightAst!, row, parameters)) };
 
         if (updateItemList.nodeType == NodeType.UpdateList)
         {
             List<(string, ColumnValue)> allUpdateItems = new();
 
             if (updateItemList.leftAst is not null)
-                allUpdateItems.AddRange(GetUpdateItemList(updateItemList.leftAst));
+                allUpdateItems.AddRange(GetUpdateItemList(updateItemList.leftAst, row, parameters));
 
             if (updateItemList.rightAst is not null)
-                allUpdateItems.AddRange(GetUpdateItemList(updateItemList.rightAst));
+                allUpdateItems.AddRange(GetUpdateItemList(updateItemList.rightAst, row, parameters));
 
             return allUpdateItems;
         }

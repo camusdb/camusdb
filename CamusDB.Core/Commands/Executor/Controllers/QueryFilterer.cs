@@ -14,9 +14,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class QueryFilterer
 {
-    internal bool MeetWhere(NodeAst where, Dictionary<string, ColumnValue> row)
+    internal bool MeetWhere(NodeAst where, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters)
     {
-        ColumnValue evaluatedExpr = SqlExecutor.EvalExpr(where, row);
+        ColumnValue evaluatedExpr = SqlExecutor.EvalExpr(where, row, parameters);
 
         switch (evaluatedExpr.Type)
         {

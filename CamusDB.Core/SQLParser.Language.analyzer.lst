@@ -3,7 +3,7 @@
 //  GPLEX error listing for lex source file <SQLParser.Language.analyzer.lex>
 // ==========================================================================
 //  Version:  1.2.2
-//  DateTime: 12/29/2023 7:03:34 PM
+//  DateTime: 1/2/2024 7:47:53 AM
 // ==========================================================================
 
 
@@ -40,7 +40,7 @@ TKey 		    (K|k)(E|e)(Y|y)
 TUnique 	    (U|u)(N|n)(I|i)(Q|q)(U|u)(E|e)
 TIndex 		    (I|i)(N|n)(D|d)(E|e)(X|x)	
 TAlter 		    (A|a)(L|l)(T|t)(E|e)(R|r)
-TAdd 		    (A|a)(D|d)(D|d)
+TWAdd 		    (A|a)(D|d)(D|d)
 TDrop 		    (D|d)(R|r)(O|o)(P|p)
 TColumn 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)
 TTypeString     (S|s)(T|t)(R|r)(I|i)(N|n)(G|g)
@@ -65,10 +65,11 @@ UniEsc          \\u{HexDig}{4}
 UNIESC          \\U{HexDig}{8}
 String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\"
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
+Identifier      (@)[a-zA-Z0-9_]*
+//^^^^^^^^
+// Error: Lexical category <Identifier> already defined
+// ----------------------------------------------------
 TAdd            \+
-//^^
-// Error: Lexical category <TAdd> already defined
-// ----------------------------------------------
 TMult           \*
 TMinus          \-
 TDiv            /
@@ -147,7 +148,7 @@ TGreaterEquals  >=
 
 {TAlter} { return (int)Token.TALTER; }
 
-{TAdd} { return (int)Token.TADD; }
+{TWAdd} { return (int)Token.TWADD; }
 
 {TDrop} { return (int)Token.TDROP; }
 
@@ -191,7 +192,12 @@ TGreaterEquals  >=
 
 {TNotEquals2} { return (int)Token.TNOTEQUALS; }
 
-{Identifier} { yylval.s = yytext; return (int)Token.IDENTIFIER; }
+{Identifier} { yylval.s = yytext; return (int)Token.TIDENTIFIER; }
+
+{Placeholder} { yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
+//^^^^^^^^^^
+// Error: Unknown lexical category <Placeholder> 
+// ----------------------------------------------
 
 %%// ==========================================================================
 

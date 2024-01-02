@@ -27,6 +27,8 @@ public readonly struct QueryTicket
 
     public List<QueryOrderBy>? OrderBy { get; }
 
+    public Dictionary<string, ColumnValue>? Parameters { get; }
+
     public QueryTicket(
         HLCTimestamp txnId,
         string databaseName,
@@ -34,7 +36,8 @@ public readonly struct QueryTicket
         string? index,
         List<QueryFilter>? filters,
         NodeAst? where,
-        List<QueryOrderBy>? orderBy)
+        List<QueryOrderBy>? orderBy,
+        Dictionary<string, ColumnValue>? parameters)
     {
         TxnId = txnId;
         DatabaseName = databaseName;
@@ -43,5 +46,6 @@ public readonly struct QueryTicket
         Filters = filters;
         Where = where;
         OrderBy = orderBy;
+        Parameters = parameters;
     }
 }

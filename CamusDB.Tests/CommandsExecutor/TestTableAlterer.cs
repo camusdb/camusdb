@@ -196,7 +196,8 @@ internal sealed class TestTableAlterer
            index: null,
            where: null,
            filters: null,
-           orderBy: null
+           orderBy: null,
+           parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -369,7 +370,8 @@ internal sealed class TestTableAlterer
            index: null,
            where: null,
            filters: null,
-           orderBy: null
+           orderBy: null,
+           parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -402,7 +404,8 @@ internal sealed class TestTableAlterer
            index: null,
            where: null,
            filters: null,
-           orderBy: null
+           orderBy: null,
+           parameters: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();

@@ -116,7 +116,8 @@ internal sealed class TestRowMultiInsertor
             index: "robots_id",
             where: null,
             filters: null,
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -168,7 +169,8 @@ internal sealed class TestRowMultiInsertor
             index: "robots_id",
             where: null,
             filters: null,
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();

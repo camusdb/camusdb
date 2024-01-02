@@ -56,6 +56,7 @@ UniEsc          \\u{HexDig}{4}
 UNIESC          \\U{HexDig}{8}
 String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\"
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
+Placeholder     (@)[a-zA-Z0-9_]*
 TAdd            \+
 TMult           \*
 TMinus          \-
@@ -179,6 +180,8 @@ TGreaterEquals  >=
 
 {TNotEquals2} { return (int)Token.TNOTEQUALS; }
 
-{Identifier} { yylval.s = yytext; return (int)Token.IDENTIFIER; }
+{Identifier} { yylval.s = yytext; return (int)Token.TIDENTIFIER; }
+
+{Placeholder} { yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
 
 %%

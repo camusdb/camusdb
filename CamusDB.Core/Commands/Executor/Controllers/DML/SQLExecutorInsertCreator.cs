@@ -25,8 +25,11 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         if (ast.extendedOne is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing or empty values list");
 
-        List<string> fieldList = GetIdentifierList(ast.rightAst);
-        List<ColumnValue> valuesList = GetInsertItemList(ast.extendedOne);
+        LinkedList<string> fieldList = new();
+        LinkedList<ColumnValue> valuesList = new();
+
+        GetIdentifierList(ast.rightAst, fieldList);
+        GetInsertItemList(ast.extendedOne, new(), ticket.Parameters ?? new(), valuesList);
 
         if (fieldList.Count != valuesList.Count)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"The number of fields is not equal to the number of values.");
@@ -34,7 +37,7 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         Dictionary<string, ColumnValue> values = new(fieldList.Count);
 
         for (int i = 0; i < fieldList.Count; i++)
-            values.Add(fieldList[i], valuesList[i]);
+            values.Add(fieldList.ElementAt(i), valuesList.ElementAt(i)); // @todo optimize this
 
         return new InsertTicket(
             txnId: await commandExecutor.NextTxnId(),
@@ -44,21 +47,19 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         );
     }
 
-    static List<ColumnValue> GetInsertItemList(NodeAst valuesList)
+    private static void GetInsertItemList(NodeAst valuesListAst, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue> parameters, LinkedList<ColumnValue> valuesList)
     {
-        if (valuesList.nodeType == NodeType.ExprList)
-        {
-            List<ColumnValue> allInsertValues = new();
+        if (valuesListAst.nodeType == NodeType.ExprList)
+        {            
+            if (valuesListAst.leftAst is not null)
+                GetInsertItemList(valuesListAst.leftAst, row, parameters, valuesList);
 
-            if (valuesList.leftAst is not null)
-                allInsertValues.AddRange(GetInsertItemList(valuesList.leftAst));
+            if (valuesListAst.rightAst is not null)
+                GetInsertItemList(valuesListAst.rightAst, row, parameters, valuesList);
 
-            if (valuesList.rightAst is not null)
-                allInsertValues.AddRange(GetInsertItemList(valuesList.rightAst));
-
-            return allInsertValues;
+            return;
         }
-
-        return new() { EvalExpr(valuesList, new()) };
+        
+        valuesList.AddLast(EvalExpr(valuesListAst, row, parameters));
     }
 }

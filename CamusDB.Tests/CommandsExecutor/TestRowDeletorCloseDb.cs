@@ -209,7 +209,8 @@ public class TestRowDeletorCloseDb
             {
                 new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
             },
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -228,7 +229,8 @@ public class TestRowDeletorCloseDb
             {
                 new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
             },
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();

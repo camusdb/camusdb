@@ -99,7 +99,8 @@ internal sealed class RowDeleter
             index: null,
             filters: ticket.Filters,
             where: ticket.Where,
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         state.DataCursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);

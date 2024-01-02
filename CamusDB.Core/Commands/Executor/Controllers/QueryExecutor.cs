@@ -142,7 +142,7 @@ internal sealed class QueryExecutor
             {
                 if (ticket.Where is not null)
                 {
-                    if (queryFilterer.MeetWhere(ticket.Where, row))
+                    if (queryFilterer.MeetWhere(ticket.Where, row, ticket.Parameters))
                         yield return new(new(entry.Key, dataOffset), row);
                 }
                 else
@@ -183,7 +183,7 @@ internal sealed class QueryExecutor
             {
                 if (ticket.Where is not null)
                 {
-                    if (queryFilterer.MeetWhere(ticket.Where, row))
+                    if (queryFilterer.MeetWhere(ticket.Where, row, ticket.Parameters))
                         yield return new(txnValue, row);
                 }
                 else

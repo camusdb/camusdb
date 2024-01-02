@@ -9,6 +9,7 @@
 using NUnit.Framework;
 
 using System.Linq;
+using System.Diagnostics;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
@@ -21,8 +22,6 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.Time;
-using System.Xml.Linq;
-using System.Diagnostics;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -561,7 +560,8 @@ internal sealed class TestRowInsertor
             index: null,
             filters: null,
             where: null,
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -673,7 +673,8 @@ internal sealed class TestRowInsertor
             index: null,
             where: null,
             filters: null,
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();

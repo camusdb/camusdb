@@ -365,7 +365,8 @@ public class TestRowUpdater
             index: null,
             where: null,
             filters: null,
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -381,7 +382,8 @@ public class TestRowUpdater
             {
                 new("name", "=", new ColumnValue(ColumnType.String, "updated value"))
             },
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -397,7 +399,8 @@ public class TestRowUpdater
             {
                 new("name", "=", new ColumnValue(ColumnType.String, "another updated value"))
             },
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -474,7 +477,8 @@ public class TestRowUpdater
             {
                 new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
             },
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
@@ -498,7 +502,8 @@ public class TestRowUpdater
             {
                 new("year", "<=", new ColumnValue(ColumnType.Integer64, "2010"))
             },
-            orderBy: null
+            orderBy: null,
+            parameters: null
         );
 
         result = await (await executor.Query(queryTicket)).ToListAsync();

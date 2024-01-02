@@ -14,15 +14,18 @@ public sealed class ExecuteSQLQueryResponse
 {
     public string Status { get; set; }
 
-    public List<Dictionary<string, ColumnValue>>? Rows { get; set; } 
+    public int Total { get; set; }
+
+    public List<Dictionary<string, ColumnValue>>? Rows { get; set; }
 
     public string? Code { get; set; }
 
     public string? Message { get; set; }
 
-    public ExecuteSQLQueryResponse(string status, List<Dictionary<string, ColumnValue>> rows)
+    public ExecuteSQLQueryResponse(string status, int total, List<Dictionary<string, ColumnValue>> rows)
     {
         Status = status;
+        Total = total;
         Rows = rows;
     }
 

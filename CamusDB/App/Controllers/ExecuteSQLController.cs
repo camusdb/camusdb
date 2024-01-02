@@ -48,7 +48,7 @@ public sealed class ExecuteSQLController : CommandsController
             await foreach (QueryResultRow row in await executor.ExecuteSQLQuery(ticket))
                 rows.Add(row.Row);
 
-            return new JsonResult(new ExecuteSQLQueryResponse("ok", rows));
+            return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
         }
         catch (CamusDBException e)
         {
@@ -63,7 +63,7 @@ public sealed class ExecuteSQLController : CommandsController
     }    
 
     [HttpPost]
-    [Route("/execute-non-sql-query")]
+    [Route("/execute-sql-non-query")]
     public async Task<JsonResult> ExecuteNonSQLQuery()
     {
         try

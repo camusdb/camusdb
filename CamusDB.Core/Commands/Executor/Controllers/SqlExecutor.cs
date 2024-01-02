@@ -68,8 +68,8 @@ internal sealed class SqlExecutor
         return sqlExecutorCreateTableCreator.CreateCreateTableTicket(ticket, ast);
     }
 
-    public static ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row)
+    public static ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters)
     {
-        return SQLExecutorBaseCreator.EvalExpr(expr, row);
+        return SQLExecutorBaseCreator.EvalExpr(expr, row, parameters);
     }
 }

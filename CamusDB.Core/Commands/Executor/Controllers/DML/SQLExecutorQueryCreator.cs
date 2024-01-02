@@ -32,7 +32,8 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
                     index: null,
                     filters: null,
                     where: ast.extendedOne,
-                    orderBy: GetQueryClause(ast)
+                    orderBy: GetQueryClause(ast),
+                    parameters: ticket.Parameters
                 );
 
             default:
@@ -44,10 +45,13 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
     {
         if (ast.extendedTwo is null)
             return null;
-
+        
         List<QueryOrderBy> orderClauses = new();
+        LinkedList<string> identifierList = new();
 
-        foreach (string orderByColumn in GetIdentifierList(ast.extendedTwo))
+        GetIdentifierList(ast.extendedTwo, identifierList);
+
+        foreach (string orderByColumn in identifierList)
             orderClauses.Add(new QueryOrderBy(orderByColumn, QueryOrderByType.Ascending));
 
         return orderClauses;
