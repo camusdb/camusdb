@@ -30,10 +30,10 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
     public async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple?>> Save(SaveUniqueIndexTicket ticket)
     {
         return await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value);
-    }    
+    }
 
     public async Task Remove(RemoveUniqueIndexTicket ticket)
-    {        
+    {
         await RemoveInternal(ticket);
     }
 
@@ -45,8 +45,8 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         //    Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
-    public void Persist(
-        BufferPoolHandler tablespace,        
+    public async Task Persist(
+        BufferPoolHandler tablespace,
         BTree<ColumnValue, BTreeTuple?> index,
         List<BufferPageOperation> modifiedPages,
         BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas
@@ -86,6 +86,8 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
         foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas.Nodes)
         {
+            using IDisposable readerLock = await node.ReaderLockAsync();
+
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // keyCount(4 byte) + 
                 SerializatorTypeSizes.TypeObjectId +  // pageOffset(4 byte)

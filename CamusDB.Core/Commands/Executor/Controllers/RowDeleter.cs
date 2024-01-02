@@ -7,9 +7,7 @@
  */
 
 using System.Diagnostics;
-using System.Net.Sockets;
 using CamusDB.Core.BufferPool;
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
@@ -167,7 +165,7 @@ internal sealed class RowDeleter
 
             uniqueIndexDeltas = await UpdateUniqueIndexes(state, ticket, tuple, row);
 
-            PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas);
+            await PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas);
 
             Console.WriteLine(
                 "Row with rowid {0} deleted to page {1}",
@@ -239,7 +237,7 @@ internal sealed class RowDeleter
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private void PersistIndexChanges(DeleteFluxState state, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> uniqueIndexDeltas)
+    private async Task PersistIndexChanges(DeleteFluxState state, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> uniqueIndexDeltas)
     {
         if (mainIndexDeltas is null)
             return;
@@ -247,7 +245,7 @@ internal sealed class RowDeleter
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in mainIndexDeltas.Entries)
             btreeEntry.CommitState = BTreeCommitState.Committed;
 
-        indexSaver.Persist(state.Database.TableSpace, state.Table.Rows, state.ModifiedPages, mainIndexDeltas);
+        await indexSaver.Persist(state.Database.TableSpace, state.Table.Rows, state.ModifiedPages, mainIndexDeltas);
 
         if (uniqueIndexDeltas is null)
             return;
@@ -257,7 +255,7 @@ internal sealed class RowDeleter
             foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.Entries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
-            indexSaver.Persist(state.Database.TableSpace, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+            await indexSaver.Persist(state.Database.TableSpace, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
         }
     }
 

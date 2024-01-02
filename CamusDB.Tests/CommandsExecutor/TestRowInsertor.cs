@@ -21,6 +21,8 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.Time;
+using System.Xml.Linq;
+using System.Diagnostics;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -508,6 +510,78 @@ internal sealed class TestRowInsertor
 
         Assert.AreEqual(row["enabled"].Type, ColumnType.Bool);
         Assert.AreEqual(row["enabled"].BoolValue, false);
+    }
+
+    private static async Task DoInsert(string dbname, CommandExecutor executor)
+    {
+        InsertTicket ticket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                { "name", new ColumnValue(ColumnType.String, "some name") },
+                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                { "enabled", new ColumnValue(ColumnType.Bool, false) },
+            }
+        );
+
+        await executor.Insert(ticket);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestSuccessfulMultipleParallelInserts()
+    {
+        (string dbname, CommandExecutor executor) = await SetupBasicTable();        
+
+        List<Task> tasks = new();
+
+        for (int i = 0; i < 100; i++)
+            tasks.Add(DoInsert(dbname, executor));
+
+        await Task.WhenAll(tasks);
+
+        Stopwatch stopwatch = Stopwatch.StartNew();
+
+        tasks = new();
+
+        for (int i = 0; i < 100; i++)
+            tasks.Add(DoInsert(dbname, executor));
+
+        await Task.WhenAll(tasks);
+
+        System.Console.WriteLine(stopwatch.ElapsedMilliseconds);
+
+        QueryTicket queryTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            filters: null,
+            where: null,
+            orderBy: null
+        );
+
+        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+
+        foreach (QueryResultRow resultRow in result)
+        {
+            Dictionary<string, ColumnValue> row = resultRow.Row;
+
+            Assert.AreEqual(row["id"].Type, ColumnType.Id);
+            Assert.AreEqual(row["id"].StrValue!.Length, 24);
+
+            Assert.AreEqual(row["name"].Type, ColumnType.String);
+            Assert.AreEqual(row["name"].StrValue, "some name");
+
+            Assert.AreEqual(row["year"].Type, ColumnType.Integer64);
+            Assert.AreEqual(row["year"].LongValue, 1234);
+
+            Assert.AreEqual(row["enabled"].Type, ColumnType.Bool);
+            Assert.AreEqual(row["enabled"].BoolValue, false);
+        }              
     }
 
     [Test]

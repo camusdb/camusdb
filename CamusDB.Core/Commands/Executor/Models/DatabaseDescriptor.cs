@@ -11,25 +11,21 @@ using RocksDbSharp;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public sealed record DatabaseDescriptor
+public sealed record DatabaseDescriptor : IDisposable
 {
     public string Name { get; }
 
     public RocksDb DbHandler { get; }
 
-    public BufferPoolHandler TableSpace { get; }    
-
-    //public BufferPoolFlusher TableSpaceFlusher { get; }
+    public BufferPoolHandler TableSpace { get; }
 
     public Schema Schema { get; } = new();
-
-    //public JournalManager Journal { get; }
 
     public SystemSchema SystemSchema { get; } = new();
 
     public SemaphoreSlim DescriptorsSemaphore { get; } = new(1, 1);
 
-    public Dictionary<string, TableDescriptor> TableDescriptors = new();
+    public Dictionary<string, TableDescriptor> TableDescriptors { get; } = new();
 
     public DatabaseDescriptor(
         string name,
@@ -39,8 +35,13 @@ public sealed record DatabaseDescriptor
     {
         Name = name;
         TableSpace = tableSpace;        
-        //Journal = new(name);
-        //TableSpaceFlusher = new(TableSpace, Journal);
         DbHandler = dbHandler;
+    }
+
+    public void Dispose()
+    {
+        Schema?.Dispose();
+        SystemSchema?.Dispose();
+        DescriptorsSemaphore?.Dispose();
     }
 }

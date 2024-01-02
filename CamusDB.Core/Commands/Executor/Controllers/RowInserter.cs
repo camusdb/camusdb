@@ -300,28 +300,28 @@ internal sealed class RowInserter
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private Task<FluxAction> PersistIndexChanges(InsertFluxState state)
+    private async Task<FluxAction> PersistIndexChanges(InsertFluxState state)
     {
         if (state.Indexes.MainIndexDeltas is null)
-            return Task.FromResult(FluxAction.Abort);
+            return FluxAction.Abort;
 
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in state.Indexes.MainIndexDeltas.Entries)
             btreeEntry.CommitState = BTreeCommitState.Committed;
 
-        indexSaver.Persist(state.Database.TableSpace, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas);
+        await indexSaver.Persist(state.Database.TableSpace, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas);
 
         if (state.Indexes.UniqueIndexDeltas is null)
-            return Task.FromResult(FluxAction.Continue);
+            return FluxAction.Continue;
 
         foreach ((BTree<ColumnValue, BTreeTuple?> index, BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
         {
             foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.Entries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
-            indexSaver.Persist(state.Database.TableSpace, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+            await indexSaver.Persist(state.Database.TableSpace, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
         }
 
-        return Task.FromResult(FluxAction.Continue);
+        return FluxAction.Continue;
     }
 
     /// <summary>

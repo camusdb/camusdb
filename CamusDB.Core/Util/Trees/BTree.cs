@@ -106,7 +106,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (node is null)
             return default;
 
-        using IDisposable disposable = await node.ReaderLockAsync();
+        using IDisposable readerLock = await node.ReaderLockAsync();
 
         BTreeEntry<TKey, TValue>[] children = node.children;
 
@@ -173,7 +173,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (node is null)
             yield break;
 
-        using IDisposable disposable = await node.ReaderLockAsync();
+        using IDisposable readerLock = await node.ReaderLockAsync();
 
         BTreeEntry<TKey, TValue>[] children = node.children;
 
@@ -226,7 +226,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (ht == 0)
             yield break;
 
-        using IDisposable disposable = await node.ReaderLockAsync();
+        using IDisposable readerLock = await node.ReaderLockAsync();
 
         for (int j = 0; j < node.KeyCount; j++)
         {
@@ -261,7 +261,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (node is null)
             yield break;
 
-        using IDisposable disposable = await node.ReaderLockAsync();
+        using IDisposable readerLock = await node.ReaderLockAsync();
 
         for (int j = node.KeyCount; j >= 0; j--)
         {

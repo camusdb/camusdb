@@ -79,45 +79,55 @@ public sealed class BufferPoolHandler : IDisposable
     /// <param name="state"></param>
     private void ReleasePages(object? state)
     {
-        float percent = Pages.Count / (float)CamusConfig.BufferPoolSize;
-        if (percent < 0.8)
-            return;
-
-        ulong ticks = logicalClock.GetTicks();
-        int numberToFree = (int)(CamusConfig.BufferPoolSize * (1 - (percent > 0.8 ? 0.8 : percent)));
-
-        lruPages.Clear();
-
-        foreach (KeyValuePair<ObjectIdValue, Lazy<BufferPage>> keyValuePair in Pages)
+        try
         {
-            Lazy<BufferPage> page = keyValuePair.Value;
 
-            if (!page.IsValueCreated)
-                continue;
+            float percent = Pages.Count / (float)CamusConfig.BufferPoolSize;
+            if (percent < 0.8)
+                return;
 
-            if (page.Value.LastAccess > (ticks - 655360)) // @todo this number must be choosen based on the actual activity of the database
-                continue;
+            ulong ticks = logicalClock.GetTicks();
+            int numberToFree = (int)(CamusConfig.BufferPoolSize * (1 - (percent > 0.8 ? 0.8 : percent)));
 
-            if (lruPages.Count > (numberToFree * 2)) // fill the red-black tree with twice the pages to release
-                break;
+            lruPages.Clear();
 
-            lruPages.Add(page.Value.LastAccess, keyValuePair.Key);
+            foreach (KeyValuePair<ObjectIdValue, Lazy<BufferPage>> keyValuePair in Pages)
+            {
+                Lazy<BufferPage> page = keyValuePair.Value;
+
+                if (!page.IsValueCreated)
+                    continue;
+
+                if (page.Value.LastAccess > (ticks - 655360)) // @todo this number must be choosen based on the actual activity of the database
+                    continue;
+
+                if (lruPages.Count > (numberToFree * 2)) // fill the red-black tree with twice the pages to release
+                    break;
+
+                lruPages.TryAdd(page.Value.LastAccess, keyValuePair.Key);
+            }
+
+            int numberFreed = 0;
+
+            foreach (KeyValuePair<ulong, ObjectIdValue> keyValue in lruPages)
+            {
+                Pages.TryRemove(keyValue.Value, out _);
+
+                numberFreed++;
+
+                if (numberFreed > numberToFree)
+                    break;
+            }
+
+            if (numberFreed > 0)
+                Console.WriteLine("Total pages freed: {0}, remaining: {1}", numberFreed, Pages.Count);
+
+            lruPages.Clear();
         }
-
-        int numberFreed = 0;
-
-        foreach (KeyValuePair<ulong, ObjectIdValue> keyValue in lruPages)
+        catch (Exception ex)
         {
-            Pages.TryRemove(keyValue.Value, out _);
-
-            numberFreed++;
-
-            if (numberFreed > numberToFree)
-                break;
+            Console.WriteLine("ReleasePages: {0}", ex.Message, ex.StackTrace);
         }
-
-        if (numberFreed > 0)
-            Console.WriteLine("Total pages freed: {0}, remaining: {1}", numberFreed, Pages.Count);
     }
 
     private BufferPage LoadPage(ObjectIdValue offset)

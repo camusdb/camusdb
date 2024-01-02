@@ -52,7 +52,7 @@ public sealed class QueryController : CommandsController
             await foreach (QueryResultRow row in await executor.Query(ticket))            
                 rows.Add(row.Row);
 
-            return new JsonResult(new QueryResponse("ok", rows));
+            return new JsonResult(new QueryResponse("ok", rows.Count, rows));
         }
         catch (CamusDBException e)
         {
@@ -91,7 +91,7 @@ public sealed class QueryController : CommandsController
             await foreach (Dictionary<string, ColumnValue> row in await executor.QueryById(ticket))
                 rows.Add(row);
 
-            return new JsonResult(new QueryResponse("ok", rows));
+            return new JsonResult(new QueryResponse("ok", rows.Count, rows));
         }
         catch (CamusDBException e)
         {

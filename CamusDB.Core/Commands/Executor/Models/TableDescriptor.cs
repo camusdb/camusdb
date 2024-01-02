@@ -12,6 +12,9 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
+/// <summary>
+/// Represents a descriptor to access a table
+/// </summary>
 public sealed class TableDescriptor
 {
     public string Name { get; }
@@ -20,8 +23,14 @@ public sealed class TableDescriptor
 
     public BTree<ObjectIdValue, ObjectIdValue> Rows { get; }
 
-    public Dictionary<string, TableIndexSchema> Indexes { get; set; } = new();    
+    public Dictionary<string, TableIndexSchema> Indexes { get; } = new();    
 
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="name"></param>
+    /// <param name="schema"></param>
+    /// <param name="rows"></param>
     public TableDescriptor(string name, TableSchema schema, BTree<ObjectIdValue, ObjectIdValue> rows)
     {
         Name = name;

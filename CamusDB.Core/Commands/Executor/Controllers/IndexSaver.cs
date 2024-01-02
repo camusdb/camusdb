@@ -46,13 +46,13 @@ internal sealed class IndexSaver
         await indexMultiSaver.Save(ticket);
     }
 
-    public void Persist(
+    public async Task Persist(
         BufferPoolHandler tablespace,
         BTree<ObjectIdValue, ObjectIdValue> index,
         List<BufferPageOperation> modifiedPages,
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas)
     {
-        indexUniqueOffsetSaver.Persist(
+        await indexUniqueOffsetSaver.Persist(
             tablespace,
             index,
             modifiedPages,
@@ -60,13 +60,13 @@ internal sealed class IndexSaver
         );
     }
 
-    public void Persist(
+    public async Task Persist(
         BufferPoolHandler tablespace,
         BTree<ColumnValue, BTreeTuple?> index,
         List<BufferPageOperation> modifiedPages,
         BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas)
     {
-        indexUniqueSaver.Persist(
+        await indexUniqueSaver.Persist(
             tablespace,
             index,
             modifiedPages,
