@@ -21,7 +21,7 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
         if (ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
 
-        List<(string, ColumnValue)> updateItemList = GetUpdateItemList(ast.rightAst, new(), new());
+        List<(string, ColumnValue)> updateItemList = GetUpdateItemList(ast.rightAst, new(), ticket.Parameters);
 
         Dictionary<string, ColumnValue> values = new(updateItemList.Count);
 
@@ -34,13 +34,14 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
             tableName: tableName,
             values: values,
             where: ast.extendedOne,
-            filters: null
+            filters: null,
+            parameters: ticket.Parameters
         );
     }
 
     // @todo expressions here must be evaluated at a later stage
     // to take into account the row's values so that we can do: amount = amount + 1
-    private static List<(string, ColumnValue)> GetUpdateItemList(NodeAst updateItemList, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue> parameters)
+    private static List<(string, ColumnValue)> GetUpdateItemList(NodeAst updateItemList, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters)
     {
         if (updateItemList.nodeType == NodeType.UpdateItem)
             return new() { (updateItemList.leftAst!.yytext ?? "", EvalExpr(updateItemList.rightAst!, row, parameters)) };

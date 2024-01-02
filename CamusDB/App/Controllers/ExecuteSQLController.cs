@@ -60,7 +60,7 @@ public sealed class ExecuteSQLController : CommandsController
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
             return new JsonResult(new ExecuteSQLQueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
-    }    
+    }
 
     [HttpPost]
     [Route("/execute-sql-non-query")]

@@ -79,7 +79,8 @@ public sealed class UpdateController : CommandsController
                 tableName: request.TableName ?? "",                
                 values: request.Values ?? new(),
                 where: null,
-                filters: request.Filters ?? new()
+                filters: request.Filters ?? new(),
+                parameters: null
             );
 
             int updatedRows = await executor.Update(ticket);

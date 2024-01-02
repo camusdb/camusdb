@@ -99,7 +99,7 @@ public class TestExecuteSql
     [NonParallelizable]
     public async Task TestExecuteSelectGenericWhere()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
@@ -576,6 +576,45 @@ public class TestExecuteSql
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteInsert4()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "INSERT INTO robots (id, name, year, enabled) VALUES (@id, @name, @year, @enabled)",
+            parameters: new()
+            {
+                { "@id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                { "@name", new ColumnValue(ColumnType.String, "astro boy") },
+                { "@year", new ColumnValue(ColumnType.Integer64, 3000) } ,
+                { "@enabled", new ColumnValue(ColumnType.Bool, false) }
+            }
+        );
+
+        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+
+        ExecuteSQLTicket queryTicket = new(
+           database: dbname,
+           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
+           parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(1, result.Count);
+
+        foreach (QueryResultRow row in result)
+        {
+            Assert.AreEqual("507f1f77bcf86cd799439011", row.Row["id"].StrValue);
+            Assert.AreEqual("astro boy", row.Row["name"].StrValue);
+            Assert.AreEqual(3000, row.Row["year"].LongValue);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteUpdateNoConditions()
     {
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
@@ -614,6 +653,39 @@ public class TestExecuteSql
             database: dbname,
             sql: "UPDATE robots SET year = 1000 WHERE year = 2024",
             parameters: null
+        );
+
+        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+
+        ExecuteSQLTicket queryTicket = new(
+           database: dbname,
+           sql: "SELECT * FROM robots",
+           parameters: null
+       );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+
+        Assert.AreEqual(1000, result[0].Row["year"].LongValue);
+        Assert.AreEqual(2023, result[1].Row["year"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteUpdateMatchOnePlaceholders()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "UPDATE robots SET year = @new_year WHERE year = @expected_year",
+            parameters: new()
+            {
+               { "@new_year", new ColumnValue(ColumnType.Integer64, 1000) },
+               { "@expected_year", new ColumnValue(ColumnType.Integer64, 2024) }
+            }
         );
 
         Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));

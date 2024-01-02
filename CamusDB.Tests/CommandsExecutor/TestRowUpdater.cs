@@ -425,7 +425,8 @@ public class TestRowUpdater
             filters: new()
             {
                 new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
-            }
+            },
+            parameters: null
         );
 
         Assert.AreEqual(1, await executor.Update(ticket));
@@ -462,7 +463,8 @@ public class TestRowUpdater
             filters: new()
             {
                 new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
-            }
+            },
+            parameters: null
         );
 
         Assert.AreEqual(14, await executor.Update(ticket));
@@ -536,7 +538,8 @@ public class TestRowUpdater
             filters: new()
             {
                 new("year", ">", new ColumnValue(ColumnType.Integer64, "200010"))
-            }
+            },
+            parameters: null
         );
 
         Assert.AreEqual(0, await executor.Update(ticket));

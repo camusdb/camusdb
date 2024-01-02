@@ -166,7 +166,7 @@ public sealed class RowUpdater
             filters: ticket.Filters,
             where: ticket.Where,
             orderBy: null,
-            parameters: null
+            parameters: ticket.Parameters
         );
 
         state.DataCursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);

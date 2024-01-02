@@ -44,7 +44,8 @@ public sealed class QueryController : CommandsController
                 index: null,
                 where: null,
                 filters: request.Filters,
-                orderBy: request.OrderBy
+                orderBy: request.OrderBy,
+                parameters: null
             );
 
             List<Dictionary<string, ColumnValue>> rows = new();

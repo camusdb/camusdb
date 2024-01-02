@@ -25,14 +25,16 @@ public readonly struct UpdateTicket
 
     public List<QueryFilter>? Filters { get; }
 
+    public Dictionary<string, ColumnValue>? Parameters { get; }
+
     public UpdateTicket(
         HLCTimestamp txnId,
         string databaseName,
         string tableName,
         Dictionary<string, ColumnValue> values,
         NodeAst? where,
-        List<QueryFilter>? filters
-    )
+        List<QueryFilter>? filters,
+        Dictionary<string, ColumnValue>? parameters)
     {
         TxnId = txnId;
         DatabaseName = databaseName;
@@ -40,5 +42,6 @@ public readonly struct UpdateTicket
         Values = values;
         Where = where;
         Filters = filters;
+        Parameters = parameters;
     }
 }

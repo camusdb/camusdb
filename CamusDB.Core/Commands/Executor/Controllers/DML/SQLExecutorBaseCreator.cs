@@ -68,7 +68,7 @@ internal abstract class SQLExecutorBaseCreator
             case NodeType.Placeholder:
                 {
                     if (parameters is null)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing placeholders to replace:" + expr.yytext!);
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing placeholders to replace: " + expr.yytext!);
 
                     if (parameters.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
                         return columnValue;

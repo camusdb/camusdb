@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using System.Text.Json.Serialization;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
@@ -22,6 +23,21 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     public bool BoolValue { get; }
 
     public string? StrValue { get; }
+
+    [JsonConstructorAttribute]
+    public ColumnValue(ColumnType type, string? strValue, long longValue, bool boolValue)
+    {
+        Type = type;
+
+        if (type == ColumnType.String || type == ColumnType.Id)
+            StrValue = strValue;
+
+        if (type == ColumnType.Integer64)
+            LongValue = longValue;
+
+        if (type == ColumnType.Bool)
+            BoolValue = boolValue;
+    }
 
     public ColumnValue(ColumnType type, bool value)
     {

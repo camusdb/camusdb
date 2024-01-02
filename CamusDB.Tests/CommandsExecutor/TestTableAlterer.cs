@@ -1,19 +1,19 @@
 ﻿
 using NUnit.Framework;
 
+using System.Linq;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 
+using CamusDB.Core;
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using System.Collections.Generic;
 using CamusDB.Core.Util.ObjectIds;
-using System.Linq;
-using CamusDB.Core;
-using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -392,7 +392,8 @@ internal sealed class TestTableAlterer
                 { "type", new ColumnValue(ColumnType.Integer64, 100) }
             },
             where: null,
-            filters: null
+            filters: null,
+            parameters: null
         );
 
         Assert.AreEqual(25, await executor.Update(updateTicket));
