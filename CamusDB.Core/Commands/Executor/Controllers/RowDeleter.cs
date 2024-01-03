@@ -111,7 +111,7 @@ internal sealed class RowDeleter
 
     private async Task DeleteMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
-        BufferPoolHandler tablespace = database.TableSpace;
+        BufferPoolManager tablespace = database.BufferPool;
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
         {
@@ -149,7 +149,7 @@ internal sealed class RowDeleter
 
         DeleteTicket ticket = state.Ticket;
         TableDescriptor table = state.Table;        
-        BufferPoolHandler tablespace = state.Database.TableSpace;
+        BufferPoolManager tablespace = state.Database.BufferPool;
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
         List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>? uniqueIndexDeltas;
 
@@ -247,7 +247,7 @@ internal sealed class RowDeleter
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in mainIndexDeltas.Entries)
             btreeEntry.CommitState = BTreeCommitState.Committed;
 
-        await indexSaver.Persist(state.Database.TableSpace, state.Table.Rows, state.ModifiedPages, mainIndexDeltas);
+        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, mainIndexDeltas);
 
         if (uniqueIndexDeltas is null)
             return;
@@ -257,7 +257,7 @@ internal sealed class RowDeleter
             foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.Entries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
-            await indexSaver.Persist(state.Database.TableSpace, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+            await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
         }
     }
 
@@ -269,7 +269,7 @@ internal sealed class RowDeleter
     private Task<FluxAction> ApplyPageOperations(DeleteFluxState state)
     {
         if (state.ModifiedPages.Count > 0)
-            state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
+            state.Database.BufferPool.ApplyPageOperations(state.ModifiedPages);
 
         return Task.FromResult(FluxAction.Continue);
     }
@@ -283,7 +283,7 @@ internal sealed class RowDeleter
     public async Task<int> DeleteInternal(FluxMachine<DeleteFluxSteps, DeleteFluxState> machine, DeleteFluxState state)
     {
         DatabaseDescriptor database = state.Database;
-        BufferPoolHandler tablespace = state.Database.TableSpace;
+        BufferPoolManager tablespace = state.Database.BufferPool;
         TableDescriptor table = state.Table;
         DeleteTicket ticket = state.Ticket;
 

@@ -21,7 +21,7 @@ using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
 namespace CamusDB.Core.BufferPool;
 
 /*
- * BufferPoolHandler
+ * BufferPoolManager
  *
  * A buffer pool is an area of main memory that has been allocated by the database manager
  * for the purpose of caching table and index data as it is read from storage.
@@ -44,18 +44,14 @@ namespace CamusDB.Core.BufferPool;
  * | data length (4 bytes integer)                        |
  * +----------+----------+----------+---------------------+
  */
-public sealed class BufferPoolHandler : IDisposable
+public sealed class BufferPoolManager : IDisposable
 {
     private readonly StorageManager storage;
 
     private readonly LC logicalClock;
-
-    private readonly SortedDictionary<ulong, ObjectIdValue> lruPages = new();
-
-    private readonly ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> pages = new();
-
-    private readonly Timer releaser;
-
+   
+    private readonly ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> pages = new();    
+    
     public int NumberPages => pages.Count;
 
     public ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> Pages => pages;
@@ -65,74 +61,15 @@ public sealed class BufferPoolHandler : IDisposable
     /// </summary>
     /// <param name="storage"></param>
     /// <param name="logicalClock"></param>
-    public BufferPoolHandler(StorageManager storage, LC logicalClock)
+    public BufferPoolManager(StorageManager storage, LC logicalClock)
     {
         this.storage = storage;
-        this.logicalClock = logicalClock;
-
-        releaser = new(ReleasePages, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
-    }
-
-    /// <summary>
-    /// This method is called every 5 seconds and it marks old pages as candidates for release
-    /// </summary>
-    /// <param name="state"></param>
-    private void ReleasePages(object? state)
-    {
-        try
-        {
-
-            float percent = Pages.Count / (float)CamusConfig.BufferPoolSize;
-            if (percent < 0.8)
-                return;
-
-            ulong ticks = logicalClock.GetTicks();
-            int numberToFree = (int)(CamusConfig.BufferPoolSize * (1 - (percent > 0.8 ? 0.8 : percent)));
-
-            lruPages.Clear();
-
-            foreach (KeyValuePair<ObjectIdValue, Lazy<BufferPage>> keyValuePair in Pages)
-            {
-                Lazy<BufferPage> page = keyValuePair.Value;
-
-                if (!page.IsValueCreated)
-                    continue;
-
-                if (page.Value.LastAccess > (ticks - 655360)) // @todo this number must be choosen based on the actual activity of the database
-                    continue;
-
-                if (lruPages.Count > (numberToFree * 2)) // fill the red-black tree with twice the pages to release
-                    break;
-
-                lruPages.TryAdd(page.Value.LastAccess, keyValuePair.Key);
-            }
-
-            int numberFreed = 0;
-
-            foreach (KeyValuePair<ulong, ObjectIdValue> keyValue in lruPages)
-            {
-                Pages.TryRemove(keyValue.Value, out _);
-
-                numberFreed++;
-
-                if (numberFreed > numberToFree)
-                    break;
-            }
-
-            if (numberFreed > 0)
-                Console.WriteLine("Total pages freed: {0}, remaining: {1}", numberFreed, Pages.Count);
-
-            lruPages.Clear();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine("ReleasePages: {0}", ex.Message, ex.StackTrace);
-        }
-    }
+        this.logicalClock = logicalClock;        
+    }    
 
     private BufferPage LoadPage(ObjectIdValue offset)
     {
-        return new BufferPage(offset, new Lazy<byte[]>(() => ReadFromDisk(offset)));
+        return new BufferPage(offset, new Lazy<byte[]>(() => ReadFromDisk(offset)), logicalClock.Increment());
     }
 
     private byte[] ReadFromDisk(ObjectIdValue offset)
@@ -147,7 +84,7 @@ public sealed class BufferPoolHandler : IDisposable
     /// <returns></returns>
     public BufferPage ReadPage(ObjectIdValue offset)
     {
-        Lazy<BufferPage> lazyBufferPage = pages.GetOrAdd(offset, (x) => new Lazy<BufferPage>(() => LoadPage(offset)));
+        Lazy<BufferPage> lazyBufferPage = pages.GetOrAdd(offset, (_) => new Lazy<BufferPage>(() => LoadPage(offset)));
         BufferPage bufferPage = lazyBufferPage.Value;
         bufferPage.Accesses++;
         bufferPage.LastAccess = logicalClock.Increment();

@@ -179,7 +179,7 @@ public sealed class RowUpdater
 
     private async Task UpdateMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
-        BufferPoolHandler tablespace = database.TableSpace;
+        BufferPoolManager tablespace = database.BufferPool;
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
         {
@@ -276,7 +276,7 @@ public sealed class RowUpdater
 
         TableDescriptor table = state.Table;
         UpdateTicket ticket = state.Ticket;
-        BufferPoolHandler tablespace = state.Database.TableSpace;
+        BufferPoolManager tablespace = state.Database.BufferPool;
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
         List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>? uniqueIndexDeltas;
 
@@ -310,7 +310,7 @@ public sealed class RowUpdater
         return FluxAction.Continue;
     }
 
-    private BTreeTuple UpdateNewRowVersionDisk(BufferPoolHandler tablespace, TableDescriptor table, UpdateFluxState state, QueryResultRow row, UpdateTicket ticket)
+    private BTreeTuple UpdateNewRowVersionDisk(BufferPoolManager tablespace, TableDescriptor table, UpdateFluxState state, QueryResultRow row, UpdateTicket ticket)
     {
         foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)        
             row.Row[keyValuePair.Key] = keyValuePair.Value;
@@ -394,7 +394,7 @@ public sealed class RowUpdater
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in mainIndexDeltas.Entries)
             btreeEntry.CommitState = BTreeCommitState.Committed;
 
-        await indexSaver.Persist(state.Database.TableSpace, state.Table.Rows, state.ModifiedPages, mainIndexDeltas);
+        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, mainIndexDeltas);
 
         if (uniqueIndexDeltas is null)
             return;
@@ -404,7 +404,7 @@ public sealed class RowUpdater
             foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.Entries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
-            await indexSaver.Persist(state.Database.TableSpace, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+            await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
         }
     }
 
@@ -416,7 +416,7 @@ public sealed class RowUpdater
     private Task<FluxAction> ApplyPageOperations(UpdateFluxState state)
     {
         if (state.ModifiedPages.Count > 0)
-            state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
+            state.Database.BufferPool.ApplyPageOperations(state.ModifiedPages);
 
         return Task.FromResult(FluxAction.Continue);
     }
@@ -430,7 +430,7 @@ public sealed class RowUpdater
     internal async Task<int> UpdateInternal(FluxMachine<UpdateFluxSteps, UpdateFluxState> machine, UpdateFluxState state)
     {
         DatabaseDescriptor database = state.Database;
-        BufferPoolHandler tablespace = state.Database.TableSpace;
+        BufferPoolManager tablespace = state.Database.BufferPool;
         TableDescriptor table = state.Table;
         UpdateTicket ticket = state.Ticket;
 

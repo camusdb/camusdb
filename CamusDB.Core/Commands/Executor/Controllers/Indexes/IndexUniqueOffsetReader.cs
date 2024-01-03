@@ -22,7 +22,7 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
         this.indexReader = indexReader;
     }
 
-    public async Task<BTree<ObjectIdValue, ObjectIdValue>> ReadOffsets(BufferPoolHandler bufferpool, ObjectIdValue offset)
+    public async Task<BTree<ObjectIdValue, ObjectIdValue>> ReadOffsets(BufferPoolManager bufferpool, ObjectIdValue offset)
     {
         //Console.WriteLine("***");
 

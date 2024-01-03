@@ -92,7 +92,7 @@ public sealed class TableColumnAdder
 
     private async Task AlterColumnMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
-        BufferPoolHandler tablespace = database.TableSpace;
+        BufferPoolManager tablespace = database.BufferPool;
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo AlterColumn in parallel
         {
@@ -154,7 +154,7 @@ public sealed class TableColumnAdder
 
         TableDescriptor table = state.Table;
         AlterColumnTicket ticket = state.Ticket;
-        BufferPoolHandler tablespace = state.Database.TableSpace;
+        BufferPoolManager tablespace = state.Database.BufferPool;
 
         await foreach (QueryResultRow row in state.DataCursor)
         {
@@ -179,7 +179,7 @@ public sealed class TableColumnAdder
     private Task<FluxAction> ApplyPageOperations(AlterColumnFluxState state)
     {
         if (state.ModifiedPages.Count > 0)
-            state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
+            state.Database.BufferPool.ApplyPageOperations(state.ModifiedPages);
 
         return Task.FromResult(FluxAction.Continue);
     }
@@ -193,7 +193,7 @@ public sealed class TableColumnAdder
     internal async Task<int> AlterColumnInternal(FluxMachine<AlterColumnFluxSteps, AlterColumnFluxState> machine, AlterColumnFluxState state)
     {
         DatabaseDescriptor database = state.Database;
-        BufferPoolHandler tablespace = state.Database.TableSpace;
+        BufferPoolManager tablespace = state.Database.BufferPool;
         TableDescriptor table = state.Table;
         AlterColumnTicket ticket = state.Ticket;
 

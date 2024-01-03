@@ -6,8 +6,8 @@
  * file that was distributed with this source code.
  */
 
-using RocksDbSharp;
 using Nito.AsyncEx;
+using CamusDB.Core.GC;
 using CamusDB.Core.Storage;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
@@ -15,9 +15,17 @@ using CamusDB.Core.Util.Time;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
+using System.Collections.Concurrent;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
+/// <summary>
+/// Opens a database.
+/// 
+/// A unique descriptor in memory is created that has references to core systems like the buffer pool manager, 
+/// storage manager, and GC (garbage collection) manager. Having multiple databases open means having these systems running in parallel.
+/// To free up resources, it is possible to close the databases.
+/// </summary>
 internal sealed class DatabaseOpener
 {
     private readonly DatabaseDescriptors databaseDescriptors;
@@ -31,33 +39,27 @@ internal sealed class DatabaseOpener
     {
         AsyncLazy<DatabaseDescriptor> openDatabaseLazy = databaseDescriptors.Descriptors.GetOrAdd(
                                                             name,
-                                                            (x) => new AsyncLazy<DatabaseDescriptor>(() => LoadDatabase(name))
+                                                            (_) => new AsyncLazy<DatabaseDescriptor>(() => LoadDatabase(name))
                                                          );
         return await openDatabaseLazy;
     }
-  
+
     private static async Task<DatabaseDescriptor> LoadDatabase(string name)
-    {                    
-        string path = Path.Combine(CamusConfig.DataDirectory, name);
-
-        DbOptions options = new DbOptions()
-                                .SetCreateIfMissing(true)
-                                .SetWalDir(path) // using WAL
-                                .SetWalRecoveryMode(Recovery.AbsoluteConsistency) // setting recovery mode to Absolute Consistency
-                                .SetAllowConcurrentMemtableWrite(true);
-
-        RocksDb dbHandler = RocksDb.Open(options, path);
-
+    {
         //if (!Directory.Exists(path))
         //    throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
 
-        StorageManager tablespaceStorage = new(dbHandler);
         LC logicalClock = new();
+        StorageManager storage = new(name);
+        BufferPoolManager bufferPool = new(storage, logicalClock);
+        ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new();
 
         DatabaseDescriptor databaseDescriptor = new(
             name: name,
-            dbHandler,
-            tableSpace: new BufferPoolHandler(tablespaceStorage, logicalClock)
+            storage: storage,
+            bufferPool: bufferPool,
+            gc: new GCManager(bufferPool, logicalClock),
+            tableDescriptors: tableDescriptors
         );
 
         await Task.WhenAll(new Task[]
@@ -73,7 +75,7 @@ internal sealed class DatabaseOpener
 
     private static Task LoadDatabaseSchema(DatabaseDescriptor database)
     {
-        byte[]? data = database.DbHandler.Get(CamusConfig.SchemaKey); //SchemaSpace!.GetDataFromPage(Config.SchemaHeaderPage);
+        byte[]? data = database.Storage.Get(CamusConfig.SchemaKey); //SchemaSpace!.GetDataFromPage(Config.SchemaHeaderPage);
 
         if (data is not null && data.Length > 0)
             database.Schema.Tables = Serializator.Unserialize<Dictionary<string, TableSchema>>(data);
@@ -87,7 +89,7 @@ internal sealed class DatabaseOpener
 
     private static Task LoadDatabaseSystemSpace(DatabaseDescriptor database)
     {
-        byte[]? data = database.DbHandler.Get(CamusConfig.SystemKey);
+        byte[]? data = database.Storage.Get(CamusConfig.SystemKey);
 
         if (data is not null && data.Length > 0)
             database.SystemSchema.Objects = Serializator.Unserialize<Dictionary<string, DatabaseObject>>(data);
@@ -97,5 +99,5 @@ internal sealed class DatabaseOpener
         Console.WriteLine("System tablespaces read. Found {0} objects", database.SystemSchema.Objects.Count);
 
         return Task.CompletedTask;
-    }    
+    }
 }

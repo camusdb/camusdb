@@ -15,7 +15,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct SaveMultiKeyIndexTicket
 {
-    public BufferPoolHandler Tablespace { get; }
+    public BufferPoolManager Tablespace { get; }
 
     public BTreeMulti<ColumnValue> Index { get; }
 
@@ -30,7 +30,7 @@ public readonly struct SaveMultiKeyIndexTicket
     public List<BufferPageOperation> ModifiedPages { get; }
 
     public SaveMultiKeyIndexTicket(
-        BufferPoolHandler tablespace,
+        BufferPoolManager tablespace,
         BTreeMulti<ColumnValue> multiIndex,
         HLCTimestamp txnId,
         ColumnValue multiKeyValue,

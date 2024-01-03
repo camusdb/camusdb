@@ -47,7 +47,7 @@ internal sealed class IndexSaver
     }
 
     public async Task Persist(
-        BufferPoolHandler tablespace,
+        BufferPoolManager tablespace,
         BTree<ObjectIdValue, ObjectIdValue> index,
         List<BufferPageOperation> modifiedPages,
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas)
@@ -61,7 +61,7 @@ internal sealed class IndexSaver
     }
 
     public async Task Persist(
-        BufferPoolHandler tablespace,
+        BufferPoolManager tablespace,
         BTree<ColumnValue, BTreeTuple?> index,
         List<BufferPageOperation> modifiedPages,
         BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas)
@@ -84,7 +84,7 @@ internal sealed class IndexSaver
         await indexUniqueOffsetSaver.Remove(ticket);
     }
 
-    public async Task Remove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
+    public async Task Remove(BufferPoolManager tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
     {
         await indexMultiSaver.Remove(tablespace, index, key);
     }

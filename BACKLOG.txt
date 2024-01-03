@@ -10,6 +10,8 @@ Query
 - Order BY ASC/DESC
 - Multi-Order clause
 - Use Temp Table to Order
+- Support for aggregations
+- Support aliases in projections
 
 BufferPool/Storage
 - Support multiple items per page to avoid storage waste

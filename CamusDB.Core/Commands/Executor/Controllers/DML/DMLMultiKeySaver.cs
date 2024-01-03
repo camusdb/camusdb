@@ -20,7 +20,7 @@ internal sealed class DMLMultiKeySaver : DMLKeyBase
 
     public async Task UpdateMultiKeys(SaveMultiKeysIndexTicket saveMultiKeysIndexTicket)
     {
-        BufferPoolHandler tablespace = saveMultiKeysIndexTicket.Database.TableSpace;
+        BufferPoolManager tablespace = saveMultiKeysIndexTicket.Database.BufferPool;
 
         foreach (KeyValuePair<string, TableIndexSchema> index in saveMultiKeysIndexTicket.Table.Indexes)
         {

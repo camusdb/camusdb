@@ -42,7 +42,7 @@ internal sealed class TableCreator
 
             Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
 
-            BufferPoolHandler tablespace = database.TableSpace;            
+            BufferPoolManager tablespace = database.BufferPool;            
 
             string tableName = tableSchema.Name!;            
 
@@ -87,7 +87,7 @@ internal sealed class TableCreator
 
             objects.Add(tableName, databaseObject);
 
-            database.DbHandler.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema.Objects));
+            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema.Objects));
 
             Console.WriteLine("Added table {0} to system, data table staring at {1}", tableName, pageOffset);
         }

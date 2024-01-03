@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using Nito.AsyncEx;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using System.Runtime.CompilerServices;
@@ -141,16 +142,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                 {
                     BTreeEntry<TKey, TValue> entry = children[j];
 
-                    if (entry.Next is null && !entry.NextPageOffset.IsNull())
-                    {
-                        if (Reader is null)
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
-
-                        entry.Next = await Reader.GetNode(entry.NextPageOffset);
-                        loaded++;
-                    }
-
-                    return await Search(entry.Next, txnid, key, ht - 1);
+                    return await Search(await entry.Next, txnid, key, ht - 1);
                 }
             }
         }
@@ -191,16 +183,16 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 BTreeEntry<TKey, TValue> entry = children[j];
 
-                if (entry.Next is null && !entry.NextPageOffset.IsNull())
+                /*if (entry.Next is null && !entry.NextPageOffset.IsNull())
                 {
                     if (Reader is null)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
                     entry.Next = await Reader.GetNode(entry.NextPageOffset);
                     loaded++;
-                }
+                }*/
 
-                await foreach (BTreeEntry<TKey, TValue> childEntry in EntriesTraverseInternal(entry.Next, ht - 1))
+                await foreach (BTreeEntry<TKey, TValue> childEntry in EntriesTraverseInternal(await entry.Next, ht - 1))
                     yield return childEntry;
             }
         }
@@ -232,16 +224,16 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             BTreeEntry<TKey, TValue> entry = node.children[j];
 
-            if (entry.Next is null && !entry.NextPageOffset.IsNull())
+            /*if (entry.Next is null && !entry.NextPageOffset.IsNull())
             {
                 if (Reader is null)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
                 entry.Next = await Reader.GetNode(entry.NextPageOffset);
                 loaded++;
-            }
+            }*/
 
-            await foreach (BTreeNode<TKey, TValue> childNode in NodesTraverseInternal(entry.Next, ht - 1))
+            await foreach (BTreeNode<TKey, TValue> childNode in NodesTraverseInternal(await entry.Next, ht - 1))
                 yield return childNode;
         }
     }
@@ -267,16 +259,16 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             BTreeEntry<TKey, TValue> entry = node.children[j];
 
-            if (entry.Next is null && !entry.NextPageOffset.IsNull())
+            /*if (entry.Next is null && !entry.NextPageOffset.IsNull())
             {
                 if (Reader is null)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
                 entry.Next = await Reader.GetNode(entry.NextPageOffset);
                 loaded++;
-            }
+            }*/
 
-            await foreach (BTreeNode<TKey, TValue> childNode in NodesReverseTraverseInternal(entry.Next, ht - 1))
+            await foreach (BTreeNode<TKey, TValue> childNode in NodesReverseTraverseInternal(await entry.Next, ht - 1))
                 yield return childNode;
         }
 
@@ -317,8 +309,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         deltas.Nodes.Add(newRoot);
         loaded++;
 
-        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, root);
-        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, split);
+        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, new AsyncLazy<BTreeNode<TKey, TValue>>(() => Task.FromResult(root)));
+        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, new AsyncLazy<BTreeNode<TKey, TValue>>(() => Task.FromResult(split)));
 
         deltas.Nodes.Add(root);
 
@@ -333,11 +325,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     }
 
     private async Task<BTreeNode<TKey, TValue>?> Insert(
-        BTreeNode<TKey, TValue>? node, 
-        HLCTimestamp txnid, 
+        BTreeNode<TKey, TValue>? node,
+        HLCTimestamp txnid,
         TKey key,
         BTreeCommitState commitState,
-        TValue? value,         
+        TValue? value,
         int ht,
         BTreeMutationDeltas<TKey, TValue> deltas
     )
@@ -359,7 +351,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                 if (Eq(key, children[j].Key))
                 {
                     deltas.Nodes.Add(node);
-                    deltas.Entries.Add(children[j].SetValue(txnid, commitState, value));                    
+                    deltas.Entries.Add(children[j].SetValue(txnid, commitState, value));
                     return null;
                 }
 
@@ -368,33 +360,33 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             }
 
             newEntry = new(key, null);
-            deltas.Entries.Add(newEntry.SetValue(txnid, commitState, value));            
+            deltas.Entries.Add(newEntry.SetValue(txnid, commitState, value));
         }
 
         // internal node
         else
-        {            
+        {
             for (j = 0; j < node.KeyCount; j++)
             {
                 if ((j + 1 == node.KeyCount) || Less(key, children[j + 1].Key))
                 {
                     BTreeEntry<TKey, TValue> entry = children[j++];
 
-                    if (entry.Next is null && !entry.NextPageOffset.IsNull())
+                    /*if (entry.Next is null && !entry.NextPageOffset.IsNull())
                     {
                         if (Reader is null)
                             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
                         entry.Next = await Reader.GetNode(entry.NextPageOffset);
                         loaded++;
-                    }
+                    }*/
 
-                    BTreeNode<TKey, TValue>? split = await Insert(entry.Next, txnid, key, commitState, value, ht - 1, deltas);
+                    BTreeNode<TKey, TValue>? split = await Insert(await entry.Next, txnid, key, commitState, value, ht - 1, deltas);
 
                     if (split == null)
                         return null;
 
-                    newEntry = new(key, null);                    
+                    newEntry = new(key, null);
                     newEntry.Key = split.children[0].Key;
                     newEntry.Next = split;
 
@@ -435,7 +427,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             newNode.children[j] = current.children[BTreeConfig.MaxChildrenHalf + j];
 
         return newNode;
-    }    
+    }
 
     /// <summary>
     /// Returns the entry associated with the given key.
@@ -505,16 +497,16 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 if (j + 1 == node.KeyCount || Less(key, children[j + 1].Key))
                 {
-                    if (children[j].Next is null && !children[j].NextPageOffset.IsNull())
+                    /*if (children[j].Next is null && !children[j].NextPageOffset.IsNull())
                     {
                         if (Reader is null)
                             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
                         children[j].Next = await Reader.GetNode(children[j].NextPageOffset);
                         loaded++;
-                    }
+                    }*/
 
-                    return await Delete(children[j].Next, key, ht - 1, deltas);
+                    return await Delete(await children[j].Next, key, ht - 1, deltas);
                 }
             }
         }

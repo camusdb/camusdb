@@ -13,13 +13,42 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.Storage;
 
+/// <summary>
+/// The StorageManager is an abstraction that allows communication with the active storage engine.
+/// At this moment, only RocksDb is available, but other storage engines could be implemented in the future.
+/// </summary>
 public sealed class StorageManager
 {
     private readonly RocksDb dbHandler;
 
+    public StorageManager(string name)
+    {
+        string path = Path.Combine(CamusConfig.DataDirectory, name);
+
+        DbOptions options = new DbOptions()
+                                .SetCreateIfMissing(true)
+                                .SetWalDir(path) // using WAL
+                                .SetWalRecoveryMode(Recovery.AbsoluteConsistency) // setting recovery mode to Absolute Consistency
+                                .SetAllowConcurrentMemtableWrite(true);
+
+        RocksDb dbHandler = RocksDb.Open(options, path);
+
+        this.dbHandler = dbHandler;
+    }
+
     public StorageManager(RocksDb dbHandler)
     {
         this.dbHandler = dbHandler;
+    }
+
+    public void Put(byte[] key, byte[] value)
+    {
+        dbHandler.Put(key, value);
+    }
+
+    public byte[]? Get(byte[] key)
+    {
+        return dbHandler.Get(key);
     }
 
     public byte[] Read(ObjectIdValue offset)
@@ -66,6 +95,6 @@ public sealed class StorageManager
 
     internal void Dispose()
     {
-        //throw new NotImplementedException();
+        dbHandler.Dispose();
     }
 }

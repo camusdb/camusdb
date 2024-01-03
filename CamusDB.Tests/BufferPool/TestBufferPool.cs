@@ -48,7 +48,7 @@ public class TestBufferPool
 
         StorageManager tablespaceStorage = new(storage);
 
-        using BufferPoolHandler bufferPool = new(tablespaceStorage, new());
+        using BufferPoolManager bufferPool = new(tablespaceStorage, new());
 
         ObjectIdValue offset = ObjectIdGenerator.Generate();
 
@@ -75,7 +75,7 @@ public class TestBufferPool
 
         StorageManager tablespaceStorage = new(storage);
 
-        using BufferPoolHandler bufferPool = new(tablespaceStorage, new());
+        using BufferPoolManager bufferPool = new(tablespaceStorage, new());
 
         ObjectIdValue offset = ObjectIdGenerator.Generate();
 
@@ -102,7 +102,7 @@ public class TestBufferPool
         StorageManager tablespaceStorage = new(storage);
         //await tablespaceStorage.Initialize();
 
-        using BufferPoolHandler bufferPool = new(tablespaceStorage, new());
+        using BufferPoolManager bufferPool = new(tablespaceStorage, new());
 
         ObjectIdValue offset = ObjectIdGenerator.Generate();
 
@@ -113,7 +113,7 @@ public class TestBufferPool
         StorageManager tablespaceStorage2 = new(storage);
         //await tablespaceStorage2.Initialize();
 
-        using BufferPoolHandler? bufferPool2 = new(tablespaceStorage2, new());
+        using BufferPoolManager? bufferPool2 = new(tablespaceStorage2, new());
 
         BufferPage page = bufferPool2.ReadPage(offset);
 
@@ -130,7 +130,7 @@ public class TestBufferPool
         StorageManager tablespaceStorage = new(storage);
         //await tablespaceStorage.Initialize();
 
-        using BufferPoolHandler bufferPool = new(tablespaceStorage, new());
+        using BufferPoolManager bufferPool = new(tablespaceStorage, new());
 
         byte[] data = Encoding.Unicode.GetBytes("some data some data");
 
@@ -152,7 +152,7 @@ public class TestBufferPool
 
         StorageManager tablespaceStorage = new(storage);
 
-        using BufferPoolHandler bufferPool = new(tablespaceStorage, new());
+        using BufferPoolManager bufferPool = new(tablespaceStorage, new());
 
         ObjectIdValue offset = ObjectIdGenerator.Generate();
 
@@ -174,7 +174,7 @@ public class TestBufferPool
 
         StorageManager tablespaceStorage = new(storage);
 
-        using BufferPoolHandler bufferPool = new(tablespaceStorage, new());
+        using BufferPoolManager bufferPool = new(tablespaceStorage, new());
 
         byte[] data = Encoding.UTF8.GetBytes(new string('s', CamusConfig.PageSize));
 
@@ -197,7 +197,7 @@ public class TestBufferPool
 
         StorageManager tablespaceStorage = new(storage);
 
-        using BufferPoolHandler bufferPool = new(tablespaceStorage, new());
+        using BufferPoolManager bufferPool = new(tablespaceStorage, new());
 
         byte[] data = Encoding.UTF8.GetBytes(new string('s', CamusConfig.PageSize * 5));
 

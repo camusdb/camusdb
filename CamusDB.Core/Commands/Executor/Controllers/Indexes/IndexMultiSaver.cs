@@ -32,19 +32,19 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         await SaveInternal(ticket.Tablespace, ticket.Index, ticket.TxnId, ticket.MultiKeyValue, ticket.RowTuple, ticket.Locks, ticket.ModifiedPages);
     }
 
-    public async Task Remove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
+    public async Task Remove(BufferPoolManager tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
     {
         await RemoveInternal(tablespace, index, key);
     }
 
-    private async Task SaveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, HLCTimestamp txnid, ColumnValue key, BTreeTuple value, List<IDisposable> locks, List<BufferPageOperation> modifiedPages)
+    private async Task SaveInternal(BufferPoolManager tablespace, BTreeMulti<ColumnValue> index, HLCTimestamp txnid, ColumnValue key, BTreeTuple value, List<IDisposable> locks, List<BufferPageOperation> modifiedPages)
     {
         Dictionary<int, BTreeMultiDelta<ColumnValue>> deltas = await index.Put(txnid, key, value);
 
         await PersistSave(tablespace, index, txnid, value, locks, modifiedPages, deltas);
     }
 
-    private static async Task RemoveInternal(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
+    private static async Task RemoveInternal(BufferPoolManager tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
     {
         (bool found, HashSet<BTreeMultiNode<ColumnValue>>? deltas) = index.Remove(key);
 
@@ -53,7 +53,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
     }
 
     private async Task PersistSave(
-        BufferPoolHandler tablespace,
+        BufferPoolManager tablespace,
         BTreeMulti<ColumnValue> index,
         HLCTimestamp txnid,
         BTreeTuple value,
@@ -165,7 +165,7 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
         }
     }
 
-    private static async Task PersistRemove(BufferPoolHandler tablespace, BTreeMulti<ColumnValue> index, HashSet<BTreeMultiNode<ColumnValue>> deltas)
+    private static async Task PersistRemove(BufferPoolManager tablespace, BTreeMulti<ColumnValue> index, HashSet<BTreeMultiNode<ColumnValue>> deltas)
     {
         foreach (BTreeMultiNode<ColumnValue> node in index.NodesTraverse())
         {

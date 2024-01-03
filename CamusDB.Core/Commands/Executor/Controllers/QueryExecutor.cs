@@ -87,7 +87,7 @@ internal sealed class QueryExecutor
 
     public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
     {
-        BufferPoolHandler tablespace = database.TableSpace;        
+        BufferPoolManager tablespace = database.BufferPool;        
 
         if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
         {
@@ -131,7 +131,7 @@ internal sealed class QueryExecutor
 
     private async IAsyncEnumerable<QueryResultRow> QueryUsingTableIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
-        BufferPoolHandler tablespace = database.TableSpace;
+        BufferPoolManager tablespace = database.BufferPool;
 
         await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse())
         {
@@ -172,7 +172,7 @@ internal sealed class QueryExecutor
 
     private async IAsyncEnumerable<QueryResultRow> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue, BTreeTuple?> index, QueryTicket ticket)
     {
-        BufferPoolHandler tablespace = database.TableSpace;
+        BufferPoolManager tablespace = database.BufferPool;
 
         await foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse())
         {
@@ -213,7 +213,7 @@ internal sealed class QueryExecutor
 
     private async IAsyncEnumerable<QueryResultRow> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, BTreeMulti<ColumnValue> index, QueryTicket ticket)
     {
-        BufferPoolHandler tablespace = database.TableSpace;
+        BufferPoolManager tablespace = database.BufferPool;
 
         foreach (BTreeMultiEntry<ColumnValue> entry in index.EntriesTraverse())
         {

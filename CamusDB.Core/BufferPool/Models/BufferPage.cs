@@ -22,7 +22,9 @@ public sealed class BufferPage
 
     public bool Dirty { get; set; }
 
-    public int Accesses { get; set; }
+    public ulong CreatedAt { get; set; }
+
+    public ulong Accesses { get; set; }
 
     public ulong LastAccess { get; set; }
 
@@ -33,10 +35,11 @@ public sealed class BufferPage
     /// </summary>
     /// <param name="offset"></param>
     /// <param name="buffer"></param>
-    public BufferPage(ObjectIdValue offset, Lazy<byte[]> buffer)
+    public BufferPage(ObjectIdValue offset, Lazy<byte[]> buffer, ulong createdAt)
     {
         Offset = offset;
         Buffer = buffer;
+        CreatedAt = createdAt;
     }
 
     /// <summary>

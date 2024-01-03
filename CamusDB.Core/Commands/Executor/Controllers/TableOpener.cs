@@ -12,6 +12,8 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
+using Nito.AsyncEx;
+using System.Xml.Linq;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -43,69 +45,61 @@ internal sealed class TableOpener
         if (string.IsNullOrEmpty(tableName))
             throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, "Invalid or empty table name");
 
-        if (database.TableDescriptors.TryGetValue(tableName, out TableDescriptor? tableDescriptor))
-            return tableDescriptor;
+        AsyncLazy<TableDescriptor> openTableLazy = database.TableDescriptors.GetOrAdd(
+                                                        tableName,
+                                                        (_) => new AsyncLazy<TableDescriptor>(() => LoadTable(database, tableName))
+                                                   );
+        return await openTableLazy;
+    }
 
-        try
+    private async Task<TableDescriptor> LoadTable(DatabaseDescriptor database, string tableName)
+    {                       
+        BufferPoolManager tablespace = database.BufferPool;
+
+        TableSchema tableSchema = Catalogs.GetTableSchema(database, tableName);
+        DatabaseObject systemObject = GetSystemObject(database, tableName);
+
+        TableDescriptor tableDescriptor = new(
+            tableName,
+            tableSchema,
+            await indexReader.ReadOffsets(tablespace, ObjectId.ToValue(systemObject.StartOffset ?? ""))
+        );
+
+        // @todo read indexes in parallel
+
+        if (systemObject.Indexes is not null)
         {
-            await database.DescriptorsSemaphore.WaitAsync(); // @todo block per table
-
-            if (database.TableDescriptors.TryGetValue(tableName, out tableDescriptor))
-                return tableDescriptor;
-
-            BufferPoolHandler tablespace = database.TableSpace;
-
-            TableSchema tableSchema = Catalogs.GetTableSchema(database, tableName);
-            DatabaseObject systemObject = GetSystemObject(database, tableName);
-
-            tableDescriptor = new(
-                tableName,
-                tableSchema,
-                await indexReader.ReadOffsets(tablespace, ObjectId.ToValue(systemObject.StartOffset ?? ""))
-            );
-
-            // @todo read indexes in parallel
-
-            if (systemObject.Indexes is not null)
+            foreach (KeyValuePair<string, DatabaseIndexObject> index in systemObject.Indexes)
             {
-                foreach (KeyValuePair<string, DatabaseIndexObject> index in systemObject.Indexes)
+                switch (index.Value.Type)
                 {
-                    switch (index.Value.Type)
-                    {
-                        case IndexType.Unique:
-                            {
-                                BTree<ColumnValue, BTreeTuple?> rows = await indexReader.ReadUnique(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
+                    case IndexType.Unique:
+                        {
+                            BTree<ColumnValue, BTreeTuple?> rows = await indexReader.ReadUnique(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
 
-                                tableDescriptor.Indexes.Add(
-                                    index.Key,
-                                    new TableIndexSchema(index.Value.Column, index.Value.Type, rows)
-                                );
-                            }
-                            break;
+                            tableDescriptor.Indexes.Add(
+                                index.Key,
+                                new TableIndexSchema(index.Value.Column, index.Value.Type, rows)
+                            );
+                        }
+                        break;
 
-                        case IndexType.Multi:
-                            {
-                                BTreeMulti<ColumnValue> rows = await indexReader.ReadMulti(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
+                    case IndexType.Multi:
+                        {
+                            BTreeMulti<ColumnValue> rows = await indexReader.ReadMulti(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
 
-                                tableDescriptor.Indexes.Add(
-                                    index.Key,
-                                    new TableIndexSchema(index.Value.Column, index.Value.Type, rows)
-                                );
+                            tableDescriptor.Indexes.Add(
+                                index.Key,
+                                new TableIndexSchema(index.Value.Column, index.Value.Type, rows)
+                            );
 
-                                continue;
-                            }
+                            continue;
+                        }
 
-                        default:
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot load invalid type of index");
-                    }
+                    default:
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot load invalid type of index");
                 }
             }
-
-            database.TableDescriptors.Add(tableName, tableDescriptor);
-        }
-        finally
-        {
-            database.DescriptorsSemaphore.Release();
         }
 
         return tableDescriptor;

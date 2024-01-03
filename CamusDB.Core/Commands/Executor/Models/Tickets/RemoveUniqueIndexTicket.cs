@@ -14,7 +14,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct RemoveUniqueIndexTicket
 {
-    public BufferPoolHandler Tablespace { get; }
+    public BufferPoolManager Tablespace { get; }
 
     public uint Sequence { get; }
 
@@ -29,7 +29,7 @@ public readonly struct RemoveUniqueIndexTicket
     public List<BufferPageOperation> ModifiedPages { get; }
 
     public RemoveUniqueIndexTicket(
-        BufferPoolHandler tablespace,
+        BufferPoolManager tablespace,
         uint sequence,
         uint subSequence,
         BTree<ColumnValue, BTreeTuple?> index,

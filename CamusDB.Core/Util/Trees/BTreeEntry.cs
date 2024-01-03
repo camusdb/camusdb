@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using Nito.AsyncEx;
 using System.Collections.Concurrent;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
@@ -20,11 +21,11 @@ public sealed class BTreeEntry<TKey, TValue>
 
     public TKey Key;
 
-    public BTreeNode<TKey, TValue>? Next; // helper field to iterate over array entries
-
     public ObjectIdValue NextPageOffset; // the address of the next page offset
 
-    public BTreeEntry(TKey key, BTreeNode<TKey, TValue>? next)
+    public AsyncLazy<BTreeNode<TKey, TValue>>? Next; // helper field to iterate over array entries    
+
+    public BTreeEntry(TKey key, AsyncLazy<BTreeNode<TKey, TValue>>? next)
     {
         Key = key;
         Next = next;

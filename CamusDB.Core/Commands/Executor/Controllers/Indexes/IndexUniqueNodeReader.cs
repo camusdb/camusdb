@@ -18,9 +18,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
 public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeTuple?>
 {
-    private readonly BufferPoolHandler bufferpool;
+    private readonly BufferPoolManager bufferpool;
 
-    public IndexUniqueNodeReader(BufferPoolHandler bufferpool)
+    public IndexUniqueNodeReader(BufferPoolManager bufferpool)
     {
         this.bufferpool = bufferpool;
     }

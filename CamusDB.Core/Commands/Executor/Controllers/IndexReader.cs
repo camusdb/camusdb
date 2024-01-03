@@ -29,17 +29,17 @@ internal sealed class IndexReader
         indexMultiReader = new(this);
     }
 
-    public async Task<BTree<ObjectIdValue, ObjectIdValue>> ReadOffsets(BufferPoolHandler tablespace, ObjectIdValue offset)
+    public async Task<BTree<ObjectIdValue, ObjectIdValue>> ReadOffsets(BufferPoolManager tablespace, ObjectIdValue offset)
     {
         return await indexUniqueOffsetReader.ReadOffsets(tablespace, offset);
     }
 
-    public async Task<BTree<ColumnValue, BTreeTuple?>> ReadUnique(BufferPoolHandler tablespace, ObjectIdValue offset)
+    public async Task<BTree<ColumnValue, BTreeTuple?>> ReadUnique(BufferPoolManager tablespace, ObjectIdValue offset)
     {
         return await indexUniqueReader.ReadUnique(tablespace, offset);
     }
 
-    public async Task<BTreeMulti<ColumnValue>> ReadMulti(BufferPoolHandler tablespace, ObjectIdValue offset)
+    public async Task<BTreeMulti<ColumnValue>> ReadMulti(BufferPoolManager tablespace, ObjectIdValue offset)
     {
         return await indexMultiReader.ReadMulti(tablespace, offset);
     }

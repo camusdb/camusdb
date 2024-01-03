@@ -49,7 +49,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     }
 
     private static async Task RemoveInternal(
-        BufferPoolHandler tablespace,
+        BufferPoolManager tablespace,
         BTree<ObjectIdValue, ObjectIdValue> index,
         ObjectIdValue key,
         List<BufferPageOperation> modifiedPages,
@@ -66,7 +66,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     }
 
     public async Task Persist(
-        BufferPoolHandler tablespace,
+        BufferPoolManager tablespace,
         BTree<ObjectIdValue, ObjectIdValue> index,
         List<BufferPageOperation> modifiedPages,
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas

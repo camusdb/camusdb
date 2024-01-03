@@ -7,7 +7,10 @@
  */
 
 using CamusDB.Core.BufferPool;
-using RocksDbSharp;
+using CamusDB.Core.GC;
+using CamusDB.Core.Storage;
+using Nito.AsyncEx;
+using System.Collections.Concurrent;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
@@ -15,33 +18,38 @@ public sealed record DatabaseDescriptor : IDisposable
 {
     public string Name { get; }
 
-    public RocksDb DbHandler { get; }
+    public StorageManager Storage { get; }
 
-    public BufferPoolHandler TableSpace { get; }
+    public BufferPoolManager BufferPool { get; }
+
+    public GCManager GC { get; }
 
     public Schema Schema { get; } = new();
 
     public SystemSchema SystemSchema { get; } = new();
 
-    public SemaphoreSlim DescriptorsSemaphore { get; } = new(1, 1);
-
-    public Dictionary<string, TableDescriptor> TableDescriptors { get; } = new();
+    public ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> TableDescriptors { get; }
 
     public DatabaseDescriptor(
         string name,
-        RocksDb dbHandler,
-        BufferPoolHandler tableSpace
+        StorageManager storage,
+        BufferPoolManager bufferPool,
+        GCManager gc,
+        ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors
     )
     {
         Name = name;
-        TableSpace = tableSpace;        
-        DbHandler = dbHandler;
+        BufferPool = bufferPool;
+        Storage = storage;
+        GC = gc;
+        TableDescriptors = tableDescriptors;
     }
 
     public void Dispose()
     {
+        Storage?.Dispose();
         Schema?.Dispose();
         SystemSchema?.Dispose();
-        DescriptorsSemaphore?.Dispose();
+        GC?.Dispose();
     }
 }

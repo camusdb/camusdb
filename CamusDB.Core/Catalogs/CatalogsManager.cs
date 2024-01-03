@@ -68,7 +68,7 @@ public sealed class CatalogsManager
 
             database.Schema.Tables.Add(ticket.TableName, tableSchema);
 
-            database.DbHandler.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
+            database.Storage.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
 
             Console.WriteLine("Added table {0} to schema", ticket.TableName);
 
@@ -120,7 +120,7 @@ public sealed class CatalogsManager
 
             tableSchema.SchemaHistory!.Add(schemaHistory);
 
-            database.DbHandler.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
+            database.Storage.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
 
             Console.WriteLine("Modifed table {0} schema", ticket.TableName);
 

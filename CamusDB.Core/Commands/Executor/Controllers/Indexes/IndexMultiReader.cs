@@ -23,7 +23,7 @@ internal sealed class IndexMultiReader : IndexBaseReader
         this.indexReader = indexReader;
     }
 
-    public async Task<BTreeMulti<ColumnValue>> ReadMulti(BufferPoolHandler bufferpool, ObjectIdValue offset)
+    public async Task<BTreeMulti<ColumnValue>> ReadMulti(BufferPoolManager bufferpool, ObjectIdValue offset)
     {
         //Console.WriteLine("***");
 
@@ -62,7 +62,7 @@ internal sealed class IndexMultiReader : IndexBaseReader
         return index;
     }
 
-    private async Task<BTreeMultiNode<ColumnValue>?> GetMultiNode(BufferPoolHandler tablespace, ObjectIdValue offset)
+    private async Task<BTreeMultiNode<ColumnValue>?> GetMultiNode(BufferPoolManager tablespace, ObjectIdValue offset)
     {
         byte[] data = await tablespace.GetDataFromPage(offset);
         if (data.Length == 0)

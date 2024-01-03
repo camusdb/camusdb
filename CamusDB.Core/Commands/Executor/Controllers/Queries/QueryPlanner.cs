@@ -52,6 +52,9 @@ public sealed class QueryPlanner
                     case "count":
                     case "max":
                     case "min":
+                    case "sum":
+                    case "avg":
+                    case "distinct":
 
                         if (projection.Count > 1)
                             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Aggregations cannot be accompanied by other projections or expressions.");

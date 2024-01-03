@@ -490,11 +490,52 @@ public class TestExecuteSql
         List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
 
-        Assert.AreEqual(25, result.Count);
+        Assert.AreEqual(1, result.Count);
 
-        //Assert.AreEqual(false, result[0].Row["enabled"].BoolValue);
-        //Assert.AreEqual(false, result[1].Row["enabled"].BoolValue);
-        //Assert.AreEqual(true, result[24].Row["enabled"].BoolValue);
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["0"].Type);
+        Assert.AreEqual(25, result[0].Row["0"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregate2()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT COUNT(id) FROM robots",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(1, result.Count);
+
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["0"].Type);
+        Assert.AreEqual(25, result[0].Row["0"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregateWithConditions()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT COUNT(id) FROM robots WHERE year<2005",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(1, result.Count);
+
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["0"].Type);
+        Assert.AreEqual(5, result[0].Row["0"].LongValue);
     }
 
     [Test]

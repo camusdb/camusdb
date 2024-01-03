@@ -46,7 +46,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
     }
 
     public async Task Persist(
-        BufferPoolHandler tablespace,
+        BufferPoolManager tablespace,
         BTree<ColumnValue, BTreeTuple?> index,
         List<BufferPageOperation> modifiedPages,
         BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas

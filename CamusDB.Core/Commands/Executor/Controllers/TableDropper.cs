@@ -46,7 +46,7 @@ internal sealed class TableDropper
 
             database.Schema.Tables.Remove(ticket.TableName);
                        
-            database.DbHandler.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
+            database.Storage.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
 
             Console.WriteLine("Dropped table {0}", ticket.TableName);
 

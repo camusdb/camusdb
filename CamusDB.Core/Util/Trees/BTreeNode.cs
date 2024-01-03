@@ -6,8 +6,8 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.ObjectIds;
 using Nito.AsyncEx;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -22,7 +22,11 @@ public sealed class BTreeNode<TKey, TValue>
 
     public int Id;
 
-    public int KeyCount;         // number of children
+    public int KeyCount; // number of children
+
+    public int CreatedAt = 0; // the time this node was created
+
+    public int NumberAccesses = 0; // number of times this node has been accessed
 
     public ObjectIdValue PageOffset;       // on-disk offset
 

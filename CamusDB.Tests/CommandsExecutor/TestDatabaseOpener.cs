@@ -49,7 +49,7 @@ public class TestDatabaseOpener
 
         Assert.AreEqual(dbname, database.Name);
         
-        Assert.IsInstanceOf<BufferPoolHandler>(database.TableSpace);
+        Assert.IsInstanceOf<BufferPoolManager>(database.BufferPool);
 
         Assert.IsInstanceOf<SystemSchema>(database.SystemSchema);
         Assert.IsInstanceOf<Schema>(database.Schema);

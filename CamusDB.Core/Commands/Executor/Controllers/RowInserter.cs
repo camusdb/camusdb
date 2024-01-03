@@ -164,7 +164,7 @@ internal sealed class RowInserter
     /// <returns></returns>
     private Task<FluxAction> AllocateInsertTuple(InsertFluxState state)
     {
-        BufferPoolHandler tablespace = state.Database.TableSpace;
+        BufferPoolManager tablespace = state.Database.BufferPool;
 
         state.RowTuple.SlotOne = tablespace.GetNextRowId();
         state.RowTuple.SlotTwo = tablespace.GetNextFreeOffset();
@@ -179,7 +179,7 @@ internal sealed class RowInserter
     /// <returns></returns>
     private Task<FluxAction> InsertToPageStep(InsertFluxState state)
     {
-        BufferPoolHandler tablespace = state.Database.TableSpace;
+        BufferPoolManager tablespace = state.Database.BufferPool;
 
         byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket.Values, state.RowTuple.SlotOne);
 
@@ -308,7 +308,7 @@ internal sealed class RowInserter
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in state.Indexes.MainIndexDeltas.Entries)
             btreeEntry.CommitState = BTreeCommitState.Committed;
 
-        await indexSaver.Persist(state.Database.TableSpace, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas);
+        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas);
 
         if (state.Indexes.UniqueIndexDeltas is null)
             return FluxAction.Continue;
@@ -318,7 +318,7 @@ internal sealed class RowInserter
             foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.Entries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
-            await indexSaver.Persist(state.Database.TableSpace, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+            await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
         }
 
         return FluxAction.Continue;
@@ -331,7 +331,7 @@ internal sealed class RowInserter
     /// <returns></returns>
     private Task<FluxAction> ApplyPageOperations(InsertFluxState state)
     {
-        state.Database.TableSpace.ApplyPageOperations(state.ModifiedPages);
+        state.Database.BufferPool.ApplyPageOperations(state.ModifiedPages);
 
         return Task.FromResult(FluxAction.Continue);
     }

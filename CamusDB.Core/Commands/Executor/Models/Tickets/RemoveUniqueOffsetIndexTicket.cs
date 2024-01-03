@@ -16,7 +16,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct RemoveUniqueOffsetIndexTicket
 {
-    public BufferPoolHandler Tablespace { get; }
+    public BufferPoolManager Tablespace { get; }
 
     public BTree<ObjectIdValue, ObjectIdValue> Index { get; }
 
@@ -29,7 +29,7 @@ public readonly struct RemoveUniqueOffsetIndexTicket
     public BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? Deltas { get; }
 
     public RemoveUniqueOffsetIndexTicket(
-        BufferPoolHandler tablespace,
+        BufferPoolManager tablespace,
         BTree<ObjectIdValue, ObjectIdValue> index,
         ObjectIdValue key,
         List<IDisposable> locks,
