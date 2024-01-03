@@ -127,6 +127,39 @@ internal abstract class SQLExecutorBaseCreator
                     return new ColumnValue(ColumnType.Bool, leftValue.BoolValue && rightValue.BoolValue);
                 }
 
+            case NodeType.ExprAdd:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+
+                    if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot add : " + leftValue + " and " + rightValue);
+
+                    return new ColumnValue(ColumnType.Integer64, leftValue.LongValue + rightValue.LongValue);
+                }
+
+            case NodeType.ExprSub:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+
+                    if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot substract : " + leftValue + " and " + rightValue);
+
+                    return new ColumnValue(ColumnType.Integer64, leftValue.LongValue - rightValue.LongValue);
+                }
+
+            case NodeType.ExprMult:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+
+                    if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot mult : " + leftValue + " and " + rightValue);
+
+                    return new ColumnValue(ColumnType.Integer64, leftValue.LongValue * rightValue.LongValue);
+                }
+
             case NodeType.ExprFuncCall:
                 {
                     string funcCall = expr.leftAst!.yytext!.ToLowerInvariant();

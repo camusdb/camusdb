@@ -42,6 +42,7 @@ public sealed class QueryController : CommandsController
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 index: null,
+                projection: null,
                 where: null,
                 filters: request.Filters,
                 orderBy: request.OrderBy,

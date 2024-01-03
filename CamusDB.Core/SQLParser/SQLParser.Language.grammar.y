@@ -17,6 +17,7 @@
 %left TEQUALS TNOTEQUALS
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
+%left TMULT
 
 %token TDIGIT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
@@ -137,6 +138,9 @@ expr       : equals_expr { $$.n = $1.n; }
            | greater_equals_than_expr { $$.n = $1.n; }
            | and_expr { $$.n = $1.n; }
            | or_expr { $$.n = $1.n; }
+           | add_expr { $$.n = $1.n; }
+           | sub_expr { $$.n = $1.n; }
+           | mult_expr { $$.n = $1.n; }
            | simple_expr { $$.n = $1.n; }
            | group_paren_expr { $$.n = $1.n; }
            | fcall_expr { $$.n = $1.n; }
@@ -166,6 +170,15 @@ greater_equals_than_expr : condition TGREATERTHANEQUALS condition { $$.n = new(N
 
 less_equals_than_expr : condition TLESSTHANEQUALS condition { $$.n = new(NodeType.ExprLessEqualsThan, $1.n, $3.n, null, null, null); }
                       ;
+
+add_expr  : condition TADD condition { $$.n = new(NodeType.ExprAdd, $1.n, $3.n, null, null, null); }
+          ;
+
+sub_expr  : condition TMINUS condition { $$.n = new(NodeType.ExprSub, $1.n, $3.n, null, null, null); }
+          ;
+
+mult_expr  : condition TMULT condition { $$.n = new(NodeType.ExprMult, $1.n, $3.n, null, null, null); }
+          ; 
 
 fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, null, null, null, null); }
            | identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, $3.n, null, null, null); }

@@ -30,7 +30,7 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
                     databaseName: ticket.DatabaseName,
                     tableName: tableName,
                     index: null,
-                    projection: null,
+                    projection: GetProjection(ast),
                     filters: null,
                     where: ast.extendedOne,
                     orderBy: GetQueryClause(ast),
@@ -40,6 +40,34 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown query AST stmt: " + ast.nodeType);
         }
+    }
+
+    private static List<NodeAst>? GetProjection(NodeAst? ast)
+    {
+        if (ast is null)
+            return null;
+
+        LinkedList<NodeAst> projectionList = new();
+
+        GetProjectionFields(ast.leftAst!, projectionList);
+
+        return projectionList.ToList();
+    }
+
+    private static void GetProjectionFields(NodeAst ast, LinkedList<NodeAst> projectionList)
+    {        
+        if (ast.nodeType == NodeType.IdentifierList)
+        {
+            if (ast.leftAst is not null)
+                GetProjectionFields(ast.leftAst, projectionList);
+
+            if (ast.rightAst is not null)
+                GetProjectionFields(ast.rightAst, projectionList);
+
+            return;
+        }
+
+        projectionList.AddLast(ast);
     }
 
     private static List<QueryOrderBy>? GetQueryClause(NodeAst ast)
