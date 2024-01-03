@@ -90,7 +90,7 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
             HLCTimestamp timestamp = UnserializeTimestamp(data, ref pointer);
             BTreeTuple? tuple = UnserializeTuple(data, ref pointer);
 
-            BTreeEntry<ColumnValue, BTreeTuple?> entry = new(key, null)
+            BTreeEntry<ColumnValue, BTreeTuple?> entry = new(key, this, null)
             {
                 NextPageOffset = Serializator.ReadObjectId(data, ref pointer)
             };

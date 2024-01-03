@@ -109,7 +109,13 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                     SerializeKey(nodeBuffer, entry.Key, ref pointer);
                     Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer);
                     SerializeTuple(nodeBuffer, tuple, ref pointer); // @todo LastValue
-                    Serializator.WriteObjectId(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : nullValue, ref pointer);
+                    if (entry.Next.IsStarted)
+                    {
+                        var next = (await entry.Next);
+                        Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : new(), ref pointer);
+                    }
+                    else
+                        Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
                 }
                 else
                 {

@@ -110,7 +110,9 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         if (subTree is null)
             yield break;
 
-        await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> subTreeEntry in subTree.EntriesTraverse())
+        HLCTimestamp timestamp = HLCTimestamp.Zero;
+
+        await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> subTreeEntry in subTree.EntriesTraverse(timestamp))
             yield return subTreeEntry.Key;
     }
 

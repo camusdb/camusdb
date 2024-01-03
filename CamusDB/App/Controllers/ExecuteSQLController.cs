@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models;
+using System.Diagnostics;
 
 namespace CamusDB.App.Controllers;
 
@@ -30,6 +31,8 @@ public sealed class ExecuteSQLController : CommandsController
     {
         try
         {
+            Stopwatch stopwatch = Stopwatch.StartNew();
+
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
 
@@ -47,6 +50,8 @@ public sealed class ExecuteSQLController : CommandsController
 
             await foreach (QueryResultRow row in await executor.ExecuteSQLQuery(ticket))
                 rows.Add(row.Row);
+
+            Console.WriteLine(stopwatch.ElapsedMilliseconds);
 
             return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
         }

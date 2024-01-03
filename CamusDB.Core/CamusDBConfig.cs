@@ -20,7 +20,7 @@ public static class CamusDBConfig
 
     public const int PageSize = 4096;
 
-    public static int BufferPoolSize = 8192;
+    public static int BufferPoolSize = 32768;
 
     #endregion
 

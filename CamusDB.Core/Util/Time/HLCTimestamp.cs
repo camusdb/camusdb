@@ -13,6 +13,8 @@ namespace CamusDB.Core.Util.Time;
 /// </summary>
 public readonly struct HLCTimestamp : IComparable<HLCTimestamp>
 {
+    public static readonly HLCTimestamp Zero = new(0, 0);
+
     public long L { get; }
 
     public uint C { get; }

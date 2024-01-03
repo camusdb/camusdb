@@ -31,8 +31,6 @@ internal sealed class DatabaseDropper
 
         DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
 
-        databaseDescriptor.BufferPool?.Dispose();
-
         databaseDescriptor.Storage.Dispose();
 
         databaseDescriptors.Descriptors.TryRemove(name, out _);

@@ -8,6 +8,7 @@
 
 using Nito.AsyncEx;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -16,7 +17,7 @@ namespace CamusDB.Core.Util.Trees;
 /// </summary>
 /// <typeparam name="TKey"></typeparam>
 /// <typeparam name="TValue"></typeparam>
-public sealed class BTreeNode<TKey, TValue>
+public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey>
 {
     private static int CurrentId = -1;
 
@@ -24,15 +25,21 @@ public sealed class BTreeNode<TKey, TValue>
 
     public int KeyCount; // number of children
 
-    public int CreatedAt = 0; // the time this node was created
+    public HLCTimestamp CreatedAt = HLCTimestamp.Zero; // the time this node was created
 
-    public int NumberAccesses = 0; // number of times this node has been accessed
+    public int NumberAccesses = 0;
+
+    public int NumberReads = 0; // number of times this node has been accessed
+
+    public int NumberWrites = 0;
+
+    public HLCTimestamp LastAccess;
 
     public ObjectIdValue PageOffset;       // on-disk offset
 
     public BTreeEntry<TKey, TValue>[] children = new BTreeEntry<TKey, TValue>[BTreeConfig.MaxChildren];   // the array of children
 
-    private readonly AsyncReaderWriterLock readerWriterLock = new(); // read/write locks prevent concurrent mutations to the node
+    private readonly AsyncReaderWriterLock readerWriterLock = new(); // read/write locks prevent concurrent mutations to the node    
 
     /// <summary>
     /// Create a node with k children

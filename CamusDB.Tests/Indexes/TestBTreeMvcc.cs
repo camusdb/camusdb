@@ -130,13 +130,13 @@ internal sealed class TestBTreeMvcc
         //await tree.Put(txnid1, BTreeCommitState.Committed, 5, 100);
         //await tree.Put(txnid2, BTreeCommitState.Committed, 7, 100);
 
-        Assert.AreEqual(1, deltas1.Entries.Count);
-        Assert.AreEqual(1, deltas2.Entries.Count);
+        Assert.AreEqual(1, deltas1.MvccEntries.Count);
+        Assert.AreEqual(1, deltas2.MvccEntries.Count);
 
-        foreach (BTreeMvccEntry<int?> x in deltas1.Entries)
+        foreach (BTreeMvccEntry<int?> x in deltas1.MvccEntries)
             x.CommitState = BTreeCommitState.Committed;
 
-        foreach (BTreeMvccEntry<int?> x in deltas2.Entries)
+        foreach (BTreeMvccEntry<int?> x in deltas2.MvccEntries)
             x.CommitState = BTreeCommitState.Committed;
 
         int? values5 = await tree.Get(txnid1, 5);

@@ -10,25 +10,44 @@ using Nito.AsyncEx;
 using System.Collections.Concurrent;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
+using YamlDotNet.Core.Tokens;
 
 namespace CamusDB.Core.Util.Trees;
 
 // internal nodes: only use key and next
 // external nodes: only use key and value
-public sealed class BTreeEntry<TKey, TValue>
+public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
 {
+    private readonly IBTreeNodeReader<TKey, TValue>? Reader; // lazy node reader
+
     private readonly ConcurrentDictionary<HLCTimestamp, BTreeMvccEntry<TValue>> mvccValues = new(); // snapshot of the values seen by each timestamp    
 
     public TKey Key;
 
     public ObjectIdValue NextPageOffset; // the address of the next page offset
 
-    public AsyncLazy<BTreeNode<TKey, TValue>>? Next; // helper field to iterate over array entries    
+    public AsyncLazy<BTreeNode<TKey, TValue>?> Next; // helper field to iterate over array entries    
 
-    public BTreeEntry(TKey key, AsyncLazy<BTreeNode<TKey, TValue>>? next)
+    public BTreeEntry(TKey key, IBTreeNodeReader<TKey, TValue>? reader, BTreeNode<TKey, TValue>? next)
     {
         Key = key;
-        Next = next;
+        Reader = reader;
+
+        if (next is not null)
+            Next = new AsyncLazy<BTreeNode<TKey, TValue>?>(() => Task.FromResult<BTreeNode<TKey, TValue>?>(next));
+        else
+            Next = new AsyncLazy<BTreeNode<TKey, TValue>?>(LoadNode);
+    }
+
+    private async Task<BTreeNode<TKey, TValue>?> LoadNode()
+    {
+        if (NextPageOffset.IsNull())
+            return null;
+
+        if (Reader is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
+
+        return await Reader.GetNode(NextPageOffset);
     }
 
     /// <summary>
@@ -64,9 +83,9 @@ public sealed class BTreeEntry<TKey, TValue>
 
         if (mvccValues.TryGetValue(timestamp, out BTreeMvccEntry<TValue>? snapshotValue))
             return snapshotValue.Value;
-        
+
         TValue? newestValue = default;
-        HLCTimestamp recentTimestamp = new(0, 0);
+        HLCTimestamp recentTimestamp = HLCTimestamp.Zero;
 
         foreach (KeyValuePair<HLCTimestamp, BTreeMvccEntry<TValue>> keyValue in mvccValues)
         {
@@ -114,7 +133,7 @@ public sealed class BTreeEntry<TKey, TValue>
     internal (HLCTimestamp, TValue?) GetMaxCommitedValue()
     {
         TValue? value = default;
-        HLCTimestamp newestValue = new(0, 0);        
+        HLCTimestamp newestValue = HLCTimestamp.Zero;
 
         foreach (KeyValuePair<HLCTimestamp, BTreeMvccEntry<TValue>> keyValue in mvccValues)
         {
@@ -128,5 +147,28 @@ public sealed class BTreeEntry<TKey, TValue>
         }
 
         return (newestValue, value);
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="timestamp"></param>
+    /// <returns></returns>
+    internal bool HasExpiredEntries(HLCTimestamp timestamp)
+    {
+        Console.WriteLine(mvccValues.Count);
+
+        if (mvccValues.Count <= 1)
+            return false;
+
+        foreach (KeyValuePair<HLCTimestamp, BTreeMvccEntry<TValue>> keyValue in mvccValues)
+        {
+            Console.WriteLine("HasExpiredEntries {0} {1} {2}", keyValue.Value.CommitState, keyValue.Key, keyValue.Value.Value);
+
+            if (keyValue.Key.CompareTo(timestamp) < 0)
+                return true;
+        }
+
+        return false;
     }
 }

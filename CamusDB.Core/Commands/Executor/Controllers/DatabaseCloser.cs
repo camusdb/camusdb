@@ -42,11 +42,10 @@ internal sealed class DatabaseCloser : IAsyncDisposable
             return;
         }
 
-        DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
-
-        databaseDescriptor.BufferPool?.Dispose();
-
+        DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;        
+        
         databaseDescriptor.Storage.Dispose();
+        databaseDescriptor.GC.Dispose();
 
         databaseDescriptors.Descriptors.TryRemove(name, out _);
 

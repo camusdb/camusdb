@@ -31,7 +31,7 @@ internal sealed class QueryExecutor
     private readonly QueryProjector queryProjector = new();
 
     public IAsyncEnumerable<QueryResultRow> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
-    {
+    {        
         QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
         
         return ExecuteQueryPlanInternal(plan);        
@@ -133,7 +133,7 @@ internal sealed class QueryExecutor
     {
         BufferPoolManager tablespace = database.BufferPool;
 
-        await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse())
+        await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse(ticket.TxnId))
         {
             ObjectIdValue dataOffset = entry.GetValue(ticket.TxnId);
 
@@ -174,7 +174,7 @@ internal sealed class QueryExecutor
     {
         BufferPoolManager tablespace = database.BufferPool;
 
-        await foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse())
+        await foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse(ticket.TxnId))
         {
             BTreeTuple? txnValue = entry.GetValue(ticket.TxnId);
 
@@ -219,7 +219,7 @@ internal sealed class QueryExecutor
         {
             //Console.WriteLine("MultiTree={0} Key={0} PageOffset={1}", index.Id, entry.Key, entry.Value!.Size());
 
-            await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> subEntry in entry.Value!.EntriesTraverse())
+            await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> subEntry in entry.Value!.EntriesTraverse(ticket.TxnId))
             {
                 //Console.WriteLine(" > Index Key={0} PageOffset={1}", subEntry.Key, subEntry.Value);
 

@@ -44,7 +44,7 @@ namespace CamusDB.Core.BufferPool;
  * | data length (4 bytes integer)                        |
  * +----------+----------+----------+---------------------+
  */
-public sealed class BufferPoolManager : IDisposable
+public sealed class BufferPoolManager
 {
     private readonly StorageManager storage;
 
@@ -483,11 +483,5 @@ public sealed class BufferPoolManager : IDisposable
     public void Clear()
     {
         pages.Clear();
-    }
-
-    public void Dispose()
-    {
-        //offsetUpdaterWriter.Complete();
-        releaser?.Dispose();
-    }
+    }    
 }

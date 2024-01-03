@@ -95,7 +95,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         tablespace.WriteDataToPageBatch(modifiedPages, index.PageOffset, 0, treeBuffer);
 
         ObjectIdValue nullAddressValue = new();
-        HLCTimestamp nullTimestamp = new(0, 0);
+        HLCTimestamp nullTimestamp = HLCTimestamp.Zero;
         //@todo update nodes concurrently        
 
         foreach (BTreeNode<ObjectIdValue, ObjectIdValue> node in deltas.Nodes)
@@ -124,7 +124,13 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
                     Serializator.WriteObjectId(nodeBuffer, entry.Key, ref pointer);
                     Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer); // @todo LastValue
                     Serializator.WriteObjectId(nodeBuffer, value, ref pointer); // @todo LastValue
-                    Serializator.WriteObjectId(nodeBuffer, entry.Next is not null ? entry.Next.PageOffset : nullAddressValue, ref pointer);
+                    if (entry.Next.IsStarted)
+                    {
+                        var next = (await entry.Next);
+                        Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : new(), ref pointer);
+                    }
+                    else
+                        Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
                 }
                 else
                 {

@@ -58,7 +58,7 @@ internal sealed class DatabaseOpener
             name: name,
             storage: storage,
             bufferPool: bufferPool,
-            gc: new GCManager(bufferPool, logicalClock),
+            gc: new GCManager(bufferPool, logicalClock, tableDescriptors),
             tableDescriptors: tableDescriptors
         );
 

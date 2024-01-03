@@ -45,22 +45,23 @@ internal sealed class TableOpener
         if (string.IsNullOrEmpty(tableName))
             throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, "Invalid or empty table name");
 
+        TableSchema tableSchema = Catalogs.GetTableSchema(database, tableName);
+
         AsyncLazy<TableDescriptor> openTableLazy = database.TableDescriptors.GetOrAdd(
-                                                        tableName,
-                                                        (_) => new AsyncLazy<TableDescriptor>(() => LoadTable(database, tableName))
+                                                        tableSchema.Name ?? "",
+                                                        (_) => new AsyncLazy<TableDescriptor>(() => LoadTable(database, tableSchema))
                                                    );
         return await openTableLazy;
     }
 
-    private async Task<TableDescriptor> LoadTable(DatabaseDescriptor database, string tableName)
+    private async Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
     {                       
         BufferPoolManager tablespace = database.BufferPool;
-
-        TableSchema tableSchema = Catalogs.GetTableSchema(database, tableName);
-        DatabaseObject systemObject = GetSystemObject(database, tableName);
+        
+        DatabaseObject systemObject = GetSystemObject(database, tableSchema.Name ?? "");
 
         TableDescriptor tableDescriptor = new(
-            tableName,
+            tableSchema.Name ?? "",
             tableSchema,
             await indexReader.ReadOffsets(tablespace, ObjectId.ToValue(systemObject.StartOffset ?? ""))
         );
