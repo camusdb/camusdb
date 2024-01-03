@@ -43,8 +43,8 @@ internal abstract class SQLExecutorBaseCreator
         switch (expr.nodeType)
         {
             case NodeType.Number:
-                if (long.TryParse(expr.yytext!, out long longValue))
-                    throw new Exception("Invalid Int64: " + expr.yytext!);
+                if (!long.TryParse(expr.yytext!, out long longValue))
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Int64: " + expr.yytext!);
 
                 return new ColumnValue(ColumnType.Integer64, longValue);                
 
@@ -52,7 +52,10 @@ internal abstract class SQLExecutorBaseCreator
                 return new ColumnValue(ColumnType.String, expr.yytext!.Trim('"'));
 
             case NodeType.Bool:
-                return new ColumnValue(ColumnType.Bool, bool.Parse(expr.yytext!));
+                if (!bool.TryParse(expr.yytext!, out bool boolValue))
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Bool: " + expr.yytext!);
+
+                return new ColumnValue(ColumnType.Bool, boolValue);
 
             case NodeType.Null:
                 return new ColumnValue(ColumnType.Null, 0);

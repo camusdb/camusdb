@@ -204,6 +204,7 @@ public class TestRowDeletorCloseDb
             databaseName: dbname,
             tableName: "robots",
             index: null,
+            projection: null,
             where: null,
             filters: new()
             {
@@ -222,8 +223,9 @@ public class TestRowDeletorCloseDb
         queryTicket = new(
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
-            tableName: "robots",
+            tableName: "robots",            
             index: null,
+            projection: null,
             where: null,
             filters: new()
             {

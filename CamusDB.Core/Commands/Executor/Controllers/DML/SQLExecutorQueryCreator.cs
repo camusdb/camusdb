@@ -30,6 +30,7 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
                     databaseName: ticket.DatabaseName,
                     tableName: tableName,
                     index: null,
+                    projection: null,
                     filters: null,
                     where: ast.extendedOne,
                     orderBy: GetQueryClause(ast),

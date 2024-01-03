@@ -8,6 +8,9 @@
 
 namespace CamusDB.Core.SQLParser;
 
+/// <summary>
+/// Creates a new parser instance 
+/// </summary>
 public static class SQLParserProcessor
 {
     public static NodeAst Parse(string sql)

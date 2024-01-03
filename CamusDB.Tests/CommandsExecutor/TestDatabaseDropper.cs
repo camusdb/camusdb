@@ -11,12 +11,12 @@ using NUnit.Framework;
 using System.Threading.Tasks;
 
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
-using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 

@@ -246,6 +246,7 @@ public class TestRowDeletor
            databaseName: dbname,
            tableName: "robots",
            index: null,
+           projection: null,
            where: null,
            filters: null,
            orderBy: null,
@@ -279,6 +280,7 @@ public class TestRowDeletor
            databaseName: dbname,
            tableName: "robots2",
            index: null,
+           projection: null,
            where: null,
            filters: null,
            orderBy: null,
@@ -316,6 +318,7 @@ public class TestRowDeletor
            databaseName: dbname,
            tableName: "robots",
            index: null,
+           projection: null,
            where: null,
            filters: null,
            orderBy: null,
@@ -350,6 +353,7 @@ public class TestRowDeletor
             databaseName: dbname,
             tableName: "robots",
             index: null,
+            projection: null,
             where: null,
             filters: new()
             {
@@ -374,6 +378,7 @@ public class TestRowDeletor
             databaseName: dbname,
             tableName: "robots",
             index: null,
+            projection: null,
             where: null,
             filters: new()
             {
@@ -404,6 +409,7 @@ public class TestRowDeletor
             databaseName: dbname,
             tableName: "robots",
             index: null,
+            projection: null,
             where: null,
             filters: new()
             {
@@ -441,6 +447,7 @@ public class TestRowDeletor
             databaseName: dbname,
             tableName: "robots",
             index: null,
+            projection: null,
             where: null,
             filters: null,
             orderBy: null,

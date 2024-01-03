@@ -12,6 +12,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -24,6 +25,8 @@ internal sealed class QueryExecutor
     private readonly QueryFilterer queryFilterer = new();
 
     private readonly QuerySorter querySorter = new();
+
+    private readonly QueryAggregator queryAggregator = new();
 
     public IAsyncEnumerable<QueryResultRow> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
@@ -53,6 +56,13 @@ internal sealed class QueryExecutor
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
                     plan.DataCursor = querySorter.SortResultset(plan.Ticket, plan.DataCursor);
+                    break;
+
+                case QueryPlanStepType.Aggregate:
+                    if (plan.DataCursor is null)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
+
+                    plan.DataCursor = queryAggregator.AggregateResultset(plan.Ticket, plan.DataCursor);
                     break;
 
                 default:

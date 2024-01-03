@@ -363,6 +363,7 @@ public class TestRowUpdater
             databaseName: dbname,
             tableName: "robots",
             index: null,
+            projection: null,
             where: null,
             filters: null,
             orderBy: null,
@@ -377,6 +378,7 @@ public class TestRowUpdater
             databaseName: dbname,
             tableName: "robots",
             index: null,
+            projection: null,
             where: null,
             filters: new()
             {
@@ -394,6 +396,7 @@ public class TestRowUpdater
             databaseName: dbname,
             tableName: "robots",
             index: null,
+            projection: null,
             where: null,
             filters: new()
             {
@@ -474,6 +477,7 @@ public class TestRowUpdater
             databaseName: dbname,
             tableName: "robots",
             index: null,
+            projection: null,
             where: null,
             filters: new()
             {
@@ -499,6 +503,7 @@ public class TestRowUpdater
             databaseName: dbname,
             tableName: "robots",
             index: null,
+            projection: null,
             where: null,
             filters: new()
             {

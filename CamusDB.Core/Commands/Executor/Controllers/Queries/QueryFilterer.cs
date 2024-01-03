@@ -10,7 +10,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.SQLParser;
 
-namespace CamusDB.Core.CommandsExecutor.Controllers;
+namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 internal sealed class QueryFilterer
 {

@@ -12,13 +12,16 @@ public sealed class InsertResponse
 {
     public string Status { get; set; }
 
+    public int Rows { get; set; }
+
     public string? Code { get; set; }
 
     public string? Message { get; set; }
 
-    public InsertResponse(string status)
+    public InsertResponse(string status, int rows)
     {
         Status = status;
+        Rows = rows;
     }
 
     public InsertResponse(string status, string code, string message)

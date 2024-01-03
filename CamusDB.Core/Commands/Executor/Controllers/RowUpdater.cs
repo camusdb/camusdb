@@ -163,6 +163,7 @@ public sealed class RowUpdater
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             index: null,
+            projection: null,
             filters: ticket.Filters,
             where: ticket.Where,
             orderBy: null,

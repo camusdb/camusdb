@@ -12,5 +12,7 @@ public enum QueryPlanStepType
 {
     QueryFromIndex,
     QueryFromTableIndex,
-    SortBy
+    SortBy,
+    Aggregate,
+    ReduceToProjections
 }

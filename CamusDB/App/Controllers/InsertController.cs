@@ -47,7 +47,8 @@ public sealed class InsertController : CommandsController
             );
 
             await executor.Insert(ticket);
-            return new JsonResult(new InsertResponse("ok"));
+
+            return new JsonResult(new InsertResponse("ok", 1));
         }
         catch (CamusDBException e)
         {

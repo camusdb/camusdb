@@ -477,6 +477,28 @@ public class TestExecuteSql
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectAggregate1()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT COUNT(*) FROM robots",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+
+        Assert.AreEqual(false, result[0].Row["enabled"].BoolValue);
+        Assert.AreEqual(false, result[1].Row["enabled"].BoolValue);
+        Assert.AreEqual(true, result[24].Row["enabled"].BoolValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteInsert1()
     {
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();

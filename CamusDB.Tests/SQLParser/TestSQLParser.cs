@@ -278,6 +278,32 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSimpleEscapedIdentifiers()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `someField`, `someData`, `someOtherField` FROM `some_table`");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleAggregate()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT COUNT(*) FROM some_table");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.ExprFuncCall, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+    }
+
+    [Test]
     public void TestParseSimpleUpdate()
     {
         NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value WHERE TRUE");
@@ -312,6 +338,45 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.UpdateList, ast.rightAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseUpdateMultiSet3()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("UPDATE `some_table` SET `some_field` = `some_value`, `some_other_field` = 100, `bool_field` = false, str_field = null WHERE TRUE");
+
+        Assert.AreEqual(NodeType.Update, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.UpdateList, ast.rightAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleDelete()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("DELETE FROM some_table WHERE 1=1");
+
+        Assert.AreEqual(NodeType.Delete, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprEquals, ast.rightAst!.nodeType);        
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleDelete1()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("DELETE FROM `some_table` WHERE `name` = `other_field`");
+
+        Assert.AreEqual(NodeType.Delete, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprEquals, ast.rightAst!.nodeType);        
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
     }
@@ -362,6 +427,21 @@ public class TestSQLParser
     public void TestParseSimpleInsert4()
     {
         NodeAst ast = SQLParserProcessor.Parse("INSERT INTO some_table (id, z) VALUES (STR_ID(\"507f1f77bcf86cd799439011\"), \"aaaa\")");
+
+        Assert.AreEqual(NodeType.Insert, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.IdentifierList, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprList, ast.extendedOne!.nodeType);
+        Assert.AreEqual(NodeType.ExprFuncCall, ast.extendedOne!.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleInsert5()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("INSERT INTO `some_table` (`id`, `z`) VALUES (STR_ID(\"507f1f77bcf86cd799439011\"), \"aaaa\")");
 
         Assert.AreEqual(NodeType.Insert, ast.nodeType);
 
@@ -487,6 +567,78 @@ public class TestSQLParser
         NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table (\nid INT64 PRIMARY KEY NOT NULL,\nname INT64 UNIQUE NOT NULL, year INT64 NULL)");
 
         Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableMultiConstraints2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE `some_table` (\n`id` INT64 PRIMARY KEY NOT NULL,\n`name` INT64 UNIQUE NOT NULL, `year` INT64 NULL)");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE some_table ADD COLUMN year INT64 NULL");
+
+        Assert.AreEqual(NodeType.AlterTableAddColumn, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable1()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD COLUMN `year` INT64 NULL");
+
+        Assert.AreEqual(NodeType.AlterTableAddColumn, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE some_table ADD COLUMN year INT64");
+
+        Assert.AreEqual(NodeType.AlterTableAddColumn, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable3()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE some_table DROP COLUMN year");
+
+        Assert.AreEqual(NodeType.AlterTableDropColumn, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable4()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` DROP COLUMN `year`");
+
+        Assert.AreEqual(NodeType.AlterTableDropColumn, ast.nodeType);
 
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
 

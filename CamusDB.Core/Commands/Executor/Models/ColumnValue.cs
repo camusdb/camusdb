@@ -24,13 +24,18 @@ public sealed class ColumnValue : IComparable<ColumnValue>
 
     public string? StrValue { get; }
 
-    [JsonConstructorAttribute]
+    [JsonConstructor]
     public ColumnValue(ColumnType type, string? strValue, long longValue, bool boolValue)
     {
         Type = type;
 
         if (type == ColumnType.String || type == ColumnType.Id)
+        {
+            if (strValue is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.String to string value (null)");
+
             StrValue = strValue;
+        }
 
         if (type == ColumnType.Integer64)
             LongValue = longValue;
@@ -62,6 +67,9 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         if (type != ColumnType.String && type != ColumnType.Id && type != ColumnType.Null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.String to string value");
 
+        if (value is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.String to string value (null)");
+
         Type = type;
         StrValue = value;
     }
@@ -75,7 +83,12 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             throw new ArgumentException($"Comparing incompatible ColumnValue: {Type} and {other.Type}");
 
         if (Type == ColumnType.String || Type == ColumnType.Id)
+        {
+            if (StrValue is null || other.StrValue is null)
+                return -1;
+
             return StrValue!.CompareTo(other.StrValue);
+        }
 
         if (Type == ColumnType.Integer64)
             return LongValue.CompareTo(other.LongValue);

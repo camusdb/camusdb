@@ -76,6 +76,7 @@ public sealed class TableColumnDropper
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             index: null,
+            projection: null,
             filters: null,
             where: null,
             orderBy: null,
