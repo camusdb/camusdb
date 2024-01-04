@@ -100,7 +100,7 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
 
         //Console.WriteLine("GetX={0} {1}", timestamp, newestValue);
 
-        mvccValues.TryAdd(timestamp, new(BTreeCommitState.Uncommitted, newestValue));
+        //mvccValues.TryAdd(timestamp, new(BTreeCommitState.Uncommitted, newestValue));
 
         return newestValue;
     }

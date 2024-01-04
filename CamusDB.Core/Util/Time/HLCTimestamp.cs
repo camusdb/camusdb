@@ -11,7 +11,7 @@ namespace CamusDB.Core.Util.Time;
 /// <summary>
 /// Represents a unique point in time given by the Hybrid Logical Clock (HLC)
 /// </summary>
-public readonly struct HLCTimestamp : IComparable<HLCTimestamp>
+public record struct HLCTimestamp : IComparable<HLCTimestamp>
 {
     public static readonly HLCTimestamp Zero = new(0, 0);
 
@@ -44,7 +44,7 @@ public readonly struct HLCTimestamp : IComparable<HLCTimestamp>
 
         return 1;
     }
-
+    
     public bool IsNull()
     {
         return L == 0 && C == 0;

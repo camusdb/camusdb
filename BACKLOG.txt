@@ -28,3 +28,6 @@ ColumnValue
 
 SQLParser
 - Make identifiers case insensitive
+
+ObjectId
+- ObjectIdValue CompareTo fix < and >
