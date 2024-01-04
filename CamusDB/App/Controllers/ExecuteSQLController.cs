@@ -51,7 +51,7 @@ public sealed class ExecuteSQLController : CommandsController
             await foreach (QueryResultRow row in await executor.ExecuteSQLQuery(ticket))
                 rows.Add(row.Row);
 
-            Console.WriteLine(stopwatch.ElapsedMilliseconds);
+            Console.WriteLine("Elapsed={0}", stopwatch.ElapsedMilliseconds);
 
             return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
         }

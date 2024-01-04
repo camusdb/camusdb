@@ -22,6 +22,9 @@ builder.Services.AddSingleton<CommandExecutor>();
 builder.Services.AddSingleton<CommandValidator>();
 builder.Services.AddSingleton<CatalogsManager>();
 
+// Initialize min threads
+ThreadPool.SetMinThreads(1024, 512);
+
 WebApplication app = builder.Build();
 
 // Initialize DB system

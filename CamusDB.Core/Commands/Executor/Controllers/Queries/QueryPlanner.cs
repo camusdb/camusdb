@@ -35,10 +35,18 @@ public sealed class QueryPlanner
             if (HasAggregation(ticket.Projection))
                 plan.AddStep(new QueryPlanStep(QueryPlanStepType.Aggregate));
             else
-                plan.AddStep(new QueryPlanStep(QueryPlanStepType.ReduceToProjections));
+            {
+                if (!IsFullProjection(ticket.Projection))
+                    plan.AddStep(new QueryPlanStep(QueryPlanStepType.ReduceToProjections));
+            }
         }
 
         return plan;
+    }
+
+    private bool IsFullProjection(List<NodeAst> projection)
+    {
+        return projection.Count == 1 && projection[0].nodeType == NodeType.ExprAllFields;            
     }
 
     private static bool HasAggregation(List<NodeAst> projection)

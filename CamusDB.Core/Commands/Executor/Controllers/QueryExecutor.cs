@@ -113,18 +113,18 @@ internal sealed class QueryExecutor
 
         if (pageOffset is null || pageOffset.IsNull())
         {
-            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+            //Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
             yield break;
         }
 
         byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo);
         if (data.Length == 0)
         {
-            Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
+            //Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
             yield break;
         }
 
-        Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
+        //Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
 
         yield return rowDeserializer.Deserialize(table.Schema, data);
     }
@@ -139,14 +139,14 @@ internal sealed class QueryExecutor
 
             if (dataOffset.IsNull())
             {
-                Console.WriteLine("Index RowId={0} has no page offset value", entry.Key);
+                //Console.WriteLine("Index RowId={0} has no page offset value", entry.Key);
                 continue;
             }
 
             byte[] data = await tablespace.GetDataFromPage(dataOffset);
             if (data.Length == 0)
             {
-                Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
+                //Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
                 continue;
             }
 
@@ -180,14 +180,14 @@ internal sealed class QueryExecutor
 
             if (txnValue is null || txnValue.IsNull())
             {
-                Console.WriteLine("Index RowId={0} has no page offset value", entry.Key);
+                //Console.WriteLine("Index RowId={0} has no page offset value", entry.Key);
                 continue;
             }
 
             byte[] data = await tablespace.GetDataFromPage(txnValue.SlotOne);
             if (data.Length == 0)
             {
-                Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
+                //Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
                 continue;
             }
 
@@ -227,14 +227,14 @@ internal sealed class QueryExecutor
 
                 if (dataOffset.IsNull())
                 {
-                    Console.WriteLine("Index RowId={0} has no page offset value", subEntry.Key);
+                    //Console.WriteLine("Index RowId={0} has no page offset value", subEntry.Key);
                     continue;
                 }
 
                 byte[] data = await tablespace.GetDataFromPage(dataOffset);
                 if (data.Length == 0)
                 {
-                    Console.WriteLine("Index RowId={0} has an empty page data", subEntry.Key);
+                    //Console.WriteLine("Index RowId={0} has an empty page data", subEntry.Key);
                     continue;
                 }
 
