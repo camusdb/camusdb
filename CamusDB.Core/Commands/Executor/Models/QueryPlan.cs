@@ -10,7 +10,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public readonly struct QueryPlanStep
+public record struct QueryPlanStep
 {
 	public QueryPlanStepType Type { get; }	
 

@@ -360,6 +360,7 @@ public class TestRowUpdater
 
         QueryTicket queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -375,6 +376,7 @@ public class TestRowUpdater
 
         queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -393,6 +395,7 @@ public class TestRowUpdater
 
         queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -474,6 +477,7 @@ public class TestRowUpdater
 
         QueryTicket queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -500,6 +504,7 @@ public class TestRowUpdater
 
         queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,

@@ -10,6 +10,7 @@ using Nito.AsyncEx;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using System.Runtime.CompilerServices;
+using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -87,11 +88,12 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <summary>
     /// Returns the value associated with the given key.
     /// </summary>
+    /// /// <param name="txType"></param>
     /// <param name="txnid"></param>
     /// <param name="key"></param>
     /// <returns>the value associated with the given key if the key is in the symbol table
     /// and {@code null} if the key is not in the symbol table</returns>
-    public async Task<TValue?> Get(HLCTimestamp txnid, TKey key)
+    public async Task<TValue?> Get(TransactionType txType, HLCTimestamp txnid, TKey key)
     {
         if (root is null)
         {
@@ -99,10 +101,10 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             return default;
         }
 
-        return await GetInternal(root, txnid, key, height);
+        return await GetInternal(root, txType, txnid, key, height);
     }
 
-    private async Task<TValue?> GetInternal(BTreeNode<TKey, TValue>? node, HLCTimestamp txnid, TKey key, int ht)
+    private async Task<TValue?> GetInternal(BTreeNode<TKey, TValue>? node, TransactionType txType, HLCTimestamp txnid, TKey key, int ht)
     {
         if (node is null)
             return default;
@@ -121,7 +123,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                     continue;
 
                 if (Eq(key, children[j].Key))
-                    return children[j].GetValue(txnid);
+                    return children[j].GetValue(txType, txnid);
             }
         }
 
@@ -134,7 +136,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                 {
                     BTreeEntry<TKey, TValue> entry = children[j];
 
-                    return await GetInternal(await entry.Next, txnid, key, ht - 1);
+                    return await GetInternal(await entry.Next, txType, txnid, key, ht - 1);
                 }
             }
         }

@@ -9,9 +9,8 @@
 using NUnit.Framework;
 using CamusDB.Core.Util.Trees;
 using System.Threading.Tasks;
-using System.Collections.Generic;
 using CamusDB.Core.Util.Time;
-using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Tests.Indexes;
 
@@ -88,7 +87,7 @@ internal sealed class TestBTree
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
-        int? values = await tree.Get(txnid, 5);        
+        int? values = await tree.Get(TransactionType.ReadOnly, txnid, 5);        
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
@@ -104,7 +103,7 @@ internal sealed class TestBTree
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
-        int? values = await tree.Get(txnid, 11);
+        int? values = await tree.Get(TransactionType.ReadOnly, txnid, 11);
 
         Assert.Null(values);
     }
@@ -123,13 +122,13 @@ internal sealed class TestBTree
         await tree.Put(txnid, BTreeCommitState.Committed, 8, 103);
         await tree.Put(txnid, BTreeCommitState.Committed, 9, 104);
 
-        int? values = await tree.Get(txnid, 5);
+        int? values = await tree.Get(TransactionType.ReadOnly, txnid, 5);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
         //Assert.AreEqual(values[0], 100);
 
-        values = await tree.Get(txnid, 7);
+        values = await tree.Get(TransactionType.ReadOnly, txnid, 7);
 
         Assert.NotNull(values);
         //Assert.AreEqual(values!.Length, 8);
@@ -246,7 +245,7 @@ internal sealed class TestBTree
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
 
-        int? search = await tree.Get(txnid, 5);
+        int? search = await tree.Get(TransactionType.ReadOnly, txnid, 5);
         Assert.IsNull(search);
     }
 
@@ -270,22 +269,22 @@ internal sealed class TestBTree
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 0);
 
-        int? search = await tree.Get(txnid, 5);
+        int? search = await tree.Get(TransactionType.ReadOnly, txnid, 5);
         Assert.IsNull(search);
 
-        search = await tree.Get(txnid, 4);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 4);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(txnid, 6);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 6);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(txnid, 7);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 7);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(txnid, 8);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 8);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(txnid, 9);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 9);
         Assert.IsNotNull(search);
     }
 
@@ -308,7 +307,7 @@ internal sealed class TestBTree
         Assert.AreEqual(64, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        int? search = await tree.Get(txnid, 5);
+        int? search = await tree.Get(TransactionType.ReadOnly, txnid, 5);
         Assert.IsNull(search);
     }
 
@@ -331,10 +330,10 @@ internal sealed class TestBTree
         Assert.AreEqual(64, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        int? search = await tree.Get(txnid, 64);
+        int? search = await tree.Get(TransactionType.ReadOnly, txnid, 64);
         Assert.IsNull(search);
 
-        search = await tree.Get(txnid, 63);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 63);
         Assert.IsNotNull(search);
     }
 
@@ -360,19 +359,19 @@ internal sealed class TestBTree
         Assert.AreEqual(6144, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
-        int? search = await tree.Get(txnid, 4);
+        int? search = await tree.Get(TransactionType.ReadOnly, txnid, 4);
         Assert.IsNull(search);
 
-        search = await tree.Get(txnid, 7);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 7);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(txnid, 41);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 41);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(txnid, 49);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 49);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(txnid, 256);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 256);
         Assert.IsNull(search);
     }
 
@@ -402,7 +401,7 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 8192; i++)
         {
-            int? search = await tree.Get(txnid, i);
+            int? search = await tree.Get(TransactionType.ReadOnly, txnid, i);
             if (search is not null)
                 count++;
         }
@@ -436,7 +435,7 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 8100; i++)
         {
-            int? search = await tree.Get(txnid, i);
+            int? search = await tree.Get(TransactionType.ReadOnly, txnid, i);
             if (search is not null)
                 count++;
         }
@@ -470,7 +469,7 @@ internal sealed class TestBTree
 
         for (int i = 0; i < 8192; i++)
         {
-            int? search = await tree.Get(txnid, i);
+            int? search = await tree.Get(TransactionType.ReadOnly, txnid, i);
             if (search is not null)
                 count++;
         }

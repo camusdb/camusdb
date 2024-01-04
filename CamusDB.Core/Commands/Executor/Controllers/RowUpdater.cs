@@ -160,6 +160,7 @@ public sealed class RowUpdater
 
         QueryTicket queryTicket = new(
             txnId: ticket.TxnId,
+            txnType: TransactionType.Write,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             index: null,
@@ -206,8 +207,10 @@ public sealed class RowUpdater
     /// Checks if a row with the same primary key is already added to table
     /// </summary>
     /// <param name="table"></param>
+    /// <param name="keyName"></param>
     /// <param name="uniqueIndex"></param>
-    /// <param name="ticket"></param>
+    /// <param name="txnId"></param>
+    /// <param name="values"></param>
     /// <param name="name"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
@@ -225,7 +228,7 @@ public sealed class RowUpdater
         if (uniqueValue is null)
             return;
 
-        BTreeTuple? rowTuple = await uniqueIndex.Get(txnId, uniqueValue);
+        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.Write, txnId, uniqueValue);
 
         if (rowTuple is not null)
             throw new CamusDBException(

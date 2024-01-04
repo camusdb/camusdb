@@ -27,6 +27,7 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
 
                 return new(
                     txnId: await executor.NextTxnId(),
+                    txnType: TransactionType.ReadOnly,
                     databaseName: ticket.DatabaseName,
                     tableName: tableName,
                     index: null,

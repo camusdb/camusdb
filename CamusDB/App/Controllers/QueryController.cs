@@ -39,6 +39,7 @@ public sealed class QueryController : CommandsController
 
             QueryTicket ticket = new(
                 txnId: await executor.NextTxnId(),
+                txnType: TransactionType.ReadOnly,
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 index: null,

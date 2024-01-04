@@ -201,6 +201,7 @@ public class TestRowDeletorCloseDb
 
         QueryTicket queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -222,6 +223,7 @@ public class TestRowDeletorCloseDb
 
         queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",            
             index: null,

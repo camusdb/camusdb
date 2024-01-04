@@ -94,6 +94,7 @@ internal sealed class RowDeleter
 
         QueryTicket queryTicket = new(
             txnId: ticket.TxnId,
+            txnType: TransactionType.Write,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             index: null,

@@ -109,7 +109,7 @@ internal sealed class QueryExecutor
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        BTreeTuple? pageOffset = await index.UniqueRows.Get(ticket.TxnId, columnId);
+        BTreeTuple? pageOffset = await index.UniqueRows.Get(TransactionType.ReadOnly, ticket.TxnId, columnId);
 
         if (pageOffset is null || pageOffset.IsNull())
         {
@@ -135,7 +135,7 @@ internal sealed class QueryExecutor
 
         await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse(ticket.TxnId))
         {
-            ObjectIdValue dataOffset = entry.GetValue(ticket.TxnId);
+            ObjectIdValue dataOffset = entry.GetValue(ticket.TxnType, ticket.TxnId);
 
             if (dataOffset.IsNull())
             {
@@ -176,7 +176,7 @@ internal sealed class QueryExecutor
 
         await foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse(ticket.TxnId))
         {
-            BTreeTuple? txnValue = entry.GetValue(ticket.TxnId);
+            BTreeTuple? txnValue = entry.GetValue(ticket.TxnType, ticket.TxnId);
 
             if (txnValue is null || txnValue.IsNull())
             {
@@ -223,7 +223,7 @@ internal sealed class QueryExecutor
             {
                 //Console.WriteLine(" > Index Key={0} PageOffset={1}", subEntry.Key, subEntry.Value);
 
-                ObjectIdValue dataOffset = subEntry.GetValue(ticket.TxnId);
+                ObjectIdValue dataOffset = subEntry.GetValue(ticket.TxnType, ticket.TxnId);
 
                 if (dataOffset.IsNull())
                 {

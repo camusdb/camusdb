@@ -10,7 +10,7 @@ using Nito.AsyncEx;
 using System.Collections.Concurrent;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
-using YamlDotNet.Core.Tokens;
+using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -77,7 +77,14 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
         return mvccEntry;
     }
 
-    public TValue? GetValue(HLCTimestamp timestamp)
+    /// <summary>
+    /// Returns the most recent value in the list of MVCC values. If the transaction is a write,
+    /// the last committed value is stored in a snapshot and returned consistently to avoid dirty reads.
+    /// </summary>
+    /// <param name="txType"></param>
+    /// <param name="timestamp"></param>
+    /// <returns></returns>
+    public TValue? GetValue(TransactionType txType, HLCTimestamp timestamp)
     {
         //Console.WriteLine("Get={0}", timestamp);
 
@@ -100,7 +107,8 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
 
         //Console.WriteLine("GetX={0} {1}", timestamp, newestValue);
 
-        //mvccValues.TryAdd(timestamp, new(BTreeCommitState.Uncommitted, newestValue));
+        if (txType == TransactionType.Write)
+            mvccValues.TryAdd(timestamp, new(BTreeCommitState.Uncommitted, newestValue));
 
         return newestValue;
     }

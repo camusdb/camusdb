@@ -243,6 +243,7 @@ public class TestRowDeletor
 
         QueryTicket queryTicket = new(
            txnId: await executor.NextTxnId(),
+           txnType: TransactionType.ReadOnly,
            databaseName: dbname,
            tableName: "robots",
            index: null,
@@ -277,6 +278,7 @@ public class TestRowDeletor
 
         QueryTicket queryTicket = new(
            txnId: await executor.NextTxnId(),
+           txnType: TransactionType.ReadOnly,
            databaseName: dbname,
            tableName: "robots2",
            index: null,
@@ -315,6 +317,7 @@ public class TestRowDeletor
 
         QueryTicket queryTicket = new(
            txnId: await executor.NextTxnId(),
+           txnType: TransactionType.ReadOnly,
            databaseName: dbname,
            tableName: "robots",
            index: null,
@@ -350,6 +353,7 @@ public class TestRowDeletor
 
         QueryTicket queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -375,6 +379,7 @@ public class TestRowDeletor
 
         QueryTicket queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -406,6 +411,7 @@ public class TestRowDeletor
 
         queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -444,6 +450,7 @@ public class TestRowDeletor
 
         QueryTicket queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,

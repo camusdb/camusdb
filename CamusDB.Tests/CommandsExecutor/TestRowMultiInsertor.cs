@@ -111,6 +111,7 @@ internal sealed class TestRowMultiInsertor
 
         QueryTicket queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "user_robots",
             index: "robots_id",
@@ -165,6 +166,7 @@ internal sealed class TestRowMultiInsertor
 
         QueryTicket queryTicket = new(
             txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "user_robots",
             index: "robots_id",

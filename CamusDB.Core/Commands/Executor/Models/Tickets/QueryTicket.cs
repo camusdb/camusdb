@@ -15,6 +15,8 @@ public readonly struct QueryTicket
 {
     public HLCTimestamp TxnId { get; }
 
+    public TransactionType TxnType { get; }
+
     public string DatabaseName { get; }
 
     public string TableName { get; }
@@ -33,6 +35,7 @@ public readonly struct QueryTicket
 
     public QueryTicket(
         HLCTimestamp txnId,
+        TransactionType txnType,
         string databaseName,
         string tableName,
         string? index,
@@ -43,6 +46,7 @@ public readonly struct QueryTicket
         Dictionary<string, ColumnValue>? parameters)
     {
         TxnId = txnId;
+        TxnType = txnType;
         DatabaseName = databaseName;
         TableName = tableName;
         IndexName = index;

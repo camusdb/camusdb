@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Tests.Indexes;
 
@@ -437,10 +438,10 @@ public class TestBTreeMulti
         Assert.AreEqual(255, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        int? search = await tree.Get(txnid, 11);
+        int? search = await tree.Get(TransactionType.ReadOnly, txnid, 11);
         Assert.IsNull(search);
 
-        search = await tree.Get(txnid, 10);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 10);
         Assert.IsNotNull(search);
     }
 

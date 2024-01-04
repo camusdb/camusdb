@@ -6,8 +6,8 @@
  * file that was distributed with this source code.
  */
 
-using System.Collections.Generic;
 using System.Threading.Tasks;
+using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
 using NUnit.Framework;
@@ -49,8 +49,8 @@ internal sealed class TestBTreeMvcc
         await tree.Put(txnid1, BTreeCommitState.Committed, 5, 100);
         await tree.Put(txnid2, BTreeCommitState.Committed, 7, 100);        
 
-        int? values1 = await tree.Get(txnid1, 5);
-        int? values2 = await tree.Get(txnid2, 5);
+        int? values1 = await tree.Get(TransactionType.Write, txnid1, 5);
+        int? values2 = await tree.Get(TransactionType.Write, txnid2, 5);
 
         Assert.NotNull(values1);
         Assert.NotNull(values2);
@@ -67,14 +67,14 @@ internal sealed class TestBTreeMvcc
         await tree.Put(txnid1, BTreeCommitState.Committed, 5, 100);
         await tree.Put(txnid2, BTreeCommitState.Committed, 7, 100);
 
-        int? values1 = await tree.Get(txnid1, 5);
-        int? values2 = await tree.Get(txnid2, 5);
+        int? values1 = await tree.Get(TransactionType.Write, txnid1, 5);
+        int? values2 = await tree.Get(TransactionType.Write, txnid2, 5);
 
         Assert.NotNull(values1);
         Assert.NotNull(values2);
 
-        int? values3 = await tree.Get(txnid1, 7);
-        int? values4 = await tree.Get(txnid2, 7);
+        int? values3 = await tree.Get(TransactionType.Write, txnid1, 7);
+        int? values4 = await tree.Get(TransactionType.Write, txnid2, 7);
 
         Assert.Null(values3);
         Assert.NotNull(values4);
@@ -91,14 +91,14 @@ internal sealed class TestBTreeMvcc
         await tree.Put(txnid1, BTreeCommitState.Uncommitted, 5, 100);
         await tree.Put(txnid2, BTreeCommitState.Uncommitted, 7, 100);
 
-        int? values1 = await tree.Get(txnid1, 5);
-        int? values2 = await tree.Get(txnid2, 5);
+        int? values1 = await tree.Get(TransactionType.Write, txnid1, 5);
+        int? values2 = await tree.Get(TransactionType.Write, txnid2, 5);
 
         Assert.NotNull(values1);
         Assert.Null(values2);
 
-        int? values3 = await tree.Get(txnid1, 7);
-        int? values4 = await tree.Get(txnid2, 7);
+        int? values3 = await tree.Get(TransactionType.Write, txnid1, 7);
+        int? values4 = await tree.Get(TransactionType.Write, txnid2, 7);
 
         Assert.Null(values3);
         Assert.NotNull(values4);
@@ -115,14 +115,14 @@ internal sealed class TestBTreeMvcc
         BTreeMutationDeltas<int, int?> deltas1 = await tree.Put(txnid1, BTreeCommitState.Uncommitted, 5, 100);
         BTreeMutationDeltas<int, int?> deltas2 = await tree.Put(txnid2, BTreeCommitState.Uncommitted, 7, 100);
 
-        int? values1 = await tree.Get(txnid1, 5);
-        int? values2 = await tree.Get(txnid2, 5);
+        int? values1 = await tree.Get(TransactionType.Write, txnid1, 5);
+        int? values2 = await tree.Get(TransactionType.Write, txnid2, 5);
 
         Assert.NotNull(values1);
         Assert.Null(values2);
 
-        int? values3 = await tree.Get(txnid1, 7);
-        int? values4 = await tree.Get(txnid2, 7);
+        int? values3 = await tree.Get(TransactionType.Write, txnid1, 7);
+        int? values4 = await tree.Get(TransactionType.Write, txnid2, 7);
 
         Assert.Null(values3);
         Assert.NotNull(values4);
@@ -139,14 +139,14 @@ internal sealed class TestBTreeMvcc
         foreach (BTreeMvccEntry<int?> x in deltas2.MvccEntries)
             x.CommitState = BTreeCommitState.Committed;
 
-        int? values5 = await tree.Get(txnid1, 5);
-        int? values6 = await tree.Get(txnid2, 5);
+        int? values5 = await tree.Get(TransactionType.Write, txnid1, 5);
+        int? values6 = await tree.Get(TransactionType.Write, txnid2, 5);
 
         Assert.NotNull(values5);
         Assert.NotNull(values6);
 
-        int? values7 = await tree.Get(txnid1, 7);
-        int? values8 = await tree.Get(txnid2, 7);
+        int? values7 = await tree.Get(TransactionType.Write, txnid1, 7);
+        int? values8 = await tree.Get(TransactionType.Write, txnid2, 7);
 
         Assert.Null(values7);
         Assert.NotNull(values8);

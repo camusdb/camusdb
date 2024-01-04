@@ -73,6 +73,7 @@ public sealed class TableColumnDropper
 
         QueryTicket queryTicket = new(
             txnId: ticket.TxnId,
+            txnType: TransactionType.Write,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             index: null,

@@ -191,6 +191,7 @@ internal sealed class TestTableAlterer
 
         QueryTicket queryTicket = new(
            txnId: await executor.NextTxnId(),
+           txnType: TransactionType.ReadOnly,
            databaseName: dbname,
            tableName: "robots",
            index: null,
@@ -366,6 +367,7 @@ internal sealed class TestTableAlterer
 
         QueryTicket queryTicket = new(
            txnId: await executor.NextTxnId(),
+           txnType: TransactionType.ReadOnly,
            databaseName: dbname,
            tableName: "robots",
            index: null,
@@ -402,6 +404,7 @@ internal sealed class TestTableAlterer
 
         queryTicket = new(
            txnId: await executor.NextTxnId(),
+           txnType: TransactionType.ReadOnly,
            databaseName: dbname,
            tableName: "robots",
            index: null,
