@@ -108,7 +108,7 @@ internal sealed class RowDeleter
         state.DataCursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
         return Task.FromResult(FluxAction.Continue);
-    }    
+    }
 
     private async Task DeleteMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
     {
@@ -149,8 +149,6 @@ internal sealed class RowDeleter
         }
 
         DeleteTicket ticket = state.Ticket;
-        TableDescriptor table = state.Table;        
-        BufferPoolManager tablespace = state.Database.BufferPool;
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
         List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>? uniqueIndexDeltas;
 
@@ -163,7 +161,7 @@ internal sealed class RowDeleter
         foreach (QueryResultRow row in rowsToDelete)
         {
             BTreeTuple tuple = new(row.Tuple.SlotOne, nullPageOffset);
-            
+
             mainTableDeltas = await DeleteFromTableIndex(state, tuple);
 
             uniqueIndexDeltas = await UpdateUniqueIndexes(state, ticket, tuple, row);
@@ -178,7 +176,7 @@ internal sealed class RowDeleter
 
             state.DeletedRows++;
         }
-        
+
         return FluxAction.Continue;
     }
 
@@ -289,10 +287,10 @@ internal sealed class RowDeleter
         DeleteTicket ticket = state.Ticket;
 
         Stopwatch timer = Stopwatch.StartNew();
-        
-        machine.When(DeleteFluxSteps.LocateTupleToDelete, LocateTupleToDelete);        
+
+        machine.When(DeleteFluxSteps.LocateTupleToDelete, LocateTupleToDelete);
         machine.When(DeleteFluxSteps.DeleteRows, DeleteRowsAndIndexesFromDisk);
-        machine.When(DeleteFluxSteps.ApplyPageOperations, ApplyPageOperations);        
+        machine.When(DeleteFluxSteps.ApplyPageOperations, ApplyPageOperations);
 
         // machine.WhenAbort(ReleaseLocks);
 
@@ -301,7 +299,7 @@ internal sealed class RowDeleter
 
         timer.Stop();
 
-        TimeSpan timeTaken = timer.Elapsed;        
+        TimeSpan timeTaken = timer.Elapsed;
 
         Console.WriteLine(
             "Deleted {0} rows, Time taken: {1}",
@@ -310,5 +308,5 @@ internal sealed class RowDeleter
         );
 
         return state.DeletedRows;
-    }    
+    }
 }

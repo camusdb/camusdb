@@ -98,7 +98,7 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
         {
             //Console.WriteLine("Get={0} {1} {2} {3}", timestamp, keyValue.Value.CommitState, keyValue.Key.CompareTo(timestamp), keyValue.Value.Value);
 
-            if (keyValue.Value.CommitState == BTreeCommitState.Committed && keyValue.Key.CompareTo(timestamp) < 0 && keyValue.Key.CompareTo(recentTimestamp) > 0)
+            if (keyValue.Value.CommitState == BTreeCommitState.Committed && keyValue.Key.CompareTo(timestamp) <= 0 && keyValue.Key.CompareTo(recentTimestamp) > 0)
             {
                 recentTimestamp = keyValue.Key;
                 newestValue = keyValue.Value.Value;

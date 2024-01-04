@@ -18,22 +18,14 @@ internal sealed class QueryFilterer
     {
         ColumnValue evaluatedExpr = SqlExecutor.EvalExpr(where, row, parameters);
 
-        switch (evaluatedExpr.Type)
+        return evaluatedExpr.Type switch
         {
-            case ColumnType.Null:
-                return false;
-
-            case ColumnType.Bool:
-                return evaluatedExpr.BoolValue;
-
-            case ColumnType.Float64:
-                return evaluatedExpr.LongValue != 0;
-
-            case ColumnType.Integer64:
-                return evaluatedExpr.LongValue != 0;
-        }
-
-        return false;
+            ColumnType.Null => false,
+            ColumnType.Bool => evaluatedExpr.BoolValue,
+            ColumnType.Float64 => evaluatedExpr.LongValue != 0,
+            ColumnType.Integer64 => evaluatedExpr.LongValue != 0,
+            _ => false,
+        };
     }
 
     // @todo : this is a very naive implementation, we should use a proper type conversion and implement all operators
