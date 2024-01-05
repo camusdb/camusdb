@@ -315,6 +315,8 @@ public sealed class RowUpdater
 
     private BTreeTuple UpdateNewRowVersionDisk(BufferPoolManager tablespace, TableDescriptor table, UpdateFluxState state, QueryResultRow row, UpdateTicket ticket)
     {
+        //Console.WriteLine("Original tuple: {0}", row.Tuple);
+
         foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)        
             row.Row[keyValuePair.Key] = keyValuePair.Value;
 
@@ -325,6 +327,8 @@ public sealed class RowUpdater
             slotOne: row.Tuple.SlotOne,
             slotTwo: tablespace.GetNextFreeOffset()
         );
+
+        //Console.WriteLine("New tuple: {0}", tuple);
 
         tablespace.WriteDataToPageBatch(state.ModifiedPages, tuple.SlotTwo, 0, buffer);
 

@@ -46,6 +46,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     public readonly IBTreeNodeReader<TKey, TValue>? Reader; // lazy node reader
 
+    private readonly AsyncReaderWriterLock readerWriterLock = new();
+
     /// <summary>
     /// Initializes an empty B-tree.
     /// </summary>
@@ -265,6 +267,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <returns></returns>
     public async Task<BTreeMutationDeltas<TKey, TValue>> Put(HLCTimestamp txnid, BTreeCommitState commitState, TKey key, TValue? value)
     {
+        using IDisposable writerLock = await WriterLockAsync();
+
         BTreeMutationDeltas<TKey, TValue> deltas = new();
 
         if (root is null) // create root
@@ -282,7 +286,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         //Console.WriteLine("need to split root");
 
-        using IDisposable disposable = await root.WriterLockAsync();
+        //using IDisposable disposable = await root.WriterLockAsync();
 
         // need to split root
         BTreeNode<TKey, TValue> newRoot = new(2);
@@ -317,9 +321,9 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (node is null)
             throw new ArgumentException("node cannot be null");
 
-        using IDisposable disposable = await node.WriterLockAsync();
+        //using IDisposable disposable = await node.WriterLockAsync();
 
-        node.NumberAccesses++;        
+        node.NumberAccesses++;
 
         int j;
         BTreeEntry<TKey, TValue>? newEntry = null;
@@ -330,17 +334,23 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             for (j = 0; j < node.KeyCount; j++)
             {
-                if (Eq(key, children[j].Key))
+                BTreeEntry<TKey, TValue> childrenEntry = children[j];
+
+                if (Eq(key, childrenEntry.Key))
                 {
+                    Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);
+
                     node.NumberWrites++;
                     deltas.Nodes.Add(node);
-                    deltas.MvccEntries.Add(children[j].SetValue(txnid, commitState, value));
+                    deltas.MvccEntries.Add(childrenEntry.SetValue(txnid, commitState, value));
                     return null;
                 }
 
-                if (Less(key, children[j].Key))
+                if (Less(key, childrenEntry.Key))
                     break;
             }
+
+            Console.WriteLine("Created new SetV={0} {1} {2} {3}", key, txnid, commitState, value);
 
             newEntry = new(key, Reader, null);
             deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
@@ -360,8 +370,10 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                     if (split == null)
                         return null;
 
+                    //Console.WriteLine("splitting internal node");
+
                     newEntry = new(split.children[0].Key, Reader, split);
-                    deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));                    
+                    deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
                     break;
                 }
             }
@@ -521,7 +533,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                 BTreeEntry<TKey, TValue> entry = children[j];
 
                 if (entry.Next.IsStarted) // ignore unloaded nodes
-                    await MarkInternal(await entry.Next, txnid, ht - 1, deltas);                
+                    await MarkInternal(await entry.Next, txnid, ht - 1, deltas);
             }
         }
     }
@@ -537,5 +549,25 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     private static bool Eq(TKey k1, TKey k2)
     {
         return k1.CompareTo(k2) == 0;
+    }
+
+    /// <summary>
+    /// Acquires a read lock. Multiple read locks can be acquired as long as the write lock is not.
+    /// Read locks are shared.
+    /// </summary>
+    /// <returns></returns>
+    public async Task<IDisposable> ReaderLockAsync()
+    {
+        return await readerWriterLock.ReaderLockAsync();
+    }
+
+    /// <summary>
+    /// Acquires a write lock. Only one write lock can be acquired while other locks are not.
+    /// Write locks are exclusive.
+    /// </summary>
+    /// <returns></returns>
+    public async Task<IDisposable> WriterLockAsync()
+    {
+        return await readerWriterLock.WriterLockAsync();
     }
 }

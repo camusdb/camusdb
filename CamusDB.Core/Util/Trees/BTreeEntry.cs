@@ -26,7 +26,7 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
 
     public ObjectIdValue NextPageOffset; // the address of the next page offset
 
-    public AsyncLazy<BTreeNode<TKey, TValue>?> Next; // helper field to iterate over array entries    
+    public AsyncLazy<BTreeNode<TKey, TValue>?> Next { get; } // helper field to iterate over array entries    
 
     public BTreeEntry(TKey key, IBTreeNodeReader<TKey, TValue>? reader, BTreeNode<TKey, TValue>? next)
     {
@@ -145,14 +145,14 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
 
         foreach (KeyValuePair<HLCTimestamp, BTreeMvccEntry<TValue>> keyValue in mvccValues)
         {
-            //Console.WriteLine("GetMaxCommitedValue {0} {1} {2}", keyValue.Value.CommitState, keyValue.Key, keyValue.Value.Value);
-
             if (keyValue.Value.CommitState == BTreeCommitState.Committed && keyValue.Key.CompareTo(newestValue) > 0)
             {
                 newestValue = keyValue.Key;
                 value = keyValue.Value.Value;
             }
         }
+
+        //Console.WriteLine("GetMaxCommitedValue {0} {1}", newestValue, value);
 
         return (newestValue, value);
     }
