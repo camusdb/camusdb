@@ -42,8 +42,8 @@ public sealed class GCManager : IDisposable
         this.logicalClock = logicalClock;
         this.tableDescriptors = tableDescriptors;
 
-        pagesReleaser = new(ReleasePages, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
-        indexReleaser = new(ReleaseIndexNodesAndEntries, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        //pagesReleaser = new(ReleasePages, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        //indexReleaser = new(ReleaseIndexNodesAndEntries, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
     }
 
     /// <summary>
@@ -162,7 +162,7 @@ public sealed class GCManager : IDisposable
 
     public void Dispose()
     {
-        indexReleaser.Dispose();
-        pagesReleaser.Dispose();
+        indexReleaser?.Dispose();
+        pagesReleaser?.Dispose();
     }
 }

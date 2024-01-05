@@ -83,8 +83,8 @@ public class TestRowUpdater
                 {
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, (2000 + i).ToString()) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, "false") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
                 }
             );
 
@@ -173,7 +173,7 @@ public class TestRowUpdater
             id: objectsId[0],
             values: new Dictionary<string, ColumnValue>()
             {
-                { "name", new ColumnValue(ColumnType.String, null!) }
+                { "name", new ColumnValue(ColumnType.Null, null!) }
             }
         );
 
@@ -468,7 +468,7 @@ public class TestRowUpdater
             where: null,
             filters: new()
             {
-                new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
+                new("year", ">", new ColumnValue(ColumnType.Integer64, 2010))
             },
             parameters: null
         );
@@ -485,7 +485,7 @@ public class TestRowUpdater
             where: null,
             filters: new()
             {
-                new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
+                new("year", ">", new ColumnValue(ColumnType.Integer64, 2010))
             },
             orderBy: null,
             parameters: null
@@ -512,7 +512,7 @@ public class TestRowUpdater
             where: null,
             filters: new()
             {
-                new("year", "<=", new ColumnValue(ColumnType.Integer64, "2010"))
+                new("year", "<=", new ColumnValue(ColumnType.Integer64, 2010))
             },
             orderBy: null,
             parameters: null
@@ -547,7 +547,7 @@ public class TestRowUpdater
             },
             filters: new()
             {
-                new("year", ">", new ColumnValue(ColumnType.Integer64, "200010"))
+                new("year", ">", new ColumnValue(ColumnType.Integer64, 200010))
             },
             parameters: null
         );

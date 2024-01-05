@@ -245,7 +245,7 @@ public sealed class RowUpdater
     /// <param name="values"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
-    private async Task CheckUniqueKeys(TableDescriptor table, HLCTimestamp txnId, Dictionary<string, ColumnValue> values)
+    private static async Task CheckUniqueKeys(TableDescriptor table, HLCTimestamp txnId, Dictionary<string, ColumnValue> values)
     {
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
