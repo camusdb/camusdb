@@ -72,6 +72,8 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas
     )
     {
+        using IDisposable writerLock = await index.WriterLockAsync();
+
         foreach (BTreeNode<ObjectIdValue, ObjectIdValue> node in deltas.Nodes)
         {
             if (node.PageOffset.IsNull())
@@ -105,7 +107,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // key count
                 SerializatorTypeSizes.TypeObjectId +  // page offset
-                (36 + 12) * node.KeyCount                    // 36 bytes * node (key + value + next)
+                (36 + 12) * node.KeyCount             // 36 bytes * node (key + value + next)
             ];
 
             pointer = 0;
@@ -119,18 +121,15 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
                 if (entry is not null)
                 {
                     (HLCTimestamp timestamp, ObjectIdValue value) = entry.GetMaxCommitedValue();
-                    //Console.WriteLine("{0} {1} {2}", entry.Key, timestamp, value);
+
+                    //Console.WriteLine("Saved K={0} T={1} V={2}", entry.Key, timestamp, value);
 
                     Serializator.WriteObjectId(nodeBuffer, entry.Key, ref pointer);
                     Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer); // @todo LastValue
                     Serializator.WriteObjectId(nodeBuffer, value, ref pointer); // @todo LastValue
-                    if (entry.Next.IsStarted)
-                    {
-                        var next = (await entry.Next);
-                        Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : new(), ref pointer);
-                    }
-                    else
-                        Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
+
+                    BTreeNode<ObjectIdValue, ObjectIdValue>? next = (await entry.Next);
+                    Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : nullAddressValue, ref pointer);
                 }
                 else
                 {

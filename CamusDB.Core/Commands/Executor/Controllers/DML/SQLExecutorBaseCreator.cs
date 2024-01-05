@@ -111,6 +111,22 @@ internal abstract class SQLExecutorBaseCreator
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) > 0);
                 }
 
+            case NodeType.ExprLessEqualsThan:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+
+                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) <= 0);
+                }
+
+            case NodeType.ExprGreaterEqualsThan:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+
+                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) >= 0);
+                }
+
             case NodeType.ExprOr:
                 {
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);

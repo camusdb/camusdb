@@ -57,9 +57,28 @@ public record struct ObjectIdValue : IComparable<ObjectIdValue>
 
     public int CompareTo(ObjectIdValue other)
     {
-        if (this.a == other.a && this.b == other.b && this.c == other.c)
-            return 0;
+        int result = ((uint)a).CompareTo((uint)other.a);
+        if (result != 0)
+            return result;
 
-        return 1;
+        result = ((uint)b).CompareTo((uint)other.b);
+        if (result != 0)
+            return result;
+
+        return ((uint)c).CompareTo((uint)other.c);
+    }
+
+    public bool Equals(ObjectIdValue other)
+    {
+        return a == other.a && b == other.b && c == other.c;
+    }
+
+    public override int GetHashCode()
+    {
+        int hash = 17;
+        hash = 37 * hash + a.GetHashCode();
+        hash = 37 * hash + b.GetHashCode();
+        hash = 37 * hash + c.GetHashCode();
+        return hash;
     }
 }

@@ -10,6 +10,7 @@ using Nito.AsyncEx;
 using System.Collections.Concurrent;
 
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.BufferPool.Utils;
@@ -18,7 +19,6 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
-using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.GC;
 
@@ -42,8 +42,8 @@ public sealed class GCManager : IDisposable
         this.logicalClock = logicalClock;
         this.tableDescriptors = tableDescriptors;
 
-        pagesReleaser = new(ReleasePages, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
-        indexReleaser = new(ReleaseIndexNodesAndEntries, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        //pagesReleaser = new(ReleasePages, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        //indexReleaser = new(ReleaseIndexNodesAndEntries, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
     }
 
     /// <summary>
@@ -162,7 +162,7 @@ public sealed class GCManager : IDisposable
 
     public void Dispose()
     {
-        indexReleaser.Dispose();
-        pagesReleaser.Dispose();
+        indexReleaser?.Dispose();
+        pagesReleaser?.Dispose();
     }
 }

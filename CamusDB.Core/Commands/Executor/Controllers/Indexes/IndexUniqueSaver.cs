@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.ObjectIds;
+using YamlDotNet.Core.Tokens;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -52,6 +53,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas
     )
     {
+        // @todo this lock will produce contention
+        using IDisposable writerLock = await index.WriterLockAsync();
+
         if (deltas.Nodes.Count == 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
@@ -83,6 +87,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
         //@todo update nodes concurrently
         ObjectIdValue nullValue = new();
+        HLCTimestamp timestampZero = HLCTimestamp.Zero;
 
         foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas.Nodes)
         {
@@ -106,21 +111,19 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 {
                     (HLCTimestamp timestamp, BTreeTuple? tuple) = entry.GetMaxCommitedValue();
 
+                    //Console.WriteLine("Saved K={0} T={1} V={2}", entry.Key, timestamp, tuple);
+
                     SerializeKey(nodeBuffer, entry.Key, ref pointer);
                     Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer);
                     SerializeTuple(nodeBuffer, tuple, ref pointer); // @todo LastValue
-                    if (entry.Next.IsStarted)
-                    {
-                        var next = (await entry.Next);
-                        Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : new(), ref pointer);
-                    }
-                    else
-                        Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
+
+                    BTreeNode<ColumnValue, BTreeTuple?>? next = (await entry.Next);
+                    Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : nullValue, ref pointer);                    
                 }
                 else
                 {
                     Serializator.WriteInt8(nodeBuffer, 0, ref pointer);
-                    Serializator.WriteHLCTimestamp(nodeBuffer, new(), ref pointer);
+                    Serializator.WriteHLCTimestamp(nodeBuffer, timestampZero, ref pointer);
                     Serializator.WriteObjectId(nodeBuffer, nullValue, ref pointer);
                     Serializator.WriteObjectId(nodeBuffer, nullValue, ref pointer);
                     Serializator.WriteObjectId(nodeBuffer, nullValue, ref pointer);
