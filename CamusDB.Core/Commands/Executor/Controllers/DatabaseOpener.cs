@@ -35,16 +35,16 @@ internal sealed class DatabaseOpener
         this.databaseDescriptors = databaseDescriptors;
     }
 
-    public async ValueTask<DatabaseDescriptor> Open(CommandExecutor executor, string name, bool recoveryMode = false)
+    public async ValueTask<DatabaseDescriptor> Open(CommandExecutor executor, HybridLogicalClock hybridLogicalClock, string name, bool recoveryMode = false)
     {
         AsyncLazy<DatabaseDescriptor> openDatabaseLazy = databaseDescriptors.Descriptors.GetOrAdd(
                                                             name,
-                                                            (_) => new AsyncLazy<DatabaseDescriptor>(() => LoadDatabase(name))
+                                                            (_) => new AsyncLazy<DatabaseDescriptor>(() => LoadDatabase(hybridLogicalClock, name))
                                                          );
         return await openDatabaseLazy;
     }
 
-    private static async Task<DatabaseDescriptor> LoadDatabase(string name)
+    private static async Task<DatabaseDescriptor> LoadDatabase(HybridLogicalClock hybridLogicalClock, string name)
     {
         //if (!Directory.Exists(path))
         //    throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
@@ -58,7 +58,7 @@ internal sealed class DatabaseOpener
             name: name,
             storage: storage,
             bufferPool: bufferPool,
-            gc: new GCManager(bufferPool, logicalClock, tableDescriptors),
+            gc: new GCManager(bufferPool, hybridLogicalClock, logicalClock, tableDescriptors),
             tableDescriptors: tableDescriptors
         );
 

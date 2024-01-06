@@ -518,10 +518,10 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             for (int j = 0; j < node.KeyCount; j++)
             {
-                if (children[j].HasExpiredEntries(txnid))
-                    deltas.Entries.Add(children[j]);
-                else
-                    Console.WriteLine(children[j].Key);
+                BTreeEntry<TKey, TValue> entry = children[j];
+
+                if (entry.HasExpiredEntries(txnid))
+                    deltas.Entries.Add(entry);
             }
         }
 

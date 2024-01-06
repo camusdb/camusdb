@@ -24,7 +24,13 @@ namespace CamusDB.Core.GC;
 
 public sealed class GCManager : IDisposable
 {
+    //private const int VersionRetentionPeriod = 3600000;
+
+    private const int VersionRetentionPeriod = 30000;
+
     private readonly BufferPoolManager bufferPool;
+
+    private readonly HybridLogicalClock hlc;
 
     private readonly LC logicalClock;
 
@@ -36,14 +42,15 @@ public sealed class GCManager : IDisposable
 
     private readonly Timer indexReleaser;
 
-    public GCManager(BufferPoolManager bufferPool, LC logicalClock, ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors)
+    public GCManager(BufferPoolManager bufferPool, HybridLogicalClock hybridLogicalClock, LC logicalClock, ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors)
     {
         this.bufferPool = bufferPool;
+        this.hlc = hybridLogicalClock;
         this.logicalClock = logicalClock;
         this.tableDescriptors = tableDescriptors;
 
-        //pagesReleaser = new(ReleasePages, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
-        //indexReleaser = new(ReleaseIndexNodesAndEntries, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        pagesReleaser = new(ReleasePages, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        indexReleaser = new(ReleaseIndexNodesAndEntries, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
     }
 
     /// <summary>
@@ -127,7 +134,7 @@ public sealed class GCManager : IDisposable
     {
         try
         {
-            HLCTimestamp timestamp = new HLCTimestamp(0, 0);
+            HLCTimestamp timestamp = await hlc.SendOrLocalEvent() - VersionRetentionPeriod;
 
             foreach (KeyValuePair<string, AsyncLazy<TableDescriptor>> keyValueDescriptor in tableDescriptors)
             {
@@ -138,10 +145,6 @@ public sealed class GCManager : IDisposable
 
                 foreach (KeyValuePair<string, TableIndexSchema> index in tableDescriptor.Indexes)
                 {
-                    Console.WriteLine(index.Value);
-
-                    Console.WriteLine(index.Value.Column);
-
                     BTree<ColumnValue, BTreeTuple?>? xindex = index.Value.UniqueRows;
                     if (xindex is not null)
                     {
@@ -149,7 +152,11 @@ public sealed class GCManager : IDisposable
 
                         await xindex.Mark(timestamp, deltas);
 
-                        Console.WriteLine(deltas.Entries.Count);
+                        if (deltas.Entries.Count == 0)
+                            continue;
+
+                        foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in deltas.Entries)
+                            entry.RemoveExpired(timestamp);
                     }
                 }
             }

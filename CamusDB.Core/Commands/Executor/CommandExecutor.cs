@@ -96,12 +96,12 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         databaseCreator.Create(ticket);
 
-        return await databaseOpener.Open(this, ticket.DatabaseName);
+        return await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
     }
 
     public async Task<DatabaseDescriptor> OpenDatabase(string database, bool recoveryMode = false)
     {
-        return await databaseOpener.Open(this, database, recoveryMode);
+        return await databaseOpener.Open(this, hybridLogicalClock, database, recoveryMode);
     }
 
     public async Task CloseDatabase(CloseDatabaseTicket ticket)
@@ -126,7 +126,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         return await tableCreator.Create(database, ticket);
     }
@@ -135,7 +135,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -146,7 +146,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -155,7 +155,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     public async Task<TableDescriptor> OpenTable(OpenTableTicket ticket)
     {
-        DatabaseDescriptor descriptor = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor descriptor = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         return await tableOpener.Open(descriptor, ticket.TableName);
     }
@@ -171,7 +171,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         switch (ast.nodeType)
         {
@@ -206,7 +206,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -227,7 +227,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -243,7 +243,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -259,7 +259,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -275,7 +275,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -291,7 +291,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -307,7 +307,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
@@ -325,7 +325,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         switch (ast.nodeType)
         {
@@ -371,7 +371,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
         QueryTicket queryTicket = await sqlExecutor.CreateQueryTicket(this, ticket);
 
