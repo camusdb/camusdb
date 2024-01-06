@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.2
-// DateTime: 1/5/2024 9:08:36 PM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 1/5/2024 9:08:00 PM>
+// DateTime: 1/6/2024 8:36:06 AM
+// Input file <SQLParser\SQLParser.Language.grammar.y - 1/6/2024 8:36:03 AM>
 
 // options: no-lines gplex
 
@@ -26,7 +26,7 @@ internal enum Token {error=2,EOF=3,TOR=4,TAND=5,TEQUALS=6,
     TVALUES=37,TCREATE=38,TTABLE=39,TNOT=40,TNULL=41,TTYPE_STRING=42,
     TTYPE_INT64=43,TTYPE_FLOAT64=44,TTYPE_OBJECT_ID=45,TPRIMARY=46,TKEY=47,TUNIQUE=48,
     TINDEX=49,TALTER=50,TWADD=51,TDROP=52,TCOLUMN=53,TESCAPED_IDENTIFIER=54,
-    TLIMIT=55,TOFFSET=56,TAS=57};
+    TLIMIT=55,TOFFSET=56,TAS=57,TGROUP=58};
 
 internal partial struct ValueType
 { 
@@ -464,7 +464,8 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-6].n, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null); }
         break;
       case 19: // select_stmt -> TSELECT, select_field_list, TFROM, any_identifier, TWHERE, 
-               //                condition, TORDER, TBY, order_list, TLIMIT, select_limit_offset
+               //                condition, TORDER, TBY, order_list, TLIMIT, 
+               //                select_limit_offset
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-10].n, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null); }
         break;
       case 20: // select_stmt -> TSELECT, select_field_list, TFROM, any_identifier, TORDER, TBY, 
@@ -473,8 +474,8 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-10].n, ValueStack[ValueStack.Depth-8].n, null, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null); }
         break;
       case 21: // select_stmt -> TSELECT, select_field_list, TFROM, any_identifier, TWHERE, 
-               //                condition, TORDER, TBY, order_list, TLIMIT, select_limit_offset, 
-               //                TOFFSET, select_limit_offset
+               //                condition, TORDER, TBY, order_list, TLIMIT, 
+               //                select_limit_offset, TOFFSET, select_limit_offset
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-12].n, ValueStack[ValueStack.Depth-10].n, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null); }
         break;
       case 22: // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
@@ -611,10 +612,10 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
         break;
       case 64: // order_item -> any_identifier, TASC
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-2].s; }
+{ CurrentSemanticValue.n = new(NodeType.SortAsc, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }
         break;
       case 65: // order_item -> any_identifier, TDESC
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-2].s; }
+{ CurrentSemanticValue.n = new(NodeType.SortDesc, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }
         break;
       case 66: // condition -> expr
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }

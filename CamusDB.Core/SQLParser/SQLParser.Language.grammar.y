@@ -22,7 +22,7 @@
 %token TDIGIT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
 %token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
-%token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS
+%token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP
 
 %%
 
@@ -136,8 +136,8 @@ order_list  : order_list TCOMMA order_item { $$.n = new(NodeType.IdentifierList,
             ;
 
 order_item  : any_identifier { $$.n = $1.n; $$.s = $1.s; }
-            | any_identifier TASC { $$.n = new(NodeType.SortAsc, $1.n, $2.n, null, null, null); }
-            | any_identifier TDESC { $$.n = new(NodeType.SortDesc, $1.n, $2.n, null, null, null); }
+            | any_identifier TASC { $$.n = new(NodeType.SortAsc, $1.n, $2.n, null, null, null, null, null); }
+            | any_identifier TDESC { $$.n = new(NodeType.SortDesc, $1.n, $2.n, null, null, null, null, null); }
             ;
 
 condition : expr { $$.n = $1.n; $$.s = $1.s; }          

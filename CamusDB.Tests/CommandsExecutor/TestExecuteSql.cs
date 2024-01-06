@@ -458,6 +458,50 @@ public class TestExecuteSql
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectOrderBy5()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots ORDER BY year DESC",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+
+        Assert.AreEqual(2024, result[0].Row["year"].LongValue);
+        Assert.AreEqual(2023, result[1].Row["year"].LongValue);
+        Assert.AreEqual(2000, result[24].Row["year"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectOrderBy6()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots ORDER BY enabled DESC",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+
+        Assert.AreEqual(true, result[0].Row["enabled"].BoolValue);
+        Assert.AreEqual(true, result[1].Row["enabled"].BoolValue);
+        Assert.AreEqual(false, result[24].Row["enabled"].BoolValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectBoundParameters1()
     {
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
@@ -743,6 +787,49 @@ public class TestExecuteSql
         Assert.AreEqual(1, result.Count);
 
         Assert.AreEqual(objectIds[5], result[0].Row["id"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectLimit6()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots LIMIT @limit",
+            parameters: new()
+            {
+                { "@limit", new ColumnValue(ColumnType.Integer64, 1)  }
+            }
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(1, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectLimit7()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots LIMIT @limit OFFSET @offset",
+            parameters: new()
+            {
+                { "@limit", new ColumnValue(ColumnType.Integer64, 1)  },
+                { "@offset", new ColumnValue(ColumnType.Integer64, 1)  }
+            }
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(1, result.Count);
     }
 
     [Test]

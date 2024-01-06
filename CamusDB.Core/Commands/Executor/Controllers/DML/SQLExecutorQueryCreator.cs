@@ -78,13 +78,47 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
             return null;
         
         List<QueryOrderBy> orderClauses = new();
-        LinkedList<string> identifierList = new();
+        LinkedList<(string, QueryOrderByType)> sortList = new();
 
-        GetIdentifierList(ast.extendedTwo, identifierList);
+        GetSortList(ast.extendedTwo, sortList);
 
-        foreach (string orderByColumn in identifierList)
-            orderClauses.Add(new QueryOrderBy(orderByColumn, QueryOrderByType.Ascending));
+        foreach ((string projectionName, QueryOrderByType type) in sortList)
+            orderClauses.Add(new QueryOrderBy(projectionName, type));
 
         return orderClauses;
+    }
+
+    private static void GetSortList(NodeAst orderByAst, LinkedList<(string, QueryOrderByType)> sortList)
+    {
+        if (orderByAst.nodeType == NodeType.Identifier)
+        {
+            sortList.AddLast((orderByAst.yytext ?? "", QueryOrderByType.Ascending));
+            return;
+        }
+
+        if (orderByAst.nodeType == NodeType.SortAsc)
+        {
+            sortList.AddLast((orderByAst.leftAst!.yytext ?? "", QueryOrderByType.Ascending));
+            return;
+        }
+
+        if (orderByAst.nodeType == NodeType.SortDesc)
+        {
+            sortList.AddLast((orderByAst.leftAst!.yytext ?? "", QueryOrderByType.Descending));
+            return;
+        }
+
+        if (orderByAst.nodeType == NodeType.IdentifierList)
+        {
+            if (orderByAst.leftAst is not null)
+                GetSortList(orderByAst.leftAst, sortList);
+
+            if (orderByAst.rightAst is not null)
+                GetSortList(orderByAst.rightAst, sortList);
+
+            return;
+        }
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid order by clause");
     }
 }
