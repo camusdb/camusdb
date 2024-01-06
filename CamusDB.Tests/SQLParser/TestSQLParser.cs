@@ -8,6 +8,10 @@
 
 using NUnit.Framework;
 using CamusDB.Core.SQLParser;
+using Microsoft.VisualStudio.TestPlatform.CommunicationUtilities;
+using NUnit.Framework.Internal;
+using System.Collections.Generic;
+using System.Net.NetworkInformation;
 
 namespace CamusDB.Tests.SQLParser;
 
@@ -249,7 +253,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-    }    
+    }
 
     [Test]
     public void TestParseSimpleSelectAll()
@@ -260,7 +264,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.ExprAllFields, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        
+
         Assert.AreEqual("some_table", ast.rightAst!.yytext);
     }
 
@@ -299,28 +303,157 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.ExprFuncCall, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-
         Assert.AreEqual("some_table", ast.rightAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectProjectionLimit()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `id`,`branch`,`jobType`,`author` FROM `some_table` WHERE `status`= @status_0 LIMIT 1000");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectProjectionLimit2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `id`,`branch`,`jobType`,`author` FROM `some_table` LIMIT 1000");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);        
+    }
+
+    [Test]
+    public void TestParseSimpleSelectProjectionLimit3()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `id`,`branch`,`jobType`,`author` FROM `some_table` LIMIT @limit");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.Placeholder, ast.extendedThree!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectProjectionLimit4()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `id`,`branch`,`jobType`,`author` FROM `some_table` ORDER BY `id` LIMIT @limit");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.Placeholder, ast.extendedThree!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectProjectionLimit5()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `id`,`branch`,`jobType`,`author` FROM `some_table` WHERE `status`= @status_0 ORDER BY `id` LIMIT 1000");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectProjectionLimitOffset()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `id`,`branch`,`jobType` FROM some_table WHERE `status`= @status_0 LIMIT 20 OFFSET 10");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
+        Assert.AreEqual(NodeType.Number, ast.extendedFour!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectProjectionLimitOffset2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `id`,`branch`,`jobType` FROM some_table LIMIT 20 OFFSET 10");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
+        Assert.AreEqual(NodeType.Number, ast.extendedFour!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectProjectionLimitOffset3()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `id`,`branch`,`jobType` FROM some_table LIMIT @limit OFFSET @offset");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.Placeholder, ast.extendedThree!.nodeType);
+        Assert.AreEqual(NodeType.Placeholder, ast.extendedFour!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectProjectionLimitOffset4()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `id`,`branch`,`jobType` FROM some_table ORDER by `id` LIMIT 20 OFFSET 10");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
+        Assert.AreEqual(NodeType.Number, ast.extendedFour!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectProjectionLimitOffset5()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `id`,`branch`,`jobType` FROM some_table WHERE `status`= @status_0 ORDER by `id` LIMIT 20 OFFSET 10");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
+        Assert.AreEqual(NodeType.Number, ast.extendedFour!.nodeType);
     }
 
     [Test]
     public void TestParseSimpleUpdate()
     {
         NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value WHERE TRUE");
-
         Assert.AreEqual(NodeType.Update, ast.nodeType);
-
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.UpdateItem, ast.rightAst!.nodeType);
-
-        Assert.AreEqual("some_table", ast.leftAst!.yytext);        
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
     }
-
     [Test]
     public void TestParseUpdateMultiSet()
     {
         NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value, some_other_field = 100 WHERE TRUE");
-
         Assert.AreEqual(NodeType.Update, ast.nodeType);
 
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
@@ -363,7 +496,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Delete, ast.nodeType);
 
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.ExprEquals, ast.rightAst!.nodeType);        
+        Assert.AreEqual(NodeType.ExprEquals, ast.rightAst!.nodeType);
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
     }
@@ -376,7 +509,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Delete, ast.nodeType);
 
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.ExprEquals, ast.rightAst!.nodeType);        
+        Assert.AreEqual(NodeType.ExprEquals, ast.rightAst!.nodeType);
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
     }
@@ -460,7 +593,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
 
-        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);        
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
     }

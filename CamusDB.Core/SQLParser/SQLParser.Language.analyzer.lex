@@ -34,6 +34,8 @@ TAlter 		    (A|a)(L|l)(T|t)(E|e)(R|r)
 TWAdd 		    (A|a)(D|d)(D|d)
 TDrop 		    (D|d)(R|r)(O|o)(P|p)
 TColumn 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)
+TLimit          (L|l)(I|i)(M|m)(I|i)(T|t)
+TOffset         (O|o)(F|f)(F|f)(S|s)(E|e)(T|t)
 TTypeString     (S|s)(T|t)(R|r)(I|i)(N|n)(G|g)
 TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
 TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
@@ -142,6 +144,10 @@ TGreaterEquals  >=
 {TDrop} { return (int)Token.TDROP; }
 
 {TColumn} { return (int)Token.TCOLUMN; }
+
+{TLimit} { return (int)Token.TLIMIT; }
+
+{TOffset} { return (int)Token.TOFFSET; }
 
 {TTypeObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
 
