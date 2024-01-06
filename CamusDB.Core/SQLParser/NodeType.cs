@@ -38,6 +38,8 @@ public enum NodeType
     UpdateItem,
     Delete,
     Insert,
+    SortAsc,
+    SortDesc,
     CreateTable,
     CreateTableItem,
     CreateTableItemList,

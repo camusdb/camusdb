@@ -13,12 +13,12 @@ using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.BufferPool.Models;
-using CamusDB.Core.BufferPool.Utils;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
+using CamusDB.Core.Util.Comparers;
 
 namespace CamusDB.Core.GC;
 

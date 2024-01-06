@@ -6,13 +6,14 @@ Indexes
 - Lazy read of b+tree nodes
 - Replace children array with lists to save memory
 - Reduce read/write locking to increase concurrency
+- Dynamic number of node children based on size
 
 Query
 - Order BY ASC/DESC
 - Multi-Order clause
 - Use Temp Table to Order
-- Support for aggregations
-- Support aliases in projections
+- Support for other aggregations
+- Fix aliases to work propertly with aggregations
 
 BufferPool/Storage
 - Support multiple items per page to avoid storage waste
@@ -30,5 +31,3 @@ ColumnValue
 SQLParser
 - Make identifiers case insensitive
 
-ObjectId
-- ObjectIdValue CompareTo fix < and >

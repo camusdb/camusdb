@@ -123,8 +123,8 @@ order_list  : order_list TCOMMA order_item { $$.n = new(NodeType.IdentifierList,
             ;
 
 order_item  : any_identifier { $$.n = $1.n; $$.s = $1.s; }
-            | any_identifier TASC { $$.n = $1.n; $$.s = $1.s; }
-            | any_identifier TDESC { $$.n = $1.n; $$.s = $1.s; }
+            | any_identifier TASC { $$.n = new(NodeType.SortAsc, $1.n, $2.n, null, null, null); }
+            | any_identifier TDESC { $$.n = new(NodeType.SortDesc, $1.n, $2.n, null, null, null); }
             ;
 
 condition : expr { $$.n = $1.n; $$.s = $1.s; }          

@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Util.Comparers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -23,9 +24,14 @@ internal sealed class QuerySorter
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "High number of order clauses is not supported");
 
         string firstSortColumn = ticket.OrderBy[0].ColumnName;
-        string secondSortColumn = ticket.OrderBy.Count > 1 ? ticket.OrderBy[1].ColumnName : "id";
+        string secondSortColumn = ticket.OrderBy.Count > 1 ? ticket.OrderBy[1].ColumnName : "id"; // @todo many tables won't have an id column
 
-        SortedDictionary<ColumnValue, SortedDictionary<ColumnValue, List<QueryResultRow>>> sortedRows = new();
+        SortedDictionary<ColumnValue, SortedDictionary<ColumnValue, List<QueryResultRow>>> sortedRows;
+
+        if (ticket.OrderBy[0].Type == QueryOrderByType.Ascending)
+            sortedRows = new();
+        else
+            sortedRows = new(new DescendingComparer<ColumnValue>());
 
         await foreach (QueryResultRow resultRow in dataCursor)
         {
@@ -46,10 +52,18 @@ internal sealed class QuerySorter
             }
             else
             {
-                SortedDictionary<ColumnValue, List<QueryResultRow>> secondSortGroup = new()
-                {
-                    { secondSortColumnValue, new() { resultRow } }
-                };
+                SortedDictionary<ColumnValue, List<QueryResultRow>> secondSortGroup;
+                
+                if (ticket.OrderBy.Count == 1 || ticket.OrderBy[1].Type == QueryOrderByType.Ascending)
+                    secondSortGroup = new()
+                    {
+                        { secondSortColumnValue, new() { resultRow } }
+                    };
+                else
+                    secondSortGroup = new(new DescendingComparer<ColumnValue>())
+                    {
+                        { secondSortColumnValue, new() { resultRow } }
+                    };
 
                 sortedRows.Add(firstSortColumnValue, secondSortGroup);
             }
