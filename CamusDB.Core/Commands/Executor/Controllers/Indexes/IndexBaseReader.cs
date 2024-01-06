@@ -33,14 +33,14 @@ internal abstract class IndexBaseReader
                     return new ColumnValue(ColumnType.Integer64, value);
                 }
 
-            /*case ColumnType.String:
-                Serializator.WriteInt16(nodeBuffer, (int)ColumnType.String, ref pointer);
-                Serializator.WriteInt32(nodeBuffer, columnValue.Value.Length, ref pointer);
-                Serializator.WriteString(nodeBuffer, columnValue.Value, ref pointer);
-                break;*/
+            case ColumnType.String:
+                {
+                    string value = Serializator.ReadString(nodeBuffer, ref pointer);
+                    return new ColumnValue(ColumnType.String, value);
+                }
 
             default:
-                throw new Exception("Can't use this type as index: " + type);
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Can't use this type as index: " + type);
         }
     }
 }

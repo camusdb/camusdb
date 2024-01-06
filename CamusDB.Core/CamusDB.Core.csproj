@@ -40,7 +40,6 @@
     <Folder Include="Statistics\" />
     <Folder Include="Statistics\Models\" />
     <Folder Include="Commands\Executor\Controllers\DDL\" />
-    <Folder Include="Commands\Executor\Controllers\Queries\" />
   </ItemGroup>
 
   <ItemGroup Label="SQLParser">
