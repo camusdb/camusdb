@@ -30,6 +30,8 @@ internal sealed class QueryExecutor
 
     private readonly QueryProjector queryProjector = new();
 
+    private readonly QueryLimiter queryLimiter = new();
+
     public IAsyncEnumerable<QueryResultRow> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {        
         QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
@@ -72,6 +74,13 @@ internal sealed class QueryExecutor
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
                     plan.DataCursor = queryAggregator.AggregateResultset(plan.Ticket, plan.DataCursor);
+                    break;
+
+                case QueryPlanStepType.Limit:
+                    if (plan.DataCursor is null)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
+
+                    plan.DataCursor = queryLimiter.LimitResultset(plan.Ticket, plan.DataCursor);
                     break;
 
                 default:

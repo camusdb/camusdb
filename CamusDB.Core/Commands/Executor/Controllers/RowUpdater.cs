@@ -168,6 +168,8 @@ public sealed class RowUpdater
             filters: ticket.Filters,
             where: ticket.Where,
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: ticket.Parameters
         );
 
@@ -245,7 +247,7 @@ public sealed class RowUpdater
     /// <param name="values"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
-    private async Task CheckUniqueKeys(TableDescriptor table, HLCTimestamp txnId, Dictionary<string, ColumnValue> values)
+    private static async Task CheckUniqueKeys(TableDescriptor table, HLCTimestamp txnId, Dictionary<string, ColumnValue> values)
     {
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {

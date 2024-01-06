@@ -102,6 +102,8 @@ internal sealed class RowDeleter
             filters: ticket.Filters,
             where: ticket.Where,
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 

@@ -107,6 +107,8 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
 
         //Console.WriteLine("GetX={0} {1}", timestamp, newestValue);
 
+        // Read - only transactions do not generate a new version in the MVCC dictionary.
+        // This frees the system from contention on the dictionary lock.
         if (txType == TransactionType.Write)
             mvccValues.TryAdd(timestamp, new(BTreeCommitState.Uncommitted, newestValue));
 
@@ -158,25 +160,52 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
     }
 
     /// <summary>
-    /// 
+    /// Checks if there are expired versions in the MVCC dictionary. If they exist,
+    /// it returns a reference in the deltas to execute a process to clean up the entries.
     /// </summary>
     /// <param name="timestamp"></param>
     /// <returns></returns>
     internal bool HasExpiredEntries(HLCTimestamp timestamp)
     {
-        Console.WriteLine(mvccValues.Count);
-
         if (mvccValues.Count <= 1)
             return false;
 
         foreach (KeyValuePair<HLCTimestamp, BTreeMvccEntry<TValue>> keyValue in mvccValues)
         {
-            Console.WriteLine("HasExpiredEntries {0} {1} {2}", keyValue.Value.CommitState, keyValue.Key, keyValue.Value.Value);
-
             if (keyValue.Key.CompareTo(timestamp) < 0)
                 return true;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Removes expired entries from the MVCC dictionary. If there are many versions,
+    /// it can generate high contention.
+    /// </summary>
+    /// <param name="timestamp"></param>
+    internal void RemoveExpired(HLCTimestamp timestamp)
+    {
+        if (mvccValues.Count <= 1)
+            return;
+
+        int removed = 0;
+
+        // The reference to the maximum committed value must be taken to
+        // prevent it from being removed from the dictionary.
+        (HLCTimestamp timestamp, TValue? value) maxCommited = GetMaxCommitedValue();
+
+        foreach (KeyValuePair<HLCTimestamp, BTreeMvccEntry<TValue>> keyValue in mvccValues)
+        {
+            if (keyValue.Key != maxCommited.timestamp && keyValue.Key.CompareTo(timestamp) < 0)
+            {
+                if (!mvccValues.TryRemove(keyValue.Key, out _))
+                    Console.WriteLine("Couldn't remove {0} {1}", keyValue.Key, keyValue.Value.Value);
+                else
+                    removed++;
+            }
+        }
+
+        Console.WriteLine("Removed {0} versions from entry", removed);
     }
 }

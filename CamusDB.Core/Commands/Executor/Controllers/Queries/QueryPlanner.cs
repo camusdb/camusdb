@@ -14,9 +14,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 public sealed class QueryPlanner
 {
-	public QueryPlanner()
-	{
-	}
+    public QueryPlanner()
+    {
+    }
 
     public QueryPlan GetPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
@@ -27,26 +27,27 @@ public sealed class QueryPlanner
         else
             plan.AddStep(new QueryPlanStep(QueryPlanStepType.QueryFromTableIndex));
 
-        if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)        
+        if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
             plan.AddStep(new QueryPlanStep(QueryPlanStepType.SortBy));
+
+        if (ticket.Limit is not null || ticket.Offset is not null)
+            plan.AddStep(new QueryPlanStep(QueryPlanStepType.Limit));
 
         if (ticket.Projection is not null && ticket.Projection.Count > 0)
         {
             if (HasAggregation(ticket.Projection))
                 plan.AddStep(new QueryPlanStep(QueryPlanStepType.Aggregate));
-            else
-            {
-                if (!IsFullProjection(ticket.Projection))
-                    plan.AddStep(new QueryPlanStep(QueryPlanStepType.ReduceToProjections));
-            }
+
+            if (!IsFullProjection(ticket.Projection))
+                plan.AddStep(new QueryPlanStep(QueryPlanStepType.ReduceToProjections));
         }
 
         return plan;
     }
 
-    private bool IsFullProjection(List<NodeAst> projection)
+    private static bool IsFullProjection(List<NodeAst> projection)
     {
-        return projection.Count == 1 && projection[0].nodeType == NodeType.ExprAllFields;            
+        return projection.Count == 1 && projection[0].nodeType == NodeType.ExprAllFields;
     }
 
     private static bool HasAggregation(List<NodeAst> projection)
@@ -54,22 +55,30 @@ public sealed class QueryPlanner
         foreach (NodeAst nodeAst in projection)
         {
             if (nodeAst.nodeType == NodeType.ExprFuncCall)
-            {
-                switch (nodeAst.leftAst!.yytext!.ToLowerInvariant())
-                {
-                    case "count":
-                    case "max":
-                    case "min":
-                    case "sum":
-                    case "avg":
-                    case "distinct":
+                return CheckIfSupportedAggregation(nodeAst, projection);
 
-                        if (projection.Count > 1)
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Aggregations cannot be accompanied by other projections or expressions.");
+            if (nodeAst.nodeType == NodeType.ExprAlias)
+                return CheckIfSupportedAggregation(nodeAst.leftAst!, projection);
+        }
 
-                        return true;
-                }
-            }
+        return false;
+    }
+
+    private static bool CheckIfSupportedAggregation(NodeAst nodeAst, List<NodeAst> projection)
+    {
+        switch (nodeAst.leftAst!.yytext!.ToLowerInvariant())
+        {
+            case "count":
+            case "max":
+            case "min":
+            case "sum":
+            case "avg":
+            case "distinct":
+
+                if (projection.Count > 1)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Aggregations cannot be accompanied by other projections or expressions.");
+
+                return true;
         }
 
         return false;

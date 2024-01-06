@@ -36,6 +36,8 @@ public sealed class ExecuteSQLController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
 
+            Console.WriteLine(body);
+
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
@@ -76,6 +78,8 @@ public sealed class ExecuteSQLController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
 
+            Console.WriteLine(body);
+
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
@@ -110,6 +114,8 @@ public sealed class ExecuteSQLController : CommandsController
         {
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
+
+            Console.WriteLine(body);
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)

@@ -67,7 +67,7 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         if (type != ColumnType.String && type != ColumnType.Id && type != ColumnType.Null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.String to string value");
 
-        if (value is null)
+        if (type != ColumnType.Null && value is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.String to string value (null)");
 
         Type = type;

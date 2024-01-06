@@ -44,7 +44,7 @@ public record struct HLCTimestamp : IComparable<HLCTimestamp>
 
         return 1;
     }
-    
+
     public bool IsNull()
     {
         return L == 0 && C == 0;
@@ -54,4 +54,8 @@ public record struct HLCTimestamp : IComparable<HLCTimestamp>
     {
         return string.Format("HLC({0}:{1})", L, C);
     }
+
+    public static HLCTimestamp operator +(HLCTimestamp a, int b) => new(a.L + b, a.C);
+
+    public static HLCTimestamp operator -(HLCTimestamp a, int b) => new(a.L - b, a.C);
 }

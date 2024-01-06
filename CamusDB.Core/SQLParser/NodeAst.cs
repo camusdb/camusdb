@@ -20,16 +20,31 @@ public sealed class NodeAst
 
 	public NodeAst? extendedTwo;
 
-	public string? yytext;
+    public NodeAst? extendedThree;
 
-    public NodeAst(NodeType nodeType, NodeAst? leftAst, NodeAst? rightAst, NodeAst? extendedOne, NodeAst? extendedTwo, string? yytext)
+    public NodeAst? extendedFour;
+
+    public string? yytext;
+
+    public NodeAst(
+        NodeType nodeType,
+        NodeAst? leftAst,
+        NodeAst? rightAst,
+        NodeAst? extendedOne,
+        NodeAst? extendedTwo,
+        NodeAst? extendedThree,
+        NodeAst? extendedFour,
+        string? yytext
+    )
 	{
 		this.nodeType = nodeType;
 		this.leftAst = leftAst;
 		this.rightAst = rightAst;
 		this.extendedOne = extendedOne;
 		this.extendedTwo = extendedTwo;
-		this.yytext = yytext;
+        this.extendedThree = extendedThree;
+        this.extendedFour = extendedFour;
+        this.yytext = yytext;
 
         //if (leftAst is not null)
         //	Console.WriteLine("left={0}/{1}", leftAst.nodeType, leftAst.yytext);

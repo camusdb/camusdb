@@ -212,6 +212,8 @@ public class TestRowDeletorCloseDb
                 new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
             },
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 
@@ -234,6 +236,8 @@ public class TestRowDeletorCloseDb
                 new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
             },
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 

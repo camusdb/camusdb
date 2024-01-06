@@ -563,6 +563,8 @@ internal sealed class TestRowInsertor
             filters: null,
             where: null,
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 
@@ -678,6 +680,8 @@ internal sealed class TestRowInsertor
             where: null,
             filters: null,
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 

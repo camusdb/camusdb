@@ -32,6 +32,7 @@ public enum NodeType
     ExprAllFields,
     ExprFuncCall,
     ExprArgumentList,
+    ExprAlias,
     Select,
     Update,
     UpdateList,

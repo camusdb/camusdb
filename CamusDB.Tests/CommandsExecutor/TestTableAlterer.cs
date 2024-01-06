@@ -199,6 +199,8 @@ internal sealed class TestTableAlterer
            where: null,
            filters: null,
            orderBy: null,
+           limit: null,
+           offset: null,
            parameters: null
         );
 
@@ -375,6 +377,8 @@ internal sealed class TestTableAlterer
            where: null,
            filters: null,
            orderBy: null,
+           limit: null,
+           offset: null,
            parameters: null
         );
 
@@ -412,6 +416,8 @@ internal sealed class TestTableAlterer
            where: null,
            filters: null,
            orderBy: null,
+           limit: null,
+           offset: null,
            parameters: null
         );
 

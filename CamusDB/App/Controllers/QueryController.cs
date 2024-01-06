@@ -47,6 +47,8 @@ public sealed class QueryController : CommandsController
                 where: null,
                 filters: request.Filters,
                 orderBy: request.OrderBy,
+                limit: null,
+                offset: null,
                 parameters: null
             );
 
