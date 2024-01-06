@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -35,6 +34,8 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
                     filters: null,
                     where: ast.extendedOne,
                     orderBy: GetQueryClause(ast),
+                    limit: ast.extendedThree,
+                    offset: ast.extendedFour,
                     parameters: ticket.Parameters
                 );
 

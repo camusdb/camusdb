@@ -623,6 +623,130 @@ public class TestExecuteSql
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectProjectionAlias1()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT year + year AS sumYear FROM robots WHERE year<2005",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(5, result.Count);
+
+        foreach (QueryResultRow row in result)
+        {
+            Assert.False(row.Row.ContainsKey("id"));
+            Assert.False(row.Row.ContainsKey("name"));
+            Assert.False(row.Row.ContainsKey("year"));
+
+            Assert.True(row.Row.ContainsKey("sumYear"));
+            Assert.True(row.Row["sumYear"].LongValue >= 4000);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectLimit1()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots LIMIT 1",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(1, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectLimit2()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots LIMIT 5",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(5, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectLimit3()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE year >= 2020 LIMIT 5",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(5, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectLimit4()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE year >= 2020 ORDER BY year LIMIT 5",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(5, result.Count);
+
+        Assert.AreEqual(2020, result[0].Row["year"].LongValue);
+        Assert.AreEqual(2021, result[1].Row["year"].LongValue);
+        Assert.AreEqual(2022, result[2].Row["year"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectLimit5()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectIds) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots LIMIT 1 OFFSET 5",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(1, result.Count);
+
+        Assert.AreEqual(objectIds[5], result[0].Row["id"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteInsert1()
     {
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();

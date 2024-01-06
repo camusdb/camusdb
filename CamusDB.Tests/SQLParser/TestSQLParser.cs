@@ -442,6 +442,30 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSimpleSelectProjectionAliases()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT year + 100 AS y FROM some_table");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.ExprAlias, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);        
+    }
+
+    [Test]
+    public void TestParseSimpleSelectProjectionAliases2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `year` + 100 AS `y` FROM some_table");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.ExprAlias, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);        
+    }
+
+    [Test]
     public void TestParseSimpleUpdate()
     {
         NodeAst ast = SQLParserProcessor.Parse("UPDATE some_table SET some_field = some_value WHERE TRUE");

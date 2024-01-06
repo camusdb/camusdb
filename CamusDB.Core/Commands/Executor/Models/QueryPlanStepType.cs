@@ -14,5 +14,6 @@ public enum QueryPlanStepType
     QueryFromTableIndex,
     SortBy,
     Aggregate,
-    ReduceToProjections
+    ReduceToProjections,
+    Limit
 }

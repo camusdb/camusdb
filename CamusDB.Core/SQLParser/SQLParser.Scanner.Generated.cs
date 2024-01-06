@@ -5,8 +5,8 @@
 //  See accompanying file GPLEXcopyright.rtf.
 //
 //  GPLEX Version:  1.2.2
-//  DateTime: 1/5/2024 6:42:40 PM
-//  GPLEX input file <SQLParser/SQLParser.Language.analyzer.lex - 1/5/2024 6:42:37 PM>
+//  DateTime: 1/5/2024 9:08:36 PM
+//  GPLEX input file <SQLParser/SQLParser.Language.analyzer.lex - 1/5/2024 9:05:58 PM>
 //  GPLEX frame file <embedded resource>
 //
 //  Option settings: verbose, parser, stack, minimize
@@ -1855,7 +1855,6 @@ yylval.s = yytext; return (int)Token.TPLACEHOLDER;
         case 148: // Recognized '{Identifier}',	Shortest string "AD"
         case 149: // Recognized '{Identifier}',	Shortest string "AL"
         case 150: // Recognized '{Identifier}',	Shortest string "AN"
-        case 151: // Recognized '{Identifier}',	Shortest string "AS"
         case 154: // Recognized '{Identifier}',	Shortest string "ALT"
         case 155: // Recognized '{Identifier}',	Shortest string "ALTE"
         case 159: // Recognized '{Identifier}',	Shortest string "TA"
@@ -1955,6 +1954,9 @@ return (int)Token.TCOLUMN;
             break;
         case 147: // Recognized '{TBy}',	Shortest string "BY"
 return (int)Token.TBY;
+            break;
+        case 151: // Recognized '{TAs}',	Shortest string "AS"
+return (int)Token.TAS;
             break;
         case 152: // Recognized '{TAsc}',	Shortest string "ASC"
 return (int)Token.TASC;

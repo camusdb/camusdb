@@ -29,16 +29,22 @@ internal sealed class QueryProjector
             {
                 if (ast.nodeType == NodeType.ExprAllFields)
                 {
-                    foreach (KeyValuePair<string, ColumnValue> xx in resultRow.Row)
-                        projected[xx.Key] = xx.Value;
+                    foreach (KeyValuePair<string, ColumnValue> keyValue in resultRow.Row)
+                        projected[keyValue.Key] = keyValue.Value;
+
+                    continue;
                 }
-                else
+
+                if (ast.nodeType == NodeType.Identifier)
                 {
-                    if (ast.nodeType == NodeType.Identifier)
-                        projected[ast.yytext!] = SqlExecutor.EvalExpr(ast, resultRow.Row, ticket.Parameters);
-                    else
-                        projected[(i++).ToString()] = SqlExecutor.EvalExpr(ast, resultRow.Row, ticket.Parameters);
+                    projected[ast.yytext!] = SqlExecutor.EvalExpr(ast, resultRow.Row, ticket.Parameters);
+                    continue;
                 }
+                
+                if (ast.nodeType == NodeType.ExprAlias)
+                    projected[ast.rightAst!.yytext ?? ""] = SqlExecutor.EvalExpr(ast.leftAst!, resultRow.Row, ticket.Parameters);
+                else
+                    projected[(i++).ToString()] = SqlExecutor.EvalExpr(ast, resultRow.Row, ticket.Parameters);                
             }
 
             yield return new(resultRow.Tuple, projected);

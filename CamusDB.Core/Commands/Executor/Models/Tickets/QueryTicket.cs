@@ -11,7 +11,7 @@ using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public readonly struct QueryTicket
+public sealed class QueryTicket
 {
     public HLCTimestamp TxnId { get; }
 
@@ -31,6 +31,10 @@ public readonly struct QueryTicket
 
     public List<QueryOrderBy>? OrderBy { get; }
 
+    public NodeAst? Limit { get; }
+
+    public NodeAst? Offset { get; }
+
     public Dictionary<string, ColumnValue>? Parameters { get; }
 
     public QueryTicket(
@@ -43,6 +47,8 @@ public readonly struct QueryTicket
         List<QueryFilter>? filters,
         NodeAst? where,
         List<QueryOrderBy>? orderBy,
+        NodeAst? limit,
+        NodeAst? offset,
         Dictionary<string, ColumnValue>? parameters)
     {
         TxnId = txnId;
@@ -54,6 +60,8 @@ public readonly struct QueryTicket
         Filters = filters;
         Where = where;
         OrderBy = orderBy;
+        Limit = limit;
+        Offset = offset;
         Parameters = parameters;
     }
 }

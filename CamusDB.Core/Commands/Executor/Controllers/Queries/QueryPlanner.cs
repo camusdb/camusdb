@@ -14,9 +14,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 public sealed class QueryPlanner
 {
-	public QueryPlanner()
-	{
-	}
+    public QueryPlanner()
+    {
+    }
 
     public QueryPlan GetPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
@@ -27,8 +27,11 @@ public sealed class QueryPlanner
         else
             plan.AddStep(new QueryPlanStep(QueryPlanStepType.QueryFromTableIndex));
 
-        if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)        
+        if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
             plan.AddStep(new QueryPlanStep(QueryPlanStepType.SortBy));
+
+        if (ticket.Limit is not null || ticket.Offset is not null)
+            plan.AddStep(new QueryPlanStep(QueryPlanStepType.Limit));
 
         if (ticket.Projection is not null && ticket.Projection.Count > 0)
         {
@@ -44,9 +47,9 @@ public sealed class QueryPlanner
         return plan;
     }
 
-    private bool IsFullProjection(List<NodeAst> projection)
+    private static bool IsFullProjection(List<NodeAst> projection)
     {
-        return projection.Count == 1 && projection[0].nodeType == NodeType.ExprAllFields;            
+        return projection.Count == 1 && projection[0].nodeType == NodeType.ExprAllFields;
     }
 
     private static bool HasAggregation(List<NodeAst> projection)

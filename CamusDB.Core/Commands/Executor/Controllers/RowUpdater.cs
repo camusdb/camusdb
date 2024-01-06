@@ -168,6 +168,8 @@ public sealed class RowUpdater
             filters: ticket.Filters,
             where: ticket.Where,
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: ticket.Parameters
         );
 

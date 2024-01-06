@@ -119,6 +119,8 @@ internal sealed class TestRowMultiInsertor
             where: null,
             filters: null,
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 
@@ -174,6 +176,8 @@ internal sealed class TestRowMultiInsertor
             where: null,
             filters: null,
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 

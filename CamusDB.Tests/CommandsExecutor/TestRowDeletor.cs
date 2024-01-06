@@ -251,6 +251,8 @@ public class TestRowDeletor
            where: null,
            filters: null,
            orderBy: null,
+           limit: null,
+           offset: null,
            parameters: null
         );
 
@@ -286,6 +288,8 @@ public class TestRowDeletor
            where: null,
            filters: null,
            orderBy: null,
+           limit: null,
+           offset: null,
            parameters: null
         );
 
@@ -325,6 +329,8 @@ public class TestRowDeletor
            where: null,
            filters: null,
            orderBy: null,
+           limit: null,
+           offset: null,
            parameters: null
         );
 
@@ -364,6 +370,8 @@ public class TestRowDeletor
                 new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
             },
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 
@@ -390,6 +398,8 @@ public class TestRowDeletor
                 new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
             },
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
        );
 
@@ -422,6 +432,8 @@ public class TestRowDeletor
                 new("year", ">", new ColumnValue(ColumnType.Integer64, 2010))
             },
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 
@@ -458,6 +470,8 @@ public class TestRowDeletor
             where: null,
             filters: null,
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 

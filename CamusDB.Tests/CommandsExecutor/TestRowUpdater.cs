@@ -368,6 +368,8 @@ public class TestRowUpdater
             where: null,
             filters: null,
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 
@@ -386,6 +388,8 @@ public class TestRowUpdater
             {
                 new("name", "=", new ColumnValue(ColumnType.String, "updated value"))
             },
+            limit: null,
+            offset: null,
             orderBy: null,
             parameters: null
         );
@@ -405,6 +409,8 @@ public class TestRowUpdater
             {
                 new("name", "=", new ColumnValue(ColumnType.String, "another updated value"))
             },
+            limit: null,
+            offset: null,
             orderBy: null,
             parameters: null
         );
@@ -488,6 +494,8 @@ public class TestRowUpdater
                 new("year", ">", new ColumnValue(ColumnType.Integer64, 2010))
             },
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 
@@ -515,6 +523,8 @@ public class TestRowUpdater
                 new("year", "<=", new ColumnValue(ColumnType.Integer64, 2010))
             },
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 

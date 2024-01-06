@@ -81,6 +81,8 @@ public sealed class TableColumnDropper
             filters: null,
             where: null,
             orderBy: null,
+            limit: null,
+            offset: null,
             parameters: null
         );
 

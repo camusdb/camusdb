@@ -22,7 +22,7 @@
 %token TDIGIT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
 %token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
-%token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET
+%token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS
 
 %%
 
@@ -109,7 +109,8 @@ select_field_list  : select_field_list TCOMMA select_field_item { $$.n = new(Nod
                    | select_field_item { $$.n = $1.n; $$.s = $1.s; }
                    ;
 
-select_field_item  : expr { $$.n = $1.n; $$.s = $1.s; }                   
+select_field_item  : expr { $$.n = $1.n; $$.s = $1.s; }
+                   | expr TAS any_identifier { $$.n = new(NodeType.ExprAlias, $1.n, $3.n, null, null, null, null, null); }             
                    ;
 
 select_limit_offset : number  { $$.n = $1.n; $$.s = $1.s; }
