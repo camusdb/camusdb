@@ -37,11 +37,9 @@ public sealed class QueryPlanner
         {
             if (HasAggregation(ticket.Projection))
                 plan.AddStep(new QueryPlanStep(QueryPlanStepType.Aggregate));
-            else
-            {
-                if (!IsFullProjection(ticket.Projection))
-                    plan.AddStep(new QueryPlanStep(QueryPlanStepType.ReduceToProjections));
-            }
+
+            if (!IsFullProjection(ticket.Projection))
+                plan.AddStep(new QueryPlanStep(QueryPlanStepType.ReduceToProjections));
         }
 
         return plan;
@@ -57,22 +55,30 @@ public sealed class QueryPlanner
         foreach (NodeAst nodeAst in projection)
         {
             if (nodeAst.nodeType == NodeType.ExprFuncCall)
-            {
-                switch (nodeAst.leftAst!.yytext!.ToLowerInvariant())
-                {
-                    case "count":
-                    case "max":
-                    case "min":
-                    case "sum":
-                    case "avg":
-                    case "distinct":
+                return CheckIfSupportedAggregation(nodeAst, projection);
 
-                        if (projection.Count > 1)
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Aggregations cannot be accompanied by other projections or expressions.");
+            if (nodeAst.nodeType == NodeType.ExprAlias)
+                return CheckIfSupportedAggregation(nodeAst.leftAst!, projection);
+        }
 
-                        return true;
-                }
-            }
+        return false;
+    }
+
+    private static bool CheckIfSupportedAggregation(NodeAst nodeAst, List<NodeAst> projection)
+    {
+        switch (nodeAst.leftAst!.yytext!.ToLowerInvariant())
+        {
+            case "count":
+            case "max":
+            case "min":
+            case "sum":
+            case "avg":
+            case "distinct":
+
+                if (projection.Count > 1)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Aggregations cannot be accompanied by other projections or expressions.");
+
+                return true;
         }
 
         return false;

@@ -59,6 +59,19 @@ internal sealed class QueryAggregator
                         return QueryAggregationType.Min;
                 }
             }
+
+            if (nodeAst.nodeType == NodeType.ExprAlias && nodeAst.leftAst!.nodeType == NodeType.ExprFuncCall)
+            {
+                switch (nodeAst.leftAst!.leftAst!.yytext!.ToLowerInvariant())
+                {
+                    case "count":
+                        return QueryAggregationType.Count;
+                    case "max":
+                        return QueryAggregationType.Max;
+                    case "min":
+                        return QueryAggregationType.Min;
+                }
+            }
         }
 
         return QueryAggregationType.None;
