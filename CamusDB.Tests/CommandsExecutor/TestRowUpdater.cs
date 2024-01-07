@@ -433,6 +433,7 @@ public class TestRowUpdater
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
             },
+            exprValues: null,
             where: null,
             filters: new()
             {
@@ -471,6 +472,7 @@ public class TestRowUpdater
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
             },
+            exprValues: null,
             where: null,
             filters: new()
             {
@@ -555,6 +557,7 @@ public class TestRowUpdater
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
             },
+            exprValues: null,
             filters: new()
             {
                 new("year", ">", new ColumnValue(ColumnType.Integer64, 200010))

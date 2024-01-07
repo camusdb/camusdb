@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.SQLParser;
-using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
@@ -21,43 +20,42 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
         if (ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
 
-        LinkedList<(string, ColumnValue)> updateItemList = new();
+        LinkedList<(string, NodeAst)> updateItemList = new();
 
-        GetUpdateItemList(ast.rightAst, new(), ticket.Parameters, updateItemList);
+        GetUpdateItemList(ast.rightAst, updateItemList);
 
-        Dictionary<string, ColumnValue> values = new(updateItemList.Count);
+        Dictionary<string, NodeAst> values = new(updateItemList.Count);
 
-        foreach ((string columnName, ColumnValue value) updateItem in updateItemList)
+        foreach ((string columnName, NodeAst value) updateItem in updateItemList)
             values[updateItem.columnName] = updateItem.value;
 
         return new(
             txnId: await executor.NextTxnId(),
             databaseName: ticket.DatabaseName,
             tableName: tableName,
-            plainValues: values,
+            plainValues: null,
+            exprValues: values,
             where: ast.extendedOne,
             filters: null,
             parameters: ticket.Parameters
         );
     }
 
-    // @todo expressions here must be evaluated at a later stage
-    // to take into account the row's values so that we can do: amount = amount + 1
-    private static void GetUpdateItemList(NodeAst updateAstItemList, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters, LinkedList<(string, ColumnValue)> updateItemList)
+    private static void GetUpdateItemList(NodeAst updateAstItemList, LinkedList<(string, NodeAst)> updateItemList)
     {
         if (updateAstItemList.nodeType == NodeType.UpdateItem)
         {
-            updateItemList.AddLast((updateAstItemList.leftAst!.yytext ?? "", EvalExpr(updateAstItemList.rightAst!, row, parameters)));
+            updateItemList.AddLast((updateAstItemList.leftAst!.yytext ?? "", updateAstItemList.rightAst!));
             return;
         }
 
         if (updateAstItemList.nodeType == NodeType.UpdateList)
         {
             if (updateAstItemList.leftAst is not null)
-                GetUpdateItemList(updateAstItemList.leftAst, row, parameters, updateItemList);
+                GetUpdateItemList(updateAstItemList.leftAst, updateItemList);
 
             if (updateAstItemList.rightAst is not null)
-                GetUpdateItemList(updateAstItemList.rightAst, row, parameters, updateItemList);
+                GetUpdateItemList(updateAstItemList.rightAst, updateItemList);
 
             return;
         }

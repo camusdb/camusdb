@@ -1093,6 +1093,35 @@ public class TestExecuteSql
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteUpdateIncrement()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "UPDATE robots SET year = year + 1000 WHERE true",
+            parameters: null
+        );
+
+        Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(ticket));
+
+        ExecuteSQLTicket queryTicket = new(
+           database: dbname,
+           sql: "SELECT * FROM robots",
+           parameters: null
+       );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+
+        foreach (QueryResultRow row in result)
+            Assert.True(row.Row["year"].LongValue >= 3000);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteDeleteNoConditions()
     {
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();

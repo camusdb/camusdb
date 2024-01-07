@@ -399,6 +399,7 @@ internal sealed class TestTableAlterer
             {
                 { "type", new ColumnValue(ColumnType.Integer64, 100) }
             },
+            exprValues: null,
             where: null,
             filters: null,
             parameters: null

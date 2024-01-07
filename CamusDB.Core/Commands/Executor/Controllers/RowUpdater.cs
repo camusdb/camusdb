@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
@@ -27,55 +28,63 @@ public sealed class RowUpdater
 {
     private readonly IndexSaver indexSaver = new();
 
-    private readonly RowSerializer rowSerializer = new();    
+    private readonly RowSerializer rowSerializer = new();
+
+    /// <summary>
+    /// Validates that the column name exists in the current table schema
+    /// </summary>
+    /// <param name="columns"></param>
+    /// <param name="columnName"></param>
+    /// <exception cref="CamusDBException"></exception>
+    private static void ValidateIfColumnExists(List<TableColumnSchema> columns, string columnName)
+    {
+        bool hasColumn = false;
+
+        for (int i = 0; i < columns.Count; i++)
+        {
+            TableColumnSchema column = columns[i];
+
+            if (string.IsNullOrEmpty(columnName))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid or empty column name in values list");
+
+            if (string.Equals(column.Name, columnName))
+            {
+                if (column.Primary)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key field");
+
+                hasColumn = true;
+                break;
+            }
+        }
+
+        if (!hasColumn)
+            throw new CamusDBException(
+                CamusDBErrorCodes.UnknownColumn,
+                $"Unknown column '{columnName}' in column list"
+            );
+    }
 
     /// <summary>
     /// Validates that all columns and values in the update statement are valid
+    /// This validation is performed when the values are simple columnvalues (not expressions)
     /// </summary>
-    /// <param name="table"></param>
-    /// <param name="ticket"></param>
+    /// <param name="columns"></param>
+    /// <param name="plainValues"></param>
     /// <exception cref="CamusDBException"></exception>
-    private static void Validate(TableDescriptor table, UpdateTicket ticket) // @todo optimize this
-    {        
-        if (ticket.PlainValues is null || ticket.PlainValues.Count == 0)
+    private static void ValidatePlainValues(List<TableColumnSchema> columns, Dictionary<string, ColumnValue> plainValues)
+    {
+        if (plainValues.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
 
-        List<TableColumnSchema> columns = table.Schema.Columns!;
-
-        foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.PlainValues)
-        {
-            bool hasColumn = false;
-
-            for (int i = 0; i < columns.Count; i++)
-            {
-                TableColumnSchema column = columns[i];
-
-                if (string.IsNullOrEmpty(columnValue.Key))
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid or empty column name in values list");
-
-                if (string.Equals(column.Name, columnValue.Key))
-                {
-                    if (column.Primary)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key field");
-
-                    hasColumn = true;
-                    break;
-                }
-            }
-
-            if (!hasColumn)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.UnknownColumn,
-                    $"Unknown column '{columnValue.Key}' in column list"
-                );
-        }
+        foreach (KeyValuePair<string, ColumnValue> columnValue in plainValues)
+            ValidateIfColumnExists(columns, columnValue.Key);
 
         foreach (TableColumnSchema columnSchema in columns)
         {
             if (!columnSchema.NotNull)
                 continue;
 
-            if (!ticket.PlainValues.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
+            if (!plainValues.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
                 continue;
 
             if (columnValue.Type == ColumnType.Null)
@@ -89,6 +98,60 @@ public sealed class RowUpdater
     }
 
     /// <summary>
+    /// Validates that all columns and values in the update statement are valid
+    /// This validation is performed when the values are SQL expressions.
+    /// </summary>
+    /// <param name="columns"></param>
+    /// <param name="exprValues"></param>
+    /// <exception cref="CamusDBException"></exception>
+    private static void ValidateExprValues(List<TableColumnSchema> columns, Dictionary<string, NodeAst> exprValues)
+    {
+        if (exprValues.Count == 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
+
+        foreach (KeyValuePair<string, NodeAst> columnValue in exprValues)
+            ValidateIfColumnExists(columns, columnValue.Key);
+
+        foreach (TableColumnSchema columnSchema in columns)
+        {
+            Console.WriteLine("columnSchema={0} NotNull={1}", columnSchema.Name, columnSchema.NotNull);
+
+            if (!columnSchema.NotNull)
+                continue;
+
+            if (!exprValues.TryGetValue(columnSchema.Name, out NodeAst? columnValue))
+                continue;
+
+            Console.WriteLine("columnSchema={0} NodeType={1}", columnSchema.Name, columnValue.nodeType);
+
+            // This is a superficial validation of the data. It only works if the value to be updated is exactly NULL.
+            // For example: UPDATE robots SET name = NULL.
+            if (columnValue.nodeType == NodeType.Null)             
+                throw new CamusDBException(CamusDBErrorCodes.NotNullViolation, $"Column '{columnSchema.Name}' cannot be null");
+        }
+    }
+
+    /// <summary>
+    /// Validates that all columns and values in the update statement are valid
+    /// </summary>
+    /// <param name="table"></param>
+    /// <param name="ticket"></param>
+    /// <exception cref="CamusDBException"></exception>
+    private static void Validate(TableDescriptor table, UpdateTicket ticket) // @todo optimize this
+    {
+        if (ticket.PlainValues is not null && ticket.ExprValues is not null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot specify both plan and sql expr values at the same time");
+
+        List<TableColumnSchema> columns = table.Schema.Columns!;
+
+        if (ticket.PlainValues is not null)
+            ValidatePlainValues(columns, ticket.PlainValues);
+
+        if (ticket.ExprValues is not null)
+            ValidateExprValues(columns, ticket.ExprValues);
+    }
+
+    /// <summary>
     /// Schedules a new Update operation by the specified filters
     /// </summary>
     /// <param name="database"></param>
@@ -97,6 +160,8 @@ public sealed class RowUpdater
     /// <returns></returns>
     internal async Task<int> Update(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, UpdateTicket ticket)
     {
+        // Performs a superficial validation of the ticket to ensure that everything is correct.
+        // However, the values must be validated again later against the internal state of the transaction.
         Validate(table, ticket);
 
         UpdateFluxState state = new(
@@ -143,6 +208,12 @@ public sealed class RowUpdater
             if (ticket.PlainValues is not null)
             {
                 if (index.Key != "~pk" && !ticket.PlainValues.ContainsKey(index.Value.Column))
+                    continue;
+            }
+
+            if (ticket.ExprValues is not null)
+            {
+                if (index.Key != "~pk" && !ticket.ExprValues.ContainsKey(index.Value.Column))
                     continue;
             }
 
@@ -257,6 +328,9 @@ public sealed class RowUpdater
             if (index.Value.Type != IndexType.Unique)
                 continue;
 
+            if (index.Key == "~pk")
+                continue;
+
             BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.Value.UniqueRows;
 
             if (uniqueIndex is null)
@@ -294,15 +368,19 @@ public sealed class RowUpdater
 
         //Console.WriteLine("Unique indexes {0}", state.Indexes.UniqueIndexes.Count);
 
-        foreach (QueryResultRow row in rowsToUpdate)
+        foreach (QueryResultRow queryRow in rowsToUpdate)
         {
-            await CheckUniqueKeys(table, ticket.TxnId, ticket.PlainValues);
+            Dictionary<string, ColumnValue> rowValues = GetNewUpdatedRow(queryRow, ticket);
 
-            BTreeTuple tuple = UpdateNewRowVersionDisk(tablespace, table, state, row, ticket);
+            CheckForNotNulls(table, rowValues);
+
+            await CheckUniqueKeys(table, ticket.TxnId, rowValues);
+
+            BTreeTuple tuple = UpdateNewRowVersionDisk(tablespace, table, state, queryRow, rowValues);
 
             mainTableDeltas = await UpdateTableIndex(state, tuple);
 
-            uniqueIndexDeltas = await UpdateUniqueIndexes(state, ticket, tuple, row);
+            uniqueIndexDeltas = await UpdateUniqueIndexes(state, ticket, tuple, queryRow);
 
             await PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas);
 
@@ -318,14 +396,89 @@ public sealed class RowUpdater
         return FluxAction.Continue;
     }
 
-    private BTreeTuple UpdateNewRowVersionDisk(BufferPoolManager tablespace, TableDescriptor table, UpdateFluxState state, QueryResultRow row, UpdateTicket ticket)
+    /// <summary>
+    /// Validates if any NOT NULL constraint is being violated with respect to the new proposed values to be updated.
+    /// </summary>
+    /// <param name="table"></param>
+    /// <param name="rowValues"></param>
+    /// <exception cref="CamusDBException"></exception>
+    private void CheckForNotNulls(TableDescriptor table, Dictionary<string, ColumnValue> rowValues)
     {
-        //Console.WriteLine("Original tuple: {0}", row.Tuple);
+        List<TableColumnSchema> columns = table.Schema.Columns!;
 
-        foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.PlainValues)        
-            row.Row[keyValuePair.Key] = keyValuePair.Value;
+        foreach (TableColumnSchema columnSchema in columns)
+        {
+            if (!columnSchema.NotNull)
+                continue;
 
-        byte[] buffer = rowSerializer.Serialize(table, row.Row, row.Tuple.SlotOne);
+            if (!rowValues.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
+                continue;
+
+            if (columnValue.Type == ColumnType.Null)
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.NotNullViolation,
+                    $"Column '{columnSchema.Name}' cannot be null"
+                );
+            }
+        }
+    }
+
+    /// <summary>
+    /// Assigns the plain column values to a fresh copy of the original row returned in the query, 
+    /// or evaluates the SQL expressions with reference to the values in the original row and placeholders.
+    /// </summary>
+    /// <param name="row"></param>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
+    /// <exception cref="CamusDBException"></exception>
+    private static Dictionary<string, ColumnValue> GetNewUpdatedRow(QueryResultRow row, UpdateTicket ticket)
+    {
+        Dictionary<string, ColumnValue> rowValues = new(row.Row.Count); // create a fresh copy
+
+        foreach (KeyValuePair<string, ColumnValue> keyValue in row.Row)
+            rowValues[keyValue.Key] = keyValue.Value;
+
+        if (ticket.PlainValues is not null)
+        {
+            foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.PlainValues)
+                rowValues[keyValuePair.Key] = keyValuePair.Value;
+
+            return rowValues;
+        }
+
+        if (ticket.ExprValues is not null)
+        {
+            foreach (KeyValuePair<string, NodeAst> keyValuePair in ticket.ExprValues)
+                rowValues[keyValuePair.Key] = SqlExecutor.EvalExpr(keyValuePair.Value, row.Row, ticket.Parameters);
+
+            return rowValues;
+        }
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid values in update ticket");
+    }
+
+    /// <summary>
+    /// Serializes the new values of the row with their respective new page addresses and also 
+    /// assigns a new row offset where the new version of the row will be stored.
+    /// </summary>
+    /// <param name="tablespace"></param>
+    /// <param name="table"></param>
+    /// <param name="state"></param>
+    /// <param name="row"></param>
+    /// <param name="ticket"></param>
+    /// <returns></returns>
+    private BTreeTuple UpdateNewRowVersionDisk(
+        BufferPoolManager tablespace, 
+        TableDescriptor table, 
+        UpdateFluxState state, 
+        QueryResultRow row,
+        Dictionary<string, ColumnValue> rowValues
+    )
+    {
+        //Console.WriteLine("Original tuple: {0}", row.Tuple);        
+
+        byte[] buffer = rowSerializer.Serialize(table, rowValues, row.Tuple.SlotOne);
 
         // Allocate a new page for the row
         BTreeTuple tuple = new(
@@ -338,7 +491,7 @@ public sealed class RowUpdater
         tablespace.WriteDataToPageBatch(state.ModifiedPages, tuple.SlotTwo, 0, buffer);
 
         return tuple;
-    }   
+    }
 
     private async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>?> UpdateTableIndex(UpdateFluxState state, BTreeTuple tuple)
     {
@@ -354,7 +507,7 @@ public sealed class RowUpdater
     }
 
     private async Task<List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>> UpdateUniqueIndexes(UpdateFluxState state, UpdateTicket ticket, BTreeTuple tuple, QueryResultRow row)
-    {        
+    {
         List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> deltas = new();
 
         //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);

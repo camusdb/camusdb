@@ -11,7 +11,7 @@ using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public readonly struct UpdateTicket
+public sealed class UpdateTicket
 {
     public HLCTimestamp TxnId { get; }
 

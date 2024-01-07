@@ -206,6 +206,7 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
             }
         }
 
-        Console.WriteLine("Removed {0} versions from entry", removed);
+        if (removed > 0)
+            Console.WriteLine("Removed {0} versions from entry", removed);
     }
 }

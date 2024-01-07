@@ -102,7 +102,7 @@ update_list : update_list TCOMMA update_item { $$.n = new(NodeType.UpdateList, $
 		    | update_item { $$.n = $1.n; $$.s = $1.s; }
 		    ;
 
-update_item    : any_identifier TEQUALS simple_expr { $$.n = new(NodeType.UpdateItem, $1.n, $3.n, null, null, null, null, null); }
+update_item    : any_identifier TEQUALS expr { $$.n = new(NodeType.UpdateItem, $1.n, $3.n, null, null, null, null, null); }
 			   ;
 
 select_field_list  : select_field_list TCOMMA select_field_item { $$.n = new(NodeType.IdentifierList, $1.n, $3.n, null, null, null, null, null); }

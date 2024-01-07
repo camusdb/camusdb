@@ -109,6 +109,7 @@ public class TestRowUpdaterUnique
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
             },
+            exprValues: null,
             where: null,
             filters: new()
             {
