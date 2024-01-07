@@ -19,7 +19,9 @@ public readonly struct UpdateTicket
 
     public string TableName { get; }
 
-    public Dictionary<string, ColumnValue> Values { get; }
+    public Dictionary<string, NodeAst>? ExprValues { get; }
+
+    public Dictionary<string, ColumnValue>? PlainValues { get; }
 
     public NodeAst? Where { get; }
 
@@ -31,7 +33,8 @@ public readonly struct UpdateTicket
         HLCTimestamp txnId,
         string databaseName,
         string tableName,
-        Dictionary<string, ColumnValue> values,
+        Dictionary<string, ColumnValue>? plainValues,
+        Dictionary<string, NodeAst>? exprValues,
         NodeAst? where,
         List<QueryFilter>? filters,
         Dictionary<string, ColumnValue>? parameters)
@@ -39,7 +42,8 @@ public readonly struct UpdateTicket
         TxnId = txnId;
         DatabaseName = databaseName;
         TableName = tableName;
-        Values = values;
+        PlainValues = plainValues;
+        ExprValues = exprValues;
         Where = where;
         Filters = filters;
         Parameters = parameters;

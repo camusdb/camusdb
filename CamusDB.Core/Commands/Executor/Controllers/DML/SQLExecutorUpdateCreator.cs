@@ -34,7 +34,7 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
             txnId: await executor.NextTxnId(),
             databaseName: ticket.DatabaseName,
             tableName: tableName,
-            values: values,
+            plainValues: values,
             where: ast.extendedOne,
             filters: null,
             parameters: ticket.Parameters

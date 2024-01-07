@@ -395,7 +395,7 @@ internal sealed class TestTableAlterer
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            plainValues: new Dictionary<string, ColumnValue>()
             {
                 { "type", new ColumnValue(ColumnType.Integer64, 100) }
             },

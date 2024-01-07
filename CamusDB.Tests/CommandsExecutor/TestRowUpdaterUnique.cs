@@ -105,7 +105,7 @@ public class TestRowUpdaterUnique
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            plainValues: new Dictionary<string, ColumnValue>()
             {
                 { "name", new ColumnValue(ColumnType.String, "updated value") }
             },

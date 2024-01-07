@@ -77,7 +77,7 @@ public sealed class UpdateController : CommandsController
                 txnId: await executor.NextTxnId(),
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",                
-                values: request.Values ?? new(),
+                plainValues: request.Values ?? new(),
                 where: null,
                 filters: request.Filters ?? new(),
                 parameters: null

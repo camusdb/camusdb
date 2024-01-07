@@ -36,13 +36,13 @@ public sealed class RowUpdater
     /// <param name="ticket"></param>
     /// <exception cref="CamusDBException"></exception>
     private static void Validate(TableDescriptor table, UpdateTicket ticket) // @todo optimize this
-    {
-        List<TableColumnSchema> columns = table.Schema.Columns!;
-
-        if (ticket.Values is null || ticket.Values.Count == 0)
+    {        
+        if (ticket.PlainValues is null || ticket.PlainValues.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
 
-        foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.Values)
+        List<TableColumnSchema> columns = table.Schema.Columns!;
+
+        foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.PlainValues)
         {
             bool hasColumn = false;
 
@@ -75,7 +75,7 @@ public sealed class RowUpdater
             if (!columnSchema.NotNull)
                 continue;
 
-            if (!ticket.Values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
+            if (!ticket.PlainValues.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
                 continue;
 
             if (columnValue.Type == ColumnType.Null)
@@ -140,8 +140,11 @@ public sealed class RowUpdater
             if (index.Value.Type != IndexType.Unique)
                 continue;
 
-            if (index.Key != "~pk" && !ticket.Values.ContainsKey(index.Value.Column))
-                continue;
+            if (ticket.PlainValues is not null)
+            {
+                if (index.Key != "~pk" && !ticket.PlainValues.ContainsKey(index.Value.Column))
+                    continue;
+            }
 
             indexState.UniqueIndexes.Add(index.Value);
         }
@@ -293,7 +296,7 @@ public sealed class RowUpdater
 
         foreach (QueryResultRow row in rowsToUpdate)
         {
-            await CheckUniqueKeys(table, ticket.TxnId, ticket.Values);
+            await CheckUniqueKeys(table, ticket.TxnId, ticket.PlainValues);
 
             BTreeTuple tuple = UpdateNewRowVersionDisk(tablespace, table, state, row, ticket);
 
@@ -319,7 +322,7 @@ public sealed class RowUpdater
     {
         //Console.WriteLine("Original tuple: {0}", row.Tuple);
 
-        foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)        
+        foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.PlainValues)        
             row.Row[keyValuePair.Key] = keyValuePair.Value;
 
         byte[] buffer = rowSerializer.Serialize(table, row.Row, row.Tuple.SlotOne);

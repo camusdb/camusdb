@@ -28,13 +28,13 @@ internal sealed class UpdateValidator : ValidatorBase
                 "Table name is required"
             );
 
-        if (ticket.Values is null)
+        if (ticket.PlainValues is null)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 "Values are required"
             );
 
-        foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.Values)
+        foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.PlainValues)
         {
             switch (columnValue.Value.Type)
             {
