@@ -1,6 +1,5 @@
 Indexes
 - Read indexes in parallel
-- Block table to read indexes
 - Destroy internal subtrees in multi index after delete
 - Version b+trees on disk
 - Lazy read of b+tree nodes
@@ -9,7 +8,6 @@ Indexes
 - Dynamic number of node children based on size
 
 Query
-- Order BY ASC/DESC
 - Multi-Order clause
 - Use Temp Table to Order
 - Support for other aggregations

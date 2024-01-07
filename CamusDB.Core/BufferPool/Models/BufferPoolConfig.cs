@@ -19,4 +19,6 @@ public static class BufferPoolConfig
     public const int LengthOffset = 22; // 2 version + 4 checksum + 4 next page + 4 data length
 
     public const int DataOffset = 26; // 2 version + 4 checksum + 12 next page + 4 data length
+
+    public static readonly int NumberBuckets = Environment.ProcessorCount; // number of buffer pool buckets
 }

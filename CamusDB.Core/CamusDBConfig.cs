@@ -20,7 +20,7 @@ public static class CamusDBConfig
 
     public const int PageSize = 4096;
 
-    public static int BufferPoolSize = 65536;
+    public static int BufferPoolSize = 65536 / Environment.ProcessorCount;
 
     #endregion
 

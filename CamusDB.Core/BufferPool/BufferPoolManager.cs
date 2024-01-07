@@ -6,8 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Collections.Concurrent;
-
 using CamusDB.Core.Storage;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Hashes;
@@ -43,18 +41,23 @@ namespace CamusDB.Core.BufferPool;
  * +----------+----------+----------+----------------------------------------+
  * | data length (4 bytes integer)                        |
  * +----------+----------+----------+---------------------+
+ * 
+ * Pages are stored in concurrent dictionary structures. Due to the way concurrency is controlled, 
+ * locks can generate high contention, slowing down the modification of pages. 
+ * For this reason, the concept of buckets is introduced. Each bucket contains a concurrent dictionary.
+ * 
+ * A separate process called GC (Garbage Collection) attempts to free infrequently 
+ * used pages with the goal of reducing the memory footprint.
  */
 public sealed class BufferPoolManager
 {
     private readonly StorageManager storage;
 
     private readonly LC logicalClock;
-   
-    private readonly ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> pages = new();    
-    
-    public int NumberPages => pages.Count;
 
-    public ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> Pages => pages;
+    private readonly BufferPoolBucket[] buckets = new BufferPoolBucket[BConfig.NumberBuckets];
+
+    public BufferPoolBucket[] Buckets => buckets;
 
     /// <summary>
     /// Constructor
@@ -64,8 +67,11 @@ public sealed class BufferPoolManager
     public BufferPoolManager(StorageManager storage, LC logicalClock)
     {
         this.storage = storage;
-        this.logicalClock = logicalClock;        
-    }    
+        this.logicalClock = logicalClock;
+
+        for (int i = 0; i < buckets.Length; i++)
+            buckets[i] = new BufferPoolBucket();
+    }
 
     private BufferPage LoadPage(ObjectIdValue offset)
     {
@@ -78,21 +84,29 @@ public sealed class BufferPoolManager
     }
 
     /// <summary>
-    /// Load a page reading its contents
+    /// Loads the content of a page.
+    /// Pages are organized into buckets, and the buckets have a concurrent dictionary.
+    /// Using the hash, the pages are distributed among the buckets.
     /// </summary>
     /// <param name="offset"></param>
     /// <returns></returns>
     public BufferPage ReadPage(ObjectIdValue offset)
     {
-        Lazy<BufferPage> lazyBufferPage = pages.GetOrAdd(offset, (_) => new Lazy<BufferPage>(() => LoadPage(offset)));
+        uint hashCode = (uint)offset.GetHashCode();
+        BufferPoolBucket poolBucket = buckets[hashCode % BConfig.NumberBuckets];
+
+        Lazy<BufferPage> lazyBufferPage = poolBucket.Pages.GetOrAdd(offset, (_) => new Lazy<BufferPage>(() => LoadPage(offset)));
+
         BufferPage bufferPage = lazyBufferPage.Value;
         bufferPage.Accesses++;
         bufferPage.LastAccess = logicalClock.Increment();
+
         return bufferPage;
     }
 
     /// <summary>
-    /// Returns the sequence of pages where a record is stored and its read locks.
+    /// Returns the sequence of pages where a record is stored and its read locks.    
+    /// NextPageOffset stores the address of the next page that must be read to load the buffer into memory.
     /// </summary>
     /// <param name="offset"></param>
     /// <returns></returns>
@@ -123,7 +137,10 @@ public sealed class BufferPoolManager
     }
 
     /// <summary>
-    /// Returns the sequence of pages where a record is stored and its write locks.
+    /// Returns the sequence of pages where a record/row is stored and its write locks.
+    ///
+    /// Obtaining write locks is necessary to prevent the contents of the pages from being modified
+    /// in parallel, causing consistency problems in reading.
     /// </summary>
     /// <param name="offset"></param>
     /// <returns></returns>
@@ -461,7 +478,11 @@ public sealed class BufferPoolManager
             foreach (BufferPage memoryPage in pagesChain)
             {
                 pagesToDelete.Add(new BufferPageOperation(BufferPageOperationType.Delete, memoryPage.Offset, 0, Array.Empty<byte>()));
-                pages.TryRemove(memoryPage.Offset, out _);
+
+                uint hashCode = (uint)memoryPage.Offset.GetHashCode();
+                BufferPoolBucket poolBucket = buckets[hashCode % BConfig.NumberBuckets];
+
+                poolBucket.Pages.TryRemove(memoryPage.Offset, out _);
             }
 
             storage.WriteBatch(pagesToDelete);
@@ -482,6 +503,7 @@ public sealed class BufferPoolManager
 
     public void Clear()
     {
-        pages.Clear();
-    }    
+        for (int i = 0; i < buckets.Length; i++)
+            buckets[i].Clear();
+    }
 }

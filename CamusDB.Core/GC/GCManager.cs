@@ -15,10 +15,11 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Util.Comparers;
 using CamusDB.Core.CommandsExecutor.Models;
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
-using CamusDB.Core.Util.Comparers;
+using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
 
 namespace CamusDB.Core.GC;
 
@@ -26,7 +27,7 @@ public sealed class GCManager : IDisposable
 {
     //private const int VersionRetentionPeriod = 3600000;
 
-    private const int VersionRetentionPeriod = 30000;
+    private const int VersionRetentionPeriod = 60000; // 1 minute
 
     private readonly BufferPoolManager bufferPool;
 
@@ -49,81 +50,96 @@ public sealed class GCManager : IDisposable
         this.logicalClock = logicalClock;
         this.tableDescriptors = tableDescriptors;
 
-        pagesReleaser = new(ReleasePages, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        pagesReleaser = new(ReleasePages, null, TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60));
         indexReleaser = new(ReleaseIndexNodesAndEntries, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
     }
 
     /// <summary>
-    /// This method is called every 30 seconds and it marks old pages as candidates for release
+    /// This method is called every 60 seconds and it marks old pages as candidates for release
     /// </summary>
     /// <param name="state"></param>
     private void ReleasePages(object? state)
     {
-        ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> pages = bufferPool.Pages;
-
         try
         {
-            float percent = pages.Count / (float)CamusConfig.BufferPoolSize;
-            if (percent < 0.8)
-                return;
-
-            ulong ticks = logicalClock.Increment(pages.Count);
-            ulong threshold = Math.Max(655360, ticks - 655360); // @todo this number must be choosen based on the actual activity of the database
-            int numberToFree = (int)(CamusConfig.BufferPoolSize * (1 - (percent > 0.8 ? 0.8 : percent)));
-
-            foreach (KeyValuePair<ObjectIdValue, Lazy<BufferPage>> keyValuePair in pages)
-            {
-                Lazy<BufferPage> page = keyValuePair.Value;
-
-                if (!page.IsValueCreated)
-                    continue;
-
-                if (page.Value.CreatedAt > threshold) // @todo this number must be choosen based on the actual activity of the database
-                    continue;
-
-                if (lruPages.TryGetValue(page.Value.Accesses, out List<BufferPage>? pagesAccesses))
-                    pagesAccesses.Add(page.Value);
-                else
-                    lruPages.TryAdd(page.Value.Accesses, new() { page.Value });
-            }
-
-            List<ObjectIdValue> pagesToRelease = new(numberToFree);
-
-            foreach (KeyValuePair<ulong, List<BufferPage>> keyValue in lruPages)
-            {
-                foreach (BufferPage page in keyValue.Value)
-                {
-                    if (page.LastAccess > threshold) // @todo this number must be choosen based on the actual activity of the database
-                        continue;
-
-                    pagesToRelease.Add(page.Offset);
-                }
-
-                if (pagesToRelease.Count >= numberToFree)
-                    break;
-            }
-
-            int numberFreed = 0;
-
-            foreach (ObjectIdValue offset in pagesToRelease)
-            {
-                pages.TryRemove(offset, out _);
-
-                numberFreed++;
-
-                if (numberFreed > numberToFree)
-                    break;
-            }
-
-            if (numberFreed > 0)
-                Console.WriteLine("Total pages freed: {0}, remaining: {1}", numberFreed, pages.Count);
-
-            lruPages.Clear();
+            for (int i = 0; i < BConfig.NumberBuckets; i++)
+                ReleaseBucketPages(i, bufferPool.Buckets[i].Pages);
         }
         catch (Exception ex)
         {
             Console.WriteLine("ReleasePages: {0}", ex.Message, ex.StackTrace);
         }
+    }
+
+    /// <summary>
+    /// Releases each individual bucket one by one
+    /// </summary>
+    /// <param name="i"></param>
+    /// <param name="pages"></param>
+    private void ReleaseBucketPages(int i, ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> pages)
+    {
+        // Counting the elements in the concurrent dictionary requires locking
+        // all the buckets and can cause high contention.
+        int numPages = pages.Count;
+
+        float percent = numPages / (float)CamusConfig.BufferPoolSize;
+        if (percent < 0.8)
+            return;
+
+        lruPages.Clear();
+
+        ulong ticks = logicalClock.Increment(numPages);
+        ulong threshold = Math.Max(655360, ticks - 655360); // @todo this number must be choosen based on the actual activity of the database
+        int numberToFree = (int)(CamusConfig.BufferPoolSize * 0.05); // release 5% of the pages
+
+        foreach (KeyValuePair<ObjectIdValue, Lazy<BufferPage>> keyValuePair in pages)
+        {
+            Lazy<BufferPage> page = keyValuePair.Value;
+
+            if (!page.IsValueCreated)
+                continue;
+
+            if (page.Value.CreatedAt > threshold) // @todo this number must be choosen based on the actual activity of the database
+                continue;
+
+            if (lruPages.TryGetValue(page.Value.Accesses, out List<BufferPage>? pagesAccesses))
+                pagesAccesses.Add(page.Value);
+            else
+                lruPages.TryAdd(page.Value.Accesses, new() { page.Value });
+        }
+
+        List<ObjectIdValue> pagesToRelease = new(numberToFree);
+
+        foreach (KeyValuePair<ulong, List<BufferPage>> keyValue in lruPages)
+        {
+            foreach (BufferPage page in keyValue.Value)
+            {
+                if (page.LastAccess > threshold) // @todo this number must be choosen based on the actual activity of the database
+                    continue;
+
+                pagesToRelease.Add(page.Offset);
+            }
+
+            if (pagesToRelease.Count >= numberToFree)
+                break;
+        }
+
+        int numberFreed = 0;
+
+        foreach (ObjectIdValue offset in pagesToRelease)
+        {
+            pages.TryRemove(offset, out _);
+
+            numberFreed++;
+
+            if (numberFreed > numberToFree)
+                break;
+        }
+
+        if (numberFreed > 0)
+            Console.WriteLine("Total pages freed: {0}, remaining: {1}", numberFreed, pages.Count);
+
+        lruPages.Clear();
     }
 
     /// <summary>
