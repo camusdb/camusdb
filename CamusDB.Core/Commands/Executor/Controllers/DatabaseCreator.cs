@@ -29,7 +29,10 @@ internal sealed class DatabaseCreator
                 return false;
 
             throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Database already exists");
-        }        
+        }
+
+        if (name == "information_schema")
+            throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Reserved database name");
 
         Console.WriteLine("Database {0} successfully created at {1}", name, dbPath);
 

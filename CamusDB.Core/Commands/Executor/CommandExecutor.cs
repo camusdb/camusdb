@@ -57,6 +57,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly SqlExecutor sqlExecutor;
 
+    private readonly SchemaQuerier schemaQuerier;
+
     private readonly CommandValidator validator;
 
     /// <summary>
@@ -86,6 +88,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         rowDeleter = new();
         queryExecutor = new();
         sqlExecutor = new();
+        schemaQuerier = new();
     }
 
     #region database
@@ -182,6 +185,15 @@ public sealed class CommandExecutor : IAsyncDisposable
                     validator.Validate(createTableTicket);
 
                     return await tableCreator.Create(database, createTableTicket);
+                }
+
+            case NodeType.AlterTableAddColumn:
+                {
+                    AlterTableTicket alterTableTicket = sqlExecutor.CreateAlterTableTicket(await NextTxnId(), ticket, ast);
+
+                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!);
+
+                    return await tableAlterer.Alter(queryExecutor, database, table, alterTableTicket);
                 }
 
             /*case NodeType.DropTable:
@@ -394,5 +406,5 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await databaseCloser.DisposeAsync();
-    }    
+    }
 }

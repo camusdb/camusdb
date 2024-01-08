@@ -66,11 +66,13 @@ public static class CamusDBConfig
     /// </summary>
     public const string PrimaryKeyInternalName = "~pk";
 
+    public const string InformationSchemaInternalName = "information_schema";
+
     #endregion   
 
     #region keys
     public readonly static byte[] SchemaKey = Encoding.Unicode.GetBytes("schema");
 
-    public readonly static byte[] SystemKey = Encoding.Unicode.GetBytes("system");
+    public readonly static byte[] SystemKey = Encoding.Unicode.GetBytes("system");    
     #endregion
 }

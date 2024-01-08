@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.2
-// DateTime: 1/7/2024 10:15:02 AM
-// Input file <SQLParser\SQLParser.Language.grammar.y - 1/7/2024 10:14:43 AM>
+// DateTime: 1/8/2024 1:36:57 PM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 1/8/2024 1:36:51 PM>
 
 // options: no-lines gplex
 
@@ -465,8 +465,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-6].n, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null); }
         break;
       case 19: // select_stmt -> TSELECT, select_field_list, TFROM, any_identifier, TWHERE, 
-               //                condition, TORDER, TBY, order_list, TLIMIT, 
-               //                select_limit_offset
+               //                condition, TORDER, TBY, order_list, TLIMIT, select_limit_offset
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-10].n, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null); }
         break;
       case 20: // select_stmt -> TSELECT, select_field_list, TFROM, any_identifier, TORDER, TBY, 
@@ -475,8 +474,8 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-10].n, ValueStack[ValueStack.Depth-8].n, null, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null); }
         break;
       case 21: // select_stmt -> TSELECT, select_field_list, TFROM, any_identifier, TWHERE, 
-               //                condition, TORDER, TBY, order_list, TLIMIT, 
-               //                select_limit_offset, TOFFSET, select_limit_offset
+               //                condition, TORDER, TBY, order_list, TLIMIT, select_limit_offset, 
+               //                TOFFSET, select_limit_offset
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-12].n, ValueStack[ValueStack.Depth-10].n, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null); }
         break;
       case 22: // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
@@ -498,15 +497,15 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
         break;
       case 27: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
                //                     field_type
-{ CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }
+{ CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
         break;
       case 28: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
                //                     any_identifier, field_type
-{ CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null); }
+{ CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
         break;
       case 29: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
                //                     any_identifier, field_type, create_table_constraint
-{ CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null); }
+{ CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null); }
         break;
       case 30: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, any_identifier
 { CurrentSemanticValue.n = new(NodeType.AlterTableDropColumn, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }

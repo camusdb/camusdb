@@ -22,6 +22,7 @@ public static class CamusDBErrorCodes
     public const string InvalidInternalOperation = "CADB0099";
     public const string InvalidPageChecksum = "CADB0098";
     public const string InvalidPageLength = "CADB0097";
+    public const string InvalidInformationSchema = "CADB0096";
 
     public const string InvalidInput = "CADB0400";
     public const string UnknownType = "CADB0401";

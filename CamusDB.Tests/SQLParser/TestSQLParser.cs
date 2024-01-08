@@ -776,6 +776,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("year", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TypeInteger64, ast.extendedOne!.nodeType);
     }
 
     [Test]
@@ -788,6 +790,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("year", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TypeInteger64, ast.extendedOne!.nodeType);
     }
 
     [Test]
@@ -800,6 +804,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("year", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TypeInteger64, ast.extendedOne!.nodeType);
     }
 
     [Test]
