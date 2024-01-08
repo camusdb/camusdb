@@ -370,6 +370,38 @@ public class TestExecuteSql
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectWhereEqualsNull()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE name = null",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsEmpty(result);        
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereEqualsNull2()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE name = @null",
+            parameters: new() { { "@null", new ColumnValue(ColumnType.Null, 0) } }
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectOrderBy()
     {
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
