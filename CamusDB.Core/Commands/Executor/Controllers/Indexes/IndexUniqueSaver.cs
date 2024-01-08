@@ -15,7 +15,6 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.ObjectIds;
-using System;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -30,14 +29,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     public async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple?>> Save(SaveUniqueIndexTicket ticket)
     {
-        // @todo this lock will produce contention
-        using IDisposable writerLock = await ticket.Index.WriterLockAsync();
-
-        BTreeMutationDeltas<ColumnValue, BTreeTuple?> mutations = await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value);
-
-        await Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, mutations);
-
-        return mutations;
+        return await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value);
     }
 
     public async Task Remove(RemoveUniqueIndexTicket ticket)
@@ -53,13 +45,16 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         //    Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
-    private async Task Persist(
+    public async Task Persist(
         BufferPoolManager tablespace,
         BTree<ColumnValue, BTreeTuple?> index,
         List<BufferPageOperation> modifiedPages,
         BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas
     )
-    {        
+    {
+        // @todo this lock will produce contention
+        using IDisposable writerLock = await index.WriterLockAsync();
+
         if (deltas.Nodes.Count == 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
@@ -95,7 +90,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
         foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas.Nodes)
         {
-            using IDisposable readerLock = await node.ReaderLockAsync();
+            //using IDisposable readerLock = await node.ReaderLockAsync();
 
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // keyCount(4 byte) + 
@@ -122,7 +117,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                     SerializeTuple(nodeBuffer, tuple, ref pointer); // @todo LastValue
 
                     BTreeNode<ColumnValue, BTreeTuple?>? next = (await entry.Next);
-                    Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : nullValue, ref pointer);           
+                    Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : nullValue, ref pointer);                    
                 }
                 else
                 {

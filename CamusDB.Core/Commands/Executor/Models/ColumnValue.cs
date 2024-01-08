@@ -79,9 +79,6 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         if (other is null)
             throw new ArgumentException("Object is not a ColumnValue");
 
-        if (Type != ColumnType.Null && other.Type == ColumnType.Null)
-            return 1;
-
         if (Type != other.Type)
             throw new ArgumentException($"Comparing incompatible ColumnValue: {Type} and {other.Type}");
 

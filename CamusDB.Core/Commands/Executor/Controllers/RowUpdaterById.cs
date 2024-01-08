@@ -236,13 +236,11 @@ public sealed class RowUpdaterById
                 );
 
             SaveUniqueIndexTicket saveUniqueIndexTicket = new(
-                tablespace: state.Database.BufferPool,
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
                 key: uniqueKeyValue,
-                value: state.RowTuple,
-                modifiedPages: state.ModifiedPages
+                value: state.RowTuple
             );
 
             deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
@@ -340,12 +338,10 @@ public sealed class RowUpdaterById
         }
 
         SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
-            tablespace: state.Database.BufferPool,
             index: state.Table.Rows,
             txnId: state.Ticket.TxnId,
             key: state.RowTuple.SlotOne,
-            value: state.RowTuple.SlotTwo,
-            modifiedPages: state.ModifiedPages
+            value: state.RowTuple.SlotTwo
         );
 
         // Main table index stores rowid pointing to page offset
@@ -359,24 +355,28 @@ public sealed class RowUpdaterById
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private Task<FluxAction> PersistIndexChanges(UpdateByIdFluxState state)
+    private async Task<FluxAction> PersistIndexChanges(UpdateByIdFluxState state)
     {
         if (state.Indexes.MainIndexDeltas is null)
-            return Task.FromResult(FluxAction.Abort);
+            return FluxAction.Abort;
 
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in state.Indexes.MainIndexDeltas.MvccEntries)
-            btreeEntry.CommitState = BTreeCommitState.Committed;        
+            btreeEntry.CommitState = BTreeCommitState.Committed;
+
+        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas);
 
         if (state.Indexes.UniqueIndexDeltas is null)
-            return Task.FromResult(FluxAction.Continue);
+            return FluxAction.Continue;
 
         foreach ((BTree<ColumnValue, BTreeTuple?> index, BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
         {
             foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
+
+            await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
         }
 
-        return Task.FromResult(FluxAction.Continue);
+        return FluxAction.Continue;
     }
 
     /// <summary>

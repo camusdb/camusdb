@@ -135,13 +135,11 @@ internal sealed class IndexMultiSaver : IndexBaseSaver
 
                     //Console.WriteLine("Saved deltas for {0} {1}", delta.Value.Node.Id, subTree.Id);
 
-                    SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
-                        tablespace: tablespace,
+                    SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(                        
                         index: subTree,
                         txnId: txnid,
                         key: value.SlotOne,
-                        value.SlotTwo,
-                        modifiedPages: modifiedPages
+                        value.SlotTwo
                     );
 
                     // @todo fix this

@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -43,6 +44,34 @@ internal sealed class IndexSaver
     public async Task Save(SaveMultiKeyIndexTicket ticket)
     {        
         await indexMultiSaver.Save(ticket);
+    }
+
+    public async Task Persist(
+        BufferPoolManager tablespace,
+        BTree<ObjectIdValue, ObjectIdValue> index,
+        List<BufferPageOperation> modifiedPages,
+        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas)
+    {
+        await indexUniqueOffsetSaver.Persist(
+            tablespace,
+            index,
+            modifiedPages,
+            deltas
+        );
+    }
+
+    public async Task Persist(
+        BufferPoolManager tablespace,
+        BTree<ColumnValue, BTreeTuple?> index,
+        List<BufferPageOperation> modifiedPages,
+        BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas)
+    {
+        await indexUniqueSaver.Persist(
+            tablespace,
+            index,
+            modifiedPages,
+            deltas
+        );
     }
 
     public async Task Remove(RemoveUniqueIndexTicket ticket)

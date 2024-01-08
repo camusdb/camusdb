@@ -168,7 +168,7 @@ internal sealed class RowDeleter
 
             uniqueIndexDeltas = await UpdateUniqueIndexes(state, ticket, tuple, row);
 
-            PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas);
+            await PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas);
 
             Console.WriteLine(
                 "Row with rowid {0} deleted to page {1}",
@@ -185,12 +185,10 @@ internal sealed class RowDeleter
     private async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>?> DeleteFromTableIndex(DeleteFluxState state, BTreeTuple tuple)
     {
         SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
-            tablespace: state.Database.BufferPool,
             index: state.Table.Rows,
             txnId: state.Ticket.TxnId,
             key: tuple.SlotOne,
-            value: tuple.SlotTwo,
-            modifiedPages: state.ModifiedPages
+            value: tuple.SlotTwo
         );
 
         // Main table index stores rowid pointing to page offset
@@ -222,13 +220,11 @@ internal sealed class RowDeleter
                 );
 
             SaveUniqueIndexTicket saveUniqueIndexTicket = new(
-                tablespace: state.Database.BufferPool,
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
                 key: uniqueKeyValue,
-                value: tuple,
-                modifiedPages: state.ModifiedPages
+                value: tuple
             );
 
             //Console.WriteLine("Saving unique index {0} {1} {2}", uniqueIndex, uniqueKeyValue, tuple);
@@ -244,13 +240,15 @@ internal sealed class RowDeleter
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private void PersistIndexChanges(DeleteFluxState state, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> uniqueIndexDeltas)
+    private async Task PersistIndexChanges(DeleteFluxState state, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> uniqueIndexDeltas)
     {
         if (mainIndexDeltas is null)
             return;
 
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in mainIndexDeltas.MvccEntries)
             btreeEntry.CommitState = BTreeCommitState.Committed;
+
+        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, mainIndexDeltas);
 
         if (uniqueIndexDeltas is null)
             return;
@@ -259,6 +257,8 @@ internal sealed class RowDeleter
         {
             foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
+
+            await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
         }
     }
 

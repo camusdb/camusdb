@@ -97,6 +97,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// and {@code null} if the key is not in the symbol table</returns>
     public async Task<TValue?> Get(TransactionType txType, HLCTimestamp txnid, TKey key)
     {
+        using IDisposable readerLock = await ReaderLockAsync();
+
         if (root is null)
         {
             Console.WriteLine("root is null");
@@ -109,9 +111,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     private async Task<TValue?> GetInternal(BTreeNode<TKey, TValue>? node, TransactionType txType, HLCTimestamp txnid, TKey key, int ht)
     {
         if (node is null)
-            return default;
-
-        using IDisposable readerLock = await node.ReaderLockAsync();
+            return default;        
 
         BTreeEntry<TKey, TValue>[] children = node.children;
 
@@ -122,13 +122,13 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
             {
                 BTreeEntry<TKey, TValue> entry = children[j];
 
-                Console.WriteLine("Z {0} {1}", key, entry.Key);
+                //Console.WriteLine("Z {0} {1}", key, entry.Key);
 
                 // verify if key can be seen by MVCC
                 if (!entry.CanBeSeenBy(txnid))
                     continue;
 
-                Console.WriteLine("X {0} {1}", key, entry.Key);
+                //Console.WriteLine("X {0} {1}", key, entry.Key);
 
                 if (Eq(key, entry.Key))
                     return entry.GetValue(txType, txnid);
@@ -158,6 +158,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <returns></returns>
     public async IAsyncEnumerable<BTreeEntry<TKey, TValue>> EntriesTraverse(HLCTimestamp txnId)
     {
+        using IDisposable readerLock = await ReaderLockAsync();
+
         await foreach (BTreeEntry<TKey, TValue> entry in EntriesTraverseInternal(root, txnId, height))
             yield return entry;
     }
@@ -167,7 +169,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (node is null)
             yield break;
 
-        using IDisposable readerLock = await node.ReaderLockAsync();
+        //using IDisposable readerLock = await node.ReaderLockAsync();
 
         node.NumberAccesses++;
         node.NumberReads++;
@@ -202,6 +204,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <returns></returns>
     public async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesTraverse(HLCTimestamp txnId)
     {
+        using IDisposable readerLock = await ReaderLockAsync();
+
         await foreach (BTreeNode<TKey, TValue> node in NodesTraverseInternal(root, txnId, height))
             yield return node;
     }
@@ -216,7 +220,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (ht == 0)
             yield break;
 
-        using IDisposable readerLock = await node.ReaderLockAsync();
+        //using IDisposable readerLock = await node.ReaderLockAsync();
 
         node.NumberAccesses++;
         node.NumberReads++;
@@ -246,7 +250,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (node is null)
             yield break;
 
-        using IDisposable readerLock = await node.ReaderLockAsync();
+        //using IDisposable readerLock = await node.ReaderLockAsync();
 
         node.NumberAccesses++;
         node.NumberReads++;
@@ -273,6 +277,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <returns></returns>
     public async Task<BTreeMutationDeltas<TKey, TValue>> Put(HLCTimestamp txnid, BTreeCommitState commitState, TKey key, TValue? value)
     {
+        using IDisposable writerLock = await WriterLockAsync();
+
         BTreeMutationDeltas<TKey, TValue> deltas = new();
 
         if (root is null) // create root
@@ -342,7 +348,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
                 if (Eq(key, childrenEntry.Key))
                 {
-                    Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);
+                    //Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);
 
                     node.NumberWrites++;
                     deltas.Nodes.Add(node);
@@ -354,7 +360,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
                     break;
             }
 
-            Console.WriteLine("Created new SetV={0} {1} {2} {3}", key, txnid, commitState, value);
+            //Console.WriteLine("Created new SetV={0} {1} {2} {3}", key, txnid, commitState, value);
 
             newEntry = new(key, Reader, null);
             deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
@@ -423,6 +429,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <returns></returns>
     public async Task<(bool found, BTreeMutationDeltas<TKey, TValue> deltas)> Remove(TKey key)
     {
+        using IDisposable writerLock = await WriterLockAsync();
+
         BTreeMutationDeltas<TKey, TValue> deltas = new();
 
         bool found = await Delete(root, key, height, deltas);
@@ -447,7 +455,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (node is null)
             return false;
 
-        using IDisposable disposable = await node.WriterLockAsync();
+        //using IDisposable disposable = await node.WriterLockAsync();
 
         BTreeEntry<TKey, TValue>[] children = node.children;
 
@@ -502,6 +510,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <returns></returns>
     public async Task Mark(HLCTimestamp txnid, BTreeMutationDeltas<TKey, TValue> deltas)
     {
+        using IDisposable readerLock = await ReaderLockAsync();
+
         if (root is null)
             return;
 
@@ -513,7 +523,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         if (node is null)
             return;
 
-        using IDisposable readerLock = await node.ReaderLockAsync();
+        //using IDisposable readerLock = await node.ReaderLockAsync();
 
         BTreeEntry<TKey, TValue>[] children = node.children;
 
