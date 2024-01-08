@@ -56,5 +56,7 @@ public enum NodeType
     TypeObjectId,
     TypeString,
     TypeInteger64,
-    TypeFloat64
+    TypeFloat64,
+    ShowColumns,
+    ShowTables
 }

@@ -3,7 +3,7 @@
 //  GPLEX error listing for lex source file <SQLParser.Language.analyzer.lex>
 // ==========================================================================
 //  Version:  1.2.2
-//  DateTime: 1/2/2024 7:47:53 AM
+//  DateTime: 1/8/2024 4:53:15 PM
 // ==========================================================================
 
 
@@ -32,7 +32,7 @@ TInsert 	    (I|i)(N|n)(S|s)(E|e)(R|r)(T|t)
 TInto 		    (I|i)(N|n)(T|t)(O|o)
 TValues         (V|v)(A|a)(L|l)(U|u)(E|e)(S|s)
 TCreate         (C|c)(R|r)(E|e)(A|a)(T|t)(E|e)
-TTable          (T|T)(A|a)(B|b)(L|l)(E|e)
+TTable          (T|t)(A|a)(B|b)(L|l)(E|e)
 TNot            (N|n)(O|o)(T|t)
 TNull           (N|n)(U|u)(L|l)(L|l)
 TPrimary 	    (P|p)(R|r)(I|i)(M|m)(A|a)(R|r)(Y|y)
@@ -43,6 +43,18 @@ TAlter 		    (A|a)(L|l)(T|t)(E|e)(R|r)
 TWAdd 		    (A|a)(D|d)(D|d)
 TDrop 		    (D|d)(R|r)(O|o)(P|p)
 TColumn 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)
+TLimit          (L|l)(I|i)(M|m)(I|i)(T|t)
+TOffset         (O|o)(F|f)(F|f)(S|s)(E|e)(T|t)
+TAs 		    (A|a)(S|s)
+TGroup 		    (G|g)(R|r)(O|o)(U|u)(P|p)
+TShow 		    (S|s)(H|h)(O|o)(W|w)
+TColumns 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)(S|s)
+TTables         (T|t)(A|a)(B|b)(L|l)(E|e)(S|s)
+TDesc           (T|t)(E|e)(S|s)
+//^^^
+// Error: Lexical category <TDesc> already defined
+// -----------------------------------------------
+TDescribe       (T|t)(E|e)(S|s)(C|c)(R|r)(I|i)(B|b)(E|e)
 TTypeString     (S|s)(T|t)(R|r)(I|i)(N|n)(G|g)
 TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
 TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
@@ -65,10 +77,8 @@ UniEsc          \\u{HexDig}{4}
 UNIESC          \\U{HexDig}{8}
 String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\"
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
-Identifier      (@)[a-zA-Z0-9_]*
-//^^^^^^^^
-// Error: Lexical category <Identifier> already defined
-// ----------------------------------------------------
+EscIdentifier   (`)[a-zA-Z_][a-zA-Z0-9_]*(`)
+Placeholder     (@)[a-zA-Z0-9_]*
 TAdd            \+
 TMult           \*
 TMinus          \-
@@ -154,6 +164,24 @@ TGreaterEquals  >=
 
 {TColumn} { return (int)Token.TCOLUMN; }
 
+{TLimit} { return (int)Token.TLIMIT; }
+
+{TOffset} { return (int)Token.TOFFSET; }
+
+{TAs} { return (int)Token.TAS; }
+
+{TGroup} { return (int)Token.TGROUP; }
+
+{TShow} { return (int)Token.TSHOW; }
+
+{TColumns} { return (int)Token.TCOLUMNS; }
+
+{TTables} { return (int)Token.TTABLES; }
+
+{TDesc} { return (int)Token.TDESCRIBE; }
+
+{TDescribe} { return (int)Token.TDESCRIBE; }
+
 {TTypeObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
 
 {TTypeSObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
@@ -194,10 +222,9 @@ TGreaterEquals  >=
 
 {Identifier} { yylval.s = yytext; return (int)Token.TIDENTIFIER; }
 
+{EscIdentifier} { yylval.s = yytext; return (int)Token.TESCAPED_IDENTIFIER; }
+
 {Placeholder} { yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
-//^^^^^^^^^^
-// Error: Unknown lexical category <Placeholder> 
-// ----------------------------------------------
 
 %%// ==========================================================================
 

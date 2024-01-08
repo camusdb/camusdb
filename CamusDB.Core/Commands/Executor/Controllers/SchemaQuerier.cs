@@ -6,8 +6,10 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs;
+using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -17,22 +19,45 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// </summary>
 internal sealed class SchemaQuerier
 {
-    public IAsyncEnumerable<QueryResultRow> Query(QueryTicket ticket)
+    private readonly CatalogsManager catalogs;
+
+    public SchemaQuerier(CatalogsManager catalogsManager)
     {
-        string viewName = ticket.TableName.ToLowerInvariant();
+        this.catalogs = catalogsManager;
+    }
 
-        switch (viewName)
+    internal async IAsyncEnumerable<QueryResultRow> ShowTables(DatabaseDescriptor database)
+    {
+        await Task.CompletedTask;
+
+        BTreeTuple tuple = new(new(), new());
+
+        foreach (KeyValuePair<string, TableSchema> table in database.Schema.Tables)
         {
-            case "tables":
-                return QueryTablesSchema();
-
-            default:
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInformationSchema, "Invalid information_schema table");
+            yield return new QueryResultRow(tuple, new()
+            {
+                { "tables", new ColumnValue(ColumnType.String, table.Key) }
+            });
         }
     }
 
-    private IAsyncEnumerable<QueryResultRow> QueryTablesSchema()
-    {
-        throw new NotImplementedException();
+    internal async IAsyncEnumerable<QueryResultRow> ShowColumns(TableDescriptor tableName)
+    {        
+        await Task.CompletedTask;
+
+        BTreeTuple tuple = new(new(), new());
+
+        foreach (TableColumnSchema column in tableName.Schema.Columns!)
+        {
+            yield return new QueryResultRow(tuple, new()
+            {
+                { "Field", new ColumnValue(ColumnType.String, column.Name) },
+                { "Type", new ColumnValue(ColumnType.String, column.Type.ToString()) },
+                { "Null", new ColumnValue(ColumnType.String, column.NotNull ? "NO" : "YES") },
+                { "Key", new ColumnValue(ColumnType.String, column.Primary ? "KEY" : "") },
+                { "Default", new ColumnValue(ColumnType.String, "NULL") },
+                { "Extra", new ColumnValue(ColumnType.String, "") },
+            });
+        }
     }
 }

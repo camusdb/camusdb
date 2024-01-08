@@ -22,7 +22,8 @@
 %token TDIGIT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
 %token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
-%token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP
+%token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW
+%token TCOLUMNS TTABLES TDESCRIBE 
 
 %%
 
@@ -36,6 +37,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | create_table_stmt { $$.n = $1.n; }
         | drop_table_stmt { $$.n = $1.n; }
         | alter_table_stmt { $$.n = $1.n; }
+        | show_stmt { $$.n = $1.n; } 
         ;
 
 select_stmt : TSELECT select_field_list TFROM any_identifier { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, null, null, null); }
@@ -74,6 +76,12 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TDROP TCOLUMN any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $5.n, null, null, null, null, null); }
 				 ;
 
+show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null); }
+          | TSHOW TTABLES { $$.n = new(NodeType.ShowTables, null, null, null, null, null, null, null); }
+          | TDESCRIBE any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null); }
+          | TDESC any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null); }
+          ;
+
 create_table_item_list : create_table_item_list TCOMMA create_table_item { $$.n = new(NodeType.CreateTableItemList, $1.n, $3.n, null, null, null, null, null); }
                        | create_table_item { $$.n = $1.n; $$.s = $1.s; }
                        ;
@@ -102,8 +110,8 @@ update_list : update_list TCOMMA update_item { $$.n = new(NodeType.UpdateList, $
 		    | update_item { $$.n = $1.n; $$.s = $1.s; }
 		    ;
 
-update_item    : any_identifier TEQUALS expr { $$.n = new(NodeType.UpdateItem, $1.n, $3.n, null, null, null, null, null); }
-			   ;
+update_item : any_identifier TEQUALS expr { $$.n = new(NodeType.UpdateItem, $1.n, $3.n, null, null, null, null, null); }
+			;
 
 select_field_list  : select_field_list TCOMMA select_field_item { $$.n = new(NodeType.IdentifierList, $1.n, $3.n, null, null, null, null, null); }
                    | select_field_item { $$.n = $1.n; $$.s = $1.s; }

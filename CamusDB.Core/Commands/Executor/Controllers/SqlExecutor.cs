@@ -35,9 +35,9 @@ internal sealed class SqlExecutor
 
     }
 
-    public async Task<QueryTicket> CreateQueryTicket(CommandExecutor executor, ExecuteSQLTicket ticket)
+    public async Task<QueryTicket> CreateQueryTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return await sqlExecutorQueryCreator.CreateQueryTicket(executor, ticket);
+        return await sqlExecutorQueryCreator.CreateQueryTicket(executor, ticket, ast);
     }
 
     internal async Task<InsertTicket> CreateInsertTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)

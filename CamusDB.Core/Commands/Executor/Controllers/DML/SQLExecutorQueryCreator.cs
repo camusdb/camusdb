@@ -14,34 +14,24 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
 {
-    public async Task<QueryTicket> CreateQueryTicket(CommandExecutor executor, ExecuteSQLTicket ticket)
+    public async Task<QueryTicket> CreateQueryTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
+        string tableName = ast.rightAst!.yytext!;
 
-        switch (ast.nodeType)
-        {
-            case NodeType.Select:
-
-                string tableName = ast.rightAst!.yytext!;
-
-                return new(
-                    txnId: await executor.NextTxnId(),
-                    txnType: TransactionType.ReadOnly,
-                    databaseName: ticket.DatabaseName,
-                    tableName: tableName,
-                    index: null,
-                    projection: GetProjection(ast),
-                    filters: null,
-                    where: ast.extendedOne,
-                    orderBy: GetQueryClause(ast),
-                    limit: ast.extendedThree,
-                    offset: ast.extendedFour,
-                    parameters: ticket.Parameters
-                );
-
-            default:
-                throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown query AST stmt: " + ast.nodeType);
-        }
+        return new(
+            txnId: await executor.NextTxnId(),
+            txnType: TransactionType.ReadOnly,
+            databaseName: ticket.DatabaseName,
+            tableName: tableName,
+            index: null,
+            projection: GetProjection(ast),
+            filters: null,
+            where: ast.extendedOne,
+            orderBy: GetQueryClause(ast),
+            limit: ast.extendedThree,
+            offset: ast.extendedFour,
+            parameters: ticket.Parameters
+        );                   
     }
 
     private static List<NodeAst>? GetProjection(NodeAst? ast)

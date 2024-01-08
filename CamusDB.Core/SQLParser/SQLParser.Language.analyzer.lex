@@ -12,7 +12,6 @@ TOrder          (O|o)(R|r)(D|d)(E|e)(R|r)
 TBy             (B|b)(Y|y)
 TAnd            (A|a)(N|n)(D|d)
 TOr             (O|o)(R|r)
-TDesc           (D|d)(E|e)(S|s)(C|c)
 TAsc            (A|a)(S|s)(C|c)
 TTrue           (T|t)(R|r)(U|u)(E|e)
 TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
@@ -38,6 +37,11 @@ TLimit          (L|l)(I|i)(M|m)(I|i)(T|t)
 TOffset         (O|o)(F|f)(F|f)(S|s)(E|e)(T|t)
 TAs 		    (A|a)(S|s)
 TGroup 		    (G|g)(R|r)(O|o)(U|u)(P|p)
+TShow 		    (S|s)(H|h)(O|o)(W|w)
+TColumns 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)(S|s)
+TTables         (T|t)(A|a)(B|b)(L|l)(E|e)(S|s)
+TDesc           (D|d)(E|e)(S|s)(C|c)
+TDescribe       (D|d)(E|e)(S|s)(C|c)(R|r)(I|i)(B|b)(E|e)
 TTypeString     (S|s)(T|t)(R|r)(I|i)(N|n)(G|g)
 TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
 TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
@@ -154,6 +158,14 @@ TGreaterEquals  >=
 {TAs} { return (int)Token.TAS; }
 
 {TGroup} { return (int)Token.TGROUP; }
+
+{TShow} { return (int)Token.TSHOW; }
+
+{TColumns} { return (int)Token.TCOLUMNS; }
+
+{TTables} { return (int)Token.TTABLES; }
+
+{TDescribe} { return (int)Token.TDESCRIBE; }
 
 {TTypeObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
 

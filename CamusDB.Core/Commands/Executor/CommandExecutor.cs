@@ -88,7 +88,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         rowDeleter = new();
         queryExecutor = new();
         sqlExecutor = new();
-        schemaQuerier = new();
+        schemaQuerier = new(catalogs);
     }
 
     #region database
@@ -383,13 +383,36 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
+        NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
+
         DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
-        QueryTicket queryTicket = await sqlExecutor.CreateQueryTicket(this, ticket);
+        switch (ast.nodeType)
+        {
+            case NodeType.Select:
+                {
+                    QueryTicket queryTicket = await sqlExecutor.CreateQueryTicket(this, ticket, ast);
 
-        TableDescriptor table = await tableOpener.Open(database, queryTicket.TableName);
+                    TableDescriptor table = await tableOpener.Open(database, queryTicket.TableName);
 
-        return queryExecutor.Query(database, table, queryTicket);
+                    return queryExecutor.Query(database, table, queryTicket);
+                }
+
+            case NodeType.ShowTables:
+                {                    
+                    return schemaQuerier.ShowTables(database);
+                }
+
+            case NodeType.ShowColumns:
+                {
+                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!);
+
+                    return schemaQuerier.ShowColumns(table);
+                }
+
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown query AST stmt: " + ast.nodeType);
+        }
     }
 
     #endregion

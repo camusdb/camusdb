@@ -831,4 +831,21 @@ public class TestSQLParser
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
     }
+
+    [Test]
+    public void TestParseShowTables()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW TABLES");
+
+        Assert.AreEqual(NodeType.ShowTables, ast.nodeType);
+    }
+
+    [Test]
+    public void TestParseShowColumns()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW COLUMNS FROM robots");
+
+        Assert.AreEqual(NodeType.ShowColumns, ast.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+    }
 }
