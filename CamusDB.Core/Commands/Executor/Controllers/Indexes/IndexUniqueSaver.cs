@@ -122,7 +122,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                     SerializeTuple(nodeBuffer, tuple, ref pointer); // @todo LastValue
 
                     BTreeNode<ColumnValue, BTreeTuple?>? next = (await entry.Next);
-                    Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : nullValue, ref pointer);                    
+                    Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : nullValue, ref pointer);           
                 }
                 else
                 {

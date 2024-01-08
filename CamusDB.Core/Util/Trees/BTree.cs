@@ -120,12 +120,18 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         {
             for (int j = 0; j < node.KeyCount; j++)
             {
+                BTreeEntry<TKey, TValue> entry = children[j];
+
+                Console.WriteLine("Z {0} {1}", key, entry.Key);
+
                 // verify if key can be seen by MVCC
-                if (!children[j].CanBeSeenBy(txnid))
+                if (!entry.CanBeSeenBy(txnid))
                     continue;
 
-                if (Eq(key, children[j].Key))
-                    return children[j].GetValue(txType, txnid);
+                Console.WriteLine("X {0} {1}", key, entry.Key);
+
+                if (Eq(key, entry.Key))
+                    return entry.GetValue(txType, txnid);
             }
         }
 
