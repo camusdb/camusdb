@@ -27,26 +27,20 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     }
 
     public async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> Save(SaveUniqueOffsetIndexTicket ticket)
-    {
-        return await SaveInternal(ticket.Index, ticket.TxnId, ticket.Key, ticket.Value);
+    {        
+        using IDisposable writerLock = await ticket.Index.WriterLockAsync();
+
+        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> mutations = await ticket.Index.Put(ticket.TxnId, BTreeCommitState.Uncommitted, ticket.Key, ticket.Value);
+
+        await Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, mutations);
+
+        return mutations;
     }
 
     public async Task Remove(RemoveUniqueOffsetIndexTicket ticket)
     {
         await RemoveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.ModifiedPages, ticket.Deltas);
-    }
-
-    private static async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> SaveInternal(
-        BTree<ObjectIdValue, ObjectIdValue> index,
-        HLCTimestamp txnid,
-        ObjectIdValue key,
-        ObjectIdValue value
-    )
-    {
-        return await index.Put(txnid, BTreeCommitState.Uncommitted, key, value);
-
-        //Persist(tablespace, index, modifiedPages, deltas);        
-    }
+    }   
 
     private static async Task RemoveInternal(
         BufferPoolManager tablespace,
@@ -65,15 +59,13 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         }
     }
 
-    public async Task Persist(
+    private async Task Persist(
         BufferPoolManager tablespace,
         BTree<ObjectIdValue, ObjectIdValue> index,
         List<BufferPageOperation> modifiedPages,
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas
     )
     {
-        using IDisposable writerLock = await index.WriterLockAsync();
-
         foreach (BTreeNode<ObjectIdValue, ObjectIdValue> node in deltas.Nodes)
         {
             if (node.PageOffset.IsNull())
@@ -98,6 +90,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
         ObjectIdValue nullAddressValue = new();
         HLCTimestamp nullTimestamp = HLCTimestamp.Zero;
+
         //@todo update nodes concurrently        
 
         foreach (BTreeNode<ObjectIdValue, ObjectIdValue> node in deltas.Nodes)

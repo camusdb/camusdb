@@ -267,8 +267,6 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// <returns></returns>
     public async Task<BTreeMutationDeltas<TKey, TValue>> Put(HLCTimestamp txnid, BTreeCommitState commitState, TKey key, TValue? value)
     {
-        using IDisposable writerLock = await WriterLockAsync();
-
         BTreeMutationDeltas<TKey, TValue> deltas = new();
 
         if (root is null) // create root

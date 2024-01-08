@@ -184,7 +184,8 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
     /// it can generate high contention.
     /// </summary>
     /// <param name="timestamp"></param>
-    internal void RemoveExpired(HLCTimestamp timestamp)
+    /// <param name="maxToRemove"></param>
+    internal void RemoveExpired(HLCTimestamp timestamp, int maxToRemove)
     {
         if (mvccValues.Count <= 1)
             return;
@@ -203,6 +204,9 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
                     Console.WriteLine("Couldn't remove {0} {1}", keyValue.Key, keyValue.Value.Value);
                 else
                     removed++;
+
+                if (removed >= maxToRemove)
+                    break;
             }
         }
 

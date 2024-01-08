@@ -15,7 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.ObjectIds;
-using YamlDotNet.Core.Tokens;
+using System;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -30,7 +30,14 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     public async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple?>> Save(SaveUniqueIndexTicket ticket)
     {
-        return await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value);
+        // @todo this lock will produce contention
+        using IDisposable writerLock = await ticket.Index.WriterLockAsync();
+
+        BTreeMutationDeltas<ColumnValue, BTreeTuple?> mutations = await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value);
+
+        await Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, mutations);
+
+        return mutations;
     }
 
     public async Task Remove(RemoveUniqueIndexTicket ticket)
@@ -46,16 +53,13 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         //    Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
     }
 
-    public async Task Persist(
+    private async Task Persist(
         BufferPoolManager tablespace,
         BTree<ColumnValue, BTreeTuple?> index,
         List<BufferPageOperation> modifiedPages,
         BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas
     )
-    {
-        // @todo this lock will produce contention
-        using IDisposable writerLock = await index.WriterLockAsync();
-
+    {        
         if (deltas.Nodes.Count == 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,

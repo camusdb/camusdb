@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Collections.Generic;
 
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.ObjectIds;
 
 using CamusDB.Core.Catalogs.Models;
@@ -20,7 +21,6 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -93,6 +93,8 @@ internal sealed class TestRowInsertorCloseDb
 
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
+
+        System.Console.WriteLine("----");
 
         QueryByIdTicket queryTicket = new(
             txnId: await executor.NextTxnId(),

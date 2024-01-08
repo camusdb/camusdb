@@ -10,6 +10,11 @@ namespace CamusDB.Core.BufferPool.Models;
 
 public static class BufferPoolConfig
 {
+    /// <summary>
+    /// 
+    /// </summary>
+    public const int PageLayoutVersion = 1;
+
     public const int ChecksumOffset = 2; // 2 version + 4 checksum + 4 next page + 4 data length
 
     public const int LastSequenceOffset = 6; // 2 version + 4 checksum + 4 next page + 4 data length
@@ -18,7 +23,5 @@ public static class BufferPoolConfig
 
     public const int LengthOffset = 22; // 2 version + 4 checksum + 4 next page + 4 data length
 
-    public const int DataOffset = 26; // 2 version + 4 checksum + 12 next page + 4 data length
-
-    public static readonly int NumberBuckets = Environment.ProcessorCount; // number of buffer pool buckets
+    public const int DataOffset = 26; // 2 version + 4 checksum + 12 next page + 4 data length    
 }

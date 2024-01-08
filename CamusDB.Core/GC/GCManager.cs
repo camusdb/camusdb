@@ -50,8 +50,8 @@ public sealed class GCManager : IDisposable
         this.logicalClock = logicalClock;
         this.tableDescriptors = tableDescriptors;
 
-        pagesReleaser = new(ReleasePages, null, TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60));
-        indexReleaser = new(ReleaseIndexNodesAndEntries, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        pagesReleaser = new(ReleasePages, null, TimeSpan.FromSeconds(CamusConfig.GCPagesIntervalSeconds), TimeSpan.FromSeconds(CamusConfig.GCPagesIntervalSeconds));
+        indexReleaser = new(ReleaseIndexNodesAndEntries, null, TimeSpan.FromSeconds(CamusConfig.GCIndexIntervalSeconds), TimeSpan.FromSeconds(CamusConfig.GCIndexIntervalSeconds));
     }
 
     /// <summary>
@@ -62,8 +62,8 @@ public sealed class GCManager : IDisposable
     {
         try
         {
-            for (int i = 0; i < BConfig.NumberBuckets; i++)
-                ReleaseBucketPages(i, bufferPool.Buckets[i].Pages);
+            for (int i = 0; i < CamusConfig.NumberBuckets; i++)
+                ReleaseBucketPages(bufferPool.Buckets[i].Pages);
         }
         catch (Exception ex)
         {
@@ -73,24 +73,23 @@ public sealed class GCManager : IDisposable
 
     /// <summary>
     /// Releases each individual bucket one by one
-    /// </summary>
-    /// <param name="i"></param>
+    /// </summary>    
     /// <param name="pages"></param>
-    private void ReleaseBucketPages(int i, ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> pages)
+    private void ReleaseBucketPages(ConcurrentDictionary<ObjectIdValue, Lazy<BufferPage>> pages)
     {
         // Counting the elements in the concurrent dictionary requires locking
         // all the buckets and can cause high contention.
         int numPages = pages.Count;
 
         float percent = numPages / (float)CamusConfig.BufferPoolSize;
-        if (percent < 0.8)
+        if (percent < CamusConfig.GCMaxPercentToStartPagesRelease)
             return;
 
         lruPages.Clear();
 
         ulong ticks = logicalClock.Increment(numPages);
         ulong threshold = Math.Max(655360, ticks - 655360); // @todo this number must be choosen based on the actual activity of the database
-        int numberToFree = (int)(CamusConfig.BufferPoolSize * 0.05); // release 5% of the pages
+        int numberToFree = (int)(CamusConfig.BufferPoolSize * CamusConfig.GCPercentToReleasePerCycle);
 
         foreach (KeyValuePair<ObjectIdValue, Lazy<BufferPage>> keyValuePair in pages)
         {
@@ -172,7 +171,7 @@ public sealed class GCManager : IDisposable
                             continue;
 
                         foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in deltas.Entries)
-                            entry.RemoveExpired(timestamp);
+                            entry.RemoveExpired(timestamp, 16);
                     }
                 }
             }

@@ -55,9 +55,26 @@ public sealed class BufferPoolManager
 
     private readonly LC logicalClock;
 
-    private readonly BufferPoolBucket[] buckets = new BufferPoolBucket[BConfig.NumberBuckets];
+    private readonly BufferPoolBucket[] buckets = new BufferPoolBucket[CamusConfig.NumberBuckets];
 
+    /// <summary>
+    /// Returns a reference to the array of buckets
+    /// </summary>
     public BufferPoolBucket[] Buckets => buckets;
+
+    /// <summary>
+    /// Returns the number of pages in all the buckets (probably inconsistent)
+    /// </summary>
+    public int NumberPages
+    {
+        get
+        {
+            int sum = 0;
+            for (int i = 0; i < buckets.Length; i++)
+                sum += buckets[i].NumberPages;
+            return sum;
+        }
+    }
 
     /// <summary>
     /// Constructor
@@ -93,7 +110,7 @@ public sealed class BufferPoolManager
     public BufferPage ReadPage(ObjectIdValue offset)
     {
         uint hashCode = (uint)offset.GetHashCode();
-        BufferPoolBucket poolBucket = buckets[hashCode % BConfig.NumberBuckets];
+        BufferPoolBucket poolBucket = buckets[hashCode % CamusConfig.NumberBuckets];
 
         Lazy<BufferPage> lazyBufferPage = poolBucket.Pages.GetOrAdd(offset, (_) => new Lazy<BufferPage>(() => LoadPage(offset)));
 
@@ -267,7 +284,7 @@ public sealed class BufferPoolManager
     public static int WritePageHeader(byte[] pageBuffer, uint checksum, uint lastSequence, ObjectIdValue nextPage, int length)
     {
         int pointer = 0;
-        Serializator.WriteInt16(pageBuffer, CamusConfig.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)        
+        Serializator.WriteInt16(pageBuffer, BConfig.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)        
         Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                      // checksum (4 bytes unsigned integer)        
         Serializator.WriteUInt32(pageBuffer, lastSequence, ref pointer);                  // lastWroteSequence (4 bytes unsigned integer)        
         Serializator.WriteObjectId(pageBuffer, nextPage, ref pointer);                    // next page (12 bytes objectid)        
@@ -480,7 +497,7 @@ public sealed class BufferPoolManager
                 pagesToDelete.Add(new BufferPageOperation(BufferPageOperationType.Delete, memoryPage.Offset, 0, Array.Empty<byte>()));
 
                 uint hashCode = (uint)memoryPage.Offset.GetHashCode();
-                BufferPoolBucket poolBucket = buckets[hashCode % BConfig.NumberBuckets];
+                BufferPoolBucket poolBucket = buckets[hashCode % CamusConfig.NumberBuckets];
 
                 poolBucket.Pages.TryRemove(memoryPage.Offset, out _);
             }
