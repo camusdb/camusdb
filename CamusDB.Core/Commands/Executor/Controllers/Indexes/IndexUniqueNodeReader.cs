@@ -76,7 +76,7 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
         if (data.Length == 0)
             return null;
 
-        BTreeNode<ColumnValue, BTreeTuple?> node = new(-1);
+        BTreeNode<ColumnValue, BTreeTuple?> node = new(-1, BTreeUtils.GetNodeCapacity<ColumnValue, BTreeTuple?>());
 
         int pointer = 0;
         node.KeyCount = Serializator.ReadInt32(data, ref pointer);

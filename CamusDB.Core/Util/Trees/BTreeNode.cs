@@ -37,7 +37,7 @@ public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey>
 
     public ObjectIdValue PageOffset;       // on-disk offset
 
-    public BTreeEntry<TKey, TValue>[] children = new BTreeEntry<TKey, TValue>[BTreeConfig.MaxChildren];   // the array of children
+    public BTreeEntry<TKey, TValue>[] children;  // = new BTreeEntry<TKey, TValue>[BTreeConfig.MaxChildren];   // the array of children
 
     private readonly AsyncReaderWriterLock readerWriterLock = new(); // read/write locks prevent concurrent mutations to the node    
 
@@ -45,11 +45,13 @@ public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey>
     /// Create a node with k children
     /// </summary>
     /// <param name="keyCount"></param>
-    public BTreeNode(int keyCount)
+    public BTreeNode(int keyCount, int capacity)
     {
         //Console.WriteLine("Allocated new node {0}", keyCount);
         Id = Interlocked.Increment(ref CurrentId);
+
         KeyCount = keyCount;
+        children = new BTreeEntry<TKey, TValue>[capacity];
     }
 
     /// <summary>

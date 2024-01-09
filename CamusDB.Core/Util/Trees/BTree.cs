@@ -32,6 +32,12 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 {
     private static int CurrentId = -1;
 
+    private readonly int maxNodeCapacity;
+
+    private readonly int maxNodeCapacityHalf;
+
+    public readonly IBTreeNodeReader<TKey, TValue>? reader; // lazy node reader
+
     public BTreeNode<TKey, TValue>? root;  // root of the B-tree
 
     public int Id;       // unique tree id
@@ -42,9 +48,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
     public int loaded;   // number of loaded nodes
 
-    public ObjectIdValue PageOffset; // page offset to root node
-
-    public readonly IBTreeNodeReader<TKey, TValue>? Reader; // lazy node reader
+    public ObjectIdValue PageOffset; // page offset to root node    
 
     private readonly AsyncReaderWriterLock readerWriterLock = new();
 
@@ -52,12 +56,16 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     /// Initializes an empty B-tree.
     /// </summary>
     /// <param name="rootOffset"></param>
+    /// <param name="maxNodeCapacity"></param>
     /// <param name="reader"></param>
     public BTree(ObjectIdValue rootOffset, IBTreeNodeReader<TKey, TValue>? reader = null)
     {
-        Reader = reader;
+        this.reader = reader;
         PageOffset = rootOffset;
         Id = Interlocked.Increment(ref CurrentId);
+
+        maxNodeCapacity = BTreeUtils.GetNodeCapacity<TKey, TValue>();
+        maxNodeCapacityHalf = maxNodeCapacity / 2;
     }
 
     /// <summary>
@@ -111,7 +119,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     private async Task<TValue?> GetInternal(BTreeNode<TKey, TValue>? node, TransactionType txType, HLCTimestamp txnid, TKey key, int ht)
     {
         if (node is null)
-            return default;        
+            return default;
 
         BTreeEntry<TKey, TValue>[] children = node.children;
 
@@ -283,7 +291,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         if (root is null) // create root
         {
-            root = new BTreeNode<TKey, TValue>(0);
+            root = new BTreeNode<TKey, TValue>(0, maxNodeCapacity);
             deltas.Nodes.Add(root);
             loaded++;
         }
@@ -299,12 +307,12 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
         //using IDisposable disposable = await root.WriterLockAsync();
 
         // need to split root
-        BTreeNode<TKey, TValue> newRoot = new(2);
+        BTreeNode<TKey, TValue> newRoot = new(2, maxNodeCapacity);
         deltas.Nodes.Add(newRoot);
         loaded++;
 
-        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, Reader, root);
-        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, Reader, split);
+        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, reader, root);
+        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, reader, split);
 
         deltas.Nodes.Add(root);
 
@@ -362,7 +370,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
             //Console.WriteLine("Created new SetV={0} {1} {2} {3}", key, txnid, commitState, value);
 
-            newEntry = new(key, Reader, null);
+            newEntry = new(key, reader, null);
             deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
         }
 
@@ -382,7 +390,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
                     //Console.WriteLine("splitting internal node");
 
-                    newEntry = new(split.children[0].Key, Reader, split);
+                    newEntry = new(split.children[0].Key, reader, split);
                     deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
                     break;
                 }
@@ -400,7 +408,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
 
         deltas.Nodes.Add(node);
 
-        if (node.KeyCount < BTreeConfig.MaxChildren)
+        if (node.KeyCount < maxNodeCapacity)
             return null;
 
         return Split(node, deltas);
@@ -409,15 +417,15 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
     // split node in half
     private BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, BTreeMutationDeltas<TKey, TValue> deltas)
     {
-        BTreeNode<TKey, TValue> newNode = new(BTreeConfig.MaxChildrenHalf);
+        BTreeNode<TKey, TValue> newNode = new(maxNodeCapacityHalf, maxNodeCapacity);
         deltas.Nodes.Add(newNode);
         loaded++;
 
-        current.KeyCount = BTreeConfig.MaxChildrenHalf;
+        current.KeyCount = maxNodeCapacityHalf;
         deltas.Nodes.Add(current);
 
-        for (int j = 0; j < BTreeConfig.MaxChildrenHalf; j++)
-            newNode.children[j] = current.children[BTreeConfig.MaxChildrenHalf + j];
+        for (int j = 0; j < maxNodeCapacityHalf; j++)
+            newNode.children[j] = current.children[maxNodeCapacityHalf + j];
 
         return newNode;
     }

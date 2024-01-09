@@ -29,7 +29,7 @@ public sealed class IndexUniqueOffsetNodeReader : IBTreeNodeReader<ObjectIdValue
         if (data.Length == 0)
             return null;
 
-        BTreeNode<ObjectIdValue, ObjectIdValue> node = new(-1);
+        BTreeNode<ObjectIdValue, ObjectIdValue> node = new(-1, BTreeUtils.GetNodeCapacity<ObjectIdValue, ObjectIdValue>());
 
         int pointer = 0;
         node.KeyCount = Serializator.ReadInt32(data, ref pointer);
