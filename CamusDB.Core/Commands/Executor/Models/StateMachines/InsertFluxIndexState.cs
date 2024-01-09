@@ -20,7 +20,7 @@ public sealed class InsertFluxIndexState
 
     public BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? MainIndexDeltas { get; set; }
 
-    public List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>? UniqueIndexDeltas { get; set; }
+    public List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)>? UniqueIndexDeltas { get; set; }
 
     public InsertFluxIndexState()
 	{

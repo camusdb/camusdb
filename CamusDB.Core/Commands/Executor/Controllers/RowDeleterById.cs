@@ -149,11 +149,11 @@ internal sealed class RowDeleterById
             return FluxAction.Abort;
         }
 
-        List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> deltas = new();
+        List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.UniqueRows;
+            BTree<ColumnValue, BTreeTuple>? uniqueIndex = index.UniqueRows;
 
             if (uniqueIndex is null)
                 throw new CamusDBException(
@@ -267,9 +267,9 @@ internal sealed class RowDeleterById
         if (state.Indexes.UniqueIndexDeltas is null)
             return FluxAction.Continue;
 
-        foreach ((BTree<ColumnValue, BTreeTuple?> index, BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+        foreach ((BTree<ColumnValue, BTreeTuple> index, BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
         {
-            foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
+            foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
             await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);

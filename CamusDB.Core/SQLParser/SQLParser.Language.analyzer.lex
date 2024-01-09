@@ -5,6 +5,7 @@
 
 %option stack, minimize, parser, verbose, persistbuffer, noembedbuffers
 
+TDatabase       (D|d)(A|a)(T|t)(A|a)(B|b)(A|a)(S|s)(E|e)
 TSelect         (S|s)(E|e)(L|l)(E|e)(C|c)(T|t)
 TFrom           (F|f)(R|r)(O|o)(M|m)
 TWhere          (W|w)(H|h)(E|e)(R|r)(E|e)
@@ -96,6 +97,8 @@ TGreaterEquals  >=
 {LParen} { return (int)Token.LPAREN; }
 
 {RParen} { return (int)Token.RPAREN; }
+
+{TDatabase} { return (int)Token.TDATABASE; }
 
 {TSelect} { return (int)Token.TSELECT; }
 

@@ -16,7 +16,7 @@ namespace CamusDB.Core.Util.Trees;
 
 // internal nodes: only use key and next
 // external nodes: only use key and value
-public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
+public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
 {
     private readonly IBTreeNodeReader<TKey, TValue>? Reader; // lazy node reader
 
@@ -140,7 +140,7 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
     /// Returns the maximum commited value to the entry
     /// </summary>
     /// <returns></returns>
-    internal (HLCTimestamp, TValue?) GetMaxCommitedValue()
+    internal (HLCTimestamp, TValue?) GetMaxCommittedValue()
     {
         TValue? value = default;
         HLCTimestamp newestValue = HLCTimestamp.Zero;
@@ -185,32 +185,36 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey>
     /// </summary>
     /// <param name="timestamp"></param>
     /// <param name="maxToRemove"></param>
-    internal void RemoveExpired(HLCTimestamp timestamp, int maxToRemove)
+    internal List<TValue>? RemoveExpired(HLCTimestamp timestamp, int maxToRemove)
     {
         if (mvccValues.Count <= 1)
-            return;
+            return null;
 
-        int removed = 0;
+        List<TValue> removed = new();
 
         // The reference to the maximum committed value must be taken to
         // prevent it from being removed from the dictionary.
-        (HLCTimestamp timestamp, TValue? value) maxCommited = GetMaxCommitedValue();
+        (HLCTimestamp timestamp, TValue? value) maxCommitted = GetMaxCommittedValue();
 
         foreach (KeyValuePair<HLCTimestamp, BTreeMvccEntry<TValue>> keyValue in mvccValues)
         {
-            if (keyValue.Key != maxCommited.timestamp && keyValue.Key.CompareTo(timestamp) < 0)
+            if (keyValue.Key != maxCommitted.timestamp && keyValue.Key.CompareTo(timestamp) < 0)
             {
-                if (!mvccValues.TryRemove(keyValue.Key, out _))
-                    Console.WriteLine("Couldn't remove {0} {1}", keyValue.Key, keyValue.Value.Value);
-                else
-                    removed++;
+                TValue? valueRemoved = keyValue.Value.Value;
 
-                if (removed >= maxToRemove)
-                    break;
+                if (!mvccValues.TryRemove(keyValue.Key, out _))
+                    Console.WriteLine("Couldn't remove {0} {1}", keyValue.Key, valueRemoved);
+                else
+                {
+                    if (maxCommitted.value is not null && valueRemoved is not null && maxCommitted.value.CompareTo(valueRemoved) != 0)
+                        removed.Add(valueRemoved);
+
+                    if (removed.Count >= maxToRemove)
+                        break;
+                }
             }
         }
 
-        if (removed > 0)
-            Console.WriteLine("Removed {0} versions from entry", removed);
+        return removed;
     }
 }

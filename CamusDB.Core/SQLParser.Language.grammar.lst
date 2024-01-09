@@ -1,9 +1,9 @@
 
 // ==========================================================================
-//  GPPG error listing for yacc source file <SQLParser/SQLParser.Language.grammar.y - 1/8/2024 4:52:56 PM>
+//  GPPG error listing for yacc source file <SQLParser/SQLParser.Language.grammar.y - 1/9/2024 12:55:46 PM>
 // ==========================================================================
 //  Version:  1.5.2
-//  DateTime: 1/8/2024 4:53:04 PM
+//  DateTime: 1/9/2024 1:57:41 PM
 // ==========================================================================
 
 
@@ -32,7 +32,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
 %token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW
-%token TCOLUMNS TTABLES TDESCRIBE 
+%token TCOLUMNS TTABLES TDESCRIBE TDATABASE
 
 %%
 
@@ -87,8 +87,11 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
 
 show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null); }
           | TSHOW TTABLES { $$.n = new(NodeType.ShowTables, null, null, null, null, null, null, null); }
-          | TDESCRIBE any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null); }
-//--------------------------------------------------------------------^^^
+          | TDESCRIBE any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null); }
+          | TDESC any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null); }
+          | TSHOW TCREATE TTABLE any_identifier { $$.n = new(NodeType.ShowCreateTable, $4.n, null, null, null, null, null, null); }
+          | TSHOW TDATABASE { $$.n = new(NodeType.ShowDatabase, $4.n, null, null, null, null, null, null); }
+//------------------------------------------------------------^^^
 // Error: Semantic action index is out of bounds
 // ---------------------------------------------
           ;

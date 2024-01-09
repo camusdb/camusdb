@@ -13,7 +13,6 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
 using Nito.AsyncEx;
-using System.Xml.Linq;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -76,7 +75,7 @@ internal sealed class TableOpener
                 {
                     case IndexType.Unique:
                         {
-                            BTree<ColumnValue, BTreeTuple?> rows = await indexReader.ReadUnique(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
+                            BTree<ColumnValue, BTreeTuple> rows = await indexReader.ReadUnique(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
 
                             tableDescriptor.Indexes.Add(
                                 index.Key,

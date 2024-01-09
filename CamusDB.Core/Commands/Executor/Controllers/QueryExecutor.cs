@@ -179,11 +179,11 @@ internal sealed class QueryExecutor
         }
     }
 
-    private async IAsyncEnumerable<QueryResultRow> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue, BTreeTuple?> index, QueryTicket ticket)
+    private async IAsyncEnumerable<QueryResultRow> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, BTree<ColumnValue, BTreeTuple> index, QueryTicket ticket)
     {
         BufferPoolManager tablespace = database.BufferPool;
 
-        await foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in index.EntriesTraverse(ticket.TxnId))
+        await foreach (BTreeEntry<ColumnValue, BTreeTuple> entry in index.EntriesTraverse(ticket.TxnId))
         {
             BTreeTuple? txnValue = entry.GetValue(ticket.TxnType, ticket.TxnId);
 

@@ -101,6 +101,18 @@ internal sealed class SchemaQuerier
         });
     }
 
+    internal async IAsyncEnumerable<QueryResultRow> ShowDatabase(DatabaseDescriptor database)
+    {
+        await Task.CompletedTask;
+
+        BTreeTuple tuple = new(new(), new());
+
+        yield return new QueryResultRow(tuple, new()
+        {
+            { "database", new ColumnValue(ColumnType.String, database.Name) }
+        });
+    }
+
     private static string GetSQLType(ColumnType type)
     {
         return type switch

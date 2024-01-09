@@ -26,7 +26,7 @@ internal sealed class TestBTree
     [Test]
     public void TestEmpty()
     {
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         Assert.AreEqual(tree.Size(), 0);
         Assert.AreEqual(tree.Height(), 0);
@@ -38,7 +38,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
@@ -51,7 +51,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
@@ -69,7 +69,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         for (int i = 0; i < 65; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -83,7 +83,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
@@ -99,7 +99,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
@@ -113,7 +113,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
@@ -140,9 +140,9 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTreeMutationDeltas<int, int?> deltas;
+        BTreeMutationDeltas<int, int> deltas;
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         Assert.AreEqual(1, deltas.Nodes.Count);        
@@ -177,7 +177,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
@@ -193,7 +193,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
@@ -209,7 +209,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
@@ -230,7 +230,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
@@ -254,7 +254,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
@@ -293,7 +293,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         for (int i = 0; i < 65; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -316,7 +316,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         for (int i = 0; i < 65; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -342,7 +342,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         for (int i = 0; i < 8192; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -380,7 +380,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         for (int i = 0; i < 8192; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -414,7 +414,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         for (int i = 0; i < 8100; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -448,7 +448,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         for (int i = 0; i < 8192; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);

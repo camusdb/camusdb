@@ -152,7 +152,7 @@ internal sealed class RowDeleter
 
         DeleteTicket ticket = state.Ticket;
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
-        List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>? uniqueIndexDeltas;
+        List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)>? uniqueIndexDeltas;
 
         // @todo we need to take a snapshot of the data to prevent deadlocks
         // but probably need to optimize this for larger datasets
@@ -195,15 +195,15 @@ internal sealed class RowDeleter
         return await indexSaver.Save(saveUniqueOffsetIndex);
     }
 
-    private async Task<List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>> UpdateUniqueIndexes(DeleteFluxState state, DeleteTicket ticket, BTreeTuple tuple, QueryResultRow row)
+    private async Task<List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)>> UpdateUniqueIndexes(DeleteFluxState state, DeleteTicket ticket, BTreeTuple tuple, QueryResultRow row)
     {
-        List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> deltas = new();
+        List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)> deltas = new();
 
         //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.UniqueRows;
+            BTree<ColumnValue, BTreeTuple>? uniqueIndex = index.UniqueRows;
 
             if (uniqueIndex is null)
                 throw new CamusDBException(
@@ -240,7 +240,7 @@ internal sealed class RowDeleter
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task PersistIndexChanges(DeleteFluxState state, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> uniqueIndexDeltas)
+    private async Task PersistIndexChanges(DeleteFluxState state, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)> uniqueIndexDeltas)
     {
         if (mainIndexDeltas is null)
             return;
@@ -253,9 +253,9 @@ internal sealed class RowDeleter
         if (uniqueIndexDeltas is null)
             return;
 
-        foreach ((BTree<ColumnValue, BTreeTuple?> index, BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas) uniqueIndex in uniqueIndexDeltas)
+        foreach ((BTree<ColumnValue, BTreeTuple> index, BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas) uniqueIndex in uniqueIndexDeltas)
         {
-            foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
+            foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
             await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);

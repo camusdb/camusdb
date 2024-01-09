@@ -26,7 +26,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
     /// <param name="name"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
-    private static async Task<ColumnValue> CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue, BTreeTuple?> uniqueIndex, InsertTicket ticket, string name)
+    private static async Task<ColumnValue> CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue, BTreeTuple> uniqueIndex, InsertTicket ticket, string name)
     {
         ColumnValue? uniqueValue = GetColumnValue(table, ticket, name);
 
@@ -38,7 +38,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
 
         BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, uniqueValue);
 
-        if (rowTuple is not null)
+        if (rowTuple is not null && !rowTuple.IsNull())
             throw new CamusDBException(
                 CamusDBErrorCodes.DuplicateUniqueKeyValue,
                 "Duplicate entry for key \"" + table.Name + "\" " + uniqueValue.Type + " " + uniqueValue
@@ -54,7 +54,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
             if (index.Value.Type != IndexType.Unique)
                 continue;
 
-            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.Value.UniqueRows;
+            BTree<ColumnValue, BTreeTuple>? uniqueIndex = index.Value.UniqueRows;
 
             if (uniqueIndex is null)
                 throw new CamusDBException(

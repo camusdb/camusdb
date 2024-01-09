@@ -293,7 +293,7 @@ public sealed class RowUpdater
     private static async Task CheckUniqueKeyViolations(
         TableDescriptor table,
         string keyName,
-        BTree<ColumnValue, BTreeTuple?> uniqueIndex,
+        BTree<ColumnValue, BTreeTuple> uniqueIndex,
         HLCTimestamp txnId,
         Dictionary<string, ColumnValue> values,
         string name
@@ -306,7 +306,7 @@ public sealed class RowUpdater
 
         BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.Write, txnId, uniqueValue);
 
-        if (rowTuple is not null)
+        if (rowTuple is not null && !rowTuple.IsNull())
             throw new CamusDBException(
                 CamusDBErrorCodes.DuplicateUniqueKeyValue,
                 "Duplicate entry for key \"" + table.Name + "." + keyName + "\" " + uniqueValue.Type + " " + uniqueValue
@@ -331,7 +331,7 @@ public sealed class RowUpdater
             if (index.Key == "~pk")
                 continue;
 
-            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.Value.UniqueRows;
+            BTree<ColumnValue, BTreeTuple>? uniqueIndex = index.Value.UniqueRows;
 
             if (uniqueIndex is null)
                 throw new CamusDBException(
@@ -360,7 +360,7 @@ public sealed class RowUpdater
         UpdateTicket ticket = state.Ticket;
         BufferPoolManager tablespace = state.Database.BufferPool;
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
-        List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>? uniqueIndexDeltas;
+        List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)>? uniqueIndexDeltas;
 
         // @todo we need to take a snapshot of the data to prevent deadlocks
         // but probably need to optimize this for larger datasets
@@ -506,15 +506,15 @@ public sealed class RowUpdater
         return await indexSaver.Save(saveUniqueOffsetIndex);
     }
 
-    private async Task<List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>> UpdateUniqueIndexes(UpdateFluxState state, UpdateTicket ticket, BTreeTuple tuple, QueryResultRow row)
+    private async Task<List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)>> UpdateUniqueIndexes(UpdateFluxState state, UpdateTicket ticket, BTreeTuple tuple, QueryResultRow row)
     {
-        List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> deltas = new();
+        List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)> deltas = new();
 
         //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BTree<ColumnValue, BTreeTuple?>? uniqueIndex = index.UniqueRows;
+            BTree<ColumnValue, BTreeTuple>? uniqueIndex = index.UniqueRows;
 
             if (uniqueIndex is null)
                 throw new CamusDBException(
@@ -551,7 +551,7 @@ public sealed class RowUpdater
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task PersistIndexChanges(UpdateFluxState state, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)> uniqueIndexDeltas)
+    private async Task PersistIndexChanges(UpdateFluxState state, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)> uniqueIndexDeltas)
     {
         if (mainIndexDeltas is null)
             return;
@@ -564,9 +564,9 @@ public sealed class RowUpdater
         if (uniqueIndexDeltas is null)
             return;
 
-        foreach ((BTree<ColumnValue, BTreeTuple?> index, BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas) uniqueIndex in uniqueIndexDeltas)
+        foreach ((BTree<ColumnValue, BTreeTuple> index, BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas) uniqueIndex in uniqueIndexDeltas)
         {
-            foreach (BTreeMvccEntry<BTreeTuple?> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
+            foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
             await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);

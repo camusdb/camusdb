@@ -16,7 +16,7 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
-public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeTuple?>
+public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeTuple>
 {
     private readonly BufferPoolManager bufferpool;
 
@@ -70,13 +70,13 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
         return new BTreeTuple(slotOne, slotTwo);
     }
 
-    public async Task<BTreeNode<ColumnValue, BTreeTuple?>?> GetNode(ObjectIdValue offset)
+    public async Task<BTreeNode<ColumnValue, BTreeTuple>?> GetNode(ObjectIdValue offset)
     {
         byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
             return null;
 
-        BTreeNode<ColumnValue, BTreeTuple?> node = new(-1, BTreeUtils.GetNodeCapacity<ColumnValue, BTreeTuple?>());
+        BTreeNode<ColumnValue, BTreeTuple> node = new(-1, BTreeUtils.GetNodeCapacity<ColumnValue, BTreeTuple?>());
 
         int pointer = 0;
         node.KeyCount = Serializator.ReadInt32(data, ref pointer);
@@ -90,7 +90,7 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<ColumnValue, BTreeT
             HLCTimestamp timestamp = UnserializeTimestamp(data, ref pointer);
             BTreeTuple? tuple = UnserializeTuple(data, ref pointer);
 
-            BTreeEntry<ColumnValue, BTreeTuple?> entry = new(key, this, null)
+            BTreeEntry<ColumnValue, BTreeTuple> entry = new(key, this, null)
             {
                 NextPageOffset = Serializator.ReadObjectId(data, ref pointer)
             };

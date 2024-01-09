@@ -121,7 +121,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
                 if (entry is not null)
                 {
-                    (HLCTimestamp timestamp, ObjectIdValue value) = entry.GetMaxCommitedValue();
+                    (HLCTimestamp timestamp, ObjectIdValue value) = entry.GetMaxCommittedValue();
 
                     //Console.WriteLine("Saved K={0} T={1} V={2}", entry.Key, timestamp, value);
 

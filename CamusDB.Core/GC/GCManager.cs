@@ -19,7 +19,6 @@ using CamusDB.Core.Util.Comparers;
 using CamusDB.Core.CommandsExecutor.Models;
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
-using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
 
 namespace CamusDB.Core.GC;
 
@@ -28,6 +27,8 @@ public sealed class GCManager : IDisposable
     //private const int VersionRetentionPeriod = 3600000;
 
     private const int VersionRetentionPeriod = 60000; // 1 minute
+
+    private const int MaxVersionsToRemove = 16;
 
     private readonly BufferPoolManager bufferPool;
 
@@ -158,20 +159,45 @@ public sealed class GCManager : IDisposable
 
                 TableDescriptor tableDescriptor = await keyValueDescriptor.Value;
 
+                BTree<ObjectIdValue, ObjectIdValue>? tableIndex = tableDescriptor.Rows;
+                if (tableIndex is not null)
+                {
+                    BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas = new();
+
+                    await tableIndex.Mark(timestamp, deltas);
+
+                    if (deltas.Entries.Count > 0)
+                    {
+                        foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in deltas.Entries)
+                        {
+                            List<ObjectIdValue>? removed = entry.RemoveExpired(timestamp, MaxVersionsToRemove);
+
+                            if (removed is not null && removed.Count > 0)
+                            {                                
+                                foreach (ObjectIdValue pageOffset in removed)
+                                {
+                                    if (!pageOffset.IsNull())
+                                        await bufferPool.DeletePage(pageOffset);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 foreach (KeyValuePair<string, TableIndexSchema> index in tableDescriptor.Indexes)
                 {
-                    BTree<ColumnValue, BTreeTuple?>? xindex = index.Value.UniqueRows;
+                    BTree<ColumnValue, BTreeTuple>? xindex = index.Value.UniqueRows;
                     if (xindex is not null)
                     {
-                        BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas = new();
+                        BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas = new();
 
                         await xindex.Mark(timestamp, deltas);
 
                         if (deltas.Entries.Count == 0)
                             continue;
 
-                        foreach (BTreeEntry<ColumnValue, BTreeTuple?> entry in deltas.Entries)
-                            entry.RemoveExpired(timestamp, 16);
+                        foreach (BTreeEntry<ColumnValue, BTreeTuple> entry in deltas.Entries)
+                            entry.RemoveExpired(timestamp, MaxVersionsToRemove);
                     }
                 }
             }

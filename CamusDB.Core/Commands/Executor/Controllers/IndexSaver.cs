@@ -36,7 +36,7 @@ internal sealed class IndexSaver
         return await indexUniqueOffsetSaver.Save(ticket);
     }
 
-    public async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple?>> Save(SaveUniqueIndexTicket ticket)
+    public async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple>> Save(SaveUniqueIndexTicket ticket)
     {
         return await indexUniqueSaver.Save(ticket);
     }
@@ -62,9 +62,9 @@ internal sealed class IndexSaver
 
     public async Task Persist(
         BufferPoolManager tablespace,
-        BTree<ColumnValue, BTreeTuple?> index,
+        BTree<ColumnValue, BTreeTuple> index,
         List<BufferPageOperation> modifiedPages,
-        BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas)
+        BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas)
     {
         await indexUniqueSaver.Persist(
             tablespace,

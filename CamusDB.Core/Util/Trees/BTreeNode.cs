@@ -17,7 +17,7 @@ namespace CamusDB.Core.Util.Trees;
 /// </summary>
 /// <typeparam name="TKey"></typeparam>
 /// <typeparam name="TValue"></typeparam>
-public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey>
+public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
 {
     private static int CurrentId = -1;
 

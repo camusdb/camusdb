@@ -202,13 +202,13 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
         }
     }
 
-    public IEnumerable<BTreeNode<int, int?>> NodesReverseTraverse()
+    public IEnumerable<BTreeNode<int, int>> NodesReverseTraverse()
     {
-        foreach (BTreeNode<int, int?> node in NodesReverseTraverseInternal(root, height))
+        foreach (BTreeNode<int, int> node in NodesReverseTraverseInternal(root, height))
             yield return node;
     }
 
-    private static IEnumerable<BTreeNode<int, int?>> NodesReverseTraverseInternal(BTreeMultiNode<TKey>? node, int ht)
+    private static IEnumerable<BTreeNode<int, int>> NodesReverseTraverseInternal(BTreeMultiNode<TKey>? node, int ht)
     {
         //Console.WriteLine("ht={0}", ht);
 
@@ -217,7 +217,7 @@ public sealed class BTreeMulti<TKey> where TKey : IComparable<TKey>
 
         for (int j = node.KeyCount; j >= 0; j--)
         {
-            foreach (BTreeNode<int, int?> childNode in NodesReverseTraverseInternal(node.children[j].Next, ht - 1))
+            foreach (BTreeNode<int, int> childNode in NodesReverseTraverseInternal(node.children[j].Next, ht - 1))
                 yield return childNode;
         }
     }

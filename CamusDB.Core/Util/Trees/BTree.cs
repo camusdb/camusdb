@@ -28,7 +28,7 @@ namespace CamusDB.Core.Util.Trees;
  * The entries version the data by timestamp and return a consistent state for 
  * the same transaction id (timestamp).
  */
-public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey>
+public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
 {
     private static int CurrentId = -1;
 

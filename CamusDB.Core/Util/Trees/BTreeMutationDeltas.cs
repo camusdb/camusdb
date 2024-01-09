@@ -8,7 +8,7 @@
 
 namespace CamusDB.Core.Util.Trees;
 
-public sealed class BTreeMutationDeltas<TKey, TValue> where TKey : IComparable<TKey>
+public sealed class BTreeMutationDeltas<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
 {
     public HashSet<BTreeNode<TKey, TValue>> Nodes { get; } = new();
 

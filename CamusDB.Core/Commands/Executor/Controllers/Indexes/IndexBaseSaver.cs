@@ -35,13 +35,13 @@ internal abstract class IndexBaseSaver
         };
     }
 
-    protected static int GetKeySizes(BTreeNode<ColumnValue, BTreeTuple?> node)
+    protected static int GetKeySizes(BTreeNode<ColumnValue, BTreeTuple> node)
     {
         int length = 0;
 
         for (int i = 0; i < node.KeyCount; i++)
         {
-            BTreeEntry<ColumnValue, BTreeTuple?> entry = node.children[i];
+            BTreeEntry<ColumnValue, BTreeTuple> entry = node.children[i];
 
             if (entry is null)
                 length += 2 + 12 * 4; // type(2 byte) + tuple(12 byte + 12 byte) + nextPage(12 byte)

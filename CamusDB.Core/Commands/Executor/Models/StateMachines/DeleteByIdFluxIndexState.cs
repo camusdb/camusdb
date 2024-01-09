@@ -20,7 +20,7 @@ public sealed class DeleteByIdFluxIndexState
 
     public BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? MainIndexDeltas { get; set; }
 
-    public List<(BTree<ColumnValue, BTreeTuple?>, BTreeMutationDeltas<ColumnValue, BTreeTuple?>)>? UniqueIndexDeltas { get; set; }
+    public List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)>? UniqueIndexDeltas { get; set; }
 
     public DeleteByIdFluxIndexState()
     {

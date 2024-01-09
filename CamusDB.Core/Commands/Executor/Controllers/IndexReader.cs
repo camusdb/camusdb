@@ -34,7 +34,7 @@ internal sealed class IndexReader
         return await indexUniqueOffsetReader.ReadOffsets(tablespace, offset);
     }
 
-    public async Task<BTree<ColumnValue, BTreeTuple?>> ReadUnique(BufferPoolManager tablespace, ObjectIdValue offset)
+    public async Task<BTree<ColumnValue, BTreeTuple>> ReadUnique(BufferPoolManager tablespace, ObjectIdValue offset)
     {
         return await indexUniqueReader.ReadUnique(tablespace, offset);
     }

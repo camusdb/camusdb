@@ -424,7 +424,7 @@ public class TestBTreeMulti
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         for (int i = 0; i < 256; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, i + 100);

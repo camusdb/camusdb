@@ -27,7 +27,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple?>> Save(SaveUniqueIndexTicket ticket)
+    public async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple>> Save(SaveUniqueIndexTicket ticket)
     {
         return await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value);
     }
@@ -39,7 +39,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
     {
-        (bool found, BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas) = await ticket.Index.Remove(ticket.Key);
+        (bool found, BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas) = await ticket.Index.Remove(ticket.Key);
 
         //if (found)
         //    Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
@@ -47,9 +47,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     public async Task Persist(
         BufferPoolManager tablespace,
-        BTree<ColumnValue, BTreeTuple?> index,
+        BTree<ColumnValue, BTreeTuple> index,
         List<BufferPageOperation> modifiedPages,
-        BTreeMutationDeltas<ColumnValue, BTreeTuple?> deltas
+        BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas
     )
     {
         // @todo this lock will produce contention
@@ -61,7 +61,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 "Deltas cannot be null or empty"
             );
 
-        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas.Nodes)
+        foreach (BTreeNode<ColumnValue, BTreeTuple> node in deltas.Nodes)
         {
             if (node.PageOffset.IsNull())
                 node.PageOffset = tablespace.GetNextFreeOffset();
@@ -88,7 +88,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         ObjectIdValue nullValue = new();
         HLCTimestamp timestampZero = HLCTimestamp.Zero;
 
-        foreach (BTreeNode<ColumnValue, BTreeTuple?> node in deltas.Nodes)
+        foreach (BTreeNode<ColumnValue, BTreeTuple> node in deltas.Nodes)
         {
             //using IDisposable readerLock = await node.ReaderLockAsync();
 
@@ -104,11 +104,11 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
             for (int i = 0; i < node.KeyCount; i++)
             {
-                BTreeEntry<ColumnValue, BTreeTuple?> entry = node.children[i];
+                BTreeEntry<ColumnValue, BTreeTuple> entry = node.children[i];
 
                 if (entry is not null)
                 {
-                    (HLCTimestamp timestamp, BTreeTuple? tuple) = entry.GetMaxCommitedValue();
+                    (HLCTimestamp timestamp, BTreeTuple? tuple) = entry.GetMaxCommittedValue();
 
                     //Console.WriteLine("Saved K={0} T={1} V={2}", entry.Key, timestamp, tuple);
 
@@ -116,7 +116,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                     Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer);
                     SerializeTuple(nodeBuffer, tuple, ref pointer); // @todo LastValue
 
-                    BTreeNode<ColumnValue, BTreeTuple?>? next = (await entry.Next);
+                    BTreeNode<ColumnValue, BTreeTuple>? next = (await entry.Next);
                     Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : nullValue, ref pointer);                    
                 }
                 else

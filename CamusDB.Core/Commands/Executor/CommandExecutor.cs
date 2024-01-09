@@ -399,7 +399,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 }
 
             case NodeType.ShowTables:
-                {                    
+                {
                     return schemaQuerier.ShowTables(database);
                 }
 
@@ -415,6 +415,11 @@ public sealed class CommandExecutor : IAsyncDisposable
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!);
 
                     return schemaQuerier.ShowCreateTable(table);
+                }
+
+            case NodeType.ShowDatabase:
+                {
+                    return schemaQuerier.ShowDatabase(database);
                 }
 
             default:

@@ -29,7 +29,7 @@ internal sealed class TestBTreeMvcc
         HLCTimestamp txnid1 = await hlc.SendOrLocalEvent();
         HLCTimestamp txnid2 = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid1, BTreeCommitState.Committed, 5, 100);
         await tree.Put(txnid2, BTreeCommitState.Committed, 7, 100);
@@ -44,7 +44,7 @@ internal sealed class TestBTreeMvcc
         HLCTimestamp txnid1 = await hlc.SendOrLocalEvent();
         HLCTimestamp txnid2 = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid1, BTreeCommitState.Committed, 5, 100);
         await tree.Put(txnid2, BTreeCommitState.Committed, 7, 100);        
@@ -62,7 +62,7 @@ internal sealed class TestBTreeMvcc
         HLCTimestamp txnid1 = await hlc.SendOrLocalEvent();
         HLCTimestamp txnid2 = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid1, BTreeCommitState.Committed, 5, 100);
         await tree.Put(txnid2, BTreeCommitState.Committed, 7, 100);
@@ -86,7 +86,7 @@ internal sealed class TestBTreeMvcc
         HLCTimestamp txnid1 = await hlc.SendOrLocalEvent();
         HLCTimestamp txnid2 = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
         await tree.Put(txnid1, BTreeCommitState.Uncommitted, 5, 100);
         await tree.Put(txnid2, BTreeCommitState.Uncommitted, 7, 100);
@@ -110,10 +110,10 @@ internal sealed class TestBTreeMvcc
         HLCTimestamp txnid1 = await hlc.SendOrLocalEvent();
         HLCTimestamp txnid2 = await hlc.SendOrLocalEvent();
 
-        BTree<int, int?> tree = new(new());
+        BTree<int, int> tree = new(new());
 
-        BTreeMutationDeltas<int, int?> deltas1 = await tree.Put(txnid1, BTreeCommitState.Uncommitted, 5, 100);
-        BTreeMutationDeltas<int, int?> deltas2 = await tree.Put(txnid2, BTreeCommitState.Uncommitted, 7, 100);
+        BTreeMutationDeltas<int, int> deltas1 = await tree.Put(txnid1, BTreeCommitState.Uncommitted, 5, 100);
+        BTreeMutationDeltas<int, int> deltas2 = await tree.Put(txnid2, BTreeCommitState.Uncommitted, 7, 100);
 
         int? values1 = await tree.Get(TransactionType.Write, txnid1, 5);
         int? values2 = await tree.Get(TransactionType.Write, txnid2, 5);
@@ -133,10 +133,10 @@ internal sealed class TestBTreeMvcc
         Assert.AreEqual(1, deltas1.MvccEntries.Count);
         Assert.AreEqual(1, deltas2.MvccEntries.Count);
 
-        foreach (BTreeMvccEntry<int?> x in deltas1.MvccEntries)
+        foreach (BTreeMvccEntry<int> x in deltas1.MvccEntries)
             x.CommitState = BTreeCommitState.Committed;
 
-        foreach (BTreeMvccEntry<int?> x in deltas2.MvccEntries)
+        foreach (BTreeMvccEntry<int> x in deltas2.MvccEntries)
             x.CommitState = BTreeCommitState.Committed;
 
         int? values5 = await tree.Get(TransactionType.Write, txnid1, 5);
