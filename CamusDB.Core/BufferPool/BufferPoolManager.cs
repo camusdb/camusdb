@@ -285,10 +285,10 @@ public sealed class BufferPoolManager
     {
         int pointer = 0;
         Serializator.WriteInt16(pageBuffer, BConfig.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)        
-        Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                      // checksum (4 bytes unsigned integer)        
-        Serializator.WriteUInt32(pageBuffer, lastSequence, ref pointer);                  // lastWroteSequence (4 bytes unsigned integer)        
-        Serializator.WriteObjectId(pageBuffer, nextPage, ref pointer);                    // next page (12 bytes objectid)        
-        Serializator.WriteInt32(pageBuffer, length, ref pointer);                         // data length (4 bytes integer)                
+        Serializator.WriteUInt32(pageBuffer, checksum, ref pointer);                  // checksum (4 bytes unsigned integer)        
+        Serializator.WriteUInt32(pageBuffer, lastSequence, ref pointer);              // lastWroteSequence (4 bytes unsigned integer)        
+        Serializator.WriteObjectId(pageBuffer, nextPage, ref pointer);                // next page (12 bytes objectid)        
+        Serializator.WriteInt32(pageBuffer, length, ref pointer);                     // data length (4 bytes integer)                
         return pointer;
     }
 

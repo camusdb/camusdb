@@ -58,5 +58,6 @@ public enum NodeType
     TypeInteger64,
     TypeFloat64,
     ShowColumns,
-    ShowTables
+    ShowTables,
+    ShowCreateTable
 }

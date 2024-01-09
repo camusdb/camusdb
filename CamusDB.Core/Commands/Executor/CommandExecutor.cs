@@ -410,6 +410,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                     return schemaQuerier.ShowColumns(table);
                 }
 
+            case NodeType.ShowCreateTable:
+                {
+                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!);
+
+                    return schemaQuerier.ShowCreateTable(table);
+                }
+
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown query AST stmt: " + ast.nodeType);
         }

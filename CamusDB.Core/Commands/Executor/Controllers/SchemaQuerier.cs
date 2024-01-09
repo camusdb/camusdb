@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using System.Text;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -41,13 +42,13 @@ internal sealed class SchemaQuerier
         }
     }
 
-    internal async IAsyncEnumerable<QueryResultRow> ShowColumns(TableDescriptor tableName)
-    {        
+    internal async IAsyncEnumerable<QueryResultRow> ShowColumns(TableDescriptor table)
+    {
         await Task.CompletedTask;
 
         BTreeTuple tuple = new(new(), new());
 
-        foreach (TableColumnSchema column in tableName.Schema.Columns!)
+        foreach (TableColumnSchema column in table.Schema.Columns!)
         {
             yield return new QueryResultRow(tuple, new()
             {
@@ -59,5 +60,68 @@ internal sealed class SchemaQuerier
                 { "Extra", new ColumnValue(ColumnType.String, "") },
             });
         }
+    }
+
+    internal async IAsyncEnumerable<QueryResultRow> ShowCreateTable(TableDescriptor table)
+    {
+        await Task.CompletedTask;
+
+        BTreeTuple tuple = new(new(), new());
+
+        StringBuilder createTableSql = new();
+
+        createTableSql.Append("CREATE TABLE `" + table.Name + "` (");
+
+        int i = 0;
+        var columns = table.Schema.Columns!;
+
+        foreach (TableColumnSchema column in columns)
+        {
+            createTableSql.Append(' ');
+            createTableSql.Append('`');
+            createTableSql.Append(column.Name);
+            createTableSql.Append('`');
+            createTableSql.Append(' ');
+            createTableSql.Append(GetSQLType(column.Type));
+            createTableSql.Append(' ');
+            createTableSql.Append(GetSQLConstraint(column));
+
+            if ((++i) != columns.Count)
+                createTableSql.Append(',');
+
+            //createTableSql.Append('\n');
+        }
+
+        createTableSql.Append(");");
+
+        yield return new QueryResultRow(tuple, new()
+        {
+            { "Table", new ColumnValue(ColumnType.String, table.Name) },
+            { "Create Table", new ColumnValue(ColumnType.String, createTableSql.ToString()) }
+        });
+    }
+
+    private static string GetSQLType(ColumnType type)
+    {
+        return type switch
+        {
+            ColumnType.String => "STRING",
+            ColumnType.Id => "OID",
+            ColumnType.Integer64 => "INT64",
+            ColumnType.Float64 => "FLOAT64",
+            ColumnType.Bool => "BOOL",
+            _ => throw new NotImplementedException(),
+        };
+    }
+
+    private static string GetSQLConstraint(TableColumnSchema column)
+    {
+        if (column.Primary)
+            return "PRIMARY KEY";
+
+        if (column.NotNull)
+            return "NOT NULL";
+
+        return "NULL";
     }
 }
