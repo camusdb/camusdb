@@ -10,16 +10,6 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public record struct QueryPlanStep
-{
-	public QueryPlanStepType Type { get; }	
-
-	public QueryPlanStep(QueryPlanStepType type)
-	{
-		Type = type;		
-	}
-}
-
 public sealed class QueryPlan
 {
 	public List<QueryPlanStep> Steps { get; } = new();

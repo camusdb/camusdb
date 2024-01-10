@@ -10,10 +10,11 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 
 public enum QueryPlanStepType
 {
-    QueryFromIndex,
-    QueryFromTableIndex,
+    FullScanFromIndex,
+    FullScanFromTableIndex,
     SortBy,
     Aggregate,
     ReduceToProjections,
-    Limit
+    Limit,
+    QueryFromIndex
 }

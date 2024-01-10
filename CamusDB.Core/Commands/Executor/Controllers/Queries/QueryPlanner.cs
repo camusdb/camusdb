@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using System.Numerics;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
@@ -22,10 +24,7 @@ public sealed class QueryPlanner
     {
         QueryPlan plan = new(database, table, ticket);
 
-        if (!string.IsNullOrEmpty(ticket.IndexName))
-            plan.AddStep(new QueryPlanStep(QueryPlanStepType.QueryFromIndex));
-        else
-            plan.AddStep(new QueryPlanStep(QueryPlanStepType.QueryFromTableIndex));
+        plan.AddStep(GetScanOrQueryType(table, ticket));
 
         if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
             plan.AddStep(new QueryPlanStep(QueryPlanStepType.SortBy));
@@ -43,6 +42,83 @@ public sealed class QueryPlanner
         }
 
         return plan;
+    }
+
+    private static QueryPlanStep GetScanOrQueryType(TableDescriptor table, QueryTicket ticket)
+    {
+        if (ticket.Filters is not null && ticket.Filters.Count > 0)
+        {
+            foreach (QueryFilter filter in ticket.Filters)
+            {
+                if (table.Indexes.TryGetValue(filter.ColumnName, out TableIndexSchema? index))
+                {
+                    if (filter.Op == "=")
+                        return new QueryPlanStep(QueryPlanStepType.QueryFromIndex, index);
+                }
+            }
+        }
+
+        if (ticket.Where is not null)
+        {
+            LinkedList<NodeAst> equalities = new();
+
+            GetEqualities(ticket.Where, equalities);
+
+            foreach (NodeAst equality in equalities)
+            {
+                if (equality.leftAst!.nodeType == NodeType.Identifier)
+                {
+                    foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+                    {
+                        if (index.Value.Column == equality.leftAst!.yytext!)
+                        {
+                            if (TryGetConstant(equality.rightAst!, ticket.Parameters, out ColumnValue? columnValue))
+                                return new QueryPlanStep(QueryPlanStepType.QueryFromIndex, index.Value, columnValue);
+                        }
+                    }
+                }
+            }            
+        }
+
+        if (!string.IsNullOrEmpty(ticket.IndexName))
+            return new QueryPlanStep(QueryPlanStepType.FullScanFromIndex);
+
+        return new QueryPlanStep(QueryPlanStepType.FullScanFromTableIndex);
+    }
+
+    private static bool TryGetConstant(NodeAst nodeAst, Dictionary<string, ColumnValue>? parameters, out ColumnValue? columnValue)
+    {
+        try
+        {
+            columnValue = SqlExecutor.EvalExpr(nodeAst, new(), parameters);
+            if (columnValue.Type != ColumnType.Null)
+                return true;
+        }
+        catch (CamusDBException)
+        {
+
+        }
+
+        columnValue = null;
+        return false;
+    }
+
+    private static void GetEqualities(NodeAst where, LinkedList<NodeAst> equalities)
+    {
+        if (where.nodeType == NodeType.ExprEquals)
+        {
+            equalities.AddLast(where);
+            return;
+        }
+
+        if (where.nodeType.IsBinary())
+        {
+            if (where.leftAst is not null)
+                GetEqualities(where.leftAst, equalities);
+
+            if (where.rightAst is not null)
+                GetEqualities(where.rightAst, equalities);
+        }
     }
 
     private static bool IsFullProjection(List<NodeAst> projection)
