@@ -23,7 +23,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
 %token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW
-%token TCOLUMNS TTABLES TDESCRIBE TDATABASE
+%token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE
 
 %%
 
@@ -40,18 +40,18 @@ stat    : select_stmt { $$.n = $1.n; }
         | show_stmt { $$.n = $1.n; } 
         ;
 
-select_stmt : TSELECT select_field_list TFROM any_identifier { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, null, null, null); }
-            | TSELECT select_field_list TFROM any_identifier TWHERE condition { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, null, null, null, null); }
-            | TSELECT select_field_list TFROM any_identifier TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, null, $7.n, null, null, null); }
-            | TSELECT select_field_list TFROM any_identifier TWHERE condition TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, null, null, null); }            
-            | TSELECT select_field_list TFROM any_identifier TLIMIT select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, $6.n, null, null); }
-            | TSELECT select_field_list TFROM any_identifier TLIMIT select_limit_offset TOFFSET select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, $6.n, $8.n, null); }
-            | TSELECT select_field_list TFROM any_identifier TWHERE condition TLIMIT select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, null, $8.n, null, null); }
-            | TSELECT select_field_list TFROM any_identifier TWHERE condition TLIMIT select_limit_offset TOFFSET select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, null, $8.n, $10.n, null); }
-            | TSELECT select_field_list TFROM any_identifier TORDER TBY order_list TLIMIT select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, null, $7.n, $9.n, null, null); }
-            | TSELECT select_field_list TFROM any_identifier TWHERE condition TORDER TBY order_list TLIMIT select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, $11.n, null, null); }
-            | TSELECT select_field_list TFROM any_identifier TORDER TBY order_list TLIMIT select_limit_offset TOFFSET select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, null, $7.n, $9.n, $11.n, null); }
-            | TSELECT select_field_list TFROM any_identifier TWHERE condition TORDER TBY order_list TLIMIT select_limit_offset TOFFSET select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, $11.n, $13.n, null); }
+select_stmt : TSELECT select_field_list TFROM select_table { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, null, null, null); }
+            | TSELECT select_field_list TFROM select_table TWHERE condition { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, null, null, null, null); }
+            | TSELECT select_field_list TFROM select_table TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, null, $7.n, null, null, null); }
+            | TSELECT select_field_list TFROM select_table TWHERE condition TORDER TBY order_list { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, null, null, null); }            
+            | TSELECT select_field_list TFROM select_table TLIMIT select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, $6.n, null, null); }
+            | TSELECT select_field_list TFROM select_table TLIMIT select_limit_offset TOFFSET select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, $6.n, $8.n, null); }
+            | TSELECT select_field_list TFROM select_table TWHERE condition TLIMIT select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, null, $8.n, null, null); }
+            | TSELECT select_field_list TFROM select_table TWHERE condition TLIMIT select_limit_offset TOFFSET select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, null, $8.n, $10.n, null); }
+            | TSELECT select_field_list TFROM select_table TORDER TBY order_list TLIMIT select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, null, $7.n, $9.n, null, null); }
+            | TSELECT select_field_list TFROM select_table TWHERE condition TORDER TBY order_list TLIMIT select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, $11.n, null, null); }
+            | TSELECT select_field_list TFROM select_table TORDER TBY order_list TLIMIT select_limit_offset TOFFSET select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, null, $7.n, $9.n, $11.n, null); }
+            | TSELECT select_field_list TFROM select_table TWHERE condition TORDER TBY order_list TLIMIT select_limit_offset TOFFSET select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, $11.n, $13.n, null); }
             ;
 
 insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES LPAREN values_list RPAREN { $$.n = new(NodeType.Insert, $3.n, $5.n, $9.n, null, null, null, null); }
@@ -83,6 +83,10 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TCREATE TTABLE any_identifier { $$.n = new(NodeType.ShowCreateTable, $4.n, null, null, null, null, null, null); }
           | TSHOW TDATABASE { $$.n = new(NodeType.ShowDatabase, null, null, null, null, null, null, null); }
           ;
+
+select_table : any_identifier  { $$.n = $1.n; $$.s = $1.s; }
+             | any_identifier TAT LBRACE identifier TEQUALS identifier RBRACE { $$.n = new(NodeType.IdentifierWithOpts, $1.n, $4.n, $6.n, null, null, null, null); }
+             ;
 
 create_table_item_list : create_table_item_list TCOMMA create_table_item { $$.n = new(NodeType.CreateTableItemList, $1.n, $3.n, null, null, null, null, null); }
                        | create_table_item { $$.n = $1.n; $$.s = $1.s; }

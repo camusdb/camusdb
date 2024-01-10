@@ -8,10 +8,7 @@
 
 using NUnit.Framework;
 using CamusDB.Core.SQLParser;
-using Microsoft.VisualStudio.TestPlatform.CommunicationUtilities;
 using NUnit.Framework.Internal;
-using System.Collections.Generic;
-using System.Net.NetworkInformation;
 
 namespace CamusDB.Tests.SQLParser;
 
@@ -486,6 +483,22 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.ExprAlias, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
         Assert.AreEqual("some_table", ast.rightAst!.yytext);        
+    }
+
+    [Test]
+    public void TestParseSelectForceIndex()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT some_field FROM some_table@{FORCE_INDEX=pk}");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.IdentifierWithOpts, ast.rightAst!.nodeType);
+
+        Assert.AreEqual("some_field", ast.leftAst!.yytext);
+        Assert.AreEqual("some_table", ast.rightAst!.leftAst!.yytext);
+        Assert.AreEqual("FORCE_INDEX", ast.rightAst!.rightAst!.yytext);
+        Assert.AreEqual("pk", ast.rightAst!.extendedOne!.yytext);
     }
 
     [Test]

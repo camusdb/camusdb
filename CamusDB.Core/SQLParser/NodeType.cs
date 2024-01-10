@@ -16,6 +16,7 @@ public enum NodeType
     Null,
     Identifier,
     IdentifierList,
+    IdentifierWithOpts,
     Placeholder,
     ExprList,
     ExprEquals,

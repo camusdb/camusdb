@@ -16,14 +16,21 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
 {
     public async Task<QueryTicket> CreateQueryTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        string tableName = ast.rightAst!.yytext!;
+        string tableName;
+
+        if (ast.rightAst!.nodeType == NodeType.Identifier)
+            tableName = ast.rightAst.yytext!;
+        else if (ast.rightAst!.nodeType == NodeType.IdentifierWithOpts)
+            tableName = ast.rightAst.leftAst!.yytext!;
+        else
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid table name");
 
         return new(
             txnId: await executor.NextTxnId(),
             txnType: TransactionType.ReadOnly,
             databaseName: ticket.DatabaseName,
             tableName: tableName,
-            index: null,
+            index: GetForcedIndex(ast.rightAst),
             projection: GetProjection(ast),
             filters: null,
             where: ast.extendedOne,
@@ -32,6 +39,17 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
             offset: ast.extendedFour,
             parameters: ticket.Parameters
         );                   
+    }
+
+    private static string? GetForcedIndex(NodeAst rightAst)
+    {
+        if (rightAst.nodeType == NodeType.IdentifierWithOpts)
+        {
+            if (rightAst.rightAst!.yytext!.Equals("FORCE_INDEX", StringComparison.InvariantCultureIgnoreCase))
+                return "~pk";
+        }
+
+        return null;
     }
 
     private static List<NodeAst>? GetProjection(NodeAst? ast)

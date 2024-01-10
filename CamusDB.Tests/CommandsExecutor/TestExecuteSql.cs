@@ -866,6 +866,22 @@ public class TestExecuteSql
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectForceIndex()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT id FROM robots@{FORCE_INDEX=pk}",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteInsert1()
     {
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();

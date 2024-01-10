@@ -50,6 +50,8 @@ TTypeObjectId   (O|o)(B|b)(J|j)(E|e)(C|c)(T|t)(_)(I|i)(D|d)
 TTypeSObjectId  (O|o)(I|i)(D|d)
 LParen          \(
 RParen          \)
+LBrace          \{
+RBrace          \}
 Eol             (\r\n?|\n)
 NotWh           [^ \t\r\n]
 Space           [ \t]
@@ -66,7 +68,8 @@ UNIESC          \\U{HexDig}{8}
 String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\"
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
 EscIdentifier   (`)[a-zA-Z_][a-zA-Z0-9_]*(`)
-Placeholder     (@)[a-zA-Z0-9_]*
+Placeholder     (@)([a-zA-Z0-9_]+)
+TAt             @
 TAdd            \+
 TMult           \*
 TMinus          \-
@@ -97,6 +100,10 @@ TGreaterEquals  >=
 {LParen} { return (int)Token.LPAREN; }
 
 {RParen} { return (int)Token.RPAREN; }
+
+{LBrace} { return (int)Token.LBRACE; }
+
+{RBrace} { return (int)Token.RBRACE; }
 
 {TDatabase} { return (int)Token.TDATABASE; }
 
@@ -179,6 +186,8 @@ TGreaterEquals  >=
 {TTypeInt64} { return (int)Token.TTYPE_INT64; }
 
 {TTypeFloat64} { return (int)Token.TTYPE_FLOAT64; }
+
+{TAt} { return (int)Token.TAT; }
 
 {TAdd} { return (int)Token.TADD; }
 

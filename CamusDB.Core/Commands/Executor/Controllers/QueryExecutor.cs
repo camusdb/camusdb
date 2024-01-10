@@ -193,7 +193,7 @@ internal sealed class QueryExecutor
                 continue;
             }
 
-            byte[] data = await tablespace.GetDataFromPage(txnValue.SlotOne);
+            byte[] data = await tablespace.GetDataFromPage(txnValue.SlotTwo);
             if (data.Length == 0)
             {
                 //Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
