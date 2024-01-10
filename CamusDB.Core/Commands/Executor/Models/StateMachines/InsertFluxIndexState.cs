@@ -16,11 +16,13 @@ public sealed class InsertFluxIndexState
 {
 	public List<TableIndexSchema> UniqueIndexes { get; } = new();
 
-	public List<TableIndexSchema>? MultiIndexes { get; } = null;
+	public List<TableIndexSchema> MultiIndexes { get; } = new();
 
     public BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? MainIndexDeltas { get; set; }
 
     public List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? UniqueIndexDeltas { get; set; }
+
+    public List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? MultiIndexDeltas { get; set; }
 
     public InsertFluxIndexState()
 	{

@@ -134,10 +134,11 @@ internal sealed class RowInserter
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
-            if (index.Value.Type != IndexType.Unique)
-                continue;
+            if (index.Value.Type == IndexType.Unique)
+                indexState.UniqueIndexes.Add(index.Value);
 
-            indexState.UniqueIndexes.Add(index.Value);
+            if (index.Value.Type == IndexType.Multi)
+                indexState.MultiIndexes.Add(index.Value);
         }
 
         return indexState;
@@ -273,18 +274,34 @@ internal sealed class RowInserter
     /// <returns></returns>
     private async Task<FluxAction> UpdateMultiIndexes(InsertFluxState state)
     {
-        /*SaveMultiKeysIndexTicket saveMultiKeysIndex = new(
-            database: state.Database,
-            table: state.Table,
-            ticket: state.Ticket,
-            rowTuple: state.RowTuple,
-            locks: state.Locks,
-            modifiedPages: state.ModifiedPages
-        );
+        InsertTicket insertTicket = state.Ticket;
 
-        await insertMultiKeySaver.UpdateMultiKeys(saveMultiKeysIndex);*/
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
-        await Task.Yield();
+        foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
+        {
+            BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;
+
+            ColumnValue? multiKeyValue = GetColumnValue(state.Table, insertTicket, index.Column);
+
+            if (multiKeyValue is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for unique key field " + index.Column
+                );
+
+            SaveUniqueIndexTicket saveUniqueIndexTicket = new(
+                index: uniqueIndex,
+                txnId: insertTicket.TxnId,
+                commitState: BTreeCommitState.Uncommitted,
+                key: new CompositeColumnValue([multiKeyValue, new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString())]),
+                value: state.RowTuple
+            );
+
+            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
+        }
+
+        state.Indexes.MultiIndexDeltas = deltas;
 
         return FluxAction.Continue;
     }
