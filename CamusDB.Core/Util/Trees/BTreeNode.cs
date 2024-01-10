@@ -13,7 +13,7 @@ using CamusDB.Core.Util.Time;
 namespace CamusDB.Core.Util.Trees;
 
 /// <summary>
-/// Helper B-tree node data type
+/// B-tree node data type
 /// </summary>
 /// <typeparam name="TKey"></typeparam>
 /// <typeparam name="TValue"></typeparam>
@@ -21,23 +21,25 @@ public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey> where
 {
     private static int CurrentId = -1;
 
-    public int Id;
+    public int Id; // unique identifier for this node
 
-    public int KeyCount; // number of children
+    public int KeyCount; // number of children    
 
-    public HLCTimestamp CreatedAt = HLCTimestamp.Zero; // the time this node was created
+    public int NumberAccesses = 0; // number of times this node has been accessed
 
-    public int NumberAccesses = 0;
+    public int NumberReads = 0; // number of times this node has been read
 
-    public int NumberReads = 0; // number of times this node has been accessed
+    public int NumberWrites = 0; // number of times this node has been written
 
-    public int NumberWrites = 0;
+    public HLCTimestamp LastAccess = HLCTimestamp.Zero; // hlc timestamp of the last access to the node
 
-    public HLCTimestamp LastAccess;
+    public HLCTimestamp CreatedAt = HLCTimestamp.Zero; // hlc time when the node was created
 
-    public ObjectIdValue PageOffset;       // on-disk offset
+    public ObjectIdValue PageOffset; // on-disk offset
 
-    public BTreeEntry<TKey, TValue>[] children;  // = new BTreeEntry<TKey, TValue>[BTreeConfig.MaxChildren];   // the array of children
+    public BTreeEntry<TKey, TValue>[] children;  // the array of children leafs
+
+    public bool Mark = false; // mark flag tells which nodes must be released
 
     private readonly AsyncReaderWriterLock readerWriterLock = new(); // read/write locks prevent concurrent mutations to the node    
 
@@ -45,6 +47,7 @@ public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey> where
     /// Create a node with k children
     /// </summary>
     /// <param name="keyCount"></param>
+    /// <param name="capacity"></param>
     public BTreeNode(int keyCount, int capacity)
     {
         //Console.WriteLine("Allocated new node {0}", keyCount);

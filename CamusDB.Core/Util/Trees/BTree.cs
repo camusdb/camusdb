@@ -126,7 +126,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
         // external node
         if (ht == 0)
         {
-            for (int j = 0; j < node.KeyCount; j++)
+            /*for (int j = 0; j < node.KeyCount; j++)
             {
                 BTreeEntry<TKey, TValue> entry = children[j];
 
@@ -139,8 +139,15 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
                 //Console.WriteLine("X {0} {1}", key, entry.Key);
 
                 if (Eq(key, entry.Key))
+                {
+                    Console.WriteLine(j);
                     return entry.GetValue(txType, txnid);
-            }
+                }
+            }*/
+
+            BTreeEntry<TKey, TValue>? entry = BinarySearch(children, node.KeyCount, key);
+            if (entry is not null && entry.CanBeSeenBy(txnid))
+                return entry.GetValue(txType, txnid);
         }
 
         // internal node
@@ -292,6 +299,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
         if (root is null) // create root
         {
             root = new BTreeNode<TKey, TValue>(0, maxNodeCapacity);
+            root.CreatedAt = txnid;
             deltas.Nodes.Add(root);
             loaded++;
         }
@@ -308,6 +316,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
 
         // need to split root
         BTreeNode<TKey, TValue> newRoot = new(2, maxNodeCapacity);
+        newRoot.CreatedAt = txnid;
         deltas.Nodes.Add(newRoot);
         loaded++;
 
@@ -342,6 +351,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
         //using IDisposable disposable = await node.WriterLockAsync();
 
         node.NumberAccesses++;
+        node.LastAccess = txnid;
 
         int j;
         BTreeEntry<TKey, TValue>? newEntry = null;
@@ -405,19 +415,21 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
 
         node.children[j] = newEntry;
         node.KeyCount++;
+        node.NumberWrites++;
 
         deltas.Nodes.Add(node);
 
         if (node.KeyCount < maxNodeCapacity)
             return null;
 
-        return Split(node, deltas);
+        return Split(node, txnid, deltas);
     }
 
     // split node in half
-    private BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, BTreeMutationDeltas<TKey, TValue> deltas)
+    private BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, HLCTimestamp txnid, BTreeMutationDeltas<TKey, TValue> deltas)
     {
         BTreeNode<TKey, TValue> newNode = new(maxNodeCapacityHalf, maxNodeCapacity);
+        newNode.CreatedAt = txnid;
         deltas.Nodes.Add(newNode);
         loaded++;
 
@@ -506,33 +518,31 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
         return false;
     }
 
-    /// <summary>
-    /// Nodes that have not been accessed recently are marked to be removed from main memory.
-    /// 
-    /// Nodes with an excess of MVCC (Multi-Version Concurrency Control) versions are
-    /// marked in a quick process that acquires read locks, to then be
-    /// released later by acquiring write locks.
+    /// <summary>       
+    /// Stage 1: Mark
+    /// Upon creation of an MVCC version, its mark flag is initially at 0 (false). During the Mark stage,
+    /// this flag is set for every accessible object (or those leafs that are visible by transactions) is switched to 1 (true).
+    /// To execute this task, a tree traversal is necessary, and utilizing a depth-first search method is effective.
+    /// In this scenario, each leaf is viewed as a vertex, and the process involves visiting all vertices (objects)
+    /// that can be accessed from a given vertex (object). This continues until all accessible vertices have been explored.
     /// </summary>
-    /// <param name="txnid"></param>]    
+    /// <param name="txnid"></param>
     /// <param name="deltas"></param>
     /// <returns></returns>
-    public async Task Mark(HLCTimestamp txnid, BTreeMutationDeltas<TKey, TValue> deltas)
+    public async Task<bool> Mark(HLCTimestamp txnid, BTreeMutationDeltas<TKey, TValue> deltas)
     {
-        using IDisposable readerLock = await ReaderLockAsync();
-
         if (root is null)
-            return;
+            return false;
 
-        await MarkInternal(root, txnid, height, deltas);
+        return await MarkInternal(root, txnid, height, deltas);
     }
 
-    private async Task MarkInternal(BTreeNode<TKey, TValue>? node, HLCTimestamp txnid, int ht, BTreeMutationDeltas<TKey, TValue> deltas)
+    private async Task<bool> MarkInternal(BTreeNode<TKey, TValue>? node, HLCTimestamp txnid, int ht, BTreeMutationDeltas<TKey, TValue> deltas)
     {
         if (node is null)
-            return;
+            return false;
 
-        //using IDisposable readerLock = await node.ReaderLockAsync();
-
+        bool hasExpiredEntries = false;
         BTreeEntry<TKey, TValue>[] children = node.children;
 
         // external node
@@ -543,7 +553,10 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
                 BTreeEntry<TKey, TValue> entry = children[j];
 
                 if (entry.HasExpiredEntries(txnid))
+                {
                     deltas.Entries.Add(entry);
+                    hasExpiredEntries = true;
+                }
             }
         }
 
@@ -555,7 +568,68 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
                 BTreeEntry<TKey, TValue> entry = children[j];
 
                 if (entry.Next.IsStarted) // ignore unloaded nodes
-                    await MarkInternal(await entry.Next, txnid, ht - 1, deltas);
+                {
+                    if (await MarkInternal(await entry.Next, txnid, ht - 1, deltas))
+                        hasExpiredEntries = true;
+                }
+            }
+        }
+
+        node.Mark = node.LastAccess.CompareTo(HLCTimestamp.Zero) != 0 && node.LastAccess.CompareTo(txnid) < 0 && !hasExpiredEntries;
+
+        return hasExpiredEntries;
+    }
+
+    /// <summary>       
+    /// Stage 2: Sweep
+    /// True to its name, this stage involves "clearing out" the leafs that are not accessed recently,
+    /// effectively freeing up heap memory from these leafs. It removes all leafs from the heap memory
+    /// whose mark flag remains false, while for all accessible objects (those that can be reached),
+    /// the mark flag is maintained as true.
+    /// </summary>    
+    /// <returns></returns>
+    public async Task Sweep()
+    {
+        if (root is null)
+            return;
+
+        await SweepInternal(root, height);
+    }
+
+    private async ValueTask SweepInternal(BTreeNode<TKey, TValue>? node, int ht)
+    {
+        if (node is null)
+            return;
+
+        if (!node.Mark)
+            return;
+
+        // external node
+        if (ht == 0)
+        {
+            return;
+        }
+
+        // internal node
+        else
+        {
+            BTreeEntry<TKey, TValue>[] children = node.children;
+
+            for (int j = 0; j < node.KeyCount; j++)
+            {
+                BTreeEntry<TKey, TValue> entry = children[j];
+
+                if (entry.Next.IsStarted && !entry.NextPageOffset.IsNull()) // ignore unloaded nodes
+                {
+                    await SweepInternal(await entry.Next, ht - 1);
+
+                    children[j] = new BTreeEntry<TKey, TValue>(entry.Key, reader, null)
+                    {
+                        NextPageOffset = entry.NextPageOffset
+                    };
+
+                    //Console.WriteLine("Freed {0} {1} {2}", node.Id, j, entry.NextPageOffset);
+                }
             }
         }
     }
@@ -571,6 +645,31 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
     private static bool Eq(TKey k1, TKey k2)
     {
         return k1.CompareTo(k2) == 0;
+    }
+
+    static BTreeEntry<TKey, TValue>? BinarySearch(BTreeEntry<TKey, TValue>[] arr, int length, TKey x)
+    {
+        int l = 0, r = length - 1;
+
+        while (l <= r)
+        {
+            int m = l + (r - l) / 2;
+
+            // Check if x is present at mid
+            if (Eq(arr[m].Key, x))
+                return arr[m];
+
+            // If x is greater, ignore left half
+            if (Less(arr[m].Key, x))
+                l = m + 1;
+
+            // If x is smaller, ignore right half
+            else
+                r = m - 1;
+        }
+
+        // If we reach here, then element was not present
+        return default;
     }
 
     /// <summary>
@@ -592,4 +691,6 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
     {
         return await readerWriterLock.WriterLockAsync();
     }
+
+
 }

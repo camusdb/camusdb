@@ -35,7 +35,7 @@ public sealed class IndexUniqueOffsetNodeReader : IBTreeNodeReader<ObjectIdValue
         node.KeyCount = Serializator.ReadInt32(data, ref pointer);
         node.PageOffset = Serializator.ReadObjectId(data, ref pointer);
 
-        //Console.WriteLine("KeyCount={0} PageOffset={1}", node.KeyCount, node.PageOffset);
+        //Console.WriteLine("Node Read KeyCount={0} PageOffset={1}", node.KeyCount, node.PageOffset);
 
         for (int i = 0; i < node.KeyCount; i++)
         {

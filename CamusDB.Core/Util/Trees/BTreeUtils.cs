@@ -28,19 +28,17 @@ public class BTreeUtils
     }
 
     private static int GetItemSize<T>()
-    {
-        return 32;
-
-        /*return typeof(T) switch
+    {        
+        return typeof(T) switch
         {
-            Type t when t == typeof(string) => 62,
-            Type t when t == typeof(long) => 8,
-            Type t when t == typeof(int) => 4,
-            Type t when t == typeof(ColumnValue) => 48,
-            Type t when t == typeof(BTreeTuple) => 24,
-            Type t when t == typeof(ObjectIdValue) => 12,
-            Type t when t == typeof(int?) => 8,
+            Type t when t == typeof(string) => 65,
+            Type t when t == typeof(long) => 9,
+            Type t when t == typeof(int) => 5,
+            Type t when t == typeof(ColumnValue) => 49,
+            Type t when t == typeof(BTreeTuple) => 25,
+            Type t when t == typeof(ObjectIdValue) => 13,
+            Type t when t == typeof(int?) => 9,
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown type " + typeof(T).Name),
-        };*/
+        };
     }
 }

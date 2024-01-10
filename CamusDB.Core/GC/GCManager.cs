@@ -22,13 +22,48 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.GC;
 
+/// <summary>
+/// The GC (garbage collector) is a process that runs in the background trying to free pages,
+/// indices, and data structures that have not been accessed or used recently.
+/// 
+/// Page Release:
+/// An LRU(Least Recently Used) algorithm is used to find the least accessed pages over a
+/// period of time. These are marked as candidates to be dereferenced from the buffer pool.
+/// This allows them to eventually be freed by dotnet's GC. It's quite possible that the
+/// pages are already in generation 2, so they will not be freed immediately.
+/// 
+/// MVCC Version Release:
+/// During normal operation, multiple versions can be added that end up taking up additional memory
+/// and disk space.A process marks, expires, and removes these versions from the B-tree leaves
+/// and deletes old versions from the disk.
+///
+/// Stage 1: Mark
+/// Upon creation of an MVCC version, its mark flag is initially at 0 (false). During the Mark stage,
+/// this flag is set for every accessible object (or those leafs that are visible by transactions) is switched to 1 (true).
+/// To execute this task, a tree traversal is necessary, and utilizing a depth-first search method is effective.
+/// In this scenario, each leaf is viewed as a vertex, and the process involves visiting all vertices (objects)
+/// that can be accessed from a given vertex (object). This continues until all accessible vertices have been explored.
+///
+/// Stage 2: Sweep
+/// True to its name, this stage involves "clearing out" the leafs that are not accessed recently,
+/// effectively freeing up heap memory from these leafs. It removes all leafs from the heap memory
+/// whose mark flag remains false, while for all accessible objects (those that can be reached),
+/// the mark flag is maintained as true.
+/// 
+/// Subsequently, the mark flag for all reachable leafs is reset to false in preparation
+/// for potentially re-running the algorithm. This sets the stage for another cycle through the
+/// labeling stage, where all accessible leafs will be identified and marked again.
+///
+/// This method has several disadvantages, the most notable being that the entire index
+/// must be suspended during collection; no mutation of the working set can be allowed. 
+/// </summary>
 public sealed class GCManager : IDisposable
 {
     //private const int VersionRetentionPeriod = 3600000;
 
-    private const int VersionRetentionPeriod = 60000; // 1 minute
+    private const int VersionRetentionPeriod = 30000; // 5 minutes
 
-    private const int MaxVersionsToRemove = 16;
+    private const int MaxVersionsToRemove = 32;
 
     private readonly BufferPoolManager bufferPool;
 
@@ -164,16 +199,16 @@ public sealed class GCManager : IDisposable
                 {
                     BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas = new();
 
-                    await tableIndex.Mark(timestamp, deltas);
+                    bool hasExpiredEntries = await tableIndex.Mark(timestamp, deltas);
 
-                    if (deltas.Entries.Count > 0)
+                    if (hasExpiredEntries)
                     {
                         foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in deltas.Entries)
                         {
                             List<ObjectIdValue>? removed = entry.RemoveExpired(timestamp, MaxVersionsToRemove);
 
                             if (removed is not null && removed.Count > 0)
-                            {                                
+                            {
                                 foreach (ObjectIdValue pageOffset in removed)
                                 {
                                     if (!pageOffset.IsNull())
@@ -182,22 +217,32 @@ public sealed class GCManager : IDisposable
                             }
                         }
                     }
+                    else
+                    {
+                        await tableIndex.Sweep();
+                    }
                 }
 
                 foreach (KeyValuePair<string, TableIndexSchema> index in tableDescriptor.Indexes)
                 {
-                    BTree<ColumnValue, BTreeTuple>? xindex = index.Value.UniqueRows;
-                    if (xindex is not null)
+                    BTree<ColumnValue, BTreeTuple>? uniqueIndex = index.Value.UniqueRows;
+                    if (uniqueIndex is not null)
                     {
                         BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas = new();
 
-                        await xindex.Mark(timestamp, deltas);
+                        using IDisposable writerLock = await uniqueIndex.WriterLockAsync();
 
-                        if (deltas.Entries.Count == 0)
-                            continue;
+                        bool hasExpiredEntries = await uniqueIndex.Mark(timestamp, deltas);
 
-                        foreach (BTreeEntry<ColumnValue, BTreeTuple> entry in deltas.Entries)
-                            entry.RemoveExpired(timestamp, MaxVersionsToRemove);
+                        if (hasExpiredEntries)
+                        {
+                            foreach (BTreeEntry<ColumnValue, BTreeTuple> entry in deltas.Entries)
+                                entry.RemoveExpired(timestamp, MaxVersionsToRemove);
+                        }
+                        else
+                        {
+                            await uniqueIndex.Sweep();
+                        }
                     }
                 }
             }

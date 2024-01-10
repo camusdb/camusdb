@@ -114,15 +114,11 @@ public sealed class RowUpdater
 
         foreach (TableColumnSchema columnSchema in columns)
         {
-            Console.WriteLine("columnSchema={0} NotNull={1}", columnSchema.Name, columnSchema.NotNull);
-
             if (!columnSchema.NotNull)
                 continue;
 
             if (!exprValues.TryGetValue(columnSchema.Name, out NodeAst? columnValue))
                 continue;
-
-            Console.WriteLine("columnSchema={0} NodeType={1}", columnSchema.Name, columnValue.nodeType);
 
             // This is a superficial validation of the data. It only works if the value to be updated is exactly NULL.
             // For example: UPDATE robots SET name = NULL.

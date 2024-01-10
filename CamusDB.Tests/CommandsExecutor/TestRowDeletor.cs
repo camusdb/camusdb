@@ -395,7 +395,7 @@ public class TestRowDeletor
             where: null,
             filters: new()
             {
-                new("year", ">", new ColumnValue(ColumnType.Integer64, "2010"))
+                new("year", ">", new ColumnValue(ColumnType.Integer64, 2010))
             },
             orderBy: null,
             limit: null,

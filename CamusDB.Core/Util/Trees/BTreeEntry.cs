@@ -39,6 +39,11 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey> wher
             Next = new AsyncLazy<BTreeNode<TKey, TValue>?>(LoadNode);
     }
 
+    /// <summary>
+    /// Loads the node from the buffer pool or disk
+    /// </summary>
+    /// <returns></returns>
+    /// <exception cref="CamusDBException"></exception>
     private async Task<BTreeNode<TKey, TValue>?> LoadNode()
     {
         if (NextPageOffset.IsNull())

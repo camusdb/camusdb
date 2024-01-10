@@ -2,10 +2,7 @@ Indexes
 - Read indexes in parallel
 - Destroy internal subtrees in multi index after delete
 - Version b+trees on disk
-- Lazy read of b+tree nodes
-- Replace children array with lists to save memory
 - Reduce read/write locking to increase concurrency
-- Dynamic number of node children based on size
 
 Query
 - Multi-Order clause
