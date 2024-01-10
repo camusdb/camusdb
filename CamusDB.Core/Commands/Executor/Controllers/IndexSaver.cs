@@ -18,16 +18,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class IndexSaver
 {
-    private readonly IndexUniqueSaver indexUniqueSaver;
-
-    private readonly IndexMultiSaver indexMultiSaver;
+    private readonly IndexUniqueSaver indexUniqueSaver;    
 
     private readonly IndexUniqueOffsetSaver indexUniqueOffsetSaver;
 
     public IndexSaver()
     {
-        indexUniqueSaver = new(this);
-        indexMultiSaver = new(this);
+        indexUniqueSaver = new(this);        
         indexUniqueOffsetSaver = new(this);
     }
 
@@ -36,15 +33,10 @@ internal sealed class IndexSaver
         return await indexUniqueOffsetSaver.Save(ticket);
     }
 
-    public async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple>> Save(SaveUniqueIndexTicket ticket)
+    public async Task<BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveUniqueIndexTicket ticket)
     {
         return await indexUniqueSaver.Save(ticket);
-    }
-
-    public async Task Save(SaveMultiKeyIndexTicket ticket)
-    {        
-        await indexMultiSaver.Save(ticket);
-    }
+    }  
 
     public async Task Persist(
         BufferPoolManager tablespace,
@@ -62,9 +54,9 @@ internal sealed class IndexSaver
 
     public async Task Persist(
         BufferPoolManager tablespace,
-        BTree<ColumnValue, BTreeTuple> index,
+        BTree<CompositeColumnValue, BTreeTuple> index,
         List<BufferPageOperation> modifiedPages,
-        BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas)
+        BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas)
     {
         await indexUniqueSaver.Persist(
             tablespace,
@@ -82,10 +74,5 @@ internal sealed class IndexSaver
     public async Task Remove(RemoveUniqueOffsetIndexTicket ticket)
     {
         await indexUniqueOffsetSaver.Remove(ticket);
-    }
-
-    public async Task Remove(BufferPoolManager tablespace, BTreeMulti<ColumnValue> index, ColumnValue key)
-    {
-        await indexMultiSaver.Remove(tablespace, index, key);
     }
 }

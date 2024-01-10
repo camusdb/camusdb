@@ -225,25 +225,23 @@ public sealed class GCManager : IDisposable
 
                 foreach (KeyValuePair<string, TableIndexSchema> index in tableDescriptor.Indexes)
                 {
-                    BTree<ColumnValue, BTreeTuple>? uniqueIndex = index.Value.UniqueRows;
-                    if (uniqueIndex is not null)
+                    BTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.Value.BTree;
+                    
+                    BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas = new();
+
+                    using IDisposable writerLock = await uniqueIndex.WriterLockAsync();
+
+                    bool hasExpiredEntries = await uniqueIndex.Mark(timestamp, deltas);
+
+                    if (hasExpiredEntries)
                     {
-                        BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas = new();
-
-                        using IDisposable writerLock = await uniqueIndex.WriterLockAsync();
-
-                        bool hasExpiredEntries = await uniqueIndex.Mark(timestamp, deltas);
-
-                        if (hasExpiredEntries)
-                        {
-                            foreach (BTreeEntry<ColumnValue, BTreeTuple> entry in deltas.Entries)
-                                entry.RemoveExpired(timestamp, MaxVersionsToRemove);
-                        }
-                        else
-                        {
-                            await uniqueIndex.Sweep();
-                        }
+                        foreach (BTreeEntry<CompositeColumnValue, BTreeTuple> entry in deltas.Entries)
+                            entry.RemoveExpired(timestamp, MaxVersionsToRemove);
                     }
+                    else
+                    {
+                        await uniqueIndex.Sweep();
+                    }                    
                 }
             }
         }

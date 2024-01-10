@@ -23,13 +23,13 @@ internal sealed class IndexUniqueReader : IndexBaseReader
         this.indexReader = indexReader;
     }
 
-    public async Task<BTree<ColumnValue, BTreeTuple>> ReadUnique(BufferPoolManager bufferpool, ObjectIdValue offset)
+    public async Task<BTree<CompositeColumnValue, BTreeTuple>> ReadUnique(BufferPoolManager bufferpool, ObjectIdValue offset)
     {
         //Console.WriteLine("***");
 
         IndexUniqueNodeReader reader = new(bufferpool);
 
-        BTree<ColumnValue, BTreeTuple> index = new(offset, reader);
+        BTree<CompositeColumnValue, BTreeTuple> index = new(offset, reader);
 
         byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
@@ -44,7 +44,7 @@ internal sealed class IndexUniqueReader : IndexBaseReader
 
         if (!rootPageOffset.IsNull())
         {
-            BTreeNode<ColumnValue, BTreeTuple>? node = await reader.GetNode(rootPageOffset);
+            BTreeNode<CompositeColumnValue, BTreeTuple>? node = await reader.GetNode(rootPageOffset);
             if (node is not null)
                 index.root = node;
         }

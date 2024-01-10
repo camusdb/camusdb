@@ -29,8 +29,6 @@ internal sealed class RowInserter
 
     private readonly RowSerializer rowSerializer = new();
 
-    private readonly DMLMultiKeySaver insertMultiKeySaver = new();
-
     private readonly DMLUniqueKeySaver insertUniqueKeySaver = new();
 
     /// <summary>
@@ -238,17 +236,11 @@ internal sealed class RowInserter
     {
         InsertTicket insertTicket = state.Ticket;        
 
-        List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BTree<ColumnValue, BTreeTuple>? uniqueIndex = index.UniqueRows;
-
-            if (uniqueIndex is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A unique index tree wasn't found"
-                );
+            BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;            
 
             ColumnValue? uniqueKeyValue = GetColumnValue(state.Table, insertTicket, index.Column);
 
@@ -262,7 +254,7 @@ internal sealed class RowInserter
                 index: uniqueIndex,
                 txnId: insertTicket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: uniqueKeyValue,
+                key: new CompositeColumnValue([uniqueKeyValue]),
                 value: state.RowTuple
             );
 
@@ -281,7 +273,7 @@ internal sealed class RowInserter
     /// <returns></returns>
     private async Task<FluxAction> UpdateMultiIndexes(InsertFluxState state)
     {
-        SaveMultiKeysIndexTicket saveMultiKeysIndex = new(
+        /*SaveMultiKeysIndexTicket saveMultiKeysIndex = new(
             database: state.Database,
             table: state.Table,
             ticket: state.Ticket,
@@ -290,7 +282,9 @@ internal sealed class RowInserter
             modifiedPages: state.ModifiedPages
         );
 
-        await insertMultiKeySaver.UpdateMultiKeys(saveMultiKeysIndex);
+        await insertMultiKeySaver.UpdateMultiKeys(saveMultiKeysIndex);*/
+
+        await Task.Yield();
 
         return FluxAction.Continue;
     }
@@ -313,7 +307,7 @@ internal sealed class RowInserter
         if (state.Indexes.UniqueIndexDeltas is null)
             return FluxAction.Continue;
 
-        foreach ((BTree<ColumnValue, BTreeTuple> index, BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
         {
             foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;

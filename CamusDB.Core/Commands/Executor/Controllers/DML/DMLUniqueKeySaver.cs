@@ -26,7 +26,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
     /// <param name="name"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
-    private static async Task<ColumnValue> CheckUniqueKeyViolations(TableDescriptor table, BTree<ColumnValue, BTreeTuple> uniqueIndex, InsertTicket ticket, string name)
+    private static async Task<ColumnValue> CheckUniqueKeyViolations(TableDescriptor table, BTree<CompositeColumnValue, BTreeTuple> uniqueIndex, InsertTicket ticket, string name)
     {
         ColumnValue? uniqueValue = GetColumnValue(table, ticket, name);
 
@@ -36,7 +36,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
                 "The primary key of the table \"" + table.Name + "\" is not present in the list of values."
             );
 
-        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, uniqueValue);
+        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue([uniqueValue]));
 
         if (rowTuple is not null && !rowTuple.IsNull())
             throw new CamusDBException(
@@ -54,7 +54,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
             if (index.Value.Type != IndexType.Unique)
                 continue;
 
-            BTree<ColumnValue, BTreeTuple>? uniqueIndex = index.Value.UniqueRows;
+            BTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.Value.BTree;
 
             if (uniqueIndex is null)
                 throw new CamusDBException(

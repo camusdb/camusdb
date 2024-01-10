@@ -49,7 +49,7 @@ internal sealed class QueryExecutor
             switch (step.Type)
             {
                 case QueryPlanStepType.QueryFromIndex:
-                    plan.DataCursor = QueryUsingIndex(plan.Database, plan.Table, plan.Ticket, step.Index);
+                    plan.DataCursor = QueryUsingIndex(plan.Database, plan.Table, plan.Ticket, step.Index, step.ColumnValue);
                     break;
 
                 case QueryPlanStepType.FullScanFromIndex:
@@ -99,24 +99,69 @@ internal sealed class QueryExecutor
         return plan.DataCursor;
     }
 
-    private IAsyncEnumerable<QueryResultRow>? QueryUsingIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket, TableIndexSchema? index)
+    private async IAsyncEnumerable<QueryResultRow> QueryUsingIndex(
+        DatabaseDescriptor database,         
+        TableDescriptor table, 
+        QueryTicket ticket, 
+        TableIndexSchema? index, 
+        ColumnValue? columnValue
+    )
     {
-        throw new NotImplementedException();
-    }
-
-    public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
-    {
-        BufferPoolManager tablespace = database.BufferPool;
-
-        if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
+        if (index is null)
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
-                "Table doesn't have a primary key index"
+                "Couldn't access table's unique index"
             );
         }
 
-        if (index.UniqueRows is null)
+        if (columnValue is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Invalid column value"
+            );
+
+        BufferPoolManager tablespace = database.BufferPool;
+
+        BTreeTuple? pageOffset = await index.BTree.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue([columnValue]));
+
+        if (pageOffset is null || pageOffset.IsNull())
+        {
+            //Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+            yield break;
+        }
+
+        byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo);
+        if (data.Length == 0)
+        {
+            //Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
+            yield break;
+        }
+
+        //Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
+
+        Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, data);
+
+        if (ticket.Filters is not null && ticket.Filters.Count > 0)
+        {
+            if (queryFilterer.MeetFilters(ticket.Filters, row))
+                yield return new(pageOffset, row);
+        }
+        else
+        {
+            if (ticket.Where is not null)
+            {
+                if (queryFilterer.MeetWhere(ticket.Where, row, ticket.Parameters))
+                    yield return new(pageOffset, row);
+            }
+            else
+                yield return new(pageOffset, row);
+        }
+    }
+
+    public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
+    {        
+        if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
@@ -126,9 +171,11 @@ internal sealed class QueryExecutor
 
         //Console.WriteLine(ticket.TxnId);
 
+        BufferPoolManager tablespace = database.BufferPool;
+
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        BTreeTuple? pageOffset = await index.UniqueRows.Get(TransactionType.ReadOnly, ticket.TxnId, columnId);
+        BTreeTuple? pageOffset = await index.BTree.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue([columnId]));
 
         if (pageOffset is null || pageOffset.IsNull())
         {

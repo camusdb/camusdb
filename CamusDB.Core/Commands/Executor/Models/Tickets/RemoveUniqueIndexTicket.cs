@@ -20,9 +20,9 @@ public readonly struct RemoveUniqueIndexTicket
 
     public uint SubSequence { get; }
 
-    public BTree<ColumnValue, BTreeTuple> Index { get; }
+    public BTree<CompositeColumnValue, BTreeTuple> Index { get; }
 
-    public ColumnValue Key { get; }
+    public CompositeColumnValue Key { get; }
 
     public List<IDisposable> Locks { get; }
 
@@ -32,8 +32,8 @@ public readonly struct RemoveUniqueIndexTicket
         BufferPoolManager tablespace,
         uint sequence,
         uint subSequence,
-        BTree<ColumnValue, BTreeTuple> index,
-        ColumnValue key,
+        BTree<CompositeColumnValue, BTreeTuple> index,
+        CompositeColumnValue key,
         List<IDisposable> locks,
         List<BufferPageOperation> modifiedPages
     )

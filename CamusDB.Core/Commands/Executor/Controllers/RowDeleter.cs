@@ -121,7 +121,7 @@ internal sealed class RowDeleter
             if (index.Value.Type != IndexType.Multi)
                 continue;
 
-            if (index.Value.MultiRows is null)
+            if (index.Value.BTree is null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     "A multi index tree wasn't found"
@@ -131,9 +131,12 @@ internal sealed class RowDeleter
             if (columnValue is null) // @todo check what to to here
                 continue;
 
-            BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
+            //BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
+            //await indexSaver.Remove(tablespace, multiIndex, columnValue);
 
-            await indexSaver.Remove(tablespace, multiIndex, columnValue);
+            await Task.CompletedTask;
+
+            throw new NotImplementedException();
         }
     }
 
@@ -152,7 +155,7 @@ internal sealed class RowDeleter
 
         DeleteTicket ticket = state.Ticket;
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
-        List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)>? uniqueIndexDeltas;
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? uniqueIndexDeltas;
 
         // @todo we need to take a snapshot of the data to prevent deadlocks
         // but probably need to optimize this for larger datasets
@@ -195,21 +198,15 @@ internal sealed class RowDeleter
         return await indexSaver.Save(saveUniqueOffsetIndex);
     }
 
-    private async Task<List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)>> UpdateUniqueIndexes(DeleteFluxState state, DeleteTicket ticket, BTreeTuple tuple, QueryResultRow row)
+    private async Task<List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>> UpdateUniqueIndexes(DeleteFluxState state, DeleteTicket ticket, BTreeTuple tuple, QueryResultRow row)
     {
-        List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
         //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BTree<ColumnValue, BTreeTuple>? uniqueIndex = index.UniqueRows;
-
-            if (uniqueIndex is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A unique index tree wasn't found"
-                );
+            BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;
 
             ColumnValue? uniqueKeyValue = GetColumnValue(row.Row, index.Column);
 
@@ -223,7 +220,7 @@ internal sealed class RowDeleter
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: uniqueKeyValue,
+                key: new CompositeColumnValue([uniqueKeyValue]),
                 value: tuple
             );
 
@@ -240,7 +237,11 @@ internal sealed class RowDeleter
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task PersistIndexChanges(DeleteFluxState state, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)> uniqueIndexDeltas)
+    private async Task PersistIndexChanges(
+        DeleteFluxState state, 
+        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, 
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> uniqueIndexDeltas
+    )
     {
         if (mainIndexDeltas is null)
             return;
@@ -253,7 +254,7 @@ internal sealed class RowDeleter
         if (uniqueIndexDeltas is null)
             return;
 
-        foreach ((BTree<ColumnValue, BTreeTuple> index, BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas) uniqueIndex in uniqueIndexDeltas)
+        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in uniqueIndexDeltas)
         {
             foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;

@@ -102,7 +102,7 @@ public sealed class TableColumnDropper
             if (index.Value.Type != IndexType.Multi)
                 continue;
 
-            if (index.Value.MultiRows is null)
+            if (index.Value.BTree is null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     "A multi index tree wasn't found"
@@ -112,9 +112,13 @@ public sealed class TableColumnDropper
             if (columnValue is null) // @todo check what to to here
                 continue;
 
-            BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
+            //BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
 
-            await indexSaver.Remove(tablespace, multiIndex, columnValue);
+            //await indexSaver.Remove(tablespace, multiIndex, columnValue);
+
+            await Task.Yield();
+
+            throw new NotImplementedException();
         }
     }
 

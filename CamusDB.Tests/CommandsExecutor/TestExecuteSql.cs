@@ -402,6 +402,25 @@ public class TestExecuteSql
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectWhereEqualsId()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectIds) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT id, enabled FROM robots WHERE id = @id",
+            parameters: new() { { "@id", new ColumnValue(ColumnType.Id, objectIds[0]) } }
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+            Assert.AreEqual(objectIds[0], row.Row["id"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectOrderBy()
     {
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();

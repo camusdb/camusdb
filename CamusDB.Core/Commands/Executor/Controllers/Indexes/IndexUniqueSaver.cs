@@ -27,7 +27,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task<BTreeMutationDeltas<ColumnValue, BTreeTuple>> Save(SaveUniqueIndexTicket ticket)
+    public async Task<BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveUniqueIndexTicket ticket)
     {
         return await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value);
     }
@@ -39,7 +39,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     private static async Task RemoveInternal(RemoveUniqueIndexTicket ticket)
     {
-        (bool found, BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas) = await ticket.Index.Remove(ticket.Key);
+        (bool found, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) = await ticket.Index.Remove(ticket.Key);
 
         //if (found)
         //    Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
@@ -47,9 +47,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     public async Task Persist(
         BufferPoolManager tablespace,
-        BTree<ColumnValue, BTreeTuple> index,
+        BTree<CompositeColumnValue, BTreeTuple> index,
         List<BufferPageOperation> modifiedPages,
-        BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas
+        BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas
     )
     {
         // @todo this lock will produce contention
@@ -61,7 +61,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 "Deltas cannot be null or empty"
             );
 
-        foreach (BTreeNode<ColumnValue, BTreeTuple> node in deltas.Nodes)
+        foreach (BTreeNode<CompositeColumnValue, BTreeTuple> node in deltas.Nodes)
         {
             if (node.PageOffset.IsNull())
                 node.PageOffset = tablespace.GetNextFreeOffset();
@@ -86,16 +86,17 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
         //@todo update nodes concurrently
         ObjectIdValue nullValue = new();
+        BTreeTuple nullTuple = new(nullValue, nullValue);
         HLCTimestamp timestampZero = HLCTimestamp.Zero;
 
-        foreach (BTreeNode<ColumnValue, BTreeTuple> node in deltas.Nodes)
+        foreach (BTreeNode<CompositeColumnValue, BTreeTuple> node in deltas.Nodes)
         {
             //using IDisposable readerLock = await node.ReaderLockAsync();
 
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // keyCount(4 byte) + 
                 SerializatorTypeSizes.TypeObjectId +  // pageOffset(4 byte)
-                GetKeySizes(node)
+                GetEntrySizes(node)
             ];
 
             pointer = 0;
@@ -104,28 +105,26 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
             for (int i = 0; i < node.KeyCount; i++)
             {
-                BTreeEntry<ColumnValue, BTreeTuple> entry = node.children[i];
+                BTreeEntry<CompositeColumnValue, BTreeTuple> entry = node.children[i];
 
                 if (entry is not null)
                 {
                     (HLCTimestamp timestamp, BTreeTuple? tuple) = entry.GetMaxCommittedValue();
+                    BTreeNode<CompositeColumnValue, BTreeTuple>? next = (await entry.Next);
 
                     //Console.WriteLine("Saved K={0} T={1} V={2}", entry.Key, timestamp, tuple);
 
                     SerializeKey(nodeBuffer, entry.Key, ref pointer);
                     Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer);
-                    SerializeTuple(nodeBuffer, tuple, ref pointer); // @todo LastValue
-
-                    BTreeNode<ColumnValue, BTreeTuple>? next = (await entry.Next);
+                    Serializator.WriteTuple(nodeBuffer, tuple ?? nullTuple, ref pointer); // @todo LastValue                    
                     Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : nullValue, ref pointer);                    
                 }
                 else
                 {
-                    Serializator.WriteInt8(nodeBuffer, 0, ref pointer);
+                    Serializator.WriteInt8(nodeBuffer, 0, ref pointer); 
                     Serializator.WriteHLCTimestamp(nodeBuffer, timestampZero, ref pointer);
-                    Serializator.WriteObjectId(nodeBuffer, nullValue, ref pointer);
-                    Serializator.WriteObjectId(nodeBuffer, nullValue, ref pointer);
-                    Serializator.WriteObjectId(nodeBuffer, nullValue, ref pointer);
+                    Serializator.WriteTuple(nodeBuffer, nullTuple, ref pointer); 
+                    Serializator.WriteObjectId(nodeBuffer, nullValue, ref pointer); 
                 }
             }
 

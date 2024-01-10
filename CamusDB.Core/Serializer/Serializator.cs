@@ -15,7 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
-using static System.Runtime.InteropServices.JavaScript.JSType;
+using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.Serializer;
 
@@ -226,6 +226,12 @@ public sealed class Serializator
         typedBool = (typedBool & 0xf) | (SerializatorTypes.TypeBool << 4);
         typedBool = (typedBool & 0xf0) | bool8;
         WriteInt8(buffer, typedBool, ref pointer);
+    }
+
+    public static void WriteTuple(byte[] buffer, BTreeTuple rowTuple, ref int pointer)
+    {        
+        WriteObjectId(buffer, rowTuple.SlotOne, ref pointer);
+        WriteObjectId(buffer, rowTuple.SlotTwo, ref pointer);        
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -13,21 +13,21 @@ namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct SaveUniqueIndexTicket
 {
-    public BTree<ColumnValue, BTreeTuple> Index { get; }
+    public BTree<CompositeColumnValue, BTreeTuple> Index { get; }
 
     public HLCTimestamp TxnId { get; }
 
     public BTreeCommitState CommitState { get; }
 
-    public ColumnValue Key { get; }
+    public CompositeColumnValue Key { get; }
 
     public BTreeTuple Value { get; }
 
     public SaveUniqueIndexTicket(
-        BTree<ColumnValue, BTreeTuple> index,
+        BTree<CompositeColumnValue, BTreeTuple> index,
         HLCTimestamp txnId,
         BTreeCommitState commitState,
-        ColumnValue key,
+        CompositeColumnValue key,
         BTreeTuple value
     )
     {

@@ -111,14 +111,14 @@ public sealed class QueryPlanner
             return;
         }
 
-        if (where.nodeType.IsBinary())
+        /*if (where.nodeType == NodeType.ExprAnd)
         {
             if (where.leftAst is not null)
                 GetEqualities(where.leftAst, equalities);
 
             if (where.rightAst is not null)
                 GetEqualities(where.rightAst, equalities);
-        }
+        }*/
     }
 
     private static bool IsFullProjection(List<NodeAst> projection)

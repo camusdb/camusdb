@@ -81,15 +81,17 @@ internal sealed class QueryScanner
         }
 
         if (index.Type == IndexType.Unique)
-            return ScanUsingUniqueIndex(database, table, index.UniqueRows!, ticket, queryFilterer, rowDeserializer);
+            return ScanUsingUniqueIndex(database, table, index.BTree, ticket, queryFilterer, rowDeserializer);
 
-        return ScanUsingMultiIndex(database, table, index.MultiRows!, ticket, queryFilterer, rowDeserializer);
+        //return ScanUsingMultiIndex(database, table, index.MultiRows!, ticket, queryFilterer, rowDeserializer);
+
+        throw new NotImplementedException();
     }
 
     private async IAsyncEnumerable<QueryResultRow> ScanUsingUniqueIndex(
         DatabaseDescriptor database,
         TableDescriptor table,
-        BTree<ColumnValue, BTreeTuple> index,
+        BTree<CompositeColumnValue, BTreeTuple> index,
         QueryTicket ticket,
         QueryFilterer queryFilterer,
         RowDeserializer rowDeserializer
@@ -97,7 +99,7 @@ internal sealed class QueryScanner
     {
         BufferPoolManager tablespace = database.BufferPool;
 
-        await foreach (BTreeEntry<ColumnValue, BTreeTuple> entry in index.EntriesTraverse(ticket.TxnId))
+        await foreach (BTreeEntry<CompositeColumnValue, BTreeTuple> entry in index.EntriesTraverse(ticket.TxnId))
         {
             BTreeTuple? txnValue = entry.GetValue(ticket.TxnType, ticket.TxnId);
 
@@ -134,7 +136,7 @@ internal sealed class QueryScanner
         }
     }
 
-    private async IAsyncEnumerable<QueryResultRow> ScanUsingMultiIndex(
+    /*private async IAsyncEnumerable<QueryResultRow> ScanUsingMultiIndex(
         DatabaseDescriptor database,
         TableDescriptor table,
         BTreeMulti<ColumnValue> index,
@@ -171,5 +173,5 @@ internal sealed class QueryScanner
                 yield return new(new(subEntry.Key, dataOffset), rowDeserializer.Deserialize(table.Schema, data));
             }
         }
-    }
+    }*/
 }

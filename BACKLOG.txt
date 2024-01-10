@@ -11,6 +11,7 @@ Query
 - Fix aliases to work propertly with aggregations
 
 BufferPool/Storage
+- Store txnid alongside records
 - Support multiple items per page to avoid storage waste
 - Support multiple storage adapters
 

@@ -74,27 +74,16 @@ internal sealed class TableOpener
                 switch (index.Value.Type)
                 {
                     case IndexType.Unique:
-                        {
-                            BTree<ColumnValue, BTreeTuple> rows = await indexReader.ReadUnique(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
-
-                            tableDescriptor.Indexes.Add(
-                                index.Key,
-                                new TableIndexSchema(index.Value.Column, index.Value.Type, rows)
-                            );
-                        }
-                        break;
-
                     case IndexType.Multi:
                         {
-                            BTreeMulti<ColumnValue> rows = await indexReader.ReadMulti(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
+                            BTree<CompositeColumnValue, BTreeTuple> rows = await indexReader.ReadUnique(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
 
                             tableDescriptor.Indexes.Add(
                                 index.Key,
                                 new TableIndexSchema(index.Value.Column, index.Value.Type, rows)
                             );
-
-                            continue;
                         }
+                        break;                                           
 
                     default:
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot load invalid type of index");

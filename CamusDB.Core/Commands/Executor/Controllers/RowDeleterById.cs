@@ -100,19 +100,11 @@ internal sealed class RowDeleterById
                 CamusDBErrorCodes.InvalidInternalOperation,
                 "Table doesn't have a primary key index"
             );
-        }
-
-        if (index.UniqueRows is null)
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "Table doesn't have a primary key index"
-            );
-        }
+        }        
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        state.RowTuple = await index.UniqueRows.Get(TransactionType.Write, ticket.TxnId, columnId);
+        state.RowTuple = await index.BTree.Get(TransactionType.Write, ticket.TxnId, new CompositeColumnValue([columnId]));
 
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
@@ -149,17 +141,11 @@ internal sealed class RowDeleterById
             return FluxAction.Abort;
         }
 
-        List<(BTree<ColumnValue, BTreeTuple>, BTreeMutationDeltas<ColumnValue, BTreeTuple>)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BTree<ColumnValue, BTreeTuple>? uniqueIndex = index.UniqueRows;
-
-            if (uniqueIndex is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A unique index tree wasn't found"
-                );
+            BTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.BTree;            
 
             ColumnValue? uniqueKeyValue = GetColumnValue(state.ColumnValues, index.Column);
 
@@ -173,7 +159,7 @@ internal sealed class RowDeleterById
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: uniqueKeyValue,
+                key: new CompositeColumnValue([uniqueKeyValue]),
                 value: new BTreeTuple(new(), new())
             );
 
@@ -206,7 +192,7 @@ internal sealed class RowDeleterById
             if (index.Value.Type != IndexType.Multi)
                 continue;
 
-            if (index.Value.MultiRows is null)
+            if (index.Value.BTree is null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     "A multi index tree wasn't found"
@@ -216,9 +202,12 @@ internal sealed class RowDeleterById
             if (columnValue is null) // @todo check what to to here
                 continue;
 
-            BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
+            //BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
+            //await indexSaver.Remove(tablespace, multiIndex, columnValue);
 
-            await indexSaver.Remove(tablespace, multiIndex, columnValue);
+            await Task.CompletedTask;
+
+            throw new NotImplementedException();
         }
     }
 
@@ -267,7 +256,7 @@ internal sealed class RowDeleterById
         if (state.Indexes.UniqueIndexDeltas is null)
             return FluxAction.Continue;
 
-        foreach ((BTree<ColumnValue, BTreeTuple> index, BTreeMutationDeltas<ColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
         {
             foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;

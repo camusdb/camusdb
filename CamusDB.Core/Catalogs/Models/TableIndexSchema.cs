@@ -15,23 +15,14 @@ public sealed class TableIndexSchema
 {
     public string Column { get; }
 
-    public IndexType Type { get; }
+    public IndexType Type { get; }    
 
-    public BTree<ColumnValue, BTreeTuple>? UniqueRows { get; } // Represents the table index to locate rows
+    public BTree<CompositeColumnValue, BTreeTuple> BTree { get; }
 
-    public BTreeMulti<ColumnValue>? MultiRows { get; }
-
-    public TableIndexSchema(string column, IndexType type, BTree<ColumnValue, BTreeTuple> rows)
+    public TableIndexSchema(string column, IndexType type, BTree<CompositeColumnValue, BTreeTuple> index)
     {
         Column = column;
         Type = type;
-        UniqueRows = rows;
-    }
-
-    public TableIndexSchema(string column, IndexType type, BTreeMulti<ColumnValue> rows)
-    {
-        Column = column;
-        Type = type;
-        MultiRows = rows;
+        BTree = index;
     }
 }

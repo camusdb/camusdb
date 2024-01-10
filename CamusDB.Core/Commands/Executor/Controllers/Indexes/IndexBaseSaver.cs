@@ -20,8 +20,7 @@ internal abstract class IndexBaseSaver
 {
     private static int GetStringLengthInBytes(string str)
     {
-        byte[] bytes = Encoding.Unicode.GetBytes(str);
-        return bytes.Length;
+        return Encoding.Unicode.GetByteCount(str);
     }
 
     protected static int GetKeySize(ColumnValue columnValue)
@@ -33,6 +32,16 @@ internal abstract class IndexBaseSaver
             ColumnType.String => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger32 + GetStringLengthInBytes(columnValue.StrValue!),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Can't use this type as index"),
         };
+    }
+
+    protected static int GetKeySize(CompositeColumnValue columnValue)
+    {
+        int size = SerializatorTypeSizes.TypeInteger8;
+
+        for (int i = 0; i < columnValue.Values.Length; i++)
+            size += GetKeySize(columnValue.Values[i]);
+
+        return size;
     }
 
     protected static int GetKeySizes(BTreeNode<ColumnValue, BTreeTuple> node)
@@ -52,21 +61,39 @@ internal abstract class IndexBaseSaver
         return length;
     }
 
-    protected static int GetKeySizes(BTreeMultiNode<ColumnValue> node)
+    protected static int GetEntrySizes(BTreeNode<CompositeColumnValue, BTreeTuple> node)
     {
         int length = 0;
 
         for (int i = 0; i < node.KeyCount; i++)
         {
-            BTreeMultiEntry<ColumnValue> entry = node.children[i];
+            BTreeEntry<CompositeColumnValue, BTreeTuple> entry = node.children[i];
 
             if (entry is null)
-                length += 2 + 36 + 12; // type (2 byte) + 12 byte + 12 byte
+                length += (
+                    SerializatorTypeSizes.TypeInteger8 +     // null key (1 byte) +
+                    SerializatorTypeSizes.TypeHLCTimestamp + // HLCTimestamp(12 bytes) +
+                    SerializatorTypeSizes.TypeTuple +        // tupleSize(2 byte) +
+                    SerializatorTypeSizes.TypeObjectId       // nextPageSize(2 byte) +
+                );
             else
-                length += 36 + GetKeySize(entry.Key);
+                length += (
+                    GetKeySize(entry.Key) +                  // dynamic +                    
+                    SerializatorTypeSizes.TypeHLCTimestamp + // HLCTimestamp(12 bytes) +
+                    SerializatorTypeSizes.TypeTuple +        // tupleSize(2 byte) +
+                    SerializatorTypeSizes.TypeObjectId       // nextPageSize(2 byte) +
+                );
         }
 
-        return length;
+        return length;        
+    }
+
+    protected static void SerializeKey(byte[] nodeBuffer, CompositeColumnValue columnValue, ref int pointer)
+    {
+        Serializator.WriteInt8(nodeBuffer, columnValue.Values.Length, ref pointer);
+
+        for (int i = 0; i < columnValue.Values.Length; i++)
+            SerializeKey(nodeBuffer, columnValue.Values[i], ref pointer);
     }
 
     protected static void SerializeKey(byte[] nodeBuffer, ColumnValue columnValue, ref int pointer)
@@ -89,22 +116,7 @@ internal abstract class IndexBaseSaver
                 break;
 
             default:
-                throw new Exception("Can't use this type as index");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Can't use this type as index");
         }
-    }
-
-    protected static void SerializeTuple(byte[] nodeBuffer, BTreeTuple? rowTuple, ref int pointer)
-    {
-        if (rowTuple is not null)
-        {
-            Serializator.WriteObjectId(nodeBuffer, rowTuple.SlotOne, ref pointer);
-            Serializator.WriteObjectId(nodeBuffer, rowTuple.SlotTwo, ref pointer);
-        }
-        else
-        {
-            Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
-            Serializator.WriteObjectId(nodeBuffer, new(), ref pointer);
-        }
-    }
+    }   
 }
-

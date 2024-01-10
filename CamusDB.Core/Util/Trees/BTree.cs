@@ -146,6 +146,7 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
             }*/
 
             BTreeEntry<TKey, TValue>? entry = BinarySearch(children, node.KeyCount, key);
+
             if (entry is not null && entry.CanBeSeenBy(txnid))
                 return entry.GetValue(txType, txnid);
         }
@@ -298,8 +299,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
 
         if (root is null) // create root
         {
-            root = new BTreeNode<TKey, TValue>(0, maxNodeCapacity);
-            root.CreatedAt = txnid;
+            root = new BTreeNode<TKey, TValue>(0, maxNodeCapacity)
+            {
+                CreatedAt = txnid
+            };
+
             deltas.Nodes.Add(root);
             loaded++;
         }
@@ -315,8 +319,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
         //using IDisposable disposable = await root.WriterLockAsync();
 
         // need to split root
-        BTreeNode<TKey, TValue> newRoot = new(2, maxNodeCapacity);
-        newRoot.CreatedAt = txnid;
+        BTreeNode<TKey, TValue> newRoot = new(2, maxNodeCapacity)
+        {
+            CreatedAt = txnid
+        };
+
         deltas.Nodes.Add(newRoot);
         loaded++;
 
