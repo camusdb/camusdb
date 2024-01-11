@@ -15,8 +15,6 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal sealed class DMLUniqueKeySaver : DMLKeyBase
 {
-    private readonly IndexSaver indexSaver = new();
-
     /// <summary>
     /// Checks if a row with the same primary key is already added to table
     /// </summary>
@@ -36,7 +34,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
                 "The primary key of the table \"" + table.Name + "\" is not present in the list of values."
             );
 
-        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue([uniqueValue]));
+        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue(uniqueValue));
 
         if (rowTuple is not null && !rowTuple.IsNull())
             throw new CamusDBException(
@@ -54,13 +52,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
             if (index.Value.Type != IndexType.Unique)
                 continue;
 
-            BTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.Value.BTree;
-
-            if (uniqueIndex is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A unique index tree wasn't found"
-                );
+            BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex = index.Value.BTree;            
 
             await CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
         }

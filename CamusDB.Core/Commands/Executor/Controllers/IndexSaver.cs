@@ -28,12 +28,12 @@ internal sealed class IndexSaver
         indexUniqueOffsetSaver = new(this);
     }
 
-    public async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> Save(SaveUniqueOffsetIndexTicket ticket)
+    public async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> Save(SaveOffsetIndexTicket ticket)
     {
         return await indexUniqueOffsetSaver.Save(ticket);
     }
 
-    public async Task<BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveUniqueIndexTicket ticket)
+    public async Task<BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveIndexTicket ticket)
     {
         return await indexUniqueSaver.Save(ticket);
     }  

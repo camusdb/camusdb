@@ -17,9 +17,9 @@ public sealed class TableIndexSchema
 
     public IndexType Type { get; }    
 
-    public BTree<CompositeColumnValue, BTreeTuple> BTree { get; }
+    public BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> BTree { get; }
 
-    public TableIndexSchema(string column, IndexType type, BTree<CompositeColumnValue, BTreeTuple> index)
+    public TableIndexSchema(string column, IndexType type, BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index)
     {
         Column = column;
         Type = type;

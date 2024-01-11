@@ -16,22 +16,22 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class IndexReader
 {    
-    private readonly IndexUniqueReader indexUniqueReader;
+    private readonly IndexUniqueReader indexReader;
 
-    private readonly IndexUniqueOffsetReader indexUniqueOffsetReader;
+    private readonly IndexUniqueOffsetReader indexOffsetReader;
 
     public IndexReader()
     {
-        indexUniqueReader = new(this);
-        indexUniqueOffsetReader = new(this);
+        indexReader = new(this);
+        indexOffsetReader = new(this);
     }
 
     public async Task<BTree<ObjectIdValue, ObjectIdValue>> ReadOffsets(BufferPoolManager tablespace, ObjectIdValue offset)
     {
-        return await indexUniqueOffsetReader.ReadOffsets(tablespace, offset);
+        return await indexOffsetReader.ReadOffsets(tablespace, offset);
     }
 
-    public async Task<BTree<CompositeColumnValue, BTreeTuple>> ReadUnique(BufferPoolManager tablespace, ObjectIdValue offset)
+    public async Task<BPTree<CompositeColumnValue, ColumnValue, BTreeTuple>> Read(BufferPoolManager tablespace, ObjectIdValue offset)
     {
-        return await indexUniqueReader.ReadUnique(tablespace, offset);
+        return await indexReader.Read(tablespace, offset);
     }}

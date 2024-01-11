@@ -23,13 +23,13 @@ internal sealed class IndexUniqueReader : IndexBaseReader
         this.indexReader = indexReader;
     }
 
-    public async Task<BTree<CompositeColumnValue, BTreeTuple>> ReadUnique(BufferPoolManager bufferpool, ObjectIdValue offset)
+    public async Task<BPTree<CompositeColumnValue, ColumnValue, BTreeTuple>> Read(BufferPoolManager bufferpool, ObjectIdValue offset)
     {
         //Console.WriteLine("***");
 
         IndexUniqueNodeReader reader = new(bufferpool);
 
-        BTree<CompositeColumnValue, BTreeTuple> index = new(offset, reader);
+        BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = new(offset, reader);
 
         byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)

@@ -11,7 +11,7 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public readonly struct SaveUniqueIndexTicket
+public readonly struct SaveIndexTicket
 {
     public BTree<CompositeColumnValue, BTreeTuple> Index { get; }
 
@@ -23,7 +23,7 @@ public readonly struct SaveUniqueIndexTicket
 
     public BTreeTuple Value { get; }
 
-    public SaveUniqueIndexTicket(
+    public SaveIndexTicket(
         BTree<CompositeColumnValue, BTreeTuple> index,
         HLCTimestamp txnId,
         BTreeCommitState commitState,

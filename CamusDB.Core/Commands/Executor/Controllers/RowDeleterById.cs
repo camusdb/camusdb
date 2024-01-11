@@ -104,7 +104,7 @@ internal sealed class RowDeleterById
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        state.RowTuple = await index.BTree.Get(TransactionType.Write, ticket.TxnId, new CompositeColumnValue([columnId]));
+        state.RowTuple = await index.BTree.Get(TransactionType.Write, ticket.TxnId, new CompositeColumnValue(columnId));
 
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
@@ -155,11 +155,11 @@ internal sealed class RowDeleterById
                     "A null value was found for unique key field " + index.Column
                 );
 
-            SaveUniqueIndexTicket saveUniqueIndexTicket = new(
+            SaveIndexTicket saveUniqueIndexTicket = new(
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: new CompositeColumnValue([uniqueKeyValue]),
+                key: new CompositeColumnValue(uniqueKeyValue),
                 value: new BTreeTuple(new(), new())
             );
 
@@ -225,7 +225,7 @@ internal sealed class RowDeleterById
             return FluxAction.Abort;
         }
 
-        SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
+        SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
             index: state.Table.Rows,
             txnId: state.Ticket.TxnId,
             key: state.RowTuple.SlotOne,

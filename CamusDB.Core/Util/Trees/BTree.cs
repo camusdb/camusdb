@@ -28,7 +28,7 @@ namespace CamusDB.Core.Util.Trees;
  * The entries version the data by timestamp and return a consistent state for 
  * the same transaction id (timestamp).
  */
-public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
+public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
 {
     private static int CurrentId = -1;
 
@@ -435,8 +435,11 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
     // split node in half
     private BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, HLCTimestamp txnid, BTreeMutationDeltas<TKey, TValue> deltas)
     {
-        BTreeNode<TKey, TValue> newNode = new(maxNodeCapacityHalf, maxNodeCapacity);
-        newNode.CreatedAt = txnid;
+        BTreeNode<TKey, TValue> newNode = new(maxNodeCapacityHalf, maxNodeCapacity)
+        {
+            CreatedAt = txnid
+        };
+
         deltas.Nodes.Add(newNode);
         loaded++;
 
@@ -662,6 +665,8 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
         {
             int m = l + (r - l) / 2;
 
+            //Console.WriteLine("Z {0} {1}", arr[m].Key, x);
+
             // Check if x is present at mid
             if (Eq(arr[m].Key, x))
                 return arr[m];
@@ -698,6 +703,4 @@ public sealed class BTree<TKey, TValue> where TKey : IComparable<TKey> where TVa
     {
         return await readerWriterLock.WriterLockAsync();
     }
-
-
 }

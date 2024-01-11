@@ -195,6 +195,7 @@ public sealed class GCManager : IDisposable
                 TableDescriptor tableDescriptor = await keyValueDescriptor.Value;
 
                 BTree<ObjectIdValue, ObjectIdValue>? tableIndex = tableDescriptor.Rows;
+
                 if (tableIndex is not null)
                 {
                     BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas = new();
@@ -225,7 +226,7 @@ public sealed class GCManager : IDisposable
 
                 foreach (KeyValuePair<string, TableIndexSchema> index in tableDescriptor.Indexes)
                 {
-                    BTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.Value.BTree;
+                    BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex = index.Value.BTree;
                     
                     BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas = new();
 

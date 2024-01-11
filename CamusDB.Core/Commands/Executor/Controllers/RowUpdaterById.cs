@@ -103,10 +103,17 @@ public sealed class RowUpdaterById
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
-            if (index.Value.Type != IndexType.Unique)
+            if (index.Value.Type == IndexType.Unique)
+            {
+                indexState.UniqueIndexes.Add(index.Value);
                 continue;
+            }
 
-            indexState.UniqueIndexes.Add(index.Value);
+            if (index.Value.Type == IndexType.Multi)
+            {
+                indexState.MultiIndexes.Add(index.Value);
+                continue;
+            }
         }
 
         return indexState;
@@ -166,11 +173,11 @@ public sealed class RowUpdaterById
                 CamusDBErrorCodes.InvalidInternalOperation,
                 "Table doesn't have a primary key index"
             );
-        }        
+        }
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        state.RowTuple = await index.BTree.Get(TransactionType.Write, ticket.TxnId, new CompositeColumnValue([columnId]));
+        state.RowTuple = await index.BTree.Get(TransactionType.Write, ticket.TxnId, new CompositeColumnValue(columnId));
 
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
@@ -211,7 +218,7 @@ public sealed class RowUpdaterById
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.BTree;            
+            BTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.BTree;
 
             ColumnValue? uniqueKeyValue = GetColumnValue(state.ColumnValues, index.Column);
 
@@ -221,11 +228,11 @@ public sealed class RowUpdaterById
                     "A null value was found for unique key field " + index.Column
                 );
 
-            SaveUniqueIndexTicket saveUniqueIndexTicket = new(
+            SaveIndexTicket saveUniqueIndexTicket = new(
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: new CompositeColumnValue([uniqueKeyValue]),
+                key: new CompositeColumnValue(uniqueKeyValue),
                 value: state.RowTuple
             );
 
@@ -242,39 +249,44 @@ public sealed class RowUpdaterById
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private Task<FluxAction> UpdateMultiIndexes(UpdateByIdFluxState state)
+    private async Task<FluxAction> UpdateMultiIndexes(UpdateByIdFluxState state)
     {
-        //await UpdateMultiIndexes(state.Database, state.Table, state.ColumnValues);
+        UpdateByIdTicket ticket = state.Ticket;
 
-        return Task.FromResult(FluxAction.Continue);
-    }
-
-    private async Task UpdateMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
-    {
-        BufferPoolManager tablespace = database.BufferPool;
-
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
+        if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            if (index.Value.Type != IndexType.Multi)
-                continue;
+            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+            return FluxAction.Abort;
+        }
 
-            if (index.Value.BTree is null)
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+
+        foreach (TableIndexSchema index in state.Indexes.MultiIndexes)
+        {
+            BTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.BTree;
+
+            ColumnValue? uniqueKeyValue = GetColumnValue(state.ColumnValues, index.Column);
+
+            if (uniqueKeyValue is null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
-                    "A multi index tree wasn't found"
+                    "A null value was found for unique key field " + index.Column
                 );
 
-            ColumnValue? columnValue = GetColumnValue(columnValues, index.Value.Column);
-            if (columnValue is null) // @todo check what to to here
-                continue;
+            SaveIndexTicket saveUniqueIndexTicket = new(
+                index: uniqueIndex,
+                txnId: ticket.TxnId,
+                commitState: BTreeCommitState.Uncommitted,
+                key: new CompositeColumnValue(uniqueKeyValue),
+                value: state.RowTuple
+            );
 
-            //BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
-            //await indexSaver.Remove(tablespace, multiIndex, columnValue);
-
-            await Task.CompletedTask;
-
-            throw new NotImplementedException();
+            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
         }
+
+        state.Indexes.MultiIndexDeltas = deltas;
+
+        return FluxAction.Continue;
     }
 
     /// <summary>
@@ -326,7 +338,7 @@ public sealed class RowUpdaterById
             return FluxAction.Abort;
         }
 
-        SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
+        SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
             index: state.Table.Rows,
             txnId: state.Ticket.TxnId,
             key: state.RowTuple.SlotOne,
@@ -354,15 +366,26 @@ public sealed class RowUpdaterById
 
         await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas);
 
-        if (state.Indexes.UniqueIndexDeltas is null)
-            return FluxAction.Continue;
-
-        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+        if (state.Indexes.UniqueIndexDeltas is not null)
         {
-            foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
-                uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+            {
+                foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
+                    uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
-            await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+                await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+            }
+        }
+
+        if (state.Indexes.MultiIndexDeltas is not null)
+        {
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multIndex in state.Indexes.MultiIndexDeltas)
+            {
+                foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multIndex.deltas.MvccEntries)
+                    multiIndexEntry.CommitState = BTreeCommitState.Committed;
+
+                await indexSaver.Persist(state.Database.BufferPool, multIndex.index, state.ModifiedPages, multIndex.deltas);
+            }
         }
 
         return FluxAction.Continue;

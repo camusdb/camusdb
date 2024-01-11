@@ -6,18 +6,25 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Util.Trees;
+
 namespace CamusDB.Core.CommandsExecutor.Models;
 
 /// <summary>
-/// Represents a value that can be stored or compared with a column's value
+/// Represents a group of column values acting as a composite value
 /// </summary>
-public sealed class CompositeColumnValue : IComparable<CompositeColumnValue>
+public sealed class CompositeColumnValue : IComparable<CompositeColumnValue>, IPrefixComparable<ColumnValue>
 {
     public ColumnValue[] Values { get; }
 
     public CompositeColumnValue(ColumnValue[] values)
     {
         Values = values;
+    }
+
+    public CompositeColumnValue(ColumnValue value)
+    {
+        Values = new ColumnValue[] { value };
     }
 
     public int CompareTo(CompositeColumnValue? other)
@@ -33,9 +40,31 @@ public sealed class CompositeColumnValue : IComparable<CompositeColumnValue>
             int result = Values[i].CompareTo(other.Values[i]);
 
             if (result != 0)
+            {
+                //Console.WriteLine(result);
                 return result;
+            }
         }
 
+        //Console.WriteLine(0);
         return 0;
+    }
+
+    public override string ToString()
+    {
+        string str = "";
+
+        for (int i = 0; i < Values.Length; i++)
+            str += i + "=" + Values[i].ToString();
+
+        return str;
+    }
+
+    public int IsPrefixedBy(ColumnValue? other)
+    {
+        if (other is null)
+            return 1;
+
+        return Values[0].CompareTo(other);
     }
 }

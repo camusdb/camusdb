@@ -12,7 +12,7 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public readonly struct SaveUniqueOffsetIndexTicket
+public readonly struct SaveOffsetIndexTicket
 {	
 	public BTree<ObjectIdValue, ObjectIdValue> Index { get; }
 
@@ -22,7 +22,7 @@ public readonly struct SaveUniqueOffsetIndexTicket
 
 	public ObjectIdValue Value { get; }    
 
-    public SaveUniqueOffsetIndexTicket(		
+    public SaveOffsetIndexTicket(		
 		BTree<ObjectIdValue, ObjectIdValue> index,
         HLCTimestamp txnId,
         ObjectIdValue key,

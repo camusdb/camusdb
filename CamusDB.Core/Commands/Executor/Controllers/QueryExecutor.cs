@@ -123,7 +123,11 @@ internal sealed class QueryExecutor
 
         BufferPoolManager tablespace = database.BufferPool;
 
-        BTreeTuple? pageOffset = await index.BTree.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue([columnValue]));
+        BTreeTuple? pageOffset = await index.BTree.Get(
+                                            TransactionType.ReadOnly,
+                                            ticket.TxnId,
+                                            new CompositeColumnValue(columnValue)
+                                       );
 
         if (pageOffset is null || pageOffset.IsNull())
         {
@@ -175,7 +179,7 @@ internal sealed class QueryExecutor
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        BTreeTuple? pageOffset = await index.BTree.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue([columnId]));
+        BTreeTuple? pageOffset = await index.BTree.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue(columnId));
 
         if (pageOffset is null || pageOffset.IsNull())
         {

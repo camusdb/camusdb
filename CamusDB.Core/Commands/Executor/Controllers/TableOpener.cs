@@ -6,13 +6,13 @@
  * file that was distributed with this source code.
  */
 
+using Nito.AsyncEx;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
-using Nito.AsyncEx;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -76,11 +76,11 @@ internal sealed class TableOpener
                     case IndexType.Unique:
                     case IndexType.Multi:
                         {
-                            BTree<CompositeColumnValue, BTreeTuple> rows = await indexReader.ReadUnique(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
+                            BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> btree = await indexReader.Read(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
 
                             tableDescriptor.Indexes.Add(
                                 index.Key,
-                                new TableIndexSchema(index.Value.Column, index.Value.Type, rows)
+                                new TableIndexSchema(index.Value.Column, index.Value.Type, btree)
                             );
                         }
                         break;                                           

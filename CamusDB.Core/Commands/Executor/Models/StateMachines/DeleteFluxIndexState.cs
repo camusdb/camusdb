@@ -1,7 +1,4 @@
 ﻿
-
-
-using CamusDB.Core.Catalogs.Models;
 /**
  * This file is part of CamusDB
  *
@@ -9,13 +6,15 @@ using CamusDB.Core.Catalogs.Models;
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
+
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 public readonly struct DeleteFluxIndexState
 {
     public List<TableIndexSchema> UniqueIndexes { get; } = new();
 
-    public List<TableIndexSchema>? MultiIndexes { get; } = null;
+    public List<TableIndexSchema> MultiIndexes { get; } = new();
 
     public DeleteFluxIndexState()
     {

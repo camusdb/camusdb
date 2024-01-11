@@ -110,35 +110,7 @@ internal sealed class RowDeleter
         state.DataCursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
         return Task.FromResult(FluxAction.Continue);
-    }
-
-    private async Task DeleteMultiIndexes(DatabaseDescriptor database, TableDescriptor table, Dictionary<string, ColumnValue> columnValues)
-    {
-        BufferPoolManager tablespace = database.BufferPool;
-
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes) // @todo update in parallel
-        {
-            if (index.Value.Type != IndexType.Multi)
-                continue;
-
-            if (index.Value.BTree is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A multi index tree wasn't found"
-                );
-
-            ColumnValue? columnValue = GetColumnValue(columnValues, index.Value.Column);
-            if (columnValue is null) // @todo check what to to here
-                continue;
-
-            //BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
-            //await indexSaver.Remove(tablespace, multiIndex, columnValue);
-
-            await Task.CompletedTask;
-
-            throw new NotImplementedException();
-        }
-    }
+    }    
 
     /// <summary>
     /// Deletes the row from disk
@@ -155,7 +127,7 @@ internal sealed class RowDeleter
 
         DeleteTicket ticket = state.Ticket;
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? uniqueIndexDeltas;
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? uniqueIndexDeltas, multiIndexDeltas;
 
         // @todo we need to take a snapshot of the data to prevent deadlocks
         // but probably need to optimize this for larger datasets
@@ -171,7 +143,9 @@ internal sealed class RowDeleter
 
             uniqueIndexDeltas = await UpdateUniqueIndexes(state, ticket, tuple, row);
 
-            await PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas);
+            multiIndexDeltas = await UpdateMultiIndexes(state, ticket, tuple, row);
+
+            await PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas, multiIndexDeltas);
 
             Console.WriteLine(
                 "Row with rowid {0} deleted to page {1}",
@@ -187,7 +161,7 @@ internal sealed class RowDeleter
 
     private async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>?> DeleteFromTableIndex(DeleteFluxState state, BTreeTuple tuple)
     {
-        SaveUniqueOffsetIndexTicket saveUniqueOffsetIndex = new(
+        SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
             index: state.Table.Rows,
             txnId: state.Ticket.TxnId,
             key: tuple.SlotOne,
@@ -198,7 +172,12 @@ internal sealed class RowDeleter
         return await indexSaver.Save(saveUniqueOffsetIndex);
     }
 
-    private async Task<List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>> UpdateUniqueIndexes(DeleteFluxState state, DeleteTicket ticket, BTreeTuple tuple, QueryResultRow row)
+    private async Task<List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>> UpdateUniqueIndexes(
+        DeleteFluxState state,
+        DeleteTicket ticket,
+        BTreeTuple tuple,
+        QueryResultRow row
+    )
     {
         List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
@@ -206,7 +185,7 @@ internal sealed class RowDeleter
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;
+            BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex = index.BTree;
 
             ColumnValue? uniqueKeyValue = GetColumnValue(row.Row, index.Column);
 
@@ -216,11 +195,53 @@ internal sealed class RowDeleter
                     "A null value was found for unique key field " + index.Column
                 );
 
-            SaveUniqueIndexTicket saveUniqueIndexTicket = new(
+            SaveIndexTicket saveUniqueIndexTicket = new(
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: new CompositeColumnValue([uniqueKeyValue]),
+                key: new CompositeColumnValue(uniqueKeyValue),
+                value: tuple
+            );
+
+            //Console.WriteLine("Saving unique index {0} {1} {2}", uniqueIndex, uniqueKeyValue, tuple);
+
+            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
+        }
+
+        return deltas;
+    }
+
+    private async Task<List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>> UpdateMultiIndexes(
+        DeleteFluxState state,
+        DeleteTicket ticket,
+        BTreeTuple tuple,
+        QueryResultRow row
+    )
+    {
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+
+        //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
+
+        foreach (TableIndexSchema index in state.Indexes.MultiIndexes)
+        {
+            BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex = index.BTree;
+
+            ColumnValue? multiKeyValue = GetColumnValue(row.Row, index.Column);
+
+            if (multiKeyValue is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for multi key field " + index.Column
+                );
+
+            SaveIndexTicket saveUniqueIndexTicket = new(
+                index: uniqueIndex,
+                txnId: ticket.TxnId,
+                commitState: BTreeCommitState.Uncommitted,
+                key: new CompositeColumnValue(new ColumnValue[] {
+                    multiKeyValue,
+                    new ColumnValue(ColumnType.Id, tuple.SlotOne.ToString())
+                }),
                 value: tuple
             );
 
@@ -240,7 +261,8 @@ internal sealed class RowDeleter
     private async Task PersistIndexChanges(
         DeleteFluxState state, 
         BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, 
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> uniqueIndexDeltas
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> uniqueIndexDeltas,
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> multiIndexDeltas
     )
     {
         if (mainIndexDeltas is null)
@@ -251,15 +273,26 @@ internal sealed class RowDeleter
 
         await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, mainIndexDeltas);
 
-        if (uniqueIndexDeltas is null)
-            return;
-
-        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in uniqueIndexDeltas)
+        if (uniqueIndexDeltas is not null)
         {
-            foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
-                uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in uniqueIndexDeltas)
+            {
+                foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
+                    uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
-            await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+                await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+            }
+        }
+
+        if (multiIndexDeltas is not null)
+        {
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multiIndex in multiIndexDeltas)
+            {
+                foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multiIndex.deltas.MvccEntries)
+                    multiIndexEntry.CommitState = BTreeCommitState.Committed;
+
+                await indexSaver.Persist(state.Database.BufferPool, multiIndex.index, state.ModifiedPages, multiIndex.deltas);
+            }
         }
     }
 

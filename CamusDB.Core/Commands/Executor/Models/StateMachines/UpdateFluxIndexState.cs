@@ -14,7 +14,7 @@ public readonly struct UpdateFluxIndexState
 {
     public List<TableIndexSchema> UniqueIndexes { get; } = new();
 
-    public List<TableIndexSchema>? MultiIndexes { get; } = null;
+    public List<TableIndexSchema> MultiIndexes { get; } = new();
 
     public UpdateFluxIndexState()
     {

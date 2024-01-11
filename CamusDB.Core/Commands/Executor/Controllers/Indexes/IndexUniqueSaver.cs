@@ -27,7 +27,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task<BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveUniqueIndexTicket ticket)
+    public async Task<BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveIndexTicket ticket)
     {
         return await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value);
     }

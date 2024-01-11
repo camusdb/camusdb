@@ -26,7 +26,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> Save(SaveUniqueOffsetIndexTicket ticket)
+    public async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> Save(SaveOffsetIndexTicket ticket)
     {
         return await SaveInternal(ticket.Index, ticket.TxnId, ticket.Key, ticket.Value);
     }
