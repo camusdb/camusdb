@@ -21,6 +21,10 @@ Create Table
 Drop table
 - Delete all data and indexes
 
+Alter Table
+- Update indexes if indexed column changed
+- Prevent delete column if column is indexed
+
 ColumnValue
 - Rethink column value as a lightweight struct
 

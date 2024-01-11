@@ -54,6 +54,8 @@ public enum NodeType
     DropTable,
     AlterTableAddColumn,
     AlterTableDropColumn,
+    AlterTableAddIndex,
+    AlterTableDropIndex,
     TypeObjectId,
     TypeString,
     TypeInteger64,

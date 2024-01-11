@@ -11,6 +11,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.Commands.Executor.Controllers.DDL;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -29,6 +30,8 @@ internal sealed class SqlExecutor
     private readonly SQLExecutorCreateTableCreator sqlExecutorCreateTableCreator = new();
 
     private readonly SQLExecutorAlterTableCreator sqlExecutorAlterTableCreator = new();
+
+    private readonly SQLExecutorAlterIndexCreator sqlExecutorAlterIndexCreator = new();
 
     public SqlExecutor()
     {
@@ -74,6 +77,11 @@ internal sealed class SqlExecutor
     internal AlterTableTicket CreateAlterTableTicket(HLCTimestamp hlcTimestamp, ExecuteSQLTicket ticket, NodeAst ast)
     {
         return sqlExecutorAlterTableCreator.CreateAlterTableTicket(hlcTimestamp, ticket, ast);
+    }
+
+    internal AlterIndexTicket CreateAlterIndexTicket(HLCTimestamp hlcTimestamp, ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        return sqlExecutorAlterIndexCreator.CreateAlterIndexTicket(hlcTimestamp, ticket, ast);
     }
 
     public static ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters)

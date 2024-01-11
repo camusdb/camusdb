@@ -8,10 +8,10 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public enum AlterTableOperation
+public enum AlterIndexOperation
 {
-    AddColumn,
-    ModifyColumn,
-    DropColumn,
-    RenameColumn
+    AddIndex,
+    ModifyIndex,
+    DropIndex,
+    RenameIndex
 }

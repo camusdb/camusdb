@@ -14,22 +14,22 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
-internal sealed class TableAlterer
+internal sealed class TableColumnAlterer
 {
-    private CatalogsManager Catalogs { get; set; }
+    private readonly CatalogsManager catalogs;
 
     private readonly TableColumnAdder tableColumnAdder = new();
 
     private readonly TableColumnDropper tableColumnDropper = new();
 
-    public TableAlterer(CatalogsManager catalogsManager)
+    public TableColumnAlterer(CatalogsManager catalogsManager)
     {
-        Catalogs = catalogsManager;
+        catalogs = catalogsManager;
     }
 
     public async Task<bool> Alter(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
     {
-        TableSchema newTableSchema = await Catalogs.AlterTable(database, ticket);
+        TableSchema newTableSchema = await catalogs.AlterTable(database, ticket);
 
         return ticket.Operation switch
         {
@@ -37,7 +37,7 @@ internal sealed class TableAlterer
             AlterTableOperation.DropColumn => await DropColumn(queryExecutor, database, table, ticket),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid alter table operation"),
         };
-    }
+    }    
 
     private async Task<bool> AddColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
     {

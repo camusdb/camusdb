@@ -846,6 +846,38 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSimpleAlterTable5()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD INDEX `year_index` (`year`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddIndex, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable6()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` DROP INDEX `year_index`");
+
+        Assert.AreEqual(NodeType.AlterTableDropIndex, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseShowDatabase()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW DATABASE");
+
+        Assert.AreEqual(NodeType.ShowDatabase, ast.nodeType);
+    }
+
+    [Test]
     public void TestParseShowTables()
     {
         NodeAst ast = SQLParserProcessor.Parse("SHOW TABLES");
@@ -857,6 +889,24 @@ public class TestSQLParser
     public void TestParseShowColumns()
     {
         NodeAst ast = SQLParserProcessor.Parse("SHOW COLUMNS FROM robots");
+
+        Assert.AreEqual(NodeType.ShowColumns, ast.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseShowColumns2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("DESC robots");
+
+        Assert.AreEqual(NodeType.ShowColumns, ast.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseShowColumns3()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("DESCRIBE robots");
 
         Assert.AreEqual(NodeType.ShowColumns, ast.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);

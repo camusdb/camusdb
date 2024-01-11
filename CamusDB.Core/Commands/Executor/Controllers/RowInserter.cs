@@ -404,18 +404,3 @@ internal sealed class RowInserter
     }
 }
 
-/*foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
-{
-    if (index.Value.MultiRows is not null)
-    {
-        foreach (BTreeMultiEntry entry in index.Value.MultiRows.EntriesTraverse())
-        {
-            Console.WriteLine("Index Key={0}/{1} PageOffset={2}", index.Key, entry.Key, entry.Value!.Size());
-
-            foreach (BTreeEntry entry2 in entry.Value.EntriesTraverse())
-            {
-                Console.WriteLine(" > Index Key={0} PageOffset={1}", entry2.Key, entry2.Value);
-            }
-        }
-    }
-}*/

@@ -18,16 +18,16 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class TableCreator
 {
-    private CatalogsManager Catalogs { get; set; }
+    private readonly CatalogsManager catalogs;
 
     public TableCreator(CatalogsManager catalogsManager)
     {
-        Catalogs = catalogsManager;
+        catalogs = catalogsManager;
     }
 
     public async Task<bool> Create(DatabaseDescriptor database, CreateTableTicket ticket)
     {
-        TableSchema tableSchema = await Catalogs.CreateTable(database, ticket);
+        TableSchema tableSchema = await catalogs.CreateTable(database, ticket);
 
         await SetInitialTablePages(database, tableSchema);
 

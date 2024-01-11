@@ -50,7 +50,7 @@ public sealed class CatalogsManager
                         column.Name,
                         column.Type,
                         column.Primary,
-                        column.NotNull,
+                        column.Primary ? true : column.NotNull,
                         column.Index
                     )
                 );

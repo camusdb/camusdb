@@ -376,6 +376,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                     //Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);
 
                     node.NumberWrites++;
+
                     deltas.Nodes.Add(node);
                     deltas.MvccEntries.Add(childrenEntry.SetValue(txnid, commitState, value));
                     return null;

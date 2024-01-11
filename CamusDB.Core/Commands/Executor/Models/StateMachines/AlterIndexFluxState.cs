@@ -9,33 +9,41 @@
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
-internal sealed class AlterColumnFluxState
+internal sealed class AlterIndexFluxState
 {
     public DatabaseDescriptor Database { get; }
 
     public TableDescriptor Table { get; }
 
-    public AlterColumnTicket Ticket { get; }
+    public AlterIndexTicket Ticket { get; }
 
-    public AlterColumnFluxIndexState Indexes { get; }
+    public AlterIndexFluxIndexState Indexes { get; }
 
     public QueryExecutor QueryExecutor { get; }
 
-    public List<BufferPageOperation> ModifiedPages { get; } = new();    
+    public ObjectIdValue IndexOffset { get; set; }
 
-    public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }
+    public BPTree<CompositeColumnValue, ColumnValue, BTreeTuple>? Btree { get; set; }
+
+    public List<BufferPageOperation> ModifiedPages { get; } = new();
+
+    public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }    
 
     public int ModifiedRows { get; set; }
 
-    public AlterColumnFluxState(
+    public List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? IndexDeltas { get; set; }
+
+    public AlterIndexFluxState(
         DatabaseDescriptor database, 
         TableDescriptor table, 
-        AlterColumnTicket ticket, 
+        AlterIndexTicket ticket, 
         QueryExecutor queryExecutor, 
-        AlterColumnFluxIndexState indexes
+        AlterIndexFluxIndexState indexes
     )
     {
         Database = database;
@@ -45,4 +53,3 @@ internal sealed class AlterColumnFluxState
         Indexes = indexes;
     }
 }
-

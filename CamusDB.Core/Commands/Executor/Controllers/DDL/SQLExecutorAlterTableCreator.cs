@@ -11,8 +11,9 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 
-namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
+namespace CamusDB.Core.Commands.Executor.Controllers.DDL;
 
 /// <summary>
 /// @todo #1 Make constraint types work without O(n) lookup
@@ -25,7 +26,7 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
         string tableName = ast.leftAst!.yytext!;
 
         if (ast.rightAst is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing create table fields list");        
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing create table fields list");
 
         return new(
             hlcTimestamp,
@@ -34,7 +35,7 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             AlterTableOperation.AddColumn,
             new ColumnInfo("x", GetColumnType(ast.extendedOne!))
         );
-    }    
+    }
 
     private static ColumnType GetColumnType(NodeAst nodeAst)
     {
@@ -48,5 +49,5 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             return ColumnType.Id;
 
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown field type: " + nodeAst.nodeType);
-    }    
+    }
 }

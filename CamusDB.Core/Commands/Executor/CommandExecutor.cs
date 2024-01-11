@@ -39,7 +39,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly TableCreator tableCreator;
 
-    private readonly TableAlterer tableAlterer;
+    private readonly TableColumnAlterer tableColumnAlterer;
+
+    private readonly TableIndexAlterer tableIndexAlterer;
 
     private readonly TableDropper tableDropper;
 
@@ -79,7 +81,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         databaseCreator = new();
         tableOpener = new(catalogs);
         tableCreator = new(catalogs);
-        tableAlterer = new(catalogs);
+        tableColumnAlterer = new(catalogs);
+        tableIndexAlterer = new(catalogs);
         tableDropper = new(catalogs);
         rowInserter = new();
         rowUpdaterById = new();
@@ -142,7 +145,18 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
-        return await tableAlterer.Alter(queryExecutor, database, table, ticket);
+        return await tableColumnAlterer.Alter(queryExecutor, database, table, ticket);
+    }
+
+    public async Task<bool> AlterIndex(AlterIndexTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+
+        return await tableIndexAlterer.Alter(queryExecutor, database, table, ticket);
     }
 
     public async Task<bool> DropTable(DropTableTicket ticket)
@@ -191,9 +205,22 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     AlterTableTicket alterTableTicket = sqlExecutor.CreateAlterTableTicket(await NextTxnId(), ticket, ast);
 
-                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!);
+                    validator.Validate(alterTableTicket);
 
-                    return await tableAlterer.Alter(queryExecutor, database, table, alterTableTicket);
+                    TableDescriptor table = await tableOpener.Open(database, alterTableTicket.TableName);
+
+                    return await tableColumnAlterer.Alter(queryExecutor, database, table, alterTableTicket);
+                }
+
+            case NodeType.AlterTableAddIndex:
+                {
+                    AlterIndexTicket alterIndexTicket = sqlExecutor.CreateAlterIndexTicket(await NextTxnId(), ticket, ast);
+
+                    validator.Validate(alterIndexTicket);
+
+                    TableDescriptor table = await tableOpener.Open(database, alterIndexTicket.TableName);
+
+                    return await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket);
                 }
 
             /*case NodeType.DropTable:

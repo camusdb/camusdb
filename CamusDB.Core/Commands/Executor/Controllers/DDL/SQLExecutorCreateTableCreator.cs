@@ -6,13 +6,13 @@
  * file that was distributed with this source code.
  */
 
-
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 
-namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
+namespace CamusDB.Core.Commands.Executor.Controllers.DDL;
 
 /// <summary>
 /// @todo #1 Make constraint types work without O(n) lookup
@@ -35,7 +35,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
     }
 
     private static void GetCreateTableFieldList(NodeAst fieldList, LinkedList<ColumnInfo> allFieldLists)
-    {        
+    {
         if (fieldList.nodeType == NodeType.CreateTableItem)
         {
             if (fieldList.extendedOne != null)
@@ -46,12 +46,12 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
 
                 allFieldLists.AddLast(
                     new ColumnInfo(
-                        fieldList.leftAst!.yytext! ?? "", 
-                        GetColumnType(fieldList.rightAst!), 
+                        fieldList.leftAst!.yytext! ?? "",
+                        GetColumnType(fieldList.rightAst!),
                         constraintTypes.Contains(ColumnConstraintType.PrimaryKey),
-                        constraintTypes.Contains(ColumnConstraintType.NotNull), 
-                        IndexType.None, 
-                        null                        
+                        constraintTypes.Contains(ColumnConstraintType.NotNull),
+                        IndexType.None,
+                        null
                     )
                 );
 

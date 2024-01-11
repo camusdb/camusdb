@@ -45,7 +45,7 @@ internal sealed class TestTableAlterer
         return (dbname, executor, catalogs, descriptor);
     }
 
-    private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupBasicTable()
+    private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupEmptyTable()
     {
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
@@ -63,6 +63,13 @@ internal sealed class TestTableAlterer
 
         await executor.CreateTable(createTicket);
 
+        return (dbname, executor, catalogs, database);
+    }
+
+    private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupBasicTable()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();        
+
         List<string> objectsId = new(25);
 
         for (int i = 0; i < 25; i++)
@@ -78,6 +85,37 @@ internal sealed class TestTableAlterer
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
                     { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                }
+            );
+
+            await executor.Insert(ticket);
+
+            objectsId.Add(objectId);
+        }
+
+        return (dbname, executor, catalogs, database, objectsId);
+    }
+
+    private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupTableRepeatedData()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
+
+        List<string> objectsId = new(25);
+
+        for (int i = 0; i < 25; i++)
+        {
+            string objectId = ObjectIdGenerator.Generate().ToString();
+
+            InsertTicket ticket = new(
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
+                values: new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, objectId) },
+                    { "name", new ColumnValue(ColumnType.String, "some name") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 2000) },
                     { "enabled", new ColumnValue(ColumnType.Bool, false) },
                 }
             );
@@ -259,7 +297,7 @@ internal sealed class TestTableAlterer
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.AlterTable(alterTableTicket));
-        Assert.AreEqual("Duplicate column 'name'", e!.Message);        
+        Assert.AreEqual("Duplicate column 'name'", e!.Message);
     }
 
     [Test]
@@ -431,5 +469,59 @@ internal sealed class TestTableAlterer
             Assert.AreEqual(ColumnType.Integer64, resultRow.Row["type"].Type);
             Assert.AreEqual(100, resultRow.Row["type"].LongValue);
         }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableAndAddIndex()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
+
+        AlterIndexTicket alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "name_idx",
+            columnName: "name",
+            operation: AlterIndexOperation.AddIndex
+        );
+
+        await executor.AlterIndex(alterIndexTicket);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableFillAndAddIndex()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupBasicTable();
+
+        AlterIndexTicket alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "name_idx",
+            columnName: "name",
+            operation: AlterIndexOperation.AddIndex
+        );
+
+        await executor.AlterIndex(alterIndexTicket);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableFillRepeatedAndAddIndex()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupTableRepeatedData();
+
+        AlterIndexTicket alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "name_idx",
+            columnName: "name",
+            operation: AlterIndexOperation.AddIndex
+        );
+
+        await executor.AlterIndex(alterIndexTicket);
     }
 }

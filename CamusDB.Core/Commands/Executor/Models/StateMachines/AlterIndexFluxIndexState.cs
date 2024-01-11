@@ -6,12 +6,9 @@
  * file that was distributed with this source code.
  */
 
-namespace CamusDB.Core.CommandsExecutor.Models;
+namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
-public enum AlterTableOperation
+public sealed class AlterIndexFluxIndexState
 {
-    AddColumn,
-    ModifyColumn,
-    DropColumn,
-    RenameColumn
+
 }

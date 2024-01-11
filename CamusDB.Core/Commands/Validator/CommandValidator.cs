@@ -37,6 +37,12 @@ public sealed class CommandValidator
         validator.Validate(ticket);
     }
 
+    public void Validate(AlterIndexTicket ticket)
+    {
+        AlterIndexValidator validator = new();
+        validator.Validate(ticket);
+    }
+
     public void Validate(CloseDatabaseTicket ticket)
     {
         CloseDatabaseValidator validator = new();
