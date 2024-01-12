@@ -27,17 +27,44 @@ internal sealed class AlterIndexValidator : ValidatorBase
                 "Table name is required"
             );
 
-        if (string.IsNullOrWhiteSpace(ticket.IndexName))
+        if (ticket.Operation != AlterIndexOperation.AddPrimaryKey && ticket.Operation != AlterIndexOperation.DropPrimaryKey && string.IsNullOrWhiteSpace(ticket.IndexName))            
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 "Index name is required"
             );
 
 
-        if (ticket.Operation == AlterIndexOperation.AddIndex && string.IsNullOrWhiteSpace(ticket.ColumnName))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Column name is required"
-            );
+        if ((ticket.Operation == AlterIndexOperation.AddIndex || ticket.Operation == AlterIndexOperation.AddUniqueIndex))
+        {
+            if (string.IsNullOrWhiteSpace(ticket.ColumnName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Column name is required"
+                );
+
+            if (string.IsNullOrWhiteSpace(ticket.IndexName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Index name is required"
+                );
+
+            if (string.IsNullOrWhiteSpace(ticket.IndexName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Index name is required"
+                );
+
+            if (ticket.IndexName.Length > 255)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Index name is too long"
+                );
+
+            if (!HasValidCharacters(ticket.IndexName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Index name has invalid characters"
+                );
+        }
     }
 }

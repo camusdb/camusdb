@@ -148,7 +148,7 @@ internal sealed class RowDeleter
             await PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas, multiIndexDeltas);
 
             Console.WriteLine(
-                "Row with rowid {0} deleted to page {1}",
+                "Row with rowid {0} deleted to tombstone page {1}",
                 tuple.SlotOne,
                 tuple.SlotTwo
             );

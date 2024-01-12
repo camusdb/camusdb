@@ -73,9 +73,13 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type create_table_constraint { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, $8.n, null, null, null); }
 				 | TALTER TTABLE any_identifier TDROP any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $5.n, null, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TDROP TCOLUMN any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $5.n, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TDROP TCOLUMN any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $6.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TINDEX any_identifier LPAREN any_identifier RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $3.n, $6.n, $8.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TUNIQUE any_identifier LPAREN any_identifier RPAREN { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $6.n, $8.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TUNIQUE TINDEX any_identifier LPAREN any_identifier RPAREN { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $7.n, $9.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TINDEX any_identifier { $$.n = new(NodeType.AlterTableDropIndex, $3.n, $6.n, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TPRIMARY TKEY LPAREN any_identifier RPAREN { $$.n = new(NodeType.AlterTableAddPrimaryKey, $3.n, $8.n, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TDROP TPRIMARY TKEY { $$.n = new(NodeType.AlterTableDropPrimaryKey, $3.n, null, null, null, null, null, null); }
 				 ;
 
 show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null); }

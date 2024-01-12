@@ -8,21 +8,41 @@
 
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
-using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 public sealed class TableColumnAdder
-{
+{    
     private readonly IndexSaver indexSaver = new();
 
     private readonly RowSerializer rowSerializer = new();
+
+    private void Validate(TableDescriptor table, AlterColumnTicket ticket)
+    {        
+        bool hasColumn = false;
+
+        foreach (TableColumnSchema column in table.Schema.Columns!)
+        {
+            if (column.Name == ticket.Column.Name)
+            {
+                hasColumn = true;
+                break;
+            }
+        }
+
+        if (hasColumn)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Column " + ticket.Column.Name + " is already part of table " + table.Name
+            );
+    }
 
     /// <summary>
     /// Schedules a new AlterColumn operation by the specified filters
@@ -31,11 +51,12 @@ public sealed class TableColumnAdder
     /// <param name="table"></param>
     /// <param name="ticket"></param>
     /// <returns></returns>
-    internal async Task<int> AddColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterColumnTicket ticket)
+    internal async Task<int> AddColumn(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterColumnTicket ticket)
     {
-        //Validate(table, ticket);
+        Validate(table, ticket);
 
         AlterColumnFluxState state = new(
+            catalogs: catalogs,
             database: database,
             table: table,
             ticket: ticket,
@@ -60,6 +81,17 @@ public sealed class TableColumnAdder
             return columnValue;
 
         return null;
+    }
+
+    private async Task<FluxAction> AlterSchema(AlterColumnFluxState state)
+    {
+        DatabaseDescriptor database = state.Database;
+        CatalogsManager catalogs = state.Catalogs;
+        AlterColumnTicket ticket = state.Ticket;
+
+        await catalogs.AlterTable(database, ticket);
+
+        return FluxAction.Continue;
     }
 
     /// <summary>
@@ -206,6 +238,7 @@ public sealed class TableColumnAdder
 
         Stopwatch timer = Stopwatch.StartNew();
         
+        machine.When(AlterColumnFluxSteps.AlterSchema, AlterSchema);
         machine.When(AlterColumnFluxSteps.LocateTupleToAlterColumn, LocateTuplesToAlterColumn);
         machine.When(AlterColumnFluxSteps.UpdateUniqueIndexes, AlterColumnUniqueIndexes);
         machine.When(AlterColumnFluxSteps.UpdateMultiIndexes, AlterColumnMultiIndexes);
@@ -228,5 +261,5 @@ public sealed class TableColumnAdder
         );
 
         return state.ModifiedRows;
-    }
+    }    
 }

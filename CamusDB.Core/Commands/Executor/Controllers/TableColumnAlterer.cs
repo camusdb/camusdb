@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -28,9 +27,7 @@ internal sealed class TableColumnAlterer
     }
 
     public async Task<bool> Alter(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
-    {
-        TableSchema newTableSchema = await catalogs.AlterTable(database, ticket);
-
+    {        
         return ticket.Operation switch
         {
             AlterTableOperation.AddColumn => await AddColumn(queryExecutor, database, table, ticket),
@@ -45,10 +42,11 @@ internal sealed class TableColumnAlterer
             txnId: ticket.TxnId,
             databaseName: database.Name,
             tableName: table.Name,
-            columnName: ticket.Column.Name
+            column: ticket.Column,
+            operation: ticket.Operation
         );
 
-        await tableColumnAdder.AddColumn(queryExecutor, database, table, alterColumnTicket);
+        await tableColumnAdder.AddColumn(catalogs, queryExecutor, database, table, alterColumnTicket);
 
         return true;
     }
@@ -59,10 +57,11 @@ internal sealed class TableColumnAlterer
             txnId: ticket.TxnId,
             databaseName: database.Name,
             tableName: table.Name,
-            columnName: ticket.Column.Name
+            column: ticket.Column,
+            operation: ticket.Operation
         );
 
-        await tableColumnDropper.DropColumn(queryExecutor, database, table, alterColumnTicket);
+        await tableColumnDropper.DropColumn(catalogs, queryExecutor, database, table, alterColumnTicket);
 
         return true;
     }

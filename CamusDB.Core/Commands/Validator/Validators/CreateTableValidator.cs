@@ -6,7 +6,7 @@
  * file that was distributed with this source code.
  */
 
-using System.Text.RegularExpressions;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -69,6 +69,12 @@ internal sealed class CreateTableValidator : ValidatorBase
                 throw new CamusDBException(
                     CamusDBErrorCodes.DuplicateColumn,
                     "Duplicate column name: " + columnInfo.Name
+                );
+
+            if (columnInfo.Type == ColumnType.Null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Column type cannot be null"
                 );
 
             if (columnInfo.Primary)

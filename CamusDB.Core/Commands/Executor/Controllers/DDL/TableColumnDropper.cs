@@ -8,13 +8,13 @@
 
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
-using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
@@ -22,20 +22,51 @@ public sealed class TableColumnDropper
 {
     private readonly IndexSaver indexSaver = new();
 
-    private readonly RowSerializer rowSerializer = new();    
+    private readonly RowSerializer rowSerializer = new();
+
+    private void Validate(TableDescriptor table, AlterColumnTicket ticket)
+    {
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        {
+            if (index.Value.Column == ticket.Column.Name)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Column cannot be dropped because it is part of an index"
+                );
+        }
+
+        bool hasColumn = false;
+
+        foreach (TableColumnSchema column in table.Schema.Columns!)
+        {
+            if (column.Name == ticket.Column.Name)
+            {
+                hasColumn = true;
+                break;
+            }
+        }
+
+        if (!hasColumn)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Column " + ticket.Column.Name + " does not exist in table " + table.Name
+            );
+    }
 
     /// <summary>
     /// Schedules a new AlterColumn operation by the specified filters
     /// </summary>
+    /// <param name="catalogs"></param>
     /// <param name="database"></param>
     /// <param name="table"></param>
     /// <param name="ticket"></param>
     /// <returns></returns>
-    internal async Task<int> DropColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterColumnTicket ticket)
+    internal async Task<int> DropColumn(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterColumnTicket ticket)
     {
-        //Validate(table, ticket);
+        Validate(table, ticket);
 
         AlterColumnFluxState state = new(
+            catalogs: catalogs,
             database: database,
             table: table,
             ticket: ticket,
@@ -60,7 +91,23 @@ public sealed class TableColumnDropper
             return columnValue;
 
         return null;
-    }    
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>    
+    private async Task<FluxAction> AlterSchema(AlterColumnFluxState state)
+    {
+        DatabaseDescriptor database = state.Database;
+        CatalogsManager catalogs = state.Catalogs;
+        AlterColumnTicket ticket = state.Ticket;
+
+        await catalogs.AlterTable(database, ticket);
+
+        return FluxAction.Continue;
+    }
 
     /// <summary>
     /// We need to locate the row tuples to AlterColumn
@@ -205,7 +252,8 @@ public sealed class TableColumnDropper
         AlterColumnTicket ticket = state.Ticket;
 
         Stopwatch timer = Stopwatch.StartNew();
-        
+
+        machine.When(AlterColumnFluxSteps.AlterSchema, AlterSchema);
         machine.When(AlterColumnFluxSteps.LocateTupleToAlterColumn, LocateTuplesToAlterColumn);
         machine.When(AlterColumnFluxSteps.UpdateUniqueIndexes, AlterColumnUniqueIndexes);
         machine.When(AlterColumnFluxSteps.UpdateMultiIndexes, AlterColumnMultiIndexes);

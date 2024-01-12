@@ -90,8 +90,11 @@ public sealed class ColumnValue : IComparable<ColumnValue>
 
         if (Type == ColumnType.String || Type == ColumnType.Id)
         {
-            if (StrValue is null || other.StrValue is null)
+            if (StrValue is null)
                 return -1;
+
+            if (other.StrValue is null)
+                return 1;
 
             return StrValue!.CompareTo(other.StrValue);
         }

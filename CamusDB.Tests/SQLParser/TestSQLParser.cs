@@ -831,6 +831,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("year", ast.rightAst!.yytext);
     }
 
     [Test]
@@ -843,6 +844,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("year", ast.rightAst!.yytext);
     }
 
     [Test]
@@ -855,6 +857,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("year_index", ast.rightAst!.yytext);
+        Assert.AreEqual("year", ast.extendedOne!.yytext);
     }
 
     [Test]
@@ -867,6 +871,57 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
 
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable7()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD PRIMARY KEY (`id`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddPrimaryKey, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("id", ast.rightAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable8()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` DROP PRIMARY KEY");
+
+        Assert.AreEqual(NodeType.AlterTableDropPrimaryKey, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);        
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable9()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD UNIQUE `year_index` (`year`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddUniqueIndex, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("year_index", ast.rightAst!.yytext);
+        Assert.AreEqual("year", ast.extendedOne!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable10()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD UNIQUE INDEX `year_index` (`year`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddUniqueIndex, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("year_index", ast.rightAst!.yytext);
+        Assert.AreEqual("year", ast.extendedOne!.yytext);
     }
 
     [Test]

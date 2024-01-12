@@ -87,7 +87,7 @@ public sealed class CatalogsManager
     /// <param name="ticket"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
-    public async Task<TableSchema> AlterTable(DatabaseDescriptor database, AlterTableTicket ticket)
+    public async Task<TableSchema> AlterTable(DatabaseDescriptor database, AlterColumnTicket ticket)
     {
         try
         {

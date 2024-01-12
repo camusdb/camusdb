@@ -15,7 +15,8 @@ using CamusDB.Core.CommandsExecutor.Controllers.DML;
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 /// <summary>
-/// @todo #1 Make constraint types work without O(n) lookup
+/// Creates a ticket to create a table from the AST representation of a SQL statement.
+/// 
 /// @todo #1 Validate empty or null table name/fields here
 /// </summary>
 internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator

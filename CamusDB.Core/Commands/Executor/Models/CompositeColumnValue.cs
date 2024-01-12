@@ -65,6 +65,6 @@ public sealed class CompositeColumnValue : IComparable<CompositeColumnValue>, IP
         if (other is null)
             return 1;
 
-        return Values[0].CompareTo(other);
+        return other.CompareTo(Values[0]);
     }
 }

@@ -375,6 +375,8 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                 {
                     //Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);
 
+                    //Console.WriteLine("Replaced at {0}/{1} SetV={2} {3} {4} {5}", node.Id, j, key, txnid, commitState, value);
+
                     node.NumberWrites++;
 
                     deltas.Nodes.Add(node);
@@ -386,7 +388,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                     break;
             }
 
-            //Console.WriteLine("Created new SetV={0} {1} {2} {3}", key, txnid, commitState, value);
+            //Console.WriteLine("Not found in external node SetV={0} {1} {2} {3}", key, txnid, commitState, value);
 
             newEntry = new(key, reader, null);
             deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
@@ -420,6 +422,8 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
         for (int i = node.KeyCount; i > j; i--)
             node.children[i] = node.children[i - 1];
+
+        //Console.WriteLine("Insert at {0}/{1} SetV={2} {3} {4} {5}", node.Id, j, key, txnid, commitState, value);
 
         node.children[j] = newEntry;
         node.KeyCount++;

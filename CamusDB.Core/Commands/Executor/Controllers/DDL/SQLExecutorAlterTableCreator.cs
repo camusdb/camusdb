@@ -16,8 +16,7 @@ using CamusDB.Core.CommandsExecutor.Controllers.DML;
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 /// <summary>
-/// @todo #1 Make constraint types work without O(n) lookup
-/// @todo #1 Validate empty or null table name/fields here
+///
 /// </summary>
 internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
 {
@@ -26,14 +25,23 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
         string tableName = ast.leftAst!.yytext!;
 
         if (ast.rightAst is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing create table fields list");
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing column name");
+
+        if (ast.nodeType == NodeType.AlterTableAddColumn)
+            return new(
+                hlcTimestamp,
+                ticket.DatabaseName,
+                tableName,
+                AlterTableOperation.AddColumn,
+                new ColumnInfo(ast.rightAst!.yytext!, GetColumnType(ast.extendedOne!))
+            );
 
         return new(
             hlcTimestamp,
             ticket.DatabaseName,
             tableName,
-            AlterTableOperation.AddColumn,
-            new ColumnInfo("x", GetColumnType(ast.extendedOne!))
+            AlterTableOperation.DropColumn,
+            new ColumnInfo(ast.rightAst!.yytext!, ColumnType.Null)
         );
     }
 

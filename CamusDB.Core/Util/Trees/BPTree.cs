@@ -17,10 +17,10 @@ namespace CamusDB.Core.Util.Trees;
  *  
  * BPTree or Prefixed is a variation of the B+Tree that allows searches by the prefix of the composite key.
  */
-public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>    
+public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>
     where TKey : IComparable<TKey>, IPrefixComparable<TSubKey>
     where TValue : IComparable<TValue>
-    
+
 {
     /// <summary>
     /// Initializes an empty B-tree.
@@ -93,13 +93,13 @@ public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>
             {
                 if (j + 1 == node.KeyCount || IsPrefixLess(key, children[j + 1].Key))
                 {
-                    BTreeEntry<TKey, TValue> entry = children[j];                    
+                    BTreeEntry<TKey, TValue> entry = children[j];
 
                     await foreach (TValue value in GetPrefixInternal(await entry.Next, txType, txnid, key, ht - 1))
                         yield return value;
                 }
             }
-        }        
+        }
     }
 
     private bool IsPrefixLess(TSubKey? key1, TKey key2)
