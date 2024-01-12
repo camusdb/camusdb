@@ -213,7 +213,10 @@ public sealed class CommandExecutor : IAsyncDisposable
                 }
 
             case NodeType.AlterTableAddIndex:
+            case NodeType.AlterTableAddUniqueIndex:
             case NodeType.AlterTableDropIndex:
+            case NodeType.AlterTableAddPrimaryKey:
+            case NodeType.AlterTableDropPrimaryKey:
                 {
                     AlterIndexTicket alterIndexTicket = sqlExecutor.CreateAlterIndexTicket(await NextTxnId(), ticket, ast);
 

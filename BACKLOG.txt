@@ -15,6 +15,9 @@ BufferPool/Storage
 - Support multiple items per page to avoid storage waste
 - Support multiple storage adapters
 
+DDL:
+- Make schema operations transactional
+
 Create Table
 - Dont allow null type columns in create table
 

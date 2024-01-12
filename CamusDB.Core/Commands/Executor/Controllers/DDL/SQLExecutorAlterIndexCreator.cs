@@ -21,7 +21,10 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
 {
     internal AlterIndexTicket CreateAlterIndexTicket(HLCTimestamp hlcTimestamp, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        string tableName = ast.leftAst!.yytext!;
+        if (ast.leftAst is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing alter table name");
+
+        string tableName = ast.leftAst.yytext!;
 
         if (ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing create table fields list");
@@ -36,13 +39,36 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
                 AlterIndexOperation.AddIndex
             );
 
-        return new(
-            hlcTimestamp,
-            ticket.DatabaseName,
-            tableName,
-            ast.rightAst.yytext!,
-            "",
-            AlterIndexOperation.DropIndex
-        );
+        if (ast.nodeType == NodeType.AlterTableAddUniqueIndex)
+            return new(
+                hlcTimestamp,
+                ticket.DatabaseName,
+                tableName,
+                ast.rightAst.yytext!,
+                ast.extendedOne!.yytext!,
+                AlterIndexOperation.AddUniqueIndex
+            );
+
+        if (ast.nodeType == NodeType.AlterTableAddPrimaryKey)
+            return new(
+                hlcTimestamp,
+                ticket.DatabaseName,
+                tableName,
+                CamusDBConfig.PrimaryKeyInternalName,
+                ast.rightAst.yytext!,                
+                AlterIndexOperation.AddPrimaryKey
+            );
+
+        if (ast.nodeType == NodeType.AlterTableDropIndex)
+            return new(
+                hlcTimestamp,
+                ticket.DatabaseName,
+                tableName,
+                ast.rightAst.yytext!,
+                "",
+                AlterIndexOperation.DropIndex
+            );
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid alter index operation: {ast.nodeType}");
     }
 }

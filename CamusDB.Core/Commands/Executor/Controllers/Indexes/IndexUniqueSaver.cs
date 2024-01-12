@@ -133,7 +133,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
             tablespace.WriteDataToPageBatch(modifiedPages, node.PageOffset, 0, nodeBuffer);
 
-            Console.WriteLine("Modified Node {0}/{1} at {2} Pointer={3} BufferLength={4}", node.Id, node.KeyCount, node.PageOffset, pointer, nodeBuffer.Length);            
+            //Console.WriteLine("Modified Node {0}/{1} at {2} Pointer={3} BufferLength={4}", node.Id, node.KeyCount, node.PageOffset, pointer, nodeBuffer.Length);            
         }
     }
 }

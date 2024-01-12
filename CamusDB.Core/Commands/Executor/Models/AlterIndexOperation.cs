@@ -11,7 +11,10 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 public enum AlterIndexOperation
 {
     AddIndex,
+    AddUniqueIndex,
+    AddPrimaryKey,
     ModifyIndex,
     DropIndex,
+    DropPrimaryKey,
     RenameIndex
 }
