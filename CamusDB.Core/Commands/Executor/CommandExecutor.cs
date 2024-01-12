@@ -377,7 +377,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             case NodeType.Insert:
                 {
-                    InsertTicket updateTicket = await sqlExecutor.CreateInsertTicket(this, ticket, ast);
+                    InsertTicket updateTicket = await sqlExecutor.CreateInsertTicket(this, database, ticket, ast);
 
                     TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
 
