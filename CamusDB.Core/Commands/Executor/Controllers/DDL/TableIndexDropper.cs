@@ -64,12 +64,11 @@ internal sealed class TableIndexDropper
             return FluxAction.Abort;
         }
 
+        BufferPoolManager tableSpace = state.Database.BufferPool;
         //using IDisposable writerLock = await state.Btree.WriterLockAsync();
 
-        await foreach (BTreeNode<CompositeColumnValue, BTreeTuple> x in state.Btree.NodesTraverse(state.Ticket.TxnId))
-        {
-            Console.WriteLine(x.PageOffset);
-        }
+        await foreach (BTreeNode<CompositeColumnValue, BTreeTuple> x in state.Btree.NodesTraverse(state.Ticket.TxnId))                    
+            await tableSpace.DeletePage(x.PageOffset);
 
         await Task.CompletedTask;
 
