@@ -34,6 +34,8 @@ public enum NodeType
     ExprFuncCall,
     ExprArgumentList,
     ExprAlias,
+    ExprLike,
+    ExprILike,
     Select,
     Update,
     UpdateList,

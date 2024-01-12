@@ -14,6 +14,8 @@ TBy             (B|b)(Y|y)
 TAnd            (A|a)(N|n)(D|d)
 TOr             (O|o)(R|r)
 TAsc            (A|a)(S|s)(C|c)
+TLike           (L|l)(I|i)(K|k)(E|e)
+TILike          (I|i)(L|l)(I|i)(K|k)(E|e)
 TTrue           (T|t)(R|r)(U|u)(E|e)
 TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
 TUpdate         (U|u)(P|p)(D|d)(A|a)(T|t)(E|e)
@@ -105,6 +107,10 @@ TGreaterEquals  >=
 {LBrace} { return (int)Token.LBRACE; }
 
 {RBrace} { return (int)Token.RBRACE; }
+
+{TLike} { return (int)Token.TLIKE; }
+
+{TILike} { return (int)Token.TILIKE; }
 
 {TDatabase} { return (int)Token.TDATABASE; }
 

@@ -11,6 +11,7 @@ using CamusDB.Core.SQLParser;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
+using System.Text.RegularExpressions;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
@@ -132,6 +133,9 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
 
+                    if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator OR for argument types: {leftValue.Type}, {rightValue.Type}");
+
                     return new ColumnValue(ColumnType.Bool, leftValue.BoolValue || rightValue.BoolValue);
                 }
 
@@ -139,6 +143,9 @@ internal abstract class SQLExecutorBaseCreator
                 {
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+
+                    if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator AND for argument types: {leftValue.Type}, {rightValue.Type}");
 
                     return new ColumnValue(ColumnType.Bool, leftValue.BoolValue && rightValue.BoolValue);
                 }
@@ -149,7 +156,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
 
                     if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot add : " + leftValue + " and " + rightValue);
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator + for argument types: {leftValue.Type}, {rightValue.Type}");
 
                     return new ColumnValue(ColumnType.Integer64, leftValue.LongValue + rightValue.LongValue);
                 }
@@ -160,7 +167,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
 
                     if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot substract : " + leftValue + " and " + rightValue);
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator - for argument types: {leftValue.Type}, {rightValue.Type}");
 
                     return new ColumnValue(ColumnType.Integer64, leftValue.LongValue - rightValue.LongValue);
                 }
@@ -171,7 +178,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
 
                     if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot mult : " + leftValue + " and " + rightValue);
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator * for argument types: {leftValue.Type}, {rightValue.Type}");
 
                     return new ColumnValue(ColumnType.Integer64, leftValue.LongValue * rightValue.LongValue);
                 }
@@ -197,8 +204,19 @@ internal abstract class SQLExecutorBaseCreator
                             return new ColumnValue(ColumnType.String, DateTime.UtcNow.ToString());
 
                         default:
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidPageOffset, "Unknown function '" + funcCall + "'");
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Function not found '" + funcCall + "'");
                     }
+                }
+
+            case NodeType.ExprLike:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    
+                    if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator LIKE for argument types: {leftValue.Type}, {rightValue.Type}");
+
+                    return new ColumnValue(ColumnType.Bool, Like(leftValue.StrValue!, rightValue.StrValue!));
                 }
 
             default:
@@ -220,5 +238,16 @@ internal abstract class SQLExecutorBaseCreator
         }
 
         argumentList.AddLast(EvalExpr(argumentAst, row, parameters));
+    }
+
+    private static bool Like(string text, string pattern)
+    {
+        // Escape all regex special characters
+        string escapedPattern = Regex.Escape(pattern);
+
+        // Replace the escaped '%' with '.*' to simulate SQL LIKE wildcard
+        string regexPattern = "^" + escapedPattern.Replace("%", ".*") + "$";
+
+        return Regex.IsMatch(text, regexPattern, RegexOptions.IgnoreCase);
     }
 }
