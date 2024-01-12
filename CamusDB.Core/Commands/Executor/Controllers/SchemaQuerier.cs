@@ -62,6 +62,24 @@ internal sealed class SchemaQuerier
         }
     }
 
+    internal async IAsyncEnumerable<QueryResultRow> ShowIndexes(TableDescriptor table)
+    {
+        await Task.CompletedTask;
+
+        BTreeTuple tuple = new(new(), new());
+
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        {
+            yield return new QueryResultRow(tuple, new()
+            {
+                { "Table", new ColumnValue(ColumnType.String, table.Name) },
+                { "Non_unique", new ColumnValue(ColumnType.String, index.Value.Type == IndexType.Unique ? "0" : "1") },
+                { "Key_name", new ColumnValue(ColumnType.String, index.Key) },
+                { "Index_type", new ColumnValue(ColumnType.String, "BTREE") }
+            });
+        }
+    }
+
     internal async IAsyncEnumerable<QueryResultRow> ShowCreateTable(TableDescriptor table)
     {
         await Task.CompletedTask;

@@ -261,7 +261,7 @@ internal sealed class TableIndexAdder
         }
 
         table.Indexes.Add(
-            ticket.ColumnName,  
+            ticket.IndexName,  
             new TableIndexSchema(ticket.ColumnName, IndexType.Unique, state.Btree)
         );
 

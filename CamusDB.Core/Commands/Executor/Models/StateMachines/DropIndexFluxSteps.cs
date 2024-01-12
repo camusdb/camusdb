@@ -15,10 +15,9 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 public enum DropIndexFluxSteps
 {
     NotInitialized = 0,
-    AllocateNewIndex = 1,
-    LocateTuplesToFeedTheIndex = 2,
-    FeedTheIndex = 3,
-    PersistIndexChanges = 4,
-    ApplyPageOperations = 5,
-    AddSystemObject = 6,
+    LocateIndex = 1,
+    DeleteIndexPages = 2,    
+    PersistIndexChanges = 3,
+    ApplyPageOperations = 4,
+    RemoveSystemObject = 5,
 }

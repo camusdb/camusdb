@@ -911,4 +911,13 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.ShowColumns, ast.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
     }
+
+    [Test]
+    public void TestParseShowIndexes()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW INDEXES FROM robots");
+
+        Assert.AreEqual(NodeType.ShowIndexes, ast.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+    }
 }

@@ -29,7 +29,8 @@ TNull           (N|n)(U|u)(L|l)(L|l)
 TPrimary 	    (P|p)(R|r)(I|i)(M|m)(A|a)(R|r)(Y|y)
 TKey 		    (K|k)(E|e)(Y|y)
 TUnique 	    (U|u)(N|n)(I|i)(Q|q)(U|u)(E|e)
-TIndex 		    (I|i)(N|n)(D|d)(E|e)(X|x)	
+TIndex 		    (I|i)(N|n)(D|d)(E|e)(X|x)
+TIndexes 		(I|i)(N|n)(D|d)(E|e)(X|x)(E|e)(S|s)
 TAlter 		    (A|a)(L|l)(T|t)(E|e)(R|r)
 TWAdd 		    (A|a)(D|d)(D|d)
 TDrop 		    (D|d)(R|r)(O|o)(P|p)
@@ -152,6 +153,8 @@ TGreaterEquals  >=
 {TUnique} { return (int)Token.TUNIQUE; }
 
 {TIndex} { return (int)Token.TINDEX; }
+
+{TIndexes} { return (int)Token.TINDEXES; }
 
 {TAlter} { return (int)Token.TALTER; }
 

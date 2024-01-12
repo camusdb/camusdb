@@ -63,5 +63,6 @@ public enum NodeType
     ShowColumns,
     ShowTables,
     ShowCreateTable,
-    ShowDatabase
+    ShowDatabase,
+    ShowIndexes
 }

@@ -213,6 +213,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 }
 
             case NodeType.AlterTableAddIndex:
+            case NodeType.AlterTableDropIndex:
                 {
                     AlterIndexTicket alterIndexTicket = sqlExecutor.CreateAlterIndexTicket(await NextTxnId(), ticket, ast);
 
@@ -435,6 +436,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!);
 
                     return schemaQuerier.ShowColumns(table);
+                }
+
+            case NodeType.ShowIndexes:
+                {
+                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!);
+
+                    return schemaQuerier.ShowIndexes(table);
                 }
 
             case NodeType.ShowCreateTable:

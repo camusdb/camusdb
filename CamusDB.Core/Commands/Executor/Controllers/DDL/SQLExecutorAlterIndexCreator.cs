@@ -6,10 +6,10 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Util.Time;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
@@ -26,13 +26,23 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
         if (ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing create table fields list");
 
+        if (ast.nodeType == NodeType.AlterTableAddIndex)
+            return new(
+                hlcTimestamp,
+                ticket.DatabaseName,
+                tableName,
+                ast.rightAst.yytext!,
+                ast.extendedOne!.yytext!,
+                AlterIndexOperation.AddIndex
+            );
+
         return new(
             hlcTimestamp,
             ticket.DatabaseName,
             tableName,
             ast.rightAst.yytext!,
-            ast.extendedOne!.yytext!,
-            AlterIndexOperation.AddIndex            
+            "",
+            AlterIndexOperation.DropIndex
         );
     }
 }

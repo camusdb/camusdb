@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsValidator.Validators;
@@ -26,13 +27,14 @@ internal sealed class AlterIndexValidator : ValidatorBase
                 "Table name is required"
             );
 
-        if (string.IsNullOrWhiteSpace(ticket.ColumnName))
+        if (string.IsNullOrWhiteSpace(ticket.IndexName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 "Index name is required"
             );
 
-        if (string.IsNullOrWhiteSpace(ticket.IndexName))
+
+        if (ticket.Operation == AlterIndexOperation.AddIndex && string.IsNullOrWhiteSpace(ticket.ColumnName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 "Column name is required"
