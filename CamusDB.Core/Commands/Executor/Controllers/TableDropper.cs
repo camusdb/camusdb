@@ -7,9 +7,11 @@
  */
 
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Serializer;
+using QUT.Gppg;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -40,21 +42,45 @@ internal sealed class TableDropper
 
         await rowDeleter.Delete(queryExecutor, database, table, deleteTicket);
 
-        try { 
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        {
+            if (index.Value.Type == IndexType.Unique)
+                continue;
+            
+        }
 
+        try
+        {
             await database.Schema.Semaphore.WaitAsync();
 
-            database.Schema.Tables.Remove(ticket.TableName);
+            if (database.Schema.Tables.Remove(ticket.TableName))
+                Console.WriteLine("Removed table {0} from database schema", ticket.TableName);
                        
-            database.Storage.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
-
-            Console.WriteLine("Dropped table {0}", ticket.TableName);
-
-            return true;
+            database.Storage.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));            
         }
         finally
         {
             database.Schema.Semaphore.Release();            
         }
+
+        try
+        {
+            await database.SystemSchema.Semaphore.WaitAsync();
+
+            Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
+
+            if (database.SystemSchema.Objects.Remove(ticket.TableName))
+                Console.WriteLine("Removed table {0} from system schema", ticket.TableName);
+
+            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema.Objects));
+        }
+        finally
+        {
+            database.SystemSchema.Semaphore.Release();
+        }
+
+        Console.WriteLine("Dropped table {0}", ticket.TableName);
+
+        return true;
     }
 }

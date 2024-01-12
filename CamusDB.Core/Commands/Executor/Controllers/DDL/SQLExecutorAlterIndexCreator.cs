@@ -12,7 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 
-namespace CamusDB.Core.Commands.Executor.Controllers.DDL;
+namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 /// <summary>
 ///

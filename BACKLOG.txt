@@ -30,4 +30,3 @@ ColumnValue
 
 SQLParser
 - Make identifiers case insensitive
-

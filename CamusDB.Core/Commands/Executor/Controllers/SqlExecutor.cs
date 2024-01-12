@@ -11,7 +11,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.Time;
-using CamusDB.Core.Commands.Executor.Controllers.DDL;
+using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 

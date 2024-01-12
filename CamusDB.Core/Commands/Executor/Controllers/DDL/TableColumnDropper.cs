@@ -222,7 +222,7 @@ public sealed class TableColumnDropper
         TimeSpan timeTaken = timer.Elapsed;
 
         Console.WriteLine(
-            "Column drop, modified {0} rows, Time taken: {1}",
+            "Column dropped, modified {0} rows, Time taken: {1}",
             state.ModifiedRows,
             timeTaken.ToString(@"m\:ss\.fff")
         );

@@ -10,6 +10,7 @@ using System.Diagnostics;
 using CamusDB.Core.Flux;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Flux.Models;
+using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -20,7 +21,7 @@ using CamusDB.Core.Serializer;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
-internal sealed class TableIndexAdder
+internal sealed class TableIndexDropper
 {
     private readonly IndexSaver indexSaver = new();
 
@@ -28,27 +29,10 @@ internal sealed class TableIndexAdder
 
     private void Validate(TableDescriptor table, AlterIndexTicket ticket)
     {
-        if (table.Indexes.ContainsKey(ticket.IndexName))
+        if (!table.Indexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "Index " + ticket.IndexName + " already exists in table " + table.Name
-            );
-
-        bool hasColumn = false;
-
-        foreach (TableColumnSchema column in table.Schema.Columns!)
-        {
-            if (column.Name == ticket.ColumnName)
-            {
-                hasColumn = true;
-                break;
-            }
-        }
-
-        if (!hasColumn)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Column " + ticket.ColumnName + " does not exist in table " + table.Name
+                "Index " + ticket.IndexName + " does not exist in table " + table.Name
             );
     }
 
@@ -72,7 +56,7 @@ internal sealed class TableIndexAdder
     /// <param name="state"></param>
     /// <returns></returns>
     private async Task<FluxAction> AllocateNewIndex(AddIndexFluxState state)
-    {        
+    {
         BufferPoolManager tablespace = state.Database.BufferPool;
 
         ObjectIdValue indexPageOffset = tablespace.GetNextFreeOffset();
@@ -84,17 +68,17 @@ internal sealed class TableIndexAdder
     }
 
     /// <summary>
-    /// Schedules a new add index operation by the specified filters
+    /// Schedules a new drop index operation by the specified filters
     /// </summary>
     /// <param name="database"></param>
     /// <param name="table"></param>
     /// <param name="ticket"></param>
     /// <returns></returns>
-    internal async Task<int> AddIndex(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
+    internal async Task<int> DropIndex(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
     {
         Validate(table, ticket);
 
-        AddIndexFluxState state = new(
+        DropIndexFluxState state = new(
             database: database,
             table: table,
             ticket: ticket,
@@ -102,17 +86,17 @@ internal sealed class TableIndexAdder
             indexes: new AlterIndexFluxIndexState()
         );
 
-        FluxMachine<AddIndexFluxSteps, AddIndexFluxState> machine = new(state);
+        FluxMachine<AddIndexFluxSteps, DropIndexFluxState> machine = new(state);
 
         return await AlterIndexInternal(machine, state);
     }
 
     /// <summary>
-    /// We need to locate the row tuples to AlterColumn
+    /// We need to locate the row tuples to AlterIndex
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private Task<FluxAction> LocateTuplesToFeedTheIndex(AddIndexFluxState state)
+    private Task<FluxAction> LocateTuplesToFeedTheIndex(DropIndexFluxState state)
     {
         AlterIndexTicket ticket = state.Ticket;
 
@@ -152,7 +136,7 @@ internal sealed class TableIndexAdder
             return FluxAction.Abort;
         }
 
-        AlterIndexTicket ticket = state.Ticket;        
+        AlterIndexTicket ticket = state.Ticket;
 
         List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
@@ -184,7 +168,7 @@ internal sealed class TableIndexAdder
                 value: row.Tuple
             );
 
-            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));            
+            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
         }
 
         state.IndexDeltas = deltas;
@@ -198,7 +182,7 @@ internal sealed class TableIndexAdder
     /// <param name="state"></param>
     /// <returns></returns>
     private async Task<FluxAction> PersistIndexChanges(AddIndexFluxState state)
-    {        
+    {
         if (state.IndexDeltas is null)
         {
             Console.WriteLine("Invalid index deltas in AlterIndex");
@@ -212,7 +196,7 @@ internal sealed class TableIndexAdder
 
             await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
         }
-        
+
         return FluxAction.Continue;
     }
 
@@ -232,7 +216,7 @@ internal sealed class TableIndexAdder
         {
             await database.SystemSchema.Semaphore.WaitAsync();
 
-            Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;            
+            Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
 
             foreach (KeyValuePair<string, DatabaseObject> systemObject in objects)
             {
@@ -253,7 +237,7 @@ internal sealed class TableIndexAdder
                 );
             }
 
-            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema.Objects));            
+            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema.Objects));
         }
         finally
         {
@@ -261,7 +245,7 @@ internal sealed class TableIndexAdder
         }
 
         table.Indexes.Add(
-            ticket.ColumnName,  
+            ticket.ColumnName,
             new TableIndexSchema(ticket.ColumnName, IndexType.Unique, state.Btree)
         );
 
@@ -287,7 +271,7 @@ internal sealed class TableIndexAdder
     /// <param name="machine"></param>
     /// <param name="state"></param>
     /// <returns></returns>
-    internal async Task<int> AlterIndexInternal(FluxMachine<AddIndexFluxSteps, AddIndexFluxState> machine, AddIndexFluxState state)
+    internal async Task<int> AlterIndexInternal(FluxMachine<AddIndexFluxSteps, DropIndexFluxState> machine, DropIndexFluxState state)
     {
         DatabaseDescriptor database = state.Database;
         BufferPoolManager tablespace = state.Database.BufferPool;
@@ -296,9 +280,8 @@ internal sealed class TableIndexAdder
 
         Stopwatch timer = Stopwatch.StartNew();
 
-        machine.When(AddIndexFluxSteps.AllocateNewIndex, AllocateNewIndex);
-        machine.When(AddIndexFluxSteps.LocateTuplesToFeedTheIndex, LocateTuplesToFeedTheIndex);
-        machine.When(AddIndexFluxSteps.FeedTheIndex, FeedTheIndex);
+        machine.When(AddIndexFluxSteps.LocateIndex, LocateIndex);        
+        machine.When(AddIndexFluxSteps.DropTheIndex, DropTheIndex);
         machine.When(AddIndexFluxSteps.PersistIndexChanges, PersistIndexChanges);
         machine.When(AddIndexFluxSteps.ApplyPageOperations, ApplyPageOperations);
         machine.When(AddIndexFluxSteps.AddSystemObject, AddSystemObject);
@@ -313,7 +296,7 @@ internal sealed class TableIndexAdder
         TimeSpan timeTaken = timer.Elapsed;
 
         Console.WriteLine(
-            "Added index {0} to {1} at {2}, Time taken: {3}",
+            "Dropped index {0} from {1} at {2}, Time taken: {3}",
             ticket.IndexName,
             table.Name,
             state.IndexOffset,

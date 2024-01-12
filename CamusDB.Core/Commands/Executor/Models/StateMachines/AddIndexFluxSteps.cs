@@ -12,7 +12,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
  * The elements in this enum are the steps required to alter an index in a table
  * Keeping the order is very important to ensure the proper operation
  */
-public enum AlterIndexFluxSteps
+public enum AddIndexFluxSteps
 {
     NotInitialized = 0,
     AllocateNewIndex = 1,

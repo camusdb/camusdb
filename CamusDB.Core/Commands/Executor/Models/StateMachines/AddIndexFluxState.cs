@@ -14,7 +14,7 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
-internal sealed class AlterIndexFluxState
+internal sealed class AddIndexFluxState
 {
     public DatabaseDescriptor Database { get; }
 
@@ -38,7 +38,7 @@ internal sealed class AlterIndexFluxState
 
     public List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? IndexDeltas { get; set; }
 
-    public AlterIndexFluxState(
+    public AddIndexFluxState(
         DatabaseDescriptor database, 
         TableDescriptor table, 
         AlterIndexTicket ticket, 
