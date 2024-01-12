@@ -18,13 +18,16 @@ public readonly struct AlterColumnTicket
 
     public string TableName { get; }
 
-    public string ColumnName { get; }
+    public ColumnInfo Column { get; }
 
-    public AlterColumnTicket(HLCTimestamp txnId, string databaseName, string tableName, string columnName)
+    public AlterTableOperation Operation { get; }
+
+    public AlterColumnTicket(HLCTimestamp txnId, string databaseName, string tableName, ColumnInfo column, AlterTableOperation operation)
     {
         TxnId = txnId;
         DatabaseName = databaseName;
         TableName = tableName;
-        ColumnName = columnName;
+        Column = column;
+        Operation = operation;
     }
 }

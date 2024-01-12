@@ -202,6 +202,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 }
 
             case NodeType.AlterTableAddColumn:
+            case NodeType.AlterTableDropColumn:
                 {
                     AlterTableTicket alterTableTicket = sqlExecutor.CreateAlterTableTicket(await NextTxnId(), ticket, ast);
 

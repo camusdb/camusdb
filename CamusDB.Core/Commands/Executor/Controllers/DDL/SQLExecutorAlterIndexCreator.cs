@@ -26,15 +26,15 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
 
         string tableName = ast.leftAst.yytext!;
 
-        if (ast.rightAst is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing create table fields list");
+        if (ast.nodeType != NodeType.AlterTableDropPrimaryKey && ast.rightAst is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing index name");
 
         if (ast.nodeType == NodeType.AlterTableAddIndex)
             return new(
                 hlcTimestamp,
                 ticket.DatabaseName,
                 tableName,
-                ast.rightAst.yytext!,
+                ast.rightAst!.yytext!,
                 ast.extendedOne!.yytext!,
                 AlterIndexOperation.AddIndex
             );
@@ -44,7 +44,7 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
                 hlcTimestamp,
                 ticket.DatabaseName,
                 tableName,
-                ast.rightAst.yytext!,
+                ast.rightAst!.yytext!,
                 ast.extendedOne!.yytext!,
                 AlterIndexOperation.AddUniqueIndex
             );
@@ -55,7 +55,7 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
                 ticket.DatabaseName,
                 tableName,
                 CamusDBConfig.PrimaryKeyInternalName,
-                ast.rightAst.yytext!,                
+                ast.rightAst!.yytext!,                
                 AlterIndexOperation.AddPrimaryKey
             );
 
@@ -64,7 +64,17 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
                 hlcTimestamp,
                 ticket.DatabaseName,
                 tableName,
-                ast.rightAst.yytext!,
+                ast.rightAst!.yytext!,
+                "",
+                AlterIndexOperation.DropIndex
+            );
+
+        if (ast.nodeType == NodeType.AlterTableDropPrimaryKey)
+            return new(
+                hlcTimestamp,
+                ticket.DatabaseName,
+                tableName,
+                CamusDBConfig.PrimaryKeyInternalName,
                 "",
                 AlterIndexOperation.DropIndex
             );

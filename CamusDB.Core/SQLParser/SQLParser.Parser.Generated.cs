@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.2
-// DateTime: 1/12/2024 8:03:26 AM
-// Input file <SQLParser\SQLParser.Language.grammar.y - 1/12/2024 8:03:03 AM>
+// DateTime: 1/12/2024 12:46:29 PM
+// Input file <SQLParser\SQLParser.Language.grammar.y - 1/12/2024 12:45:49 PM>
 
 // options: no-lines gplex
 
@@ -583,7 +583,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
         break;
       case 32: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TCOLUMN, 
                //                     any_identifier
-{ CurrentSemanticValue.n = new(NodeType.AlterTableDropColumn, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null); }
+{ CurrentSemanticValue.n = new(NodeType.AlterTableDropColumn, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }
         break;
       case 33: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TINDEX, 
                //                     any_identifier, LPAREN, any_identifier, RPAREN

@@ -14,10 +14,11 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
  */
 public enum AlterColumnFluxSteps
 {
-    NotInitialized = 0,    
-    LocateTupleToAlterColumn = 1,
-    UpdateUniqueIndexes = 2,
-    UpdateMultiIndexes = 3,
-    AlterColumnRow = 4,
-    ApplyPageOperations = 5
+    NotInitialized = 0,
+    AlterSchema = 1,
+    LocateTupleToAlterColumn = 2,
+    UpdateUniqueIndexes = 3,
+    UpdateMultiIndexes = 4,
+    AlterColumnRow = 5,
+    ApplyPageOperations = 6,    
 }
