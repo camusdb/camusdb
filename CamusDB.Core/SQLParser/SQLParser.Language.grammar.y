@@ -24,7 +24,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
 %token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW
-%token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE
+%token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT
 
 %%
 
@@ -113,7 +113,14 @@ create_table_constraint : TNULL { $$.n = new(NodeType.ConstraintNull, null, null
                         | TNOT TNULL { $$.n = new(NodeType.ConstraintNotNull, null, null, null, null, null, null, null); }
 						| TPRIMARY TKEY { $$.n = new(NodeType.ConstraintPrimaryKey, null, null, null, null, null, null, null); }
                         | TUNIQUE { $$.n = new(NodeType.ConstraintUnique, null, null, null, null, null, null, null); }
+                        | TDEFAULT LPAREN default_expr RPAREN { $$.n = new(NodeType.ConstraintDefault, $3.n, null, null, null, null, null, null); }
                         ;
+
+default_expr : number { $$.n = $1.n; $$.s = $1.s; }
+             | string { $$.n = $1.n; $$.s = $1.s; }
+             | bool { $$.n = $1.n; $$.s = $1.s; }
+             | null { $$.n = $1.n; $$.s = $1.s; }             
+			 ;
 
 field_type : TTYPE_OBJECT_ID { $$.n = new(NodeType.TypeObjectId, null, null, null, null, null, null, null); }
            | TTYPE_STRING { $$.n = new(NodeType.TypeString, null, null, null, null, null, null, null); }
@@ -238,7 +245,7 @@ fcall_argument_item : expr { $$.n = $1.n; $$.s = $1.s; }
 group_paren_expr : LPAREN condition RPAREN { $$.n = $2.n; $$.s = $2.s; }
                  ;
 
-simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }            
+simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
 			| number { $$.n = $1.n; $$.s = $1.s; }
             | string { $$.n = $1.n; $$.s = $1.s; }
             | bool { $$.n = $1.n; $$.s = $1.s; }

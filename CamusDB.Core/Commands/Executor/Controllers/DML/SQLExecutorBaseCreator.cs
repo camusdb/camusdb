@@ -219,6 +219,17 @@ internal abstract class SQLExecutorBaseCreator
                     return new ColumnValue(ColumnType.Bool, Like(leftValue.StrValue!, rightValue.StrValue!));
                 }
 
+            case NodeType.ExprILike:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+
+                    if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator ILIKE for argument types: {leftValue.Type}, {rightValue.Type}");
+
+                    return new ColumnValue(ColumnType.Bool, ILike(leftValue.StrValue!, rightValue.StrValue!));
+                }
+
             default:
                 throw new CamusDBException(CamusDBErrorCodes.UnknownType, $"ERROR {expr.nodeType}");
         }
@@ -241,6 +252,17 @@ internal abstract class SQLExecutorBaseCreator
     }
 
     private static bool Like(string text, string pattern)
+    {
+        // Escape all regex special characters
+        string escapedPattern = Regex.Escape(pattern);
+
+        // Replace the escaped '%' with '.*' to simulate SQL LIKE wildcard
+        string regexPattern = "^" + escapedPattern.Replace("%", ".*") + "$";
+
+        return Regex.IsMatch(text, regexPattern);
+    }
+
+    private static bool ILike(string text, string pattern)
     {
         // Escape all regex special characters
         string escapedPattern = Regex.Escape(pattern);

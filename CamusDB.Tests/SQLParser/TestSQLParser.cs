@@ -156,6 +156,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprAnd, ast.extendedOne!.nodeType);
     }
 
     [Test]
@@ -166,6 +167,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprOr, ast.extendedOne!.nodeType);
     }
 
     [Test]
@@ -176,6 +178,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprOr, ast.extendedOne!.nodeType);
     }
 
     [Test]
@@ -186,6 +189,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprOr, ast.extendedOne!.nodeType);
     }
 
     [Test]
@@ -196,6 +200,29 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprOr, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectWhere14()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table WHERE xx LIKE \"prefix%\"");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprLike, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectWhere15()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table WHERE xx ILIKE \"prefix%\"");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprILike, ast.extendedOne!.nodeType);
     }
 
     [Test]
@@ -786,6 +813,18 @@ public class TestSQLParser
     public void TestParseSimpleCreateTableMultiConstraints2()
     {
         NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE `some_table` (\n`id` INT64 PRIMARY KEY NOT NULL,\n`name` INT64 UNIQUE NOT NULL, `year` INT64 NULL)");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableDefault1()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table ( id INT64 NOT NULL, name INT64 DEFAULT (100))");
 
         Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
 

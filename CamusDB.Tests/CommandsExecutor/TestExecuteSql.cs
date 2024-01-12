@@ -421,6 +421,139 @@ public class TestExecuteSql
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectWhereEqualsId2()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectIds) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT id, enabled FROM robots WHERE id = str_id(@id)",
+            parameters: new() { { "@id", new ColumnValue(ColumnType.String, objectIds[0]) } }
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+            Assert.AreEqual(objectIds[0], row.Row["id"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereLike()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT id, name FROM robots WHERE name LIKE \"some%\"",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+            Assert.True(row.Row["name"].StrValue!.StartsWith("some"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereLike2()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT id, name FROM robots WHERE name LIKE \"some name 0\"",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+            Assert.True(row.Row["name"].StrValue!.StartsWith("some"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereLike3()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT id, name FROM robots WHERE name LIKE \"some%0\"",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+            Assert.True(row.Row["name"].StrValue!.StartsWith("some"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereLike4()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT id, name FROM robots WHERE name LIKE \"%name%0\"",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+            Assert.True(row.Row["name"].StrValue!.StartsWith("some"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereILike()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectIds) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT id, name FROM robots WHERE name ILIKE \"SOME%\"",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+            Assert.True(row.Row["name"].StrValue!.StartsWith("some"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWhereILike2()
+    {
+        (string dbname, CommandExecutor executor, List<string> objectIds) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT id, name FROM robots WHERE name ILIKE \"%NAME%\"",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+            Assert.True(row.Row["name"].StrValue!.StartsWith("some"));
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectOrderBy()
     {
         (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
@@ -440,6 +573,8 @@ public class TestExecuteSql
         Assert.AreEqual(2001, result[1].Row["year"].LongValue);
         Assert.AreEqual(2024, result[24].Row["year"].LongValue);
     }
+
+
 
     [Test]
     [NonParallelizable]

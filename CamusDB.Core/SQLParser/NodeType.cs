@@ -53,6 +53,7 @@ public enum NodeType
     ConstraintNotNull,
     ConstraintPrimaryKey,
     ConstraintUnique,
+    ConstraintDefault,
     DropTable,
     AlterTableAddColumn,
     AlterTableDropColumn,

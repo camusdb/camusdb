@@ -33,6 +33,7 @@ TKey 		    (K|k)(E|e)(Y|y)
 TUnique 	    (U|u)(N|n)(I|i)(Q|q)(U|u)(E|e)
 TIndex 		    (I|i)(N|n)(D|d)(E|e)(X|x)
 TIndexes 		(I|i)(N|n)(D|d)(E|e)(X|x)(E|e)(S|s)
+TDefault 		(D|d)(E|e)(F|f)(A|a)(U|u)(L|l)(T|t)
 TAlter 		    (A|a)(L|l)(T|t)(E|e)(R|r)
 TWAdd 		    (A|a)(D|d)(D|d)
 TDrop 		    (D|d)(R|r)(O|o)(P|p)
@@ -155,6 +156,8 @@ TGreaterEquals  >=
 {TPrimary} { return (int)Token.TPRIMARY; }
 
 {TKey} { return (int)Token.TKEY; }
+
+{TDefault} { return (int)Token.TDEFAULT; }
 
 {TUnique} { return (int)Token.TUNIQUE; }
 
