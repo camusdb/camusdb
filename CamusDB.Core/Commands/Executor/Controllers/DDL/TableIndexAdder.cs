@@ -38,7 +38,7 @@ internal sealed class TableIndexAdder
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 "Index " + ticket.IndexName + " already exists in table " + table.Name
-            );
+            );        
 
         bool hasColumn = false;
 

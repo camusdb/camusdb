@@ -34,10 +34,37 @@ internal sealed class AlterIndexValidator : ValidatorBase
             );
 
 
-        if ((ticket.Operation == AlterIndexOperation.AddIndex || ticket.Operation == AlterIndexOperation.AddUniqueIndex) && string.IsNullOrWhiteSpace(ticket.ColumnName))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Column name is required"
-            );
+        if ((ticket.Operation == AlterIndexOperation.AddIndex || ticket.Operation == AlterIndexOperation.AddUniqueIndex))
+        {
+            if (string.IsNullOrWhiteSpace(ticket.ColumnName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Column name is required"
+                );
+
+            if (string.IsNullOrWhiteSpace(ticket.IndexName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Index name is required"
+                );
+
+            if (string.IsNullOrWhiteSpace(ticket.IndexName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Index name is required"
+                );
+
+            if (ticket.IndexName.Length > 255)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Index name is too long"
+                );
+
+            if (!HasValidCharacters(ticket.IndexName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Index name has invalid characters"
+                );
+        }
     }
 }

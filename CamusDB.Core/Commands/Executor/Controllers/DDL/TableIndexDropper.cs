@@ -39,9 +39,6 @@ internal sealed class TableIndexDropper
     {
         TableDescriptor table = state.Table;
 
-        if (state.Ticket.IndexName == "~pk")
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, "Primary index cannot be deleted");
-
         if (!table.Indexes.TryGetValue(state.Ticket.IndexName, out TableIndexSchema? index))
             throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, "Index " + state.Ticket.IndexName + " does not exist");
 

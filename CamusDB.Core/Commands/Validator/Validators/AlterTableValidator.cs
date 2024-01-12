@@ -25,5 +25,23 @@ internal sealed class AlterTableValidator : ValidatorBase
                 CamusDBErrorCodes.InvalidInput,
                 "Table name is required"
             );
+
+        if (string.IsNullOrWhiteSpace(ticket.Column.Name))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Column name is required"
+            );
+
+        if (ticket.Column.Name.Length > 255)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Column name is too long"
+            );
+
+        if (!HasValidCharacters(ticket.Column.Name))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Column name has invalid characters"
+            );
     }
 }

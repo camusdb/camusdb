@@ -21,9 +21,6 @@ DDL:
 Create Table
 - Dont allow null type columns in create table
 
-Drop table
-- Delete all data and indexes
-
 Alter Table
 - Update indexes if indexed column changed
 - Prevent delete column if column is indexed

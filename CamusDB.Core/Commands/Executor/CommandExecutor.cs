@@ -167,7 +167,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
-        return await tableDropper.Drop(queryExecutor, rowDeleter, database, table, ticket);
+        return await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket);
     }
 
     public async Task<TableDescriptor> OpenTable(OpenTableTicket ticket)
@@ -228,14 +228,16 @@ public sealed class CommandExecutor : IAsyncDisposable
                     return await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket);
                 }
 
-            /*case NodeType.DropTable:
+            case NodeType.DropTable:
                 {
-                    DropTableTicket dropTableTicket = sqlExecutor.CreateDropTableTicket(ticket, ast);
+                    DropTableTicket dropTableTicket = await sqlExecutor.CreateDropTableTicket(this, ticket, ast);
 
                     validator.Validate(dropTableTicket);
 
-                    return await tableDropper.Drop(rowDeleter, database, table, dropTableTicket);
-                }*/
+                    TableDescriptor table = await tableOpener.Open(database, dropTableTicket.TableName);
+
+                    return await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, dropTableTicket);
+                }
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown DDL AST stmt: " + ast.nodeType);

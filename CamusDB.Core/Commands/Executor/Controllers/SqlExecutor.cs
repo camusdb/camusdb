@@ -29,6 +29,8 @@ internal sealed class SqlExecutor
 
     private readonly SQLExecutorCreateTableCreator sqlExecutorCreateTableCreator = new();
 
+    private readonly SQLExecutorDropTableCreator sqlExecutorDropTableCreator = new();
+
     private readonly SQLExecutorAlterTableCreator sqlExecutorAlterTableCreator = new();
 
     private readonly SQLExecutorAlterIndexCreator sqlExecutorAlterIndexCreator = new();
@@ -69,21 +71,57 @@ internal sealed class SqlExecutor
         );
     }
 
+    /// <summary>
+    /// Creates a ticket to create a table from the AST representation of a SQL statement.
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <param name="ast"></param>
+    /// <returns></returns>
     internal CreateTableTicket CreateCreateTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         return sqlExecutorCreateTableCreator.CreateCreateTableTicket(ticket, ast);
     }
 
+    /// <summary>
+    /// Creates a ticket to drop a table from the AST representation of a SQL statement.
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <param name="ast"></param>
+    /// <returns></returns>
+    internal async Task<DropTableTicket> CreateDropTableTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        return await sqlExecutorDropTableCreator.CreateDropTableTicket(executor, ticket, ast);
+    }
+
+    /// <summary>
+    /// Creates a ticket to alter a table from the AST representation of a SQL statement.
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <param name="ast"></param>
+    /// <returns></returns>
     internal AlterTableTicket CreateAlterTableTicket(HLCTimestamp hlcTimestamp, ExecuteSQLTicket ticket, NodeAst ast)
     {
         return sqlExecutorAlterTableCreator.CreateAlterTableTicket(hlcTimestamp, ticket, ast);
     }
 
+    /// <summary>
+    /// Creates a ticket to alter an index from the AST representation of a SQL statement.
+    /// </summary>
+    /// <param name="ticket"></param>
+    /// <param name="ast"></param>
+    /// <returns></returns>
     internal AlterIndexTicket CreateAlterIndexTicket(HLCTimestamp hlcTimestamp, ExecuteSQLTicket ticket, NodeAst ast)
     {
         return sqlExecutorAlterIndexCreator.CreateAlterIndexTicket(hlcTimestamp, ticket, ast);
     }
 
+    /// <summary>
+    /// Evaluates an AST (Abstract Syntax Tree) representation of a SQL statement and returns a ColumnValue result.
+    /// </summary>
+    /// <param name="expr"></param>
+    /// <param name="row"></param>
+    /// <param name="parameters"></param>
+    /// <returns></returns>
     public static ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters)
     {
         return SQLExecutorBaseCreator.EvalExpr(expr, row, parameters);
