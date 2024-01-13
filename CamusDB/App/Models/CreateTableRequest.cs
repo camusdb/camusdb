@@ -15,4 +15,6 @@ public sealed class CreateTableRequest
     public string? TableName { get; set; }
 
     public CreateTableColumn[]? Columns { get; set; }
+
+    public bool IfNotExists { get; set; }
 }

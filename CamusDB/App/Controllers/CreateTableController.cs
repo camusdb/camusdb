@@ -100,7 +100,8 @@ public sealed class CreateTableController : CommandsController
             CreateTableTicket ticket = new(
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
-                columns: GetColumnInfos(request.Columns)
+                columns: GetColumnInfos(request.Columns),
+                ifNotExists: request.IfNotExists
             );
 
             await executor.CreateTable(ticket);

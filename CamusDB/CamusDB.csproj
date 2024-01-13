@@ -2,11 +2,11 @@
 
   <PropertyGroup>
     <TargetFramework>net7.0</TargetFramework>
-    <LangVersion>10</LangVersion>
+    <LangVersion>11</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ServerGarbageCollection>false</ServerGarbageCollection>
-    <Version>0.0.10</Version>    
+    <Version>0.1.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
@@ -24,9 +24,15 @@
     <Folder Include="Data\" />
     <Folder Include="Config\" />
   </ItemGroup>
+  
   <ItemGroup>
     <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj">
       <GlobalPropertiesToRemove></GlobalPropertiesToRemove>
     </ProjectReference>
   </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Config\config.yml" CopyToPublishDirectory="PreserveNewest"></Content>
+  </ItemGroup>
+  
 </Project>
