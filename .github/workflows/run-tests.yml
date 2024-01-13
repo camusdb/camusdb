@@ -5,7 +5,7 @@ on:
   pull_request:
     branches: [ main ]
 jobs:  
-  Backend-Tests:
+  CamusDB-Tests:
     runs-on: "ubuntu-latest"    
     steps:
       - name: Check out repository code
@@ -17,4 +17,4 @@ jobs:
         with:
           dotnet-version: '7.0.x'
       - name: Run Tests         
-        run: (chmod +x ./github/scripts/run-tests.sh && ./github/scripts/run-tests.sh)      
+        run: (pwd && ls -lh && chmod +x ./github/scripts/run-tests.sh && ./github/scripts/run-tests.sh)      
