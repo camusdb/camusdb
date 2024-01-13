@@ -31,13 +31,13 @@ internal sealed class TableIndexAdder
         if (ticket.Operation == AlterIndexOperation.AddPrimaryKey && table.Indexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "Primary key already exists in table " + table.Name
+                "Primary key already exists on table '" + table.Name + "'"
             );
 
         if (table.Indexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "Index " + ticket.IndexName + " already exists in table " + table.Name
+                "Index '" + ticket.IndexName + "' already exists on table '" + table.Name + "'"
             );        
 
         bool hasColumn = false;
@@ -54,7 +54,7 @@ internal sealed class TableIndexAdder
         if (!hasColumn)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "Column " + ticket.ColumnName + " does not exist in table " + table.Name
+                "Column '" + ticket.ColumnName + "' does not exist on table '" + table.Name + "'"
             );
     }
 

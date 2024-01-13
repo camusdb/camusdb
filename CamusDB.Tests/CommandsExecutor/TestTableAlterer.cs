@@ -69,7 +69,7 @@ internal sealed class TestTableAlterer
 
     private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupBasicTable()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();        
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
 
         List<string> objectsId = new(25);
 
@@ -490,7 +490,79 @@ internal sealed class TestTableAlterer
             operation: AlterIndexOperation.AddIndex
         );
 
-        await executor.AlterIndex(alterIndexTicket);
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        OpenTableTicket openTableTicket = new(
+            databaseName: dbname,
+            tableName: "robots"
+        );
+
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+        Assert.True(table.Indexes.TryGetValue("name_idx", out TableIndexSchema? index));
+        Assert.AreEqual(IndexType.Multi, index!.Type);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableAndAddDuplicatedIndex()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
+
+        AlterIndexTicket alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "name_idx",
+            columnName: "name",
+            operation: AlterIndexOperation.AddIndex
+        );
+
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () => await executor.AlterIndex(alterIndexTicket));
+        Assert.AreEqual("Index 'name_idx' already exists on table 'robots'", exception!.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableAndAddTwoIndexes()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
+
+        AlterIndexTicket alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "name_idx",
+            columnName: "name",
+            operation: AlterIndexOperation.AddIndex
+        );
+
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "year_idx",
+            columnName: "year",
+            operation: AlterIndexOperation.AddIndex
+        );
+
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        OpenTableTicket openTableTicket = new(
+            databaseName: dbname,
+            tableName: "robots"
+        );
+
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+
+        Assert.True(table.Indexes.TryGetValue("name_idx", out TableIndexSchema? index));
+        Assert.AreEqual(IndexType.Multi, index!.Type);
+
+        Assert.True(table.Indexes.TryGetValue("year_idx", out index));
+        Assert.AreEqual(IndexType.Multi, index!.Type);
     }
 
     [Test]
@@ -508,7 +580,16 @@ internal sealed class TestTableAlterer
             operation: AlterIndexOperation.AddIndex
         );
 
-        await executor.AlterIndex(alterIndexTicket);
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        OpenTableTicket openTableTicket = new(
+            databaseName: dbname,
+            tableName: "robots"
+        );
+
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+        Assert.True(table.Indexes.TryGetValue("name_idx", out TableIndexSchema? index));
+        Assert.AreEqual(IndexType.Multi, index!.Type);
     }
 
     [Test]
@@ -526,6 +607,168 @@ internal sealed class TestTableAlterer
             operation: AlterIndexOperation.AddIndex
         );
 
-        await executor.AlterIndex(alterIndexTicket);
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        OpenTableTicket openTableTicket = new(
+            databaseName: dbname,
+            tableName: "robots"
+        );
+
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+        Assert.True(table.Indexes.TryGetValue("name_idx", out TableIndexSchema? index));
+        Assert.AreEqual(IndexType.Multi, index!.Type);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableAndAddUniqueIndex()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
+
+        AlterIndexTicket alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "name_idx",
+            columnName: "name",
+            operation: AlterIndexOperation.AddUniqueIndex
+        );
+
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        OpenTableTicket openTableTicket = new(
+            databaseName: dbname,
+            tableName: "robots"
+        );
+
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+        Assert.True(table.Indexes.TryGetValue("name_idx", out TableIndexSchema? index));
+        Assert.AreEqual(IndexType.Unique, index!.Type);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableFillRepeatedAndAddUniqueIndex()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupTableRepeatedData();
+
+        AlterIndexTicket alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "name_idx",
+            columnName: "name",
+            operation: AlterIndexOperation.AddUniqueIndex
+        );
+
+        CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () => await executor.AlterIndex(alterIndexTicket));
+        Assert.True(exception!.Message.StartsWith("Duplicate entry for key \"name_idx\""));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableAndAddDropIndex()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _) = await SetupEmptyTable();
+
+        AlterIndexTicket alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "name_idx",
+            columnName: "name",
+            operation: AlterIndexOperation.AddIndex
+        );
+
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        OpenTableTicket openTableTicket = new(
+            databaseName: dbname,
+            tableName: "robots"
+        );
+
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+        Assert.True(table.Indexes.TryGetValue("name_idx", out TableIndexSchema? index));
+        Assert.AreEqual(IndexType.Multi, index!.Type);
+
+        alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "name_idx",
+            columnName: "name",
+            operation: AlterIndexOperation.DropIndex
+        );
+
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        table = await executor.OpenTable(openTableTicket);
+        Assert.False(table.Indexes.ContainsKey("name_idx"));        
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableAndAddDropPrimaryKey()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _) = await SetupEmptyTable();
+
+        AlterIndexTicket alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "~pk",
+            columnName: "",
+            operation: AlterIndexOperation.DropPrimaryKey
+        );
+
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        OpenTableTicket openTableTicket = new(
+            databaseName: dbname,
+            tableName: "robots"
+        );
+
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+        Assert.False(table.Indexes.ContainsKey("~pk"));        
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableAndAddDropPrimaryKeyAndAddItAgain()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _) = await SetupEmptyTable();
+
+        AlterIndexTicket alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "~pk",
+            columnName: "",
+            operation: AlterIndexOperation.DropPrimaryKey
+        );
+
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        OpenTableTicket openTableTicket = new(
+            databaseName: dbname,
+            tableName: "robots"
+        );
+
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+        Assert.False(table.Indexes.ContainsKey("~pk"));
+
+        alterIndexTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "~pk",
+            columnName: "id",
+            operation: AlterIndexOperation.AddPrimaryKey
+        );
+
+        Assert.True(await executor.AlterIndex(alterIndexTicket));
+
+        table = await executor.OpenTable(openTableTicket);
+        Assert.True(table.Indexes.ContainsKey("~pk"));
     }
 }

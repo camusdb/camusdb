@@ -14,9 +14,9 @@ public readonly struct OpenTableTicket
 
 	public string TableName { get; }
 
-	public OpenTableTicket(string database, string name)
+	public OpenTableTicket(string databaseName, string tableName)
 	{
-		DatabaseName = database;
-		TableName = name;
+		DatabaseName = databaseName;
+		TableName = tableName;
 	}
 }

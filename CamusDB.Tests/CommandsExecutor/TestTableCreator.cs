@@ -1,9 +1,14 @@
 ﻿
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using NUnit.Framework;
 
-using System.Linq;
 using System.Threading.Tasks;
-using System.Collections.Generic;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs;

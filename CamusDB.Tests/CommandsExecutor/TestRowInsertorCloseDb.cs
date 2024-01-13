@@ -11,6 +11,7 @@ using NUnit.Framework;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Time;
@@ -240,30 +241,93 @@ internal sealed class TestRowInsertorCloseDb
             }
         }
 
-        /*i = 0;
+        i = 0;
 
         foreach (string objectId in objectIds)
         {
             QueryByIdTicket queryTicket = new(
-                database: "factory",
-                name: "robots",
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "user_robots",
                 id: objectId
             );
 
-            List<Dictionary<string, ColumnValue>> result = await executor.QueryById(queryTicket);
+            List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryTicket)).ToListAsync();
 
             Dictionary<string, ColumnValue> row = result[0];
 
             Assert.AreEqual(ColumnType.Id, row["id"].Type);
-            Assert.AreEqual(24, row["id"].Value.Length);
-
-            Assert.AreEqual(ColumnType.String, row["name"].Type);
-            Assert.AreEqual("some name " + i, row["name"].Value);
-
-            Assert.AreEqual(ColumnType.Integer, row["year"].Type);
-            Assert.AreEqual((i * 1000).ToString(), row["year"].Value);
+            Assert.AreEqual(24, row["id"].StrValue!.Length);            
 
             i++;
-        }*/
+        }
+
+        Assert.AreEqual(50, i);
+    }
+
+    private static async Task InsertRow(string dbname, CommandExecutor executor, ConcurrentBag<string> objectIds, string[] userIds, int i)
+    {
+        string objectId = ObjectIdGenerator.Generate().ToString();
+        objectIds.Add(objectId);
+
+        InsertTicket insertTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "user_robots",
+            values: new Dictionary<string, ColumnValue>()
+            {
+                { "id", new ColumnValue(ColumnType.Id, objectId) },
+                { "usersId", new ColumnValue(ColumnType.Id, userIds[i % 5]) },
+                { "amount", new ColumnValue(ColumnType.Integer64, 50) },
+            }
+        );
+
+        await executor.Insert(insertTicket);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCheckSuccessfulMultiInsert2()
+    {
+        int i;
+        (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
+
+        string[] userIds = new string[5];
+        for (i = 0; i < 5; i++)
+            userIds[i] = ObjectIdGenerator.Generate().ToString();
+
+        List<Task> tasks = new();
+        ConcurrentBag<string> objectIds = new();
+
+        for (i = 0; i < 50; i++)        
+            tasks.Add(InsertRow(dbname, executor, objectIds, userIds, i));
+                        
+        await Task.WhenAll(tasks);
+
+        CloseDatabaseTicket closeTicket = new(dbname);
+        await executor.CloseDatabase(closeTicket);
+
+        i = 0;
+
+        foreach (string objectId in objectIds)
+        {
+            QueryByIdTicket queryTicket = new(
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "user_robots",
+                id: objectId
+            );
+
+            List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryTicket)).ToListAsync();
+
+            Dictionary<string, ColumnValue> row = result[0];
+
+            Assert.AreEqual(ColumnType.Id, row["id"].Type);
+            Assert.AreEqual(24, row["id"].StrValue!.Length);
+
+            i++;
+        }
+
+        Assert.AreEqual(50, i);
     }
 }
