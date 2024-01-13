@@ -17,4 +17,4 @@ jobs:
         with:
           dotnet-version: '7.0.x'
       - name: Run Tests         
-        run: (pwd && ls -lh && chmod +x ./github/scripts/run-tests.sh && ./github/scripts/run-tests.sh)      
+        run: (chmod +x ./scripts/run-tests.sh && ./scripts/run-tests.sh)      
