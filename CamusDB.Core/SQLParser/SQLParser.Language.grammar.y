@@ -190,6 +190,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | group_paren_expr { $$.n = $1.n; }
            | fcall_expr { $$.n = $1.n; }
            | projection_all { $$.n = $1.n; }
+           | use_default_expr { $$.n = $1.n; }
            ;
 
 and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, null, null, null, null, null); }
@@ -252,6 +253,9 @@ simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
             | null { $$.n = $1.n; $$.s = $1.s; }
             | placeholder { $$.n = $1.n; $$.s = $1.s; }
 			;
+
+use_default_expr : TDEFAULT { $$.n = new(NodeType.ExprDefault, null, null, null, null, null, null, null); }
+                 ;
 
 projection_all : TMULT { $$.n = new(NodeType.ExprAllFields, null, null, null, null, null, null, null); }
                ;

@@ -22,19 +22,25 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
 
         string tableName = ast.leftAst.yytext!;
 
-        LinkedList<string> fieldList = new();
+        // If the fields are not provided, we consult them from the latest version of the schema.
+        TableDescriptor table = await commandExecutor.OpenTable(new(database.Name, tableName));
+
+        List<string> fields;
 
         if (ast.rightAst is null)
         {
-            //  If the fields are not provided, we consult them from the latest version of the schema.
-            TableDescriptor table = await commandExecutor.OpenTable(new(database.Name, tableName));
+            fields = new();
 
             foreach (TableColumnSchema column in table.Schema.Columns!)
-                fieldList.AddLast(column.Name);
+                fields.Add(column.Name);
         }
         else
         {
-            GetIdentifierList(ast.rightAst, fieldList);
+            LinkedList<string> fieldListLinked = new();
+
+            GetIdentifierList(ast.rightAst, fieldListLinked);
+
+            fields = fieldListLinked.ToList();
         }
 
         if (ast.extendedOne is null)
@@ -42,15 +48,22 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
 
         LinkedList<ColumnValue> valuesList = new();
 
-        GetInsertItemList(ast.extendedOne, new(), ticket.Parameters, valuesList);
+        GetValuesList(table, ast.extendedOne, new(), ticket.Parameters, valuesList);
 
-        if (fieldList.Count != valuesList.Count)
+        if (fields.Count != valuesList.Count)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"The number of fields is not equal to the number of values.");
 
-        Dictionary<string, ColumnValue> values = new(fieldList.Count);
+        Dictionary<string, ColumnValue> values = new(fields.Count);
 
-        for (int i = 0; i < fieldList.Count; i++)
-            values.Add(fieldList.ElementAt(i), valuesList.ElementAt(i)); // @todo optimize this
+        for (int i = 0; i < fields.Count; i++)
+            values.Add(fields[i], valuesList.ElementAt(i)); // @todo optimize this
+
+        // Try to include any missing field with its default value if available
+        foreach (TableColumnSchema column in table.Schema.Columns!)
+        {
+            if (!values.ContainsKey(column.Name) && column.DefaultValue is not null)
+                values.Add(column.Name, column.DefaultValue);
+        }
 
         return new InsertTicket(
             txnId: await commandExecutor.NextTxnId(),
@@ -60,16 +73,28 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         );
     }
 
-    private static void GetInsertItemList(NodeAst valuesListAst, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters, LinkedList<ColumnValue> valuesList)
+    private static void GetValuesList(
+        TableDescriptor table,
+        NodeAst valuesListAst,
+        Dictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        LinkedList<ColumnValue> valuesList
+    )
     {
         if (valuesListAst.nodeType == NodeType.ExprList)
         {
             if (valuesListAst.leftAst is not null)
-                GetInsertItemList(valuesListAst.leftAst, row, parameters, valuesList);
+                GetValuesList(table, valuesListAst.leftAst, row, parameters, valuesList);
 
             if (valuesListAst.rightAst is not null)
-                GetInsertItemList(valuesListAst.rightAst, row, parameters, valuesList);
+                GetValuesList(table, valuesListAst.rightAst, row, parameters, valuesList);
 
+            return;
+        }
+
+        if (valuesListAst.nodeType == NodeType.ExprDefault)
+        {
+            //table.
             return;
         }
 

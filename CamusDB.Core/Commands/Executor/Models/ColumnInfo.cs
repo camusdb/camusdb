@@ -30,7 +30,8 @@ public sealed class ColumnInfo
         bool primary = false,
         bool notNull = false,
         IndexType index = IndexType.None,
-        ColumnValue? defaultValue = null)
+        ColumnValue? defaultValue = null
+    )
     {
         Name = name;
         Type = type;

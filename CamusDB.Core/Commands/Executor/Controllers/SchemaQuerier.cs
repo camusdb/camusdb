@@ -6,11 +6,11 @@
  * file that was distributed with this source code.
  */
 
+using System.Text;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
-using System.Text;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -56,10 +56,26 @@ internal sealed class SchemaQuerier
                 { "Type", new ColumnValue(ColumnType.String, column.Type.ToString()) },
                 { "Null", new ColumnValue(ColumnType.String, column.NotNull ? "NO" : "YES") },
                 { "Key", new ColumnValue(ColumnType.String, column.Primary ? "KEY" : "") },
-                { "Default", new ColumnValue(ColumnType.String, "NULL") },
+                { "Default", GetDefaultValue(column) },
                 { "Extra", new ColumnValue(ColumnType.String, "") },
             });
         }
+    }
+
+    private static ColumnValue GetDefaultValue(TableColumnSchema column)
+    {
+        if (column.DefaultValue is null)
+            return new ColumnValue(ColumnType.String, "NULL");
+
+        return column.DefaultValue.Type switch
+        {
+            ColumnType.Null => new ColumnValue(ColumnType.String, "NULL"),
+            ColumnType.Id => new ColumnValue(ColumnType.String, column.DefaultValue.StrValue!),
+            ColumnType.String => new ColumnValue(ColumnType.String, column.DefaultValue.StrValue!),
+            ColumnType.Bool => new ColumnValue(ColumnType.String, column.DefaultValue.BoolValue.ToString()),
+            ColumnType.Integer64 => new ColumnValue(ColumnType.String, column.DefaultValue.LongValue.ToString()),
+            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown default type :" + column.DefaultValue.Type),
+        };
     }
 
     internal async IAsyncEnumerable<QueryResultRow> ShowIndexes(TableDescriptor table)

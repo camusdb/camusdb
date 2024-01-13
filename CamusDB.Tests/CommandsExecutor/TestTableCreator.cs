@@ -276,4 +276,41 @@ internal sealed class TestTableCreator
         List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
         Assert.IsEmpty(result);
     }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteCreateTableWithSQL2()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+
+        ExecuteSQLTicket createTableTicket = new(
+            database: dbname,
+            sql: "CREATE TABLE robots (id OID PRIMARY KEY NOT NULL, name STRING DEFAULT (\"hello\"))",
+            parameters: null
+        );
+
+        Assert.IsTrue(await executor.ExecuteDDLSQL(createTableTicket));
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
+
+        Assert.AreEqual("robots", tableSchema.Name);
+        Assert.AreEqual(0, tableSchema.Version);
+
+        Assert.AreEqual(2, tableSchema.Columns!.Count);
+
+        Assert.AreEqual("id", tableSchema.Columns![0].Name);
+        Assert.AreEqual(ColumnType.Id, tableSchema.Columns![0].Type);
+
+        Assert.AreEqual("name", tableSchema.Columns![1].Name);
+        Assert.AreEqual(ColumnType.String, tableSchema.Columns![1].Type);        
+
+        ExecuteSQLTicket queryTicket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
+    }
 }

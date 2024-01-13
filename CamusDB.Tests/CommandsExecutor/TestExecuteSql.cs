@@ -518,7 +518,7 @@ public class TestExecuteSql
     [NonParallelizable]
     public async Task TestExecuteSelectWhereILike()
     {
-        (string dbname, CommandExecutor executor, List<string> objectIds) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,
@@ -537,7 +537,7 @@ public class TestExecuteSql
     [NonParallelizable]
     public async Task TestExecuteSelectWhereILike2()
     {
-        (string dbname, CommandExecutor executor, List<string> objectIds) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
         ExecuteSQLTicket ticket = new(
             database: dbname,

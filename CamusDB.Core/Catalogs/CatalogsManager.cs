@@ -51,7 +51,8 @@ public sealed class CatalogsManager
                         column.Type,
                         column.Primary,
                         column.Primary ? true : column.NotNull,
-                        column.Index
+                        column.Index,
+                        column.Default
                     )
                 );
             }
@@ -164,7 +165,16 @@ public sealed class CatalogsManager
         if (hasColumn)
             throw new CamusDBException(CamusDBErrorCodes.DuplicateColumn, $"Duplicate column '{newColumn.Name}'");
 
-        tableColumns.Add(new TableColumnSchema(newColumn.Name, newColumn.Type, false, newColumn.NotNull, IndexType.None));
+        tableColumns.Add(
+            new TableColumnSchema(
+                newColumn.Name,
+                newColumn.Type,
+                false,
+                newColumn.NotNull,
+                IndexType.None,
+                newColumn.Default
+            )
+        );
 
         tableSchema.Columns = tableColumns;
     }

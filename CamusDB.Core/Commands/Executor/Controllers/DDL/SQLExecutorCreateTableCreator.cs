@@ -16,14 +16,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 /// <summary>
 /// Creates a ticket to create a table from the AST representation of a SQL statement.
-/// 
-/// @todo #1 Validate empty or null table name/fields here
 /// </summary>
 internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
 {
     internal CreateTableTicket CreateCreateTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
-        string tableName = ast.leftAst!.yytext!;
+        if (ast.leftAst is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing table name");
+
+        string tableName = ast.leftAst.yytext!;
 
         if (ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing create table fields list");
@@ -39,27 +40,33 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
     {
         if (fieldList.nodeType == NodeType.CreateTableItem)
         {
+            if (fieldList.leftAst is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing field name");
+
+            if (fieldList.rightAst is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing field type");
+
             if (fieldList.extendedOne != null)
-            {
-                LinkedList<ColumnConstraintType> constraintTypes = new();
+            {                
+                LinkedList<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
 
                 GetCreateTableItemConstraintList(fieldList.extendedOne, constraintTypes);
 
                 allFieldLists.AddLast(
                     new ColumnInfo(
-                        fieldList.leftAst!.yytext! ?? "",
-                        GetColumnType(fieldList.rightAst!),
-                        constraintTypes.Contains(ColumnConstraintType.PrimaryKey),
-                        constraintTypes.Contains(ColumnConstraintType.NotNull),
-                        IndexType.None,
-                        null
+                        name: fieldList.leftAst.yytext! ?? "",
+                        type: GetColumnType(fieldList.rightAst),
+                        primary: constraintTypes.Any(x => x.type == ColumnConstraintType.PrimaryKey),
+                        notNull: constraintTypes.Any(x => x.type == ColumnConstraintType.NotNull),
+                        index: IndexType.None,
+                        defaultValue: GetDefaultValue(constraintTypes)
                     )
                 );
 
                 return;
             }
 
-            allFieldLists.AddLast(new ColumnInfo(fieldList.leftAst!.yytext! ?? "", GetColumnType(fieldList.rightAst!)));
+            allFieldLists.AddLast(new ColumnInfo(fieldList.leftAst.yytext! ?? "", GetColumnType(fieldList.rightAst)));
             return;
         }
 
@@ -77,6 +84,17 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid create table field list");
     }
 
+    private static ColumnValue? GetDefaultValue(LinkedList<(ColumnConstraintType type, ColumnValue? value)> constraintTypes)
+    {
+        foreach ((ColumnConstraintType type, ColumnValue? value) in constraintTypes)
+        {
+            if (type == ColumnConstraintType.Default)
+                return value;
+        }
+
+        return null;
+    }
+
     private static ColumnType GetColumnType(NodeAst nodeAst)
     {
         if (nodeAst.nodeType == NodeType.TypeInteger64)
@@ -91,23 +109,29 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown field type: " + nodeAst.nodeType);
     }
 
-    private static void GetCreateTableItemConstraintList(NodeAst constraintsList, LinkedList<ColumnConstraintType> constraintTypes)
+    private static void GetCreateTableItemConstraintList(NodeAst constraintsList, LinkedList<(ColumnConstraintType, ColumnValue?)> constraintTypes)
     {
         if (constraintsList.nodeType == NodeType.ConstraintNotNull)
         {
-            constraintTypes.AddLast(ColumnConstraintType.NotNull);
+            constraintTypes.AddLast((ColumnConstraintType.NotNull, null));
             return;
         }
 
         if (constraintsList.nodeType == NodeType.ConstraintNull)
         {
-            constraintTypes.AddLast(ColumnConstraintType.Null);
+            constraintTypes.AddLast((ColumnConstraintType.Null, null));
             return;
         }
 
         if (constraintsList.nodeType == NodeType.ConstraintPrimaryKey)
         {
-            constraintTypes.AddLast(ColumnConstraintType.PrimaryKey);
+            constraintTypes.AddLast((ColumnConstraintType.PrimaryKey, null));
+            return;
+        }
+
+        if (constraintsList.nodeType == NodeType.ConstraintDefault)
+        {
+            constraintTypes.AddLast((ColumnConstraintType.Default, SqlExecutor.EvalExpr(constraintsList.leftAst!, new(), null)));
             return;
         }
 

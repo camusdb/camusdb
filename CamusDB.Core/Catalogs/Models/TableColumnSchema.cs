@@ -1,4 +1,7 @@
 ﻿
+
+
+using CamusDB.Core.CommandsExecutor.Models;
 /**
  * This file is part of CamusDB
  *
@@ -20,13 +23,23 @@ public sealed class TableColumnSchema
 
     public IndexType Index { get; }
 
-    public TableColumnSchema(string name, ColumnType type, bool primary, bool notNull, IndexType index)
+    public ColumnValue? DefaultValue { get; }
+
+    public TableColumnSchema(
+        string name,
+        ColumnType type,
+        bool primary,
+        bool notNull,
+        IndexType index,
+        ColumnValue? defaultValue
+    )
     {
         Name = name;
         Type = type;
         Primary = primary;
         NotNull = notNull;
         Index = index;
+        DefaultValue = defaultValue;
     }
 }
 
