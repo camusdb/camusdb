@@ -16,11 +16,14 @@ public readonly struct CreateTableTicket
 
     public ColumnInfo[] Columns { get; }
 
-    public CreateTableTicket(string databaseName, string tableName, ColumnInfo[] columns)
+    public bool IfNotExists { get; }
+
+    public CreateTableTicket(string databaseName, string tableName, ColumnInfo[] columns, bool ifNotExists)
     {
         DatabaseName = databaseName;
         TableName = tableName;
         Columns = columns;
+        IfNotExists = ifNotExists;
     }
 }
 

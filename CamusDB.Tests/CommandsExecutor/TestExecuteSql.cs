@@ -20,7 +20,6 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
-using CamusDB.Core;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -64,7 +63,8 @@ public class TestExecuteSql
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("year", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
-            }
+            },
+            ifNotExists: false
         );
 
         await executor.CreateTable(tableTicket);
@@ -109,7 +109,8 @@ public class TestExecuteSql
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("year", ColumnType.Integer64, defaultValue: new ColumnValue(ColumnType.Integer64, 1999)),
                 new ColumnInfo("enabled", ColumnType.Bool)
-            }
+            },
+            ifNotExists: false
         );
 
         await executor.CreateTable(tableTicket);

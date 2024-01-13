@@ -136,4 +136,54 @@ public class TestExecuteSqlCreateTable
         List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
         Assert.IsEmpty(result);
     }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteCreateTableIfNotExists()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+
+        ExecuteSQLTicket createTableTicket = new(
+            database: dbname,
+            sql: "CREATE TABLE IF NOT EXISTS robots (id OID PRIMARY KEY NOT NULL, name STRING DEFAULT (\"hello\"))",
+            parameters: null
+        );
+
+        Assert.IsTrue(await executor.ExecuteDDLSQL(createTableTicket));
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
+
+        Assert.AreEqual("robots", tableSchema.Name);
+        Assert.AreEqual(0, tableSchema.Version);
+
+        Assert.AreEqual(2, tableSchema.Columns!.Count);
+
+        Assert.AreEqual("id", tableSchema.Columns![0].Name);
+        Assert.AreEqual(ColumnType.Id, tableSchema.Columns![0].Type);
+        Assert.True(tableSchema.Columns![0].NotNull);
+        Assert.True(tableSchema.Columns![0].Primary);
+
+        Assert.AreEqual("name", tableSchema.Columns![1].Name);
+        Assert.AreEqual(ColumnType.String, tableSchema.Columns![1].Type);
+        Assert.AreEqual(0, (new ColumnValue(ColumnType.String, "hello")).CompareTo(tableSchema.Columns![1].DefaultValue));
+        Assert.False(tableSchema.Columns![1].Primary);
+        Assert.False(tableSchema.Columns![1].NotNull);
+
+        ExecuteSQLTicket queryTicket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
+
+        createTableTicket = new(
+            database: dbname,
+            sql: "CREATE TABLE IF NOT EXISTS robots (id OID PRIMARY KEY NOT NULL, name STRING DEFAULT (\"hello\"))",
+            parameters: null
+        );
+
+        Assert.IsFalse(await executor.ExecuteDDLSQL(createTableTicket));
+    }
 }

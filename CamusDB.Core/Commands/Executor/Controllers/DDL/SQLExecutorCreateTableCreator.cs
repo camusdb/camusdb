@@ -33,7 +33,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
 
         GetCreateTableFieldList(ast.rightAst, columnInfos);
 
-        return new(ticket.DatabaseName, tableName, columnInfos.ToArray());
+        return new(ticket.DatabaseName, tableName, columnInfos.ToArray(), ifNotExists: ast.nodeType == NodeType.CreateTableIfNotExists);
     }
 
     private static void GetCreateTableFieldList(NodeAst fieldList, LinkedList<ColumnInfo> allFieldLists)

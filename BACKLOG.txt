@@ -1,17 +1,13 @@
 Insert
-- Insert without fields
 - Insert batch
-- DEFAULT constraints
 
 Indexes
-- Read indexes in parallel
-- Destroy internal subtrees in multi index after delete
 - Version b+trees on disk
 - Reduce read/write locking to increase concurrency
 
 Query
 - Multi-Order clause
-- Use Temp Table to Order
+- Use Temp Table to Order (Materialize)
 - Support for other aggregations
 - Fix aliases to work propertly with aggregations
 
@@ -23,12 +19,8 @@ BufferPool/Storage
 DDL:
 - Make schema operations transactional
 
-Create Table
-- Dont allow null type columns in create table
-
 Alter Table
 - Update indexes if indexed column changed
-- Prevent delete column if column is indexed
 
 ColumnValue
 - Rethink column value as a lightweight struct

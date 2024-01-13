@@ -55,7 +55,8 @@ internal sealed class TestTableDropper
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("year", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
-            }
+            },
+            ifNotExists: false
         );
 
         await executor.CreateTable(createTicket);

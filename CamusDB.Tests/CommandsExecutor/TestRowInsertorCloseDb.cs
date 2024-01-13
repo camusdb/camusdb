@@ -63,7 +63,8 @@ internal sealed class TestRowInsertorCloseDb
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("usersId", ColumnType.Id, notNull: true, index: IndexType.Multi),
                 new ColumnInfo("amount", ColumnType.Integer64)
-            }
+            },
+            ifNotExists: false
         );
 
         await executor.CreateTable(tableTicket);
@@ -93,8 +94,6 @@ internal sealed class TestRowInsertorCloseDb
 
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
-
-        System.Console.WriteLine("----");
 
         QueryByIdTicket queryTicket = new(
             txnId: await executor.NextTxnId(),
@@ -212,7 +211,7 @@ internal sealed class TestRowInsertorCloseDb
         string[] userIds = new string[5];
         for (i = 0; i < 5; i++)
             userIds[i] = ObjectIdGenerator.Generate().ToString();
-            
+
         List<string> objectIds = new();
 
         for (i = 0; i < 50; i++)

@@ -193,7 +193,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         switch (ast.nodeType)
         {
             case NodeType.CreateTable:
-                {
+            case NodeType.CreateTableIfNotExists:
+            {
                     CreateTableTicket createTableTicket = sqlExecutor.CreateCreateTableTicket(ticket, ast);
 
                     validator.Validate(createTableTicket);

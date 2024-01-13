@@ -58,10 +58,11 @@ internal sealed class TestTableCreator
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("age", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
-            }
+            },
+            ifNotExists: false
         );
 
-        await executor.CreateTable(ticket);
+        Assert.True(await executor.CreateTable(ticket));
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "my_table");
 
@@ -92,7 +93,8 @@ internal sealed class TestTableCreator
         CreateTableTicket ticket = new(
             databaseName: dbname,
             tableName: "my_table",
-            new ColumnInfo[] { }
+            new ColumnInfo[] { },
+            ifNotExists: false
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
@@ -111,7 +113,8 @@ internal sealed class TestTableCreator
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
-            }
+            },
+            ifNotExists: false
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
@@ -130,7 +133,8 @@ internal sealed class TestTableCreator
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
-            }
+            },
+            ifNotExists: false
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
@@ -149,7 +153,8 @@ internal sealed class TestTableCreator
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("id", ColumnType.String, notNull: true),
-            }
+            },
+            ifNotExists: false
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
@@ -168,7 +173,8 @@ internal sealed class TestTableCreator
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String, primary: true),
-            }
+            },
+            ifNotExists: false
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
@@ -187,7 +193,8 @@ internal sealed class TestTableCreator
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String),
-            }
+            },
+            ifNotExists: false
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
@@ -206,7 +213,8 @@ internal sealed class TestTableCreator
             new ColumnInfo[] {
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("name", ColumnType.String),
-            }
+            },
+            ifNotExists: false
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
@@ -228,12 +236,56 @@ internal sealed class TestTableCreator
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("age", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
-            }
+            },
+            ifNotExists: false
         );
 
-        await executor.CreateTable(ticket);
+        Assert.True(await executor.CreateTable(ticket));
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
         Assert.AreEqual("Table 'my_table' already exists", e!.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableIfNotExists()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+
+        CreateTableTicket ticket = new(
+            databaseName: dbname,
+            tableName: "my_table",
+            new ColumnInfo[]
+            {
+                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("name", ColumnType.String, notNull: true),
+                new ColumnInfo("age", ColumnType.Integer64),
+                new ColumnInfo("enabled", ColumnType.Bool)
+            },
+            ifNotExists: true
+        );
+
+        Assert.True(await executor.CreateTable(ticket));
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "my_table");
+
+        Assert.AreEqual("my_table", tableSchema.Name);
+        Assert.AreEqual(0, tableSchema.Version);
+
+        Assert.AreEqual(4, tableSchema.Columns!.Count);
+
+        Assert.AreEqual("id", tableSchema.Columns![0].Name);
+        Assert.AreEqual(ColumnType.Id, tableSchema.Columns![0].Type);
+
+        Assert.AreEqual("name", tableSchema.Columns![1].Name);
+        Assert.AreEqual(ColumnType.String, tableSchema.Columns![1].Type);
+
+        Assert.AreEqual("age", tableSchema.Columns![2].Name);
+        Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![2].Type);
+
+        Assert.AreEqual("enabled", tableSchema.Columns![3].Name);
+        Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
+
+        Assert.False(await executor.CreateTable(ticket));
     }
 }

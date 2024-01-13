@@ -27,6 +27,9 @@ internal sealed class TableCreator
 
     public async Task<bool> Create(DatabaseDescriptor database, CreateTableTicket ticket)
     {
+        if (ticket.IfNotExists && database.SystemSchema.Objects.ContainsKey(ticket.TableName))
+            return false;
+
         TableSchema tableSchema = await catalogs.CreateTable(database, ticket);
 
         await SetInitialTablePages(database, tableSchema);
@@ -42,9 +45,9 @@ internal sealed class TableCreator
 
             Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
 
-            BufferPoolManager tablespace = database.BufferPool;            
+            BufferPoolManager tablespace = database.BufferPool;
 
-            string tableName = tableSchema.Name!;            
+            string tableName = tableSchema.Name!;
 
             ObjectIdValue pageOffset = tablespace.GetNextFreeOffset();
 

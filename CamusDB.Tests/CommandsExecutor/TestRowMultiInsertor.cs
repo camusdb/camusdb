@@ -55,7 +55,8 @@ internal sealed class TestRowMultiInsertor
                 new ColumnInfo("id", ColumnType.Id, primary: true),
                 new ColumnInfo("robots_id", ColumnType.Id, notNull: true, index: IndexType.Multi),
                 new ColumnInfo("amount", ColumnType.Integer64)
-            }
+            },
+            ifNotExists: false
         );
 
         await executor.CreateTable(tableTicket);

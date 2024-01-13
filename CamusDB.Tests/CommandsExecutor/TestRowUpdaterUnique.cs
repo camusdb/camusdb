@@ -63,7 +63,8 @@ public class TestRowUpdaterUnique
                 new ColumnInfo("name", ColumnType.String, notNull: true, index: IndexType.Unique),
                 new ColumnInfo("year", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
-            }
+            },
+            ifNotExists: false
         );
 
         await executor.CreateTable(tableTicket);
