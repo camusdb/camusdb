@@ -72,15 +72,30 @@ internal sealed class RowDeleter
     /// <summary>
     /// 
     /// </summary>
-    /// <param name="columnValues"></param>
-    /// <param name="name"></param>
+    /// <param name="rowValues"></param>
+    /// <param name="columnNames"></param>
     /// <returns></returns>
-    private static ColumnValue? GetColumnValue(Dictionary<string, ColumnValue> columnValues, string name)
+    private static CompositeColumnValue GetColumnValue(Dictionary<string, ColumnValue> rowValues, string[] columnNames, ColumnValue? extraUniqueValue = null)
     {
-        if (columnValues.TryGetValue(name, out ColumnValue? columnValue))
-            return columnValue;
+        ColumnValue[] columnValues = new ColumnValue[extraUniqueValue is null ? columnNames.Length : columnNames.Length + 1];
 
-        return null;
+        for (int i = 0; i < columnNames.Length; i++)
+        {
+            string name = columnNames[i];
+
+            if (!rowValues.TryGetValue(name, out ColumnValue? columnValue))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for unique key field '" + name + "'"
+                );
+
+            columnValues[i] = columnValue;
+        }
+
+        if (extraUniqueValue is not null)
+            columnValues[^1] = extraUniqueValue;
+
+        return new CompositeColumnValue(columnValues);
     }
 
     /// <summary>
@@ -187,19 +202,13 @@ internal sealed class RowDeleter
         {
             BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex = index.BTree;
 
-            ColumnValue? uniqueKeyValue = GetColumnValue(row.Row, index.Column);
-
-            if (uniqueKeyValue is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A null value was found for unique key field " + index.Column
-                );
+            CompositeColumnValue? uniqueKeyValue = GetColumnValue(row.Row, index.Columns);            
 
             SaveIndexTicket saveUniqueIndexTicket = new(
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: new CompositeColumnValue(uniqueKeyValue),
+                key: uniqueKeyValue,
                 value: tuple
             );
 
@@ -226,22 +235,13 @@ internal sealed class RowDeleter
         {
             BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex = index.BTree;
 
-            ColumnValue? multiKeyValue = GetColumnValue(row.Row, index.Column);
-
-            if (multiKeyValue is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A null value was found for multi key field " + index.Column
-                );
+            CompositeColumnValue multiKeyValue = GetColumnValue(row.Row, index.Columns, new ColumnValue(ColumnType.Id, tuple.SlotOne.ToString()));            
 
             SaveIndexTicket saveUniqueIndexTicket = new(
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: new CompositeColumnValue(new ColumnValue[] {
-                    multiKeyValue,
-                    new ColumnValue(ColumnType.Id, tuple.SlotOne.ToString())
-                }),
+                key: multiKeyValue,
                 value: tuple
             );
 

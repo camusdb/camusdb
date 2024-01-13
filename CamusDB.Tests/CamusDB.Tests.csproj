@@ -5,6 +5,8 @@
     <Nullable>enable</Nullable>
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <IsPackable>false</IsPackable>
+    <Version>0.1.1</Version>
+    <LangVersion>11</LangVersion>
   </PropertyGroup>
 
   <ItemGroup>

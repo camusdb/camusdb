@@ -10,6 +10,7 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.Catalogs;
 
@@ -37,6 +38,7 @@ public sealed class CatalogsManager
 
             TableSchema tableSchema = new()
             {
+                Id = ObjectIdGenerator.Generate().ToString(),
                 Version = 0,
                 Name = ticket.TableName,
                 Columns = new(),
@@ -47,12 +49,13 @@ public sealed class CatalogsManager
             {
                 tableSchema.Columns.Add(
                     new TableColumnSchema(
-                        column.Name,
-                        column.Type,
-                        column.Primary,
-                        column.Primary ? true : column.NotNull,
-                        column.Index,
-                        column.Default
+                        id: ObjectIdGenerator.Generate().ToString(),
+                        name: column.Name,
+                        type: column.Type,
+                        primary: column.Primary,
+                        notNull: column.Primary ? true : column.NotNull,
+                        index: column.Index,
+                        defaultValue: column.Default
                     )
                 );
             }
@@ -69,7 +72,10 @@ public sealed class CatalogsManager
 
             database.Schema.Tables.Add(ticket.TableName, tableSchema);
 
-            database.Storage.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
+            // @todo Currently, the schema is a simple JSON saved on disk. Look for ways to make this more robust.
+            byte[] encoded = Serializator.Serialize(database.Schema.Tables);
+
+            database.Storage.Put(CamusDBConfig.SchemaKey, encoded);
 
             Console.WriteLine("Added table {0} to schema", ticket.TableName);
 
@@ -167,12 +173,13 @@ public sealed class CatalogsManager
 
         tableColumns.Add(
             new TableColumnSchema(
-                newColumn.Name,
-                newColumn.Type,
-                false,
-                newColumn.NotNull,
-                IndexType.None,
-                newColumn.Default
+                id: ObjectIdGenerator.Generate().ToString(),
+                name: newColumn.Name,
+                type: newColumn.Type,
+                primary: false,
+                notNull: newColumn.NotNull,
+                index: IndexType.None,
+                defaultValue: newColumn.Default
             )
         );
 

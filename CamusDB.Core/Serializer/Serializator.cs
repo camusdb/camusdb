@@ -19,11 +19,16 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.Serializer;
 
+/// <summary>
+/// Utility class for serializing and deserializing all kinds of data to and from a buffer.
+///
+/// The goal is for the serialization to be very fast and for most methods should be inlined where they are called.
+/// </summary>
 public sealed class Serializator
 {
     public static byte[] Serialize(Dictionary<string, TableSchema> tableSchema)
     {
-        string jsonSerialized = JsonSerializer.Serialize(tableSchema);
+        string jsonSerialized = JsonSerializer.Serialize(tableSchema);        
         return Encoding.Unicode.GetBytes(jsonSerialized);
     }
 

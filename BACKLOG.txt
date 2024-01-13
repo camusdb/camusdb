@@ -27,3 +27,9 @@ ColumnValue
 
 SQLParser
 - Make identifiers case insensitive
+
+DeleteById
+- Update multi indexes
+
+UpdateById
+- Add tests for multi indexes

@@ -13,15 +13,30 @@ namespace CamusDB.Core.Catalogs.Models;
 
 public sealed class TableIndexSchema
 {
-    public string Column { get; }
+    /// <summary>
+    /// The list of columns that make up the index
+    /// </summary>
+    public string[] Columns { get; }
 
+    /// <summary>
+    /// The type of index
+    /// </summary>
     public IndexType Type { get; }    
 
+    /// <summary>
+    /// Reference to the B+Tree that stores the index
+    /// </summary>
     public BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> BTree { get; }
 
-    public TableIndexSchema(string column, IndexType type, BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index)
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="columns"></param>
+    /// <param name="type"></param>
+    /// <param name="index"></param>
+    public TableIndexSchema(string[] columns, IndexType type, BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index)
     {
-        Column = column;
+        Columns = columns;
         Type = type;
         BTree = index;
     }

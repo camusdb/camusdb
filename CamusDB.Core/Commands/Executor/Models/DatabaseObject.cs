@@ -12,6 +12,8 @@ public sealed record DatabaseObject
 {
     public DatabaseObjectType Type { get; set; }
 
+    public string? Id { get; set; }
+
     public string? Name { get; set; }
 
     public string? StartOffset { get; set; }

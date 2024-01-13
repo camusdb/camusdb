@@ -173,18 +173,35 @@ public sealed class RowUpdater
         return await UpdateInternal(machine, state);
     }
 
-    /// <summary>
+    // <summary>
     /// 
     /// </summary>
-    /// <param name="columnValues"></param>
-    /// <param name="columnName"></param>
+    /// <param name="rowValues"></param>
+    /// <param name="columnNames"></param>
+    /// <param name="extraUniqueValue"></param>
     /// <returns></returns>
-    private static ColumnValue? GetColumnValue(Dictionary<string, ColumnValue> columnValues, string columnName)
+    /// <exception cref="CamusDBException"></exception>
+    private static CompositeColumnValue GetColumnValue(Dictionary<string, ColumnValue> rowValues, string[] columnNames, ColumnValue? extraUniqueValue = null)
     {
-        if (columnValues.TryGetValue(columnName, out ColumnValue? columnValue))
-            return columnValue;
+        ColumnValue[] columnValues = new ColumnValue[extraUniqueValue is null ? columnNames.Length : columnNames.Length + 1];
 
-        return null;
+        for (int i = 0; i < columnNames.Length; i++)
+        {
+            string name = columnNames[i];
+
+            if (!rowValues.TryGetValue(name, out ColumnValue? columnValue))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for unique key field '" + name + "'"
+                );
+
+            columnValues[i] = columnValue;
+        }
+
+        if (extraUniqueValue is not null)
+            columnValues[^1] = extraUniqueValue;
+
+        return new CompositeColumnValue(columnValues);
     }
 
     /// <summary>
@@ -262,20 +279,17 @@ public sealed class RowUpdater
         BTree<CompositeColumnValue, BTreeTuple> uniqueIndex,
         HLCTimestamp txnId,
         Dictionary<string, ColumnValue> values,
-        string name
+        string[] columnNames
     )
     {
-        ColumnValue? uniqueValue = GetColumnValue(values, name);
+        CompositeColumnValue uniqueValue = GetColumnValue(values, columnNames);        
 
-        if (uniqueValue is null)
-            return;
-
-        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.Write, txnId, new CompositeColumnValue(uniqueValue));
+        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.Write, txnId, uniqueValue);
 
         if (rowTuple is not null && !rowTuple.IsNull())
             throw new CamusDBException(
                 CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                "Duplicate entry for key \"" + table.Name + "." + keyName + "\" " + uniqueValue.Type + " " + uniqueValue
+                "Duplicate entry for key \"" + table.Name + "." + keyName + "\" " + uniqueValue
             );
     }
 
@@ -299,7 +313,7 @@ public sealed class RowUpdater
 
             BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.Value.BTree;
 
-            await CheckUniqueKeyViolations(table, index.Key, uniqueIndex, txnId, values, index.Value.Column);
+            await CheckUniqueKeyViolations(table, index.Key, uniqueIndex, txnId, values, index.Value.Columns);
         }
     }
 
@@ -483,19 +497,13 @@ public sealed class RowUpdater
         {
             BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;
 
-            ColumnValue? uniqueKeyValue = GetColumnValue(row.Row, index.Column);
-
-            if (uniqueKeyValue is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A null value was found for unique key field " + index.Column
-                );
+            CompositeColumnValue uniqueKeyValue = GetColumnValue(row.Row, index.Columns);            
 
             SaveIndexTicket saveIndexTicket = new(
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: new CompositeColumnValue(uniqueKeyValue),
+                key: uniqueKeyValue,
                 value: tuple
             );
 
@@ -522,22 +530,13 @@ public sealed class RowUpdater
         {
             BTree<CompositeColumnValue, BTreeTuple> multiIndex = index.BTree;
 
-            ColumnValue? multiKeyValue = GetColumnValue(row.Row, index.Column);
-
-            if (multiKeyValue is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A null value was found for multi key field " + index.Column
-                );
+            CompositeColumnValue multiKeyValue = GetColumnValue(row.Row, index.Columns, new ColumnValue(ColumnType.Id, tuple.SlotOne.ToString()));
 
             SaveIndexTicket saveIndexTicket = new(
                 index: multiIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: new CompositeColumnValue(new ColumnValue[] {
-                    multiKeyValue,
-                    new ColumnValue(ColumnType.Id, tuple.SlotOne.ToString())
-                }),
+                key: multiKeyValue,
                 value: tuple
             );
 

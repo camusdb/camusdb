@@ -60,6 +60,7 @@ internal sealed class TableOpener
         DatabaseObject systemObject = GetSystemObject(database, tableSchema.Name ?? "");
 
         TableDescriptor tableDescriptor = new(
+            tableSchema.Id ?? "",
             tableSchema.Name ?? "",
             tableSchema,
             await indexReader.ReadOffsets(tablespace, ObjectId.ToValue(systemObject.StartOffset ?? ""))
@@ -80,7 +81,7 @@ internal sealed class TableOpener
 
                             tableDescriptor.Indexes.Add(
                                 index.Key,
-                                new TableIndexSchema(index.Value.Column, index.Value.Type, btree)
+                                new TableIndexSchema(MapColumnsIdsToNames(tableSchema.Columns, index.Value.ColumnIds), index.Value.Type, btree)
                             );
                         }
                         break;                                           
@@ -92,6 +93,22 @@ internal sealed class TableOpener
         }
 
         return tableDescriptor;
+    }
+
+    private static string[] MapColumnsIdsToNames(List<TableColumnSchema>? columns, string[] columnIds)
+    {
+        string[] columNames = new string[columnIds.Length];
+
+        for (int i  = 0; i < columnIds.Length;  i++)
+        {
+            foreach (TableColumnSchema column in columns!)
+            {
+                if (column.Id == columnIds[i])
+                    columNames[i] = column.Name ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Table system data is corrupt");
+            }
+        }
+       
+        return columNames;
     }
 
     private static DatabaseObject GetSystemObject(DatabaseDescriptor database, string tableName)

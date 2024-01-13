@@ -24,9 +24,14 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
     /// <param name="name"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
-    private static async Task<ColumnValue> CheckUniqueKeyViolations(TableDescriptor table, BTree<CompositeColumnValue, BTreeTuple> uniqueIndex, InsertTicket ticket, string name)
+    private static async Task<CompositeColumnValue> CheckUniqueKeyViolations(
+        TableDescriptor table, 
+        BTree<CompositeColumnValue, BTreeTuple> uniqueIndex, 
+        InsertTicket ticket, 
+        string[] columnNames
+    )
     {
-        ColumnValue? uniqueValue = GetColumnValue(table, ticket, name);
+        CompositeColumnValue? uniqueValue = GetColumnValue(ticket.Values, columnNames);
 
         if (uniqueValue is null)
             throw new CamusDBException(
@@ -34,12 +39,12 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
                 "The primary key of the table \"" + table.Name + "\" is not present in the list of values."
             );
 
-        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue(uniqueValue));
+        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, uniqueValue);
 
         if (rowTuple is not null && !rowTuple.IsNull())
             throw new CamusDBException(
                 CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                "Duplicate entry for key \"" + table.Name + "\" " + uniqueValue.Type + " " + uniqueValue
+                "Duplicate entry for key \"" + table.Name + "\" " + uniqueValue
             );
 
         return uniqueValue;
@@ -54,7 +59,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
 
             BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex = index.Value.BTree;            
 
-            await CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Column);
+            await CheckUniqueKeyViolations(table, uniqueIndex, ticket, index.Value.Columns);
         }
     }
 }

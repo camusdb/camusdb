@@ -17,22 +17,41 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// </summary>
 public sealed class TableDescriptor
 {
+    /// <summary>
+    /// Unique identifier of table
+    /// </summary>
+    public string Id { get; }
+
+    /// <summary>
+    /// Name of the table
+    /// </summary>
     public string Name { get; }
 
+    /// <summary>
+    /// Pointer to the table schema
+    /// </summary>
     public TableSchema Schema { get; }
 
+    /// <summary>
+    /// Pointer to the B+Tree that stores the rows
+    /// </summary>
     public BTree<ObjectIdValue, ObjectIdValue> Rows { get; }
 
-    public Dictionary<string, TableIndexSchema> Indexes { get; } = new();    
+    /// <summary>
+    /// List of indexes on the table
+    /// </summary>
+    public Dictionary<string, TableIndexSchema> Indexes { get; } = new();
 
     /// <summary>
     /// Constructor
     /// </summary>
+    /// <param name="id"></param>
     /// <param name="name"></param>
     /// <param name="schema"></param>
     /// <param name="rows"></param>
-    public TableDescriptor(string name, TableSchema schema, BTree<ObjectIdValue, ObjectIdValue> rows)
+    public TableDescriptor(string id, string name, TableSchema schema, BTree<ObjectIdValue, ObjectIdValue> rows)
     {
+        Id = id;
         Name = name;
         Schema = schema;
         Rows = rows;

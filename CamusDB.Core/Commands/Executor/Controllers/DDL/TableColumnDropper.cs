@@ -28,7 +28,7 @@ public sealed class TableColumnDropper
     {
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
-            if (index.Value.Column == ticket.Column.Name)
+            if (index.Value.Columns.Contains(ticket.Column.Name))
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
                     "Column cannot be dropped because it is part of an index"
@@ -155,9 +155,9 @@ public sealed class TableColumnDropper
                     "A multi index tree wasn't found"
                 );
 
-            ColumnValue? columnValue = GetColumnValue(columnValues, index.Value.Column);
-            if (columnValue is null) // @todo check what to to here
-                continue;
+            //ColumnValue? columnValue = GetColumnValue(columnValues, index.Value.Columns);
+            //if (columnValue is null) // @todo check what to to here
+            //    continue;
 
             //BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
 

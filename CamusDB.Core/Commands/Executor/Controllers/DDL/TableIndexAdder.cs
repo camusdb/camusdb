@@ -26,7 +26,7 @@ internal sealed class TableIndexAdder
 
     private readonly IndexReader indexReader = new();
 
-    private void Validate(TableDescriptor table, AlterIndexTicket ticket)
+    private static void Validate(TableDescriptor table, AlterIndexTicket ticket)
     {
         if (ticket.Operation == AlterIndexOperation.AddPrimaryKey && table.Indexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
@@ -300,7 +300,12 @@ internal sealed class TableIndexAdder
 
                 databaseObject.Indexes.Add(
                     ticket.IndexName,
-                    new DatabaseIndexObject(ticket.ColumnName, indexType, state.IndexOffset.ToString())
+                    new DatabaseIndexObject(
+                        database.BufferPool.GetNextFreeOffset().ToString(),
+                        GetColumnIds(table, ticket.ColumnName),
+                        indexType, 
+                        state.IndexOffset.ToString()
+                    )
                 );
             }
 
@@ -313,10 +318,24 @@ internal sealed class TableIndexAdder
 
         table.Indexes.Add(
             ticket.IndexName,
-            new TableIndexSchema(ticket.ColumnName, indexType, state.Btree)
+            new TableIndexSchema(new string[] { ticket.ColumnName }, indexType, state.Btree)
         );
 
         return FluxAction.Continue;
+    }
+
+    private static string[] GetColumnIds(TableDescriptor table, string columnName)
+    {
+        foreach (TableColumnSchema column in table.Schema.Columns!)
+        {
+            if (column.Name == columnName)
+                return new string[] { column.Id };
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            "Couldn't get column id for column '" + columnName + "'"
+        );
     }
 
     /// <summary>

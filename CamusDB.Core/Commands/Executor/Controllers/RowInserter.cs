@@ -141,7 +141,7 @@ internal sealed class RowInserter
             }
 
             if (index.Value.Type == IndexType.Multi)
-            {                
+            {
                 indexState.MultiIndexes.Add(index.Value);
                 continue;
             }
@@ -217,23 +217,35 @@ internal sealed class RowInserter
         return FluxAction.Continue;
     }
 
-    private static ColumnValue? GetColumnValue(TableDescriptor table, InsertTicket ticket, string name)
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="rowValues"></param>
+    /// <param name="columnNames"></param>
+    /// <param name="extraUniqueValue"></param>
+    /// <returns></returns>
+    /// <exception cref="CamusDBException"></exception>
+    private static CompositeColumnValue GetColumnValue(Dictionary<string, ColumnValue> rowValues, string[] columnNames, ColumnValue? extraUniqueValue = null)
     {
-        List<TableColumnSchema> columns = table.Schema.Columns!;
+        ColumnValue[] columnValues = new ColumnValue[extraUniqueValue is null ? columnNames.Length : columnNames.Length + 1];
 
-        for (int i = 0; i < columns.Count; i++)
+        for (int i = 0; i < columnNames.Length; i++)
         {
-            TableColumnSchema column = columns[i];
+            string name = columnNames[i];
 
-            if (column.Name == name)
-            {
-                if (ticket.Values.TryGetValue(column.Name, out ColumnValue? value))
-                    return value;
-                break;
-            }
+            if (!rowValues.TryGetValue(name, out ColumnValue? columnValue))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for unique key field '" + name + "'"
+                );
+
+            columnValues[i] = columnValue;
         }
 
-        return null;
+        if (extraUniqueValue is not null)
+            columnValues[^1] = extraUniqueValue;
+
+        return new CompositeColumnValue(columnValues);
     }
 
     /// <summary>
@@ -243,27 +255,21 @@ internal sealed class RowInserter
     /// <returns></returns>
     private async Task<FluxAction> UpdateUniqueIndexes(InsertFluxState state)
     {
-        InsertTicket insertTicket = state.Ticket;        
+        InsertTicket insertTicket = state.Ticket;
 
         List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;            
+            BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;
 
-            ColumnValue? uniqueKeyValue = GetColumnValue(state.Table, insertTicket, index.Column);
-
-            if (uniqueKeyValue is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A null value was found for unique key field " + index.Column
-                );
+            CompositeColumnValue uniqueKeyValue = GetColumnValue(insertTicket.Values, index.Columns);
 
             SaveIndexTicket saveUniqueIndexTicket = new(
                 index: uniqueIndex,
                 txnId: insertTicket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: new CompositeColumnValue(uniqueKeyValue),
+                key: uniqueKeyValue,
                 value: state.RowTuple
             );
 
@@ -290,22 +296,13 @@ internal sealed class RowInserter
         {
             BTree<CompositeColumnValue, BTreeTuple> multiIndex = index.BTree;
 
-            ColumnValue? multiKeyValue = GetColumnValue(state.Table, insertTicket, index.Column);
-
-            if (multiKeyValue is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A null value was found for multi key field " + index.Column
-                );
+            CompositeColumnValue multiKeyValue = GetColumnValue(insertTicket.Values, index.Columns, new ColumnValue(ColumnType.Id, state.RowTuple.SlotOne.ToString()));
 
             SaveIndexTicket saveIndexTicket = new(
                 index: multiIndex,
                 txnId: insertTicket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
-                key: new CompositeColumnValue(new ColumnValue[] {
-                    multiKeyValue,
-                    new ColumnValue(ColumnType.Id, state.RowTuple.SlotOne.ToString())
-                }),
+                key: multiKeyValue,
                 value: state.RowTuple
             );
 

@@ -54,6 +54,7 @@ internal sealed class TableCreator
             DatabaseObject databaseObject = new()
             {
                 Type = DatabaseObjectType.Table,
+                Id = tablespace.GetNextFreeOffset().ToString(),
                 Name = tableName,
                 StartOffset = pageOffset.ToString(),
                 Indexes = new()
@@ -63,26 +64,28 @@ internal sealed class TableCreator
             {
                 if (column.Primary)
                 {
+                    ObjectIdValue indexId = tablespace.GetNextFreeOffset();
                     ObjectIdValue indexPageOffset = tablespace.GetNextFreeOffset();
 
                     Console.WriteLine("Primary key for {0} added to system, staring at {1}", tableName, indexPageOffset);
 
                     databaseObject.Indexes.Add(
                         CamusDBConfig.PrimaryKeyInternalName,
-                        new DatabaseIndexObject(column.Name, IndexType.Unique, indexPageOffset.ToString())
+                        new DatabaseIndexObject(indexId.ToString(), new string[] { column.Id }, IndexType.Unique, indexPageOffset.ToString())
                     );
                     continue;
                 }
 
                 if (column.Index != IndexType.None)
                 {
+                    ObjectIdValue indexId = tablespace.GetNextFreeOffset();
                     ObjectIdValue indexPageOffset = tablespace.GetNextFreeOffset();
 
                     Console.WriteLine("Index {0}/{1} key for {2} added to system, staring at {3}", column.Name, column.Index, tableName, indexPageOffset);
 
                     databaseObject.Indexes.Add(
-                        column.Name,
-                        new DatabaseIndexObject(column.Name, column.Index, indexPageOffset.ToString())
+                        column.Name + "_idx",
+                        new DatabaseIndexObject(indexId.ToString(), new string[] { column.Id }, column.Index, indexPageOffset.ToString())
                     );
                     continue;
                 }

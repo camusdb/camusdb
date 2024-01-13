@@ -6,30 +6,29 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal abstract class DMLKeyBase
 {
-    protected static ColumnValue? GetColumnValue(TableDescriptor table, InsertTicket ticket, string name)
+    protected static CompositeColumnValue GetColumnValue(Dictionary<string, ColumnValue> rowValues, string[] columnNames)
     {
-        List<TableColumnSchema> columns = table.Schema.Columns!;
+        ColumnValue[] columnValues = new ColumnValue[columnNames.Length];
 
-        for (int i = 0; i < columns.Count; i++)
+        for (int i = 0; i < columnNames.Length; i++)
         {
-            TableColumnSchema column = columns[i];
+            string name = columnNames[i];
 
-            if (column.Name == name)
-            {
-                if (ticket.Values.TryGetValue(column.Name, out ColumnValue? value))
-                    return value;
-                break;
-            }
+            if (!rowValues.TryGetValue(name, out ColumnValue? columnValue))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for unique key field '" + name + "'"
+                );
+
+            columnValues[i] = columnValue;
         }
 
-        return null;
+        return new CompositeColumnValue(columnValues);
     }
 }

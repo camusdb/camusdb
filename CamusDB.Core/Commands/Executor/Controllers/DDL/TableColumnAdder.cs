@@ -141,9 +141,9 @@ public sealed class TableColumnAdder
                     "A multi index tree wasn't found"
                 );
 
-            ColumnValue? columnValue = GetColumnValue(columnValues, index.Value.Column);
-            if (columnValue is null) // @todo check what to to here
-                continue;
+            //ColumnValue? columnValue = GetColumnValue(columnValues, index.Value.Columns);
+            //if (columnValue is null) // @todo check what to to here
+            //continue;
 
             //BTreeMulti<ColumnValue> multiIndex = index.Value.MultiRows;
 
