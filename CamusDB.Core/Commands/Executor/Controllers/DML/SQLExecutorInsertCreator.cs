@@ -46,9 +46,10 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         if (ast.extendedOne is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing or empty values list");
 
-        LinkedList<ColumnValue> valuesList = new();
-
-        GetValuesList(table, ast.extendedOne, new(), ticket.Parameters, valuesList);
+        LinkedList<ColumnValue?> valuesList = new();
+        Dictionary<string, ColumnValue> rowReference = new();        
+        
+        GetValuesList(table, ast.extendedOne, rowReference, ticket.Parameters, valuesList);
 
         if (fields.Count != valuesList.Count)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"The number of fields is not equal to the number of values.");
@@ -56,13 +57,23 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         Dictionary<string, ColumnValue> values = new(fields.Count);
 
         for (int i = 0; i < fields.Count; i++)
-            values.Add(fields[i], valuesList.ElementAt(i)); // @todo optimize this
+        {
+            ColumnValue? columnValue = valuesList.ElementAt(i); // @todo optimize this
+
+            if (columnValue is not null)
+                values.Add(fields[i], columnValue);
+            else                            
+                values.Add(fields[i], GetDefaultValue(table.Schema.Columns, fields[i]));
+        }
 
         // Try to include any missing field with its default value if available
-        foreach (TableColumnSchema column in table.Schema.Columns!)
-        {
-            if (!values.ContainsKey(column.Name) && column.DefaultValue is not null)
-                values.Add(column.Name, column.DefaultValue);
+        if (values.Count != table.Schema.Columns!.Count)
+        {            
+            foreach (TableColumnSchema column in table.Schema.Columns!)
+            {
+                if (!values.ContainsKey(column.Name) && column.DefaultValue is not null)
+                    values.Add(column.Name, column.DefaultValue);
+            }
         }
 
         return new InsertTicket(
@@ -73,12 +84,26 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         );
     }
 
+    private static ColumnValue GetDefaultValue(List<TableColumnSchema>? columns, string columnName)
+    {
+        foreach (TableColumnSchema column in columns!)
+        {
+            if (column.Name == columnName)
+            {
+                if (column.DefaultValue is not null)
+                    return column.DefaultValue;
+            }
+        }   
+
+        return new ColumnValue(ColumnType.Null, "");
+    }
+
     private static void GetValuesList(
-        TableDescriptor table,
+        TableDescriptor table,        
         NodeAst valuesListAst,
         Dictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
-        LinkedList<ColumnValue> valuesList
+        LinkedList<ColumnValue?> valuesList
     )
     {
         if (valuesListAst.nodeType == NodeType.ExprList)
@@ -92,9 +117,11 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
             return;
         }
 
-        if (valuesListAst.nodeType == NodeType.ExprDefault)
+        // DEFAULT expression must be evaluated at a later stage when we know the position of the value in the field list
+        if (valuesListAst.nodeType == NodeType.ExprDefault) 
         {
-            //table.
+            ColumnValue? defaultValue = null;
+            valuesList.AddLast(defaultValue);
             return;
         }
 

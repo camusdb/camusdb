@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Data.Common;
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs;
@@ -40,7 +41,7 @@ public sealed class TableColumnAdder
         if (hasColumn)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "Column " + ticket.Column.Name + " is already part of table " + table.Name
+                "Duplicate column '" + ticket.Column.Name + "'"
             );
     }
 

@@ -46,6 +46,7 @@ public enum NodeType
     SortAsc,
     SortDesc,
     CreateTable,
+    CreateTableIfNotExists,
     CreateTableItem,
     CreateTableItemList,
     CreateTableConstraintList,

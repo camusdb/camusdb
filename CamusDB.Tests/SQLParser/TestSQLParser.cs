@@ -827,9 +827,17 @@ public class TestSQLParser
         NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table ( id INT64 NOT NULL, name INT64 DEFAULT (100))");
 
         Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
-
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
 
+    [Test]
+    public void TestParseSimpleCreateTableIfNotExists()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE IF NOT EXISTS some_table ( id INT64 NOT NULL, name INT64 DEFAULT (100))");
+
+        Assert.AreEqual(NodeType.CreateTableIfNotExists, ast.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
     }
 

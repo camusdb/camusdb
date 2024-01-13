@@ -24,7 +24,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
 %token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW
-%token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT
+%token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS
 
 %%
 
@@ -65,7 +65,8 @@ update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition { $$.n = 
 delete_stmt : TDELETE TFROM any_identifier TWHERE condition { $$.n = new(NodeType.Delete, $3.n, $5.n, null, null, null, null, null); }
 			;
 
-create_table_stmt : TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, null, null, null, null); }                  
+create_table_stmt : TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, null, null, null, null); }
+                  | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, null, null, null, null, null); }
                   ;
 
 drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null); }

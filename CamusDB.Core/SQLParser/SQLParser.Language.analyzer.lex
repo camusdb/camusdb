@@ -26,6 +26,8 @@ TInto 		    (I|i)(N|n)(T|t)(O|o)
 TValues         (V|v)(A|a)(L|l)(U|u)(E|e)(S|s)
 TCreate         (C|c)(R|r)(E|e)(A|a)(T|t)(E|e)
 TTable          (T|t)(A|a)(B|b)(L|l)(E|e)
+TIf 		    (I|i)(F|f)
+TExists 	    (E|e)(X|x)(I|i)(S|s)(T|t)(S|s)
 TNot            (N|n)(O|o)(T|t)
 TNull           (N|n)(U|u)(L|l)(L|l)
 TPrimary 	    (P|p)(R|r)(I|i)(M|m)(A|a)(R|r)(Y|y)
@@ -146,6 +148,10 @@ TGreaterEquals  >=
 {TValues} { return (int)Token.TVALUES; }
 
 {TCreate} { return (int)Token.TCREATE; }
+
+{TIf} { return (int)Token.TIF; }
+
+{TExists} { return (int)Token.TEXISTS; }
 
 {TTable} { return (int)Token.TTABLE; }
 

@@ -79,16 +79,11 @@ internal sealed class QueryScanner
                 "Key '" + ticket.IndexName! + "' doesn't exist in table '" + table.Name + "'"
             );
         }
-
-        if (index.Type == IndexType.Unique)
-            return ScanUsingUniqueIndex(database, table, index.BTree, ticket, queryFilterer, rowDeserializer);
-
-        //return ScanUsingMultiIndex(database, table, index.MultiRows!, ticket, queryFilterer, rowDeserializer);
-
-        throw new NotImplementedException();
+        
+        return ScanUsingIndex(database, table, index.BTree, ticket, queryFilterer, rowDeserializer);        
     }
 
-    private async IAsyncEnumerable<QueryResultRow> ScanUsingUniqueIndex(
+    private async IAsyncEnumerable<QueryResultRow> ScanUsingIndex(
         DatabaseDescriptor database,
         TableDescriptor table,
         BTree<CompositeColumnValue, BTreeTuple> index,
