@@ -27,7 +27,7 @@ internal sealed class TestRowMultiInsertor
 
     private async Task<(string, CommandExecutor)> SetupDatabase()
     {
-        string dbname = System.Guid.NewGuid().ToString("n");
+        string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
@@ -122,7 +122,7 @@ internal sealed class TestRowMultiInsertor
             txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "user_robots",
-            index: "robots_id",
+            index: "robots_id_idx",
             projection: null,
             where: null,
             filters: null,
@@ -179,7 +179,7 @@ internal sealed class TestRowMultiInsertor
             txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "user_robots",
-            index: "robots_id",
+            index: "robots_id_idx",
             projection: null,
             where: null,
             filters: null,
