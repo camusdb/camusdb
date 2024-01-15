@@ -34,4 +34,5 @@ internal sealed class IndexReader
     public async Task<BPTree<CompositeColumnValue, ColumnValue, BTreeTuple>> Read(BufferPoolManager tablespace, ObjectIdValue offset)
     {
         return await indexReader.Read(tablespace, offset);
-    }}
+    }
+}

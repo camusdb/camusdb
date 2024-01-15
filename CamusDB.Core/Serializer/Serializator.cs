@@ -10,8 +10,6 @@ using System.Text;
 using System.Text.Json;
 using System.Runtime.CompilerServices;
 
-using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
@@ -29,17 +27,12 @@ public sealed class Serializator
     public static byte[] Serialize<T>(T tableSchema)
     {
         string jsonSerialized = JsonSerializer.Serialize(tableSchema);
-
-        Console.WriteLine(jsonSerialized);
-
         return Encoding.Unicode.GetBytes(jsonSerialized);
     }
 
     public static T Unserialize<T>(byte[] buffer) where T : new()
     {
         string str = Encoding.Unicode.GetString(buffer);
-
-        Console.WriteLine(str);
 
         T? deserialized = JsonSerializer.Deserialize<T>(str);
         if (deserialized is null)
@@ -233,9 +226,9 @@ public sealed class Serializator
     }
 
     public static void WriteTuple(byte[] buffer, BTreeTuple rowTuple, ref int pointer)
-    {        
+    {
         WriteObjectId(buffer, rowTuple.SlotOne, ref pointer);
-        WriteObjectId(buffer, rowTuple.SlotTwo, ref pointer);        
+        WriteObjectId(buffer, rowTuple.SlotTwo, ref pointer);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -365,5 +358,5 @@ public sealed class Serializator
     public static bool ReadBoolAhead(byte[] buffer, ref int pointer)
     {
         return (buffer[pointer++] & 0xf) == 1;
-    }    
+    }
 }

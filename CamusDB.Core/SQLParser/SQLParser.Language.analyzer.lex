@@ -13,6 +13,8 @@ TOrder          (O|o)(R|r)(D|d)(E|e)(R|r)
 TBy             (B|b)(Y|y)
 TAnd            (A|a)(N|n)(D|d)
 TOr             (O|o)(R|r)
+TOn             (O|o)(N|n)
+TIn             (I|i)(N|n)
 TAsc            (A|a)(S|s)(C|c)
 TLike           (L|l)(I|i)(K|k)(E|e)
 TILike          (I|i)(L|l)(I|i)(K|k)(E|e)
@@ -218,6 +220,10 @@ TGreaterEquals  >=
 {TComma} { return (int)Token.TCOMMA; }
 
 {TAnd} { return (int)Token.TAND; }
+
+{TOn} { return (int)Token.TON; }
+
+{TIn} { return (int)Token.TIN; }
 
 {TOr} { return (int)Token.TOR; }
 

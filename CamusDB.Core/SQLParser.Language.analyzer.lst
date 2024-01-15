@@ -3,7 +3,7 @@
 //  GPLEX error listing for lex source file <SQLParser.Language.analyzer.lex>
 // ==========================================================================
 //  Version:  1.2.2
-//  DateTime: 1/8/2024 4:53:15 PM
+//  DateTime: 1/14/2024 10:22:08 PM
 // ==========================================================================
 
 
@@ -14,6 +14,7 @@
 
 %option stack, minimize, parser, verbose, persistbuffer, noembedbuffers
 
+TDatabase       (D|d)(A|a)(T|t)(A|a)(B|b)(A|a)(S|s)(E|e)
 TSelect         (S|s)(E|e)(L|l)(E|e)(C|c)(T|t)
 TFrom           (F|f)(R|r)(O|o)(M|m)
 TWhere          (W|w)(H|h)(E|e)(R|r)(E|e)
@@ -21,8 +22,11 @@ TOrder          (O|o)(R|r)(D|d)(E|e)(R|r)
 TBy             (B|b)(Y|y)
 TAnd            (A|a)(N|n)(D|d)
 TOr             (O|o)(R|r)
-TDesc           (D|d)(E|e)(S|s)(C|c)
+TOn             (O|o)(N|n)
+TIn             (I|i)(N|n)
 TAsc            (A|a)(S|s)(C|c)
+TLike           (L|l)(I|i)(K|k)(E|e)
+TILike          (I|i)(L|l)(I|i)(K|k)(E|e)
 TTrue           (T|t)(R|r)(U|u)(E|e)
 TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
 TUpdate         (U|u)(P|p)(D|d)(A|a)(T|t)(E|e)
@@ -33,12 +37,16 @@ TInto 		    (I|i)(N|n)(T|t)(O|o)
 TValues         (V|v)(A|a)(L|l)(U|u)(E|e)(S|s)
 TCreate         (C|c)(R|r)(E|e)(A|a)(T|t)(E|e)
 TTable          (T|t)(A|a)(B|b)(L|l)(E|e)
+TIf 		    (I|i)(F|f)
+TExists 	    (E|e)(X|x)(I|i)(S|s)(T|t)(S|s)
 TNot            (N|n)(O|o)(T|t)
 TNull           (N|n)(U|u)(L|l)(L|l)
 TPrimary 	    (P|p)(R|r)(I|i)(M|m)(A|a)(R|r)(Y|y)
 TKey 		    (K|k)(E|e)(Y|y)
 TUnique 	    (U|u)(N|n)(I|i)(Q|q)(U|u)(E|e)
-TIndex 		    (I|i)(N|n)(D|d)(E|e)(X|x)	
+TIndex 		    (I|i)(N|n)(D|d)(E|e)(X|x)
+TIndexes 		(I|i)(N|n)(D|d)(E|e)(X|x)(E|e)(S|s)
+TDefault 		(D|d)(E|e)(F|f)(A|a)(U|u)(L|l)(T|t)
 TAlter 		    (A|a)(L|l)(T|t)(E|e)(R|r)
 TWAdd 		    (A|a)(D|d)(D|d)
 TDrop 		    (D|d)(R|r)(O|o)(P|p)
@@ -50,11 +58,8 @@ TGroup 		    (G|g)(R|r)(O|o)(U|u)(P|p)
 TShow 		    (S|s)(H|h)(O|o)(W|w)
 TColumns 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)(S|s)
 TTables         (T|t)(A|a)(B|b)(L|l)(E|e)(S|s)
-TDesc           (T|t)(E|e)(S|s)
-//^^^
-// Error: Lexical category <TDesc> already defined
-// -----------------------------------------------
-TDescribe       (T|t)(E|e)(S|s)(C|c)(R|r)(I|i)(B|b)(E|e)
+TDesc           (D|d)(E|e)(S|s)(C|c)
+TDescribe       (D|d)(E|e)(S|s)(C|c)(R|r)(I|i)(B|b)(E|e)
 TTypeString     (S|s)(T|t)(R|r)(I|i)(N|n)(G|g)
 TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
 TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
@@ -62,6 +67,8 @@ TTypeObjectId   (O|o)(B|b)(J|j)(E|e)(C|c)(T|t)(_)(I|i)(D|d)
 TTypeSObjectId  (O|o)(I|i)(D|d)
 LParen          \(
 RParen          \)
+LBrace          \{
+RBrace          \}
 Eol             (\r\n?|\n)
 NotWh           [^ \t\r\n]
 Space           [ \t]
@@ -78,7 +85,8 @@ UNIESC          \\U{HexDig}{8}
 String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\"
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
 EscIdentifier   (`)[a-zA-Z_][a-zA-Z0-9_]*(`)
-Placeholder     (@)[a-zA-Z0-9_]*
+Placeholder     (@)([a-zA-Z0-9_]+)
+TAt             @
 TAdd            \+
 TMult           \*
 TMinus          \-
@@ -109,6 +117,16 @@ TGreaterEquals  >=
 {LParen} { return (int)Token.LPAREN; }
 
 {RParen} { return (int)Token.RPAREN; }
+
+{LBrace} { return (int)Token.LBRACE; }
+
+{RBrace} { return (int)Token.RBRACE; }
+
+{TLike} { return (int)Token.TLIKE; }
+
+{TILike} { return (int)Token.TILIKE; }
+
+{TDatabase} { return (int)Token.TDATABASE; }
 
 {TSelect} { return (int)Token.TSELECT; }
 
@@ -142,6 +160,10 @@ TGreaterEquals  >=
 
 {TCreate} { return (int)Token.TCREATE; }
 
+{TIf} { return (int)Token.TIF; }
+
+{TExists} { return (int)Token.TEXISTS; }
+
 {TTable} { return (int)Token.TTABLE; }
 
 {TNot} { return (int)Token.TNOT; }
@@ -152,9 +174,13 @@ TGreaterEquals  >=
 
 {TKey} { return (int)Token.TKEY; }
 
+{TDefault} { return (int)Token.TDEFAULT; }
+
 {TUnique} { return (int)Token.TUNIQUE; }
 
 {TIndex} { return (int)Token.TINDEX; }
+
+{TIndexes} { return (int)Token.TINDEXES; }
 
 {TAlter} { return (int)Token.TALTER; }
 
@@ -178,8 +204,6 @@ TGreaterEquals  >=
 
 {TTables} { return (int)Token.TTABLES; }
 
-{TDesc} { return (int)Token.TDESCRIBE; }
-
 {TDescribe} { return (int)Token.TDESCRIBE; }
 
 {TTypeObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
@@ -191,6 +215,8 @@ TGreaterEquals  >=
 {TTypeInt64} { return (int)Token.TTYPE_INT64; }
 
 {TTypeFloat64} { return (int)Token.TTYPE_FLOAT64; }
+
+{TAt} { return (int)Token.TAT; }
 
 {TAdd} { return (int)Token.TADD; }
 
@@ -204,7 +230,14 @@ TGreaterEquals  >=
 
 {TAnd} { return (int)Token.TAND; }
 
-{TOr} { return (int)Token.TOR; }
+{TOn} { return (int)Token.TON; }
+
+{TIn} { return (int)Token.TIN; }
+
+{Tor} { return (int)Token.TOR; }
+//^^
+// Error: Unknown lexical category <Tor> 
+// --------------------------------------
 
 {TEquals} { return (int)Token.TEQUALS; }
 
