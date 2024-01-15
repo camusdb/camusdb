@@ -8,6 +8,8 @@ CamusDB also provides support for dialect of SQL, making it accessible and easy 
 
 **This is an alpha project please don't use it in production.**
 
+![camus-cli](https://media.giphy.com/media/vqs2XqX5mAxC4Ln0FO/giphy.gif)
+
 Features
 --------
  - *ACID-compliant:* Ensures reliable transaction processing with Atomicity, Consistency, Isolation, and Durability. Guarantees complete success or failure of transactions, maintaining data integrity and reliability.
