@@ -16,12 +16,13 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 internal sealed class TableIndexDropper
 {
-    private void Validate(TableDescriptor table, AlterIndexTicket ticket)
+    private static void Validate(TableDescriptor table, AlterIndexTicket ticket)
     {
         if (!table.Indexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
@@ -86,29 +87,26 @@ internal sealed class TableIndexDropper
 
         try
         {
-            await database.SystemSchema.Semaphore.WaitAsync();
+            await database.SystemSchemaSemaphore.WaitAsync();
 
-            Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
+            Dictionary<string, DatabaseIndexObject> objects = database.SystemSchema.Indexes;
 
-            foreach (KeyValuePair<string, DatabaseObject> systemObject in objects)
+            foreach (KeyValuePair<string, DatabaseIndexObject> systemObject in objects)
             {
-                DatabaseObject databaseObject = systemObject.Value;
+                DatabaseIndexObject databaseObject = systemObject.Value;                
 
-                if (databaseObject.Type != DatabaseObjectType.Table)
+                if (databaseObject.Name != ticket.IndexName)
                     continue;
 
-                if (databaseObject.Name != state.Table.Name)
-                    continue;
-
-                if (databaseObject.Indexes is not null)
-                    databaseObject.Indexes.Remove(ticket.IndexName);               
+                objects.Remove(databaseObject.Id);
+                break;
             }
 
-            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema.Objects));
+            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema));
         }
         finally
         {
-            database.SystemSchema.Semaphore.Release();
+            database.SystemSchemaSemaphore.Release();
         }
 
         table.Indexes.Remove(ticket.IndexName);

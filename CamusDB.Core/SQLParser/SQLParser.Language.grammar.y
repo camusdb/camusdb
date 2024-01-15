@@ -67,6 +67,8 @@ delete_stmt : TDELETE TFROM any_identifier TWHERE condition { $$.n = new(NodeTyp
 
 create_table_stmt : TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, null, null, null, null); }
                   | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, null, null, null, null, null); }
+                  | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list { $$.n = new(NodeType.CreateTable, $3.n, $5.n, $7.n, null, null, null, null); }
+                  | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, $9.n, null, null, null, null); }
                   ;
 
 drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null); }
@@ -74,14 +76,14 @@ drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $
 
 alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, $6.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type create_table_constraint { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, $8.n, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type create_table_field_constraint { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, $8.n, null, null, null); }
 				 | TALTER TTABLE any_identifier TDROP any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $5.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TCOLUMN any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $6.n, null, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TINDEX any_identifier LPAREN any_identifier RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $3.n, $6.n, $8.n, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TUNIQUE any_identifier LPAREN any_identifier RPAREN { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $6.n, $8.n, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TUNIQUE TINDEX any_identifier LPAREN any_identifier RPAREN { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $7.n, $9.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TINDEX any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $3.n, $6.n, $8.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TUNIQUE any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $6.n, $8.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TUNIQUE TINDEX any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $7.n, $9.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TINDEX any_identifier { $$.n = new(NodeType.AlterTableDropIndex, $3.n, $6.n, null, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TPRIMARY TKEY LPAREN any_identifier RPAREN { $$.n = new(NodeType.AlterTableAddPrimaryKey, $3.n, $8.n, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddPrimaryKey, $3.n, $8.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TPRIMARY TKEY { $$.n = new(NodeType.AlterTableDropPrimaryKey, $3.n, null, null, null, null, null, null); }
 				 ;
 
@@ -94,7 +96,16 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TINDEXES TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null); }
           ;
 
-select_table : any_identifier  { $$.n = $1.n; $$.s = $1.s; }
+identifier_index_list : identifier_index_list TCOMMA identifier_index { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null); }
+                      | identifier_index { $$.n = $1.n; $$.s = $1.s; }
+                      ;
+
+identifier_index : any_identifier { $$.n = $1.n; $$.s = $1.s; }
+                 | any_identifier TASC { $$.n = new(NodeType.IndexIdentifierAsc, $1.n, null, null, null, null, null, null); }
+                 | any_identifier TDESC { $$.n = new(NodeType.IndexIdentifierDesc, $1.n, null, null, null, null, null, null); }
+                 ;
+
+select_table : any_identifier { $$.n = $1.n; $$.s = $1.s; }
              | any_identifier TAT LBRACE identifier TEQUALS identifier RBRACE { $$.n = new(NodeType.IdentifierWithOpts, $1.n, $4.n, $6.n, null, null, null, null); }
              ;
 
@@ -103,14 +114,17 @@ create_table_item_list : create_table_item_list TCOMMA create_table_item { $$.n 
                        ;
 
 create_table_item : any_identifier field_type { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, null, null, null, null, null); }
-                  | any_identifier field_type create_table_constraint_list { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, $3.n, null, null, null, null); }
+                  | any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, $3.n, null, null, null, null); }
                   ;
 
-create_table_constraint_list : create_table_constraint_list create_table_constraint { $$.n = new(NodeType.CreateTableConstraintList, $1.n, $2.n, null, null, null, null, null); }
-							 | create_table_constraint { $$.n = $1.n; $$.s = $1.s; }
-							 ;
+create_table_constraint_list : TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $4.n, null, null, null, null, null, null); }
+                             ;
 
-create_table_constraint : TNULL { $$.n = new(NodeType.ConstraintNull, null, null, null, null, null, null, null); }
+create_table_field_constraint_list : create_table_field_constraint_list create_table_field_constraint { $$.n = new(NodeType.CreateTableFieldConstraintList, $1.n, $2.n, null, null, null, null, null); }
+                                   | create_table_field_constraint { $$.n = $1.n; $$.s = $1.s; }
+                                   ;
+
+create_table_field_constraint : TNULL { $$.n = new(NodeType.ConstraintNull, null, null, null, null, null, null, null); }
                         | TNOT TNULL { $$.n = new(NodeType.ConstraintNotNull, null, null, null, null, null, null, null); }
 						| TPRIMARY TKEY { $$.n = new(NodeType.ConstraintPrimaryKey, null, null, null, null, null, null, null); }
                         | TUNIQUE { $$.n = new(NodeType.ConstraintUnique, null, null, null, null, null, null, null); }

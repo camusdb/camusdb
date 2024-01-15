@@ -73,16 +73,13 @@ public class TestExecuteSqlCreateTable
         Assert.AreEqual("id", tableSchema.Columns![0].Name);
         Assert.AreEqual(ColumnType.Id, tableSchema.Columns![0].Type);
         Assert.True(tableSchema.Columns![0].NotNull);
-        Assert.True(tableSchema.Columns![0].Primary);
 
         Assert.AreEqual("name", tableSchema.Columns![1].Name);
         Assert.AreEqual(ColumnType.String, tableSchema.Columns![1].Type);
-        Assert.False(tableSchema.Columns![1].Primary);
         Assert.True(tableSchema.Columns![1].NotNull);
 
         Assert.AreEqual("year", tableSchema.Columns![2].Name);
         Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![2].Type);
-        Assert.False(tableSchema.Columns![2].Primary);
         Assert.True(tableSchema.Columns![2].NotNull);
 
         ExecuteSQLTicket queryTicket = new(
@@ -119,12 +116,10 @@ public class TestExecuteSqlCreateTable
         Assert.AreEqual("id", tableSchema.Columns![0].Name);
         Assert.AreEqual(ColumnType.Id, tableSchema.Columns![0].Type);
         Assert.True(tableSchema.Columns![0].NotNull);
-        Assert.True(tableSchema.Columns![0].Primary);
 
         Assert.AreEqual("name", tableSchema.Columns![1].Name);
         Assert.AreEqual(ColumnType.String, tableSchema.Columns![1].Type);
         Assert.AreEqual(0, (new ColumnValue(ColumnType.String, "hello")).CompareTo(tableSchema.Columns![1].DefaultValue));
-        Assert.False(tableSchema.Columns![1].Primary);
         Assert.False(tableSchema.Columns![1].NotNull);
 
         ExecuteSQLTicket queryTicket = new(
@@ -161,12 +156,10 @@ public class TestExecuteSqlCreateTable
         Assert.AreEqual("id", tableSchema.Columns![0].Name);
         Assert.AreEqual(ColumnType.Id, tableSchema.Columns![0].Type);
         Assert.True(tableSchema.Columns![0].NotNull);
-        Assert.True(tableSchema.Columns![0].Primary);
 
         Assert.AreEqual("name", tableSchema.Columns![1].Name);
         Assert.AreEqual(ColumnType.String, tableSchema.Columns![1].Type);
         Assert.AreEqual(0, (new ColumnValue(ColumnType.String, "hello")).CompareTo(tableSchema.Columns![1].DefaultValue));
-        Assert.False(tableSchema.Columns![1].Primary);
         Assert.False(tableSchema.Columns![1].NotNull);
 
         ExecuteSQLTicket queryTicket = new(
@@ -185,5 +178,48 @@ public class TestExecuteSqlCreateTable
         );
 
         Assert.IsFalse(await executor.ExecuteDDLSQL(createTableTicket));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteCreateTableConstraints()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+
+        ExecuteSQLTicket createTableTicket = new(
+            database: dbname,
+            sql: "CREATE TABLE robots (id OID NOT NULL, name STRING NOT NULL, year INT64 NOT NULL) PRIMARY KEY (id)",
+            parameters: null
+        );
+
+        Assert.IsTrue(await executor.ExecuteDDLSQL(createTableTicket));
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
+
+        Assert.AreEqual("robots", tableSchema.Name);
+        Assert.AreEqual(0, tableSchema.Version);
+
+        Assert.AreEqual(3, tableSchema.Columns!.Count);
+
+        Assert.AreEqual("id", tableSchema.Columns![0].Name);
+        Assert.AreEqual(ColumnType.Id, tableSchema.Columns![0].Type);
+        Assert.True(tableSchema.Columns![0].NotNull);
+
+        Assert.AreEqual("name", tableSchema.Columns![1].Name);
+        Assert.AreEqual(ColumnType.String, tableSchema.Columns![1].Type);
+        Assert.True(tableSchema.Columns![1].NotNull);
+
+        Assert.AreEqual("year", tableSchema.Columns![2].Name);
+        Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![2].Type);
+        Assert.True(tableSchema.Columns![2].NotNull);
+
+        ExecuteSQLTicket queryTicket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        Assert.IsEmpty(result);
     }
 }

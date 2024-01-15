@@ -1,7 +1,9 @@
 ﻿
 using NUnit.Framework;
 
+using System;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
@@ -9,7 +11,6 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using System.Collections.Generic;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 
@@ -25,7 +26,7 @@ internal sealed class TestTableDropper
 
     private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupDatabase()
     {
-        string dbname = System.Guid.NewGuid().ToString("n");
+        string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
@@ -47,14 +48,19 @@ internal sealed class TestTableDropper
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket createTicket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
             new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("year", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );

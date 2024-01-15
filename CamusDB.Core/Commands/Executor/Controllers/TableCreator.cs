@@ -25,25 +25,33 @@ internal sealed class TableCreator
         catalogs = catalogsManager;
     }
 
-    public async Task<bool> Create(DatabaseDescriptor database, CreateTableTicket ticket)
+    public async Task<bool> Create(
+        QueryExecutor queryExecutor,
+        TableOpener tableOpener,
+        TableIndexAlterer tableIndexAlterer,
+        DatabaseDescriptor database,
+        CreateTableTicket ticket
+    )
     {
-        if (ticket.IfNotExists && database.SystemSchema.Objects.ContainsKey(ticket.TableName))
+        if (ticket.IfNotExists && database.SystemSchema.Tables.ContainsKey(ticket.TableName))
             return false;
 
         TableSchema tableSchema = await catalogs.CreateTable(database, ticket);
 
         await SetInitialTablePages(database, tableSchema);
 
+        await AddConstraints(queryExecutor, tableOpener, tableIndexAlterer, database, ticket);
+
         return true;
     }
 
-    private async Task SetInitialTablePages(DatabaseDescriptor database, TableSchema tableSchema)
+    private static async Task SetInitialTablePages(DatabaseDescriptor database, TableSchema tableSchema)
     {
         try
         {
-            await database.SystemSchema.Semaphore.WaitAsync();
+            await database.SystemSchemaSemaphore.WaitAsync();
 
-            Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
+            Dictionary<string, DatabaseTableObject> tables = database.SystemSchema.Tables;
 
             BufferPoolManager tablespace = database.BufferPool;
 
@@ -51,56 +59,95 @@ internal sealed class TableCreator
 
             ObjectIdValue pageOffset = tablespace.GetNextFreeOffset();
 
-            DatabaseObject databaseObject = new()
-            {
-                Type = DatabaseObjectType.Table,
-                Id = tablespace.GetNextFreeOffset().ToString(),
-                Name = tableName,
-                StartOffset = pageOffset.ToString(),
-                Indexes = new()
-            };
+            DatabaseTableObject tableObject = new(            
+                type: DatabaseObjectType.Table,
+                id: tableSchema.Id ?? "",
+                name: tableName,
+                startOffset:  pageOffset.ToString()
+            );
 
-            foreach (TableColumnSchema column in tableSchema.Columns!)
-            {
-                if (column.Primary)
-                {
-                    ObjectIdValue indexId = tablespace.GetNextFreeOffset();
-                    ObjectIdValue indexPageOffset = tablespace.GetNextFreeOffset();
+            tables.Add(tableObject.Id, tableObject);
 
-                    Console.WriteLine("Primary key for {0} added to system, staring at {1}", tableName, indexPageOffset);
-
-                    databaseObject.Indexes.Add(
-                        CamusDBConfig.PrimaryKeyInternalName,
-                        new DatabaseIndexObject(indexId.ToString(), new string[] { column.Id }, IndexType.Unique, indexPageOffset.ToString())
-                    );
-                    continue;
-                }
-
-                if (column.Index != IndexType.None)
-                {
-                    ObjectIdValue indexId = tablespace.GetNextFreeOffset();
-                    ObjectIdValue indexPageOffset = tablespace.GetNextFreeOffset();
-
-                    Console.WriteLine("Index {0}/{1} key for {2} added to system, staring at {3}", column.Name, column.Index, tableName, indexPageOffset);
-
-                    databaseObject.Indexes.Add(
-                        column.Name + "_idx",
-                        new DatabaseIndexObject(indexId.ToString(), new string[] { column.Id }, column.Index, indexPageOffset.ToString())
-                    );
-                    continue;
-                }
-            }
-
-            objects.Add(tableName, databaseObject);
-
-            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema.Objects));
+            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema));
 
             Console.WriteLine("Added table {0} to system, data table staring at {1}", tableName, pageOffset);
         }
         finally
         {
-            database.SystemSchema.Semaphore.Release();
+            database.SystemSchemaSemaphore.Release();
+        }
+    }
+
+    private static async Task AddConstraints(
+        QueryExecutor queryExecutor,
+        TableOpener tableOpener,
+        TableIndexAlterer tableIndexAlterer,
+        DatabaseDescriptor database,
+        CreateTableTicket ticket
+    )
+    {
+        if (ticket.Constraints.Length == 0)
+            return;
+
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+
+        for (int i = 0; i < ticket.Constraints.Length; i++)
+        {
+            ConstraintInfo constraint = ticket.Constraints[i];
+
+            switch (constraint.Type)
+            {
+                case ConstraintType.PrimaryKey:
+                    {
+                        AlterIndexTicket indexTicket = new(
+                            txnId: ticket.TxnId,
+                            databaseName: database.Name,
+                            tableName: ticket.TableName,
+                            indexName: constraint.Name,
+                            columnName: constraint.Columns[0].Name,
+                            operation: AlterIndexOperation.AddPrimaryKey
+                        );
+
+                        await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
+                    }
+                    break;
+
+                case ConstraintType.IndexMulti:
+                    {
+                        AlterIndexTicket indexTicket = new(
+                            txnId: ticket.TxnId,
+                            databaseName: database.Name,
+                            tableName: ticket.TableName,
+                            indexName: constraint.Name,
+                            columnName: constraint.Columns[0].Name,
+                            operation: AlterIndexOperation.AddIndex
+                        );
+
+                        await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
+                    }
+                    break;
+
+                case ConstraintType.IndexUnique:
+                    {
+                        AlterIndexTicket indexTicket = new(
+                            txnId: ticket.TxnId,
+                            databaseName: database.Name,
+                            tableName: ticket.TableName,
+                            indexName: constraint.Name,
+                            columnName: constraint.Columns[0].Name,
+                            operation: AlterIndexOperation.AddUniqueIndex
+                        );
+
+                        await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
+                    }
+                    break;
+
+                default:
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        "Unknown constraint: " + constraint.Type
+                    );
+            }
         }
     }
 }
-

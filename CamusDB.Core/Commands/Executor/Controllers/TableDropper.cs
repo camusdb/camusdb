@@ -72,18 +72,18 @@ internal sealed class TableDropper
 
         try
         {
-            await database.SystemSchema.Semaphore.WaitAsync();
+            await database.SystemSchemaSemaphore.WaitAsync();
 
-            Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
+            Dictionary<string, DatabaseTableObject> objects = database.SystemSchema.Tables;
 
-            if (database.SystemSchema.Objects.Remove(ticket.TableName))
+            if (database.SystemSchema.Tables.Remove(table.Id))
                 Console.WriteLine("Removed table {0} from system schema", ticket.TableName);
 
-            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema.Objects));
+            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema));
         }
         finally
         {
-            database.SystemSchema.Semaphore.Release();
+            database.SystemSchemaSemaphore.Release();
         }
 
         Console.WriteLine("Dropped table {0}", ticket.TableName);

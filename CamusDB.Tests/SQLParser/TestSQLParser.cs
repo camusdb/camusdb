@@ -822,6 +822,54 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSimpleCreateTableMultiConstraints3()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE `some_table` (\n`id` INT64 NOT NULL,\n`name` INT64 UNIQUE NOT NULL, `year` INT64 NULL) PRIMARY KEY (`id`)");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableMultiConstraints4()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE `some_table` (\n`id` INT64 NOT NULL,\n`name` INT64 UNIQUE NOT NULL, `year` INT64 NULL) PRIMARY KEY (`id`, `name`)");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableMultiConstraints5()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE `some_table` (\n`id` INT64 NOT NULL,\n`name` INT64 UNIQUE NOT NULL, `year` INT64 NULL) PRIMARY KEY (`id` DESC)");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleCreateTableMultiConstraints6()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE `some_table` (\n`id` INT64 NOT NULL,\n`name` INT64 UNIQUE NOT NULL, `year` INT64 NULL) PRIMARY KEY (`id` ASC, `name` ASC)");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+    }
+
+    [Test]
     public void TestParseSimpleCreateTableDefault1()
     {
         NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE some_table ( id INT64 NOT NULL, name INT64 DEFAULT (100))");
@@ -985,6 +1033,57 @@ public class TestSQLParser
         Assert.AreEqual("year_index", ast.rightAst!.yytext);
         Assert.AreEqual("year", ast.extendedOne!.yytext);
     }
+
+    [Test]
+    public void TestParseSimpleAlterTable11()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD PRIMARY KEY (`usersId`, `id`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddPrimaryKey, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual(NodeType.IndexIdentifierList, ast.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable12()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD INDEX `usersid_idx` (`usersId`, `id`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddIndex, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("usersid_idx", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.IndexIdentifierList, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable13()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD UNIQUE INDEX `usersid_idx` (`usersId`, `id`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddUniqueIndex, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("usersid_idx", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.IndexIdentifierList, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable14()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD UNIQUE `usersid_idx` (`usersId`, `id`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddUniqueIndex, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("usersid_idx", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.IndexIdentifierList, ast.extendedOne!.nodeType);
+    }    
 
     [Test]
     public void TestParseShowDatabase()

@@ -12,9 +12,9 @@ public readonly struct QueryOrderBy
 {
     public string ColumnName { get; }
 
-    public QueryOrderByType Type { get; }
+    public OrderType Type { get; }
 
-    public QueryOrderBy(string columnName, QueryOrderByType type)
+    public QueryOrderBy(string columnName, OrderType type)
 	{
         ColumnName = columnName;
         Type = type;

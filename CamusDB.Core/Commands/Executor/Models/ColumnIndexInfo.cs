@@ -8,9 +8,15 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public sealed class SystemSchema
-{    
-    public Dictionary<string, DatabaseTableObject> Tables { get; set; } = new();
+public sealed class ColumnIndexInfo
+{
+    public string Name { get; }
 
-    public Dictionary<string, DatabaseIndexObject> Indexes { get; set; } = new();
+    public OrderType Order { get; }
+
+    public ColumnIndexInfo(string name, OrderType order)
+	{
+        Name = name;
+        Order = order;
+	}
 }

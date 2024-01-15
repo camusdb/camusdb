@@ -19,7 +19,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// </summary>
 internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
 {
-    internal CreateTableTicket CreateCreateTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    internal async Task<CreateTableTicket> CreateCreateTableTicket(
+        CommandExecutor commandExecutor,
+        ExecuteSQLTicket ticket,
+        NodeAst ast
+    )
     {
         if (ast.leftAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing table name");
@@ -29,14 +33,109 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         if (ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing create table fields list");
 
-        LinkedList<ColumnInfo> columnInfos = new();
+        List<ColumnInfo> columnInfos = new();
+        List<ConstraintInfo> constraintInfos = new();
 
         GetCreateTableFieldList(ast.rightAst, columnInfos);
 
-        return new(ticket.DatabaseName, tableName, columnInfos.ToArray(), ifNotExists: ast.nodeType == NodeType.CreateTableIfNotExists);
+        GetCreateTableConstraintList(ast.extendedOne, constraintInfos);
+
+        GetCreateTableConstraintFromFieldList(ast.rightAst, constraintInfos);
+
+        return new(
+            txnId: await commandExecutor.NextTxnId(),
+            databaseName: ticket.DatabaseName,
+            tableName: tableName,
+            columns: columnInfos.ToArray(),
+            constraints: constraintInfos.ToArray(),
+            ifNotExists: ast.nodeType == NodeType.CreateTableIfNotExists
+        );
     }
 
-    private static void GetCreateTableFieldList(NodeAst fieldList, LinkedList<ColumnInfo> allFieldLists)
+    private static void GetCreateTableConstraintList(NodeAst? constraintList, List<ConstraintInfo> constraintInfos)
+    {
+        if (constraintList is null)
+            return;
+
+        if (constraintList.nodeType == NodeType.CreateTableConstraintPrimaryKey)
+        {
+            List<ColumnIndexInfo> columnIndexInfos = new();
+            GetIndexColumnList(constraintList.leftAst, columnIndexInfos);
+            ConstraintInfo constraintInfo = new(ConstraintType.PrimaryKey, CamusDBConfig.PrimaryKeyInternalName, columnIndexInfos.ToArray());
+            constraintInfos.Add(constraintInfo);
+            return;
+        }
+
+        if (constraintList.nodeType == NodeType.CreateTableConstraintPrimaryKey)
+        {
+            List<ColumnIndexInfo> columnIndexInfos = new();
+            GetIndexColumnList(constraintList.leftAst, columnIndexInfos);
+            ConstraintInfo constraintInfo = new(ConstraintType.PrimaryKey, CamusDBConfig.PrimaryKeyInternalName, columnIndexInfos.ToArray());
+            constraintInfos.Add(constraintInfo);
+            return;
+        }
+
+        if (constraintList.nodeType == NodeType.CreateTableConstraintList)
+        {
+            if (constraintList.leftAst != null)
+                GetCreateTableConstraintList(constraintList.leftAst, constraintInfos);
+
+            if (constraintList.rightAst != null)
+                GetCreateTableConstraintList(constraintList.rightAst, constraintInfos);
+
+            return;
+        }
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid create table field list");
+    }
+
+    /// <summary>
+    /// Returns the list of 
+    /// </summary>
+    /// <param name="leftAst"></param>
+    /// <returns></returns>
+    private static void GetIndexColumnList(NodeAst? leftAst, List<ColumnIndexInfo> indexColumns)
+    {
+        if (leftAst is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid field list in constraint");
+
+        if (leftAst.nodeType == NodeType.Identifier)
+        {
+            indexColumns.Add(new ColumnIndexInfo(leftAst.yytext!, OrderType.Ascending));
+            return;
+        }
+
+        if (leftAst.nodeType == NodeType.IndexIdentifierAsc)
+        {
+            indexColumns.Add(new ColumnIndexInfo(leftAst.yytext!, OrderType.Ascending));
+            return;
+        }
+
+        if (leftAst.nodeType == NodeType.IndexIdentifierDesc)
+        {
+            indexColumns.Add(new ColumnIndexInfo(leftAst.yytext!, OrderType.Descending));
+            return;
+        }
+
+        if (leftAst.nodeType == NodeType.IndexIdentifierList)
+        {
+            if (leftAst.leftAst != null)
+                GetIndexColumnList(leftAst.leftAst, indexColumns);
+
+            if (leftAst.rightAst != null)
+                GetIndexColumnList(leftAst.rightAst, indexColumns);
+        }
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid index column field list");
+    }
+
+    /// <summary>
+    /// Returns the list of fields that make up the table
+    /// </summary>
+    /// <param name="fieldList"></param>
+    /// <param name="allFieldLists"></param>
+    /// <exception cref="CamusDBException"></exception>
+    private static void GetCreateTableFieldList(NodeAst fieldList, List<ColumnInfo> allFieldLists)
     {
         if (fieldList.nodeType == NodeType.CreateTableItem)
         {
@@ -47,18 +146,16 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing field type");
 
             if (fieldList.extendedOne != null)
-            {                
-                LinkedList<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
+            {
+                List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
 
                 GetCreateTableItemConstraintList(fieldList.extendedOne, constraintTypes);
 
-                allFieldLists.AddLast(
+                allFieldLists.Add(
                     new ColumnInfo(
                         name: fieldList.leftAst.yytext! ?? "",
                         type: GetColumnType(fieldList.rightAst),
-                        primary: constraintTypes.Any(x => x.type == ColumnConstraintType.PrimaryKey),
                         notNull: constraintTypes.Any(x => x.type == ColumnConstraintType.NotNull),
-                        index: IndexType.None,
                         defaultValue: GetDefaultValue(constraintTypes)
                     )
                 );
@@ -66,7 +163,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 return;
             }
 
-            allFieldLists.AddLast(new ColumnInfo(fieldList.leftAst.yytext! ?? "", GetColumnType(fieldList.rightAst)));
+            allFieldLists.Add(new ColumnInfo(fieldList.leftAst.yytext! ?? "", GetColumnType(fieldList.rightAst)));
             return;
         }
 
@@ -84,7 +181,12 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid create table field list");
     }
 
-    private static ColumnValue? GetDefaultValue(LinkedList<(ColumnConstraintType type, ColumnValue? value)> constraintTypes)
+    /// <summary>
+    /// Returns the default value as ColumnValue
+    /// </summary>
+    /// <param name="constraintTypes"></param>
+    /// <returns></returns>
+    private static ColumnValue? GetDefaultValue(List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes)
     {
         foreach ((ColumnConstraintType type, ColumnValue? value) in constraintTypes)
         {
@@ -95,6 +197,12 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         return null;
     }
 
+    /// <summary>
+    /// Get the column type as a ColumnType enum value
+    /// </summary>
+    /// <param name="nodeAst"></param>
+    /// <returns></returns>
+    /// <exception cref="CamusDBException"></exception>
     private static ColumnType GetColumnType(NodeAst nodeAst)
     {
         if (nodeAst.nodeType == NodeType.TypeInteger64)
@@ -109,33 +217,39 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown field type: " + nodeAst.nodeType);
     }
 
-    private static void GetCreateTableItemConstraintList(NodeAst constraintsList, LinkedList<(ColumnConstraintType, ColumnValue?)> constraintTypes)
+    /// <summary>
+    /// Creates a list of table field constraints
+    /// </summary>
+    /// <param name="constraintsList"></param>
+    /// <param name="constraintTypes"></param>
+    /// <exception cref="CamusDBException"></exception>
+    private static void GetCreateTableItemConstraintList(NodeAst constraintsList, List<(ColumnConstraintType, ColumnValue?)> constraintTypes)
     {
         if (constraintsList.nodeType == NodeType.ConstraintNotNull)
         {
-            constraintTypes.AddLast((ColumnConstraintType.NotNull, null));
+            constraintTypes.Add((ColumnConstraintType.NotNull, null));
             return;
         }
 
         if (constraintsList.nodeType == NodeType.ConstraintNull)
         {
-            constraintTypes.AddLast((ColumnConstraintType.Null, null));
+            constraintTypes.Add((ColumnConstraintType.Null, null));
             return;
         }
 
         if (constraintsList.nodeType == NodeType.ConstraintPrimaryKey)
         {
-            constraintTypes.AddLast((ColumnConstraintType.PrimaryKey, null));
+            constraintTypes.Add((ColumnConstraintType.PrimaryKey, null));
             return;
         }
 
         if (constraintsList.nodeType == NodeType.ConstraintDefault)
         {
-            constraintTypes.AddLast((ColumnConstraintType.Default, SqlExecutor.EvalExpr(constraintsList.leftAst!, new(), null)));
+            constraintTypes.Add((ColumnConstraintType.Default, SqlExecutor.EvalExpr(constraintsList.leftAst!, new(), null)));
             return;
         }
 
-        if (constraintsList.nodeType == NodeType.CreateTableConstraintList)
+        if (constraintsList.nodeType == NodeType.CreateTableFieldConstraintList)
         {
             if (constraintsList.leftAst != null)
                 GetCreateTableItemConstraintList(constraintsList.leftAst, constraintTypes);
@@ -147,5 +261,53 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         }
 
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid constraint type found: " + constraintsList.nodeType);
+    }
+
+    private static void GetCreateTableConstraintFromFieldList(NodeAst fieldList, List<ConstraintInfo> constraintInfos)
+    {
+        if (fieldList.nodeType == NodeType.CreateTableItem)
+        {
+            if (fieldList.leftAst is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing field name");
+
+            if (fieldList.rightAst is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing field type");
+
+            if (fieldList.extendedOne != null)
+            {
+                List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
+
+                GetCreateTableItemConstraintList(fieldList.extendedOne, constraintTypes);
+
+                foreach ((ColumnConstraintType type, ColumnValue? _) in constraintTypes)
+                {
+                    if (type == ColumnConstraintType.PrimaryKey)
+                    {
+                        ConstraintInfo constraintInfo = new(
+                            ConstraintType.PrimaryKey,
+                            CamusDBConfig.PrimaryKeyInternalName,
+                            new ColumnIndexInfo[] { new(name: fieldList.leftAst.yytext! ?? "", OrderType.Ascending) }
+                        );
+
+                        constraintInfos.Add(constraintInfo);
+                    }
+                }
+            }
+
+            return;
+        }
+
+        if (fieldList.nodeType == NodeType.CreateTableItemList)
+        {
+            if (fieldList.leftAst != null)
+                GetCreateTableConstraintFromFieldList(fieldList.leftAst, constraintInfos);
+
+            if (fieldList.rightAst != null)
+                GetCreateTableConstraintFromFieldList(fieldList.rightAst, constraintInfos);
+
+            return;
+        }
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid create table field list");
     }
 }

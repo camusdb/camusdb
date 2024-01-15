@@ -13,7 +13,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class CreateTableValidator : ValidatorBase
-{    
+{
     public void Validate(CreateTableTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))
@@ -46,7 +46,6 @@ internal sealed class CreateTableValidator : ValidatorBase
                 "Table requires at least one column"
             );
 
-        ColumnInfo? primaryKey = null;
         HashSet<string> existingColumns = new();
 
         for (int i = 0; i < ticket.Columns.Length; i++)
@@ -76,20 +75,22 @@ internal sealed class CreateTableValidator : ValidatorBase
                     CamusDBErrorCodes.InvalidInput,
                     "Column type cannot be null"
                 );
+        }
 
-            if (columnInfo.Primary)
+        bool havePrimaryKey = false;
+
+        for (int i = 0; i < ticket.Constraints.Length; i++)
+        {
+            ConstraintInfo constraint = ticket.Constraints[i];
+
+            if (constraint.Type == ConstraintType.PrimaryKey)
             {
-                if (primaryKey != null)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.DuplicatePrimaryKey,
-                        "Multiple primary key defined"
-                    );
-
-                primaryKey = columnInfo;
+                havePrimaryKey = true;
+                break;
             }
         }
 
-        if (primaryKey is null)
+        if (!havePrimaryKey)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 "A primary key column is mandatory in the table"

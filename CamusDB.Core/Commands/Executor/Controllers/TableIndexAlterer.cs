@@ -31,23 +31,23 @@ internal sealed class TableIndexAlterer
         return ticket.Operation switch
         {
             AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey 
-                => await AddIndex(queryExecutor, database, table, ticket),
+                => await AddIndex(catalogs, queryExecutor, database, table, ticket),
                 
             AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey
-                => await DropIndex(queryExecutor, database, table, ticket),
+                => await DropIndex(catalogs, queryExecutor, database, table, ticket),
 
             _ => 
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid alter table operation"),
         };
     }
 
-    private async Task<bool> AddIndex(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
+    private async Task<bool> AddIndex(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
     {        
-        await tableIndexAdder.AddIndex(queryExecutor, database, table, ticket);
+        await tableIndexAdder.AddIndex(catalogs, queryExecutor, database, table, ticket);
         return true;
     }
 
-    private async Task<bool> DropIndex(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
+    private async Task<bool> DropIndex(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
     {
         await tableIndexDropper.DropIndex(queryExecutor, database, table, ticket);
         return true;

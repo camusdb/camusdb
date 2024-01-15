@@ -1,13 +1,12 @@
 ﻿
-
-
-using CamusDB.Core.CommandsExecutor.Models;
 /**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
  */
+
+using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.Catalogs.Models;
 
@@ -29,19 +28,9 @@ public sealed class TableColumnSchema
     public ColumnType Type { get; }
 
     /// <summary>
-    /// If true, the column is part of the primary key
-    /// </summary>
-    public bool Primary { get; }
-
-    /// <summary>
     /// If true, the column cannot be null
     /// </summary>
     public bool NotNull { get; }
-
-    /// <summary>
-    /// The type of index on the column
-    /// </summary>
-    public IndexType Index { get; }
 
     /// <summary>
     /// The default value of the column (optional)
@@ -52,18 +41,14 @@ public sealed class TableColumnSchema
         string id,
         string name,
         ColumnType type,
-        bool primary,
         bool notNull,
-        IndexType index,
         ColumnValue? defaultValue
     )
     {
         Id = id;
         Name = name;
         Type = type;
-        Primary = primary;
         NotNull = notNull;
-        Index = index;
         DefaultValue = defaultValue;
     }
 }

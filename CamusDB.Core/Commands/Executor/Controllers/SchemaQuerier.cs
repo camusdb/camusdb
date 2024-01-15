@@ -55,11 +55,21 @@ internal sealed class SchemaQuerier
                 { "Field", new ColumnValue(ColumnType.String, column.Name) },
                 { "Type", new ColumnValue(ColumnType.String, column.Type.ToString()) },
                 { "Null", new ColumnValue(ColumnType.String, column.NotNull ? "NO" : "YES") },
-                { "Key", new ColumnValue(ColumnType.String, column.Primary ? "KEY" : "") },
+                { "Key", new ColumnValue(ColumnType.String, IsPrimary(column.Name, table.Indexes) ? "PRI" : "") },
                 { "Default", GetDefaultValue(column) },
                 { "Extra", new ColumnValue(ColumnType.String, "") },
             });
         }
+    }
+
+    private static bool IsPrimary(string name, Dictionary<string, TableIndexSchema> indexes)
+    {
+        foreach (KeyValuePair<string, TableIndexSchema> kv in indexes)
+        {
+            if (kv.Key == CamusDBConfig.PrimaryKeyInternalName && kv.Value.Columns.Contains(name))
+                return true;
+        }
+        return false;
     }
 
     private static ColumnValue GetDefaultValue(TableColumnSchema column)
@@ -162,8 +172,8 @@ internal sealed class SchemaQuerier
 
     private static string GetSQLConstraint(TableColumnSchema column)
     {
-        if (column.Primary)
-            return "PRIMARY KEY";
+        //if (column.Primary)
+        //    return "PRIMARY KEY";
 
         if (column.NotNull)
             return "NOT NULL";

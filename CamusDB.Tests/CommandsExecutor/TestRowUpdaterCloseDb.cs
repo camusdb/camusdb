@@ -8,6 +8,8 @@
 
 using NUnit.Framework;
 
+using System;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
@@ -19,7 +21,6 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
-using System.Linq;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -33,7 +34,7 @@ public class TestRowUpdaterCloseDb
 
     private static async Task<(string, CommandExecutor)> SetupDatabase()
     {
-        string dbname = System.Guid.NewGuid().ToString("n");
+        string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
@@ -55,14 +56,19 @@ public class TestRowUpdaterCloseDb
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
             new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("year", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );

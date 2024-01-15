@@ -74,10 +74,8 @@ public sealed class CreateTableController : CommandsController
             columnInfos[i++] = new ColumnInfo(
                 name: column.Name ?? "",
                 type: GetColumnType(column.Type),
-                primary: column.Primary,
                 notNull: column.NotNull,
-                index: GetIndexType(column.Index),
-                defaultValue: null
+                defaultValue: column.DefaultValue
             );
         }
 
@@ -98,13 +96,16 @@ public sealed class CreateTableController : CommandsController
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "CreateTable request is not valid");
 
             CreateTableTicket ticket = new(
+                txnId: await executor.NextTxnId(),
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 columns: GetColumnInfos(request.Columns),
+                constraints: Array.Empty<ConstraintInfo>(),
                 ifNotExists: request.IfNotExists
             );
 
             await executor.CreateTable(ticket);
+
             return new JsonResult(new CreateTableResponse("ok"));
         }
         catch (CamusDBException e)

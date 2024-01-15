@@ -15,7 +15,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
 {
-    internal async Task<InsertTicket> CreateInsertTicket(CommandExecutor commandExecutor, DatabaseDescriptor database, ExecuteSQLTicket ticket, NodeAst ast)
+    internal async Task<InsertTicket> CreateInsertTicket(
+        CommandExecutor commandExecutor,
+        DatabaseDescriptor database,
+        ExecuteSQLTicket ticket,
+        NodeAst ast
+    )
     {
         if (ast.leftAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing table name");
@@ -25,30 +30,24 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         // If the fields are not provided, we consult them from the latest version of the schema.
         TableDescriptor table = await commandExecutor.OpenTable(new(database.Name, tableName));
 
-        List<string> fields;
+        List<string> fields = new();
 
         if (ast.rightAst is null)
         {
-            fields = new();
-
             foreach (TableColumnSchema column in table.Schema.Columns!)
                 fields.Add(column.Name);
         }
         else
         {
-            LinkedList<string> fieldListLinked = new();
-
-            GetIdentifierList(ast.rightAst, fieldListLinked);
-
-            fields = fieldListLinked.ToList();
+            GetIdentifierList(ast.rightAst, fields);
         }
 
         if (ast.extendedOne is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing or empty values list");
 
-        LinkedList<ColumnValue?> valuesList = new();
-        Dictionary<string, ColumnValue> rowReference = new();        
-        
+        List<ColumnValue?> valuesList = new();
+        Dictionary<string, ColumnValue> rowReference = new();
+
         GetValuesList(table, ast.extendedOne, rowReference, ticket.Parameters, valuesList);
 
         if (fields.Count != valuesList.Count)
@@ -62,13 +61,13 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
 
             if (columnValue is not null)
                 values.Add(fields[i], columnValue);
-            else                            
+            else
                 values.Add(fields[i], GetDefaultValue(table.Schema.Columns, fields[i]));
         }
 
         // Try to include any missing field with its default value if available
         if (values.Count != table.Schema.Columns!.Count)
-        {            
+        {
             foreach (TableColumnSchema column in table.Schema.Columns!)
             {
                 if (!values.ContainsKey(column.Name) && column.DefaultValue is not null)
@@ -93,17 +92,17 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
                 if (column.DefaultValue is not null)
                     return column.DefaultValue;
             }
-        }   
+        }
 
         return new ColumnValue(ColumnType.Null, "");
     }
 
     private static void GetValuesList(
-        TableDescriptor table,        
+        TableDescriptor table,
         NodeAst valuesListAst,
         Dictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
-        LinkedList<ColumnValue?> valuesList
+        List<ColumnValue?> valuesList
     )
     {
         if (valuesListAst.nodeType == NodeType.ExprList)
@@ -118,13 +117,13 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         }
 
         // DEFAULT expression must be evaluated at a later stage when we know the position of the value in the field list
-        if (valuesListAst.nodeType == NodeType.ExprDefault) 
+        if (valuesListAst.nodeType == NodeType.ExprDefault)
         {
             ColumnValue? defaultValue = null;
-            valuesList.AddLast(defaultValue);
+            valuesList.Add(defaultValue);
             return;
         }
 
-        valuesList.AddLast(EvalExpr(valuesListAst, row, parameters));
+        valuesList.Add(EvalExpr(valuesListAst, row, parameters));
     }
 }

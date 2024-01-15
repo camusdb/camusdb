@@ -36,7 +36,7 @@ public sealed class RowUpdater
     /// <param name="columns"></param>
     /// <param name="columnName"></param>
     /// <exception cref="CamusDBException"></exception>
-    private static void ValidateIfColumnExists(List<TableColumnSchema> columns, string columnName)
+    private static void ValidateIfColumnExists(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, string columnName)
     {
         bool hasColumn = false;
 
@@ -48,10 +48,7 @@ public sealed class RowUpdater
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid or empty column name in values list");
 
             if (string.Equals(column.Name, columnName))
-            {
-                if (column.Primary)
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key field");
-
+            {                
                 hasColumn = true;
                 break;
             }
@@ -62,6 +59,12 @@ public sealed class RowUpdater
                 CamusDBErrorCodes.UnknownColumn,
                 $"Unknown column '{columnName}' in column list"
             );
+
+        if (indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? indexSchema))
+        {
+            if (indexSchema.Columns.Contains(columnName))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key field");
+        }
     }
 
     /// <summary>
@@ -69,15 +72,16 @@ public sealed class RowUpdater
     /// This validation is performed when the values are simple columnvalues (not expressions)
     /// </summary>
     /// <param name="columns"></param>
+    /// <param name="indexes"></param>
     /// <param name="plainValues"></param>
     /// <exception cref="CamusDBException"></exception>
-    private static void ValidatePlainValues(List<TableColumnSchema> columns, Dictionary<string, ColumnValue> plainValues)
+    private static void ValidatePlainValues(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, Dictionary<string, ColumnValue> plainValues)
     {
         if (plainValues.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
 
         foreach (KeyValuePair<string, ColumnValue> columnValue in plainValues)
-            ValidateIfColumnExists(columns, columnValue.Key);
+            ValidateIfColumnExists(columns, indexes, columnValue.Key);
 
         foreach (TableColumnSchema columnSchema in columns)
         {
@@ -102,15 +106,16 @@ public sealed class RowUpdater
     /// This validation is performed when the values are SQL expressions.
     /// </summary>
     /// <param name="columns"></param>
+    /// <param name="indexes"></param>
     /// <param name="exprValues"></param>
     /// <exception cref="CamusDBException"></exception>
-    private static void ValidateExprValues(List<TableColumnSchema> columns, Dictionary<string, NodeAst> exprValues)
+    private static void ValidateExprValues(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, Dictionary<string, NodeAst> exprValues)
     {
         if (exprValues.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
 
         foreach (KeyValuePair<string, NodeAst> columnValue in exprValues)
-            ValidateIfColumnExists(columns, columnValue.Key);
+            ValidateIfColumnExists(columns, indexes, columnValue.Key);
 
         foreach (TableColumnSchema columnSchema in columns)
         {
@@ -137,14 +142,15 @@ public sealed class RowUpdater
     {
         if (ticket.PlainValues is not null && ticket.ExprValues is not null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot specify both plan and sql expr values at the same time");
-
+        
         List<TableColumnSchema> columns = table.Schema.Columns!;
+        Dictionary<string, TableIndexSchema> indexes = table.Indexes;
 
         if (ticket.PlainValues is not null)
-            ValidatePlainValues(columns, ticket.PlainValues);
+            ValidatePlainValues(columns, indexes, ticket.PlainValues);
 
         if (ticket.ExprValues is not null)
-            ValidateExprValues(columns, ticket.ExprValues);
+            ValidateExprValues(columns, indexes, ticket.ExprValues);
     }
 
     /// <summary>

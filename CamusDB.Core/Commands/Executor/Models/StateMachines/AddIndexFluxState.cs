@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.BufferPool.Models;
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
@@ -16,6 +17,8 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 internal sealed class AddIndexFluxState
 {
+    public CatalogsManager Catalogs { get; }
+
     public DatabaseDescriptor Database { get; }
 
     public TableDescriptor Table { get; }
@@ -39,13 +42,14 @@ internal sealed class AddIndexFluxState
     public List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? IndexDeltas { get; set; }
 
     public AddIndexFluxState(
+        CatalogsManager catalogs,
         DatabaseDescriptor database, 
         TableDescriptor table, 
         AlterIndexTicket ticket, 
         QueryExecutor queryExecutor, 
-        AlterIndexFluxIndexState indexes
-    )
+        AlterIndexFluxIndexState indexes)
     {
+        Catalogs = catalogs;
         Database = database;
         Table = table;
         Ticket = ticket;

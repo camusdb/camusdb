@@ -8,6 +8,7 @@
 
 using NUnit.Framework;
 
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
@@ -35,7 +36,7 @@ internal sealed class TestRowInsertorCloseDb
 
     private static async Task<(string, CommandExecutor)> SetupDatabase()
     {
-        string dbname = System.Guid.NewGuid().ToString("n");
+        string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
@@ -57,13 +58,19 @@ internal sealed class TestRowInsertorCloseDb
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "user_robots",
-            new ColumnInfo[]
+            columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
-                new ColumnInfo("usersId", ColumnType.Id, notNull: true, index: IndexType.Multi),
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("usersId", ColumnType.Id, notNull: true),
                 new ColumnInfo("amount", ColumnType.Integer64)
+            },            
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                new ConstraintInfo(ConstraintType.IndexMulti, "usersId", new ColumnIndexInfo[] { new("usersId", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -83,7 +90,7 @@ internal sealed class TestRowInsertorCloseDb
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "user_robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
                 { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                 { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },

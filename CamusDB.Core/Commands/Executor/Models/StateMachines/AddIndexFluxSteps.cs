@@ -20,5 +20,5 @@ public enum AddIndexFluxSteps
     FeedTheIndex = 3,
     PersistIndexChanges = 4,
     ApplyPageOperations = 5,
-    AddSystemObject = 6,    
+    AddSystemObject = 6,
 }

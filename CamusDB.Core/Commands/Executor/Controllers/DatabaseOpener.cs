@@ -92,11 +92,11 @@ internal sealed class DatabaseOpener
         byte[]? data = database.Storage.Get(CamusConfig.SystemKey);
 
         if (data is not null && data.Length > 0)
-            database.SystemSchema.Objects = Serializator.Unserialize<Dictionary<string, DatabaseObject>>(data);
+            database.SystemSchema = Serializator.Unserialize<SystemSchema>(data);
         else
-            database.SystemSchema.Objects = new();
+            database.SystemSchema = new();
 
-        Console.WriteLine("System tablespaces read. Found {0} objects", database.SystemSchema.Objects.Count);
+        Console.WriteLine("System tablespaces read. Found {0} objects", database.SystemSchema.Tables.Count);
 
         return Task.CompletedTask;
     }

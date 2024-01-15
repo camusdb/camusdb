@@ -14,30 +14,22 @@ public sealed class ColumnInfo
 {
     public string Name { get; }
 
-    public ColumnType Type { get; }
+    public ColumnType Type { get; }    
 
-    public bool Primary { get; }    
-
-    public bool NotNull { get; }
-
-    public IndexType Index { get; }
+    public bool NotNull { get; }    
 
     public ColumnValue? Default { get; }
 
     public ColumnInfo(
         string name,
-        ColumnType type,
-        bool primary = false,
-        bool notNull = false,
-        IndexType index = IndexType.None,
+        ColumnType type,        
+        bool notNull = false,        
         ColumnValue? defaultValue = null
     )
     {
         Name = name;
-        Type = type;
-        Primary = primary;
+        Type = type;        
         NotNull = notNull;
-        Index = index;
         Default = defaultValue;
     }
 }

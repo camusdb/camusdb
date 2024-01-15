@@ -26,21 +26,20 @@ namespace CamusDB.Core.Serializer;
 /// </summary>
 public sealed class Serializator
 {
-    public static byte[] Serialize(Dictionary<string, TableSchema> tableSchema)
+    public static byte[] Serialize<T>(T tableSchema)
     {
-        string jsonSerialized = JsonSerializer.Serialize(tableSchema);        
-        return Encoding.Unicode.GetBytes(jsonSerialized);
-    }
+        string jsonSerialized = JsonSerializer.Serialize(tableSchema);
 
-    public static byte[] Serialize(Dictionary<string, DatabaseObject> databaseObjects)
-    {
-        string jsonSerialized = JsonSerializer.Serialize(databaseObjects);
+        Console.WriteLine(jsonSerialized);
+
         return Encoding.Unicode.GetBytes(jsonSerialized);
     }
 
     public static T Unserialize<T>(byte[] buffer) where T : new()
     {
         string str = Encoding.Unicode.GetString(buffer);
+
+        Console.WriteLine(str);
 
         T? deserialized = JsonSerializer.Deserialize<T>(str);
         if (deserialized is null)

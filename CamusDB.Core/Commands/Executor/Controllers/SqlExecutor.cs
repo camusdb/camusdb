@@ -7,10 +7,10 @@
  */
 
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.Util.Time;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -74,12 +74,13 @@ internal sealed class SqlExecutor
     /// <summary>
     /// Creates a ticket to create a table from the AST representation of a SQL statement.
     /// </summary>
+    /// <param name="commandExecutor"></param>
     /// <param name="ticket"></param>
     /// <param name="ast"></param>
     /// <returns></returns>
-    internal CreateTableTicket CreateCreateTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    internal async Task<CreateTableTicket> CreateCreateTableTicket(CommandExecutor commandExecutor, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return sqlExecutorCreateTableCreator.CreateCreateTableTicket(ticket, ast);
+        return await sqlExecutorCreateTableCreator.CreateCreateTableTicket(commandExecutor, ticket, ast);
     }
 
     /// <summary>

@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Data.Common;
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs;
@@ -20,13 +19,11 @@ using CamusDB.Core.Flux.Models;
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 public sealed class TableColumnAdder
-{    
-    private readonly IndexSaver indexSaver = new();
-
+{
     private readonly RowSerializer rowSerializer = new();
 
-    private void Validate(TableDescriptor table, AlterColumnTicket ticket)
-    {        
+    private static void Validate(TableDescriptor table, AlterColumnTicket ticket)
+    {
         bool hasColumn = false;
 
         foreach (TableColumnSchema column in table.Schema.Columns!)
@@ -48,11 +45,19 @@ public sealed class TableColumnAdder
     /// <summary>
     /// Schedules a new AlterColumn operation by the specified filters
     /// </summary>
+    /// <param name="catalogs"></param>
+    /// <param name="queryExecutor"></param>
     /// <param name="database"></param>
     /// <param name="table"></param>
     /// <param name="ticket"></param>
     /// <returns></returns>
-    internal async Task<int> AddColumn(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterColumnTicket ticket)
+    internal async Task<int> AddColumn(
+        CatalogsManager catalogs,
+        QueryExecutor queryExecutor,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        AlterColumnTicket ticket
+    )
     {
         Validate(table, ticket);
 
@@ -84,6 +89,11 @@ public sealed class TableColumnAdder
         return null;
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private async Task<FluxAction> AlterSchema(AlterColumnFluxState state)
     {
         DatabaseDescriptor database = state.Database;
@@ -238,13 +248,13 @@ public sealed class TableColumnAdder
         AlterColumnTicket ticket = state.Ticket;
 
         Stopwatch timer = Stopwatch.StartNew();
-        
+
         machine.When(AlterColumnFluxSteps.AlterSchema, AlterSchema);
         machine.When(AlterColumnFluxSteps.LocateTupleToAlterColumn, LocateTuplesToAlterColumn);
         machine.When(AlterColumnFluxSteps.UpdateUniqueIndexes, AlterColumnUniqueIndexes);
         machine.When(AlterColumnFluxSteps.UpdateMultiIndexes, AlterColumnMultiIndexes);
         machine.When(AlterColumnFluxSteps.AlterColumnRow, AlterColumnRowsFromDisk);
-        machine.When(AlterColumnFluxSteps.ApplyPageOperations, ApplyPageOperations);        
+        machine.When(AlterColumnFluxSteps.ApplyPageOperations, ApplyPageOperations);
 
         //machine.WhenAbort(ReleaseLocks);
 
@@ -262,5 +272,5 @@ public sealed class TableColumnAdder
         );
 
         return state.ModifiedRows;
-    }    
+    }
 }

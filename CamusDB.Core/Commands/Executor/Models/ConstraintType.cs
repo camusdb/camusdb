@@ -8,9 +8,9 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public sealed class SystemSchema
-{    
-    public Dictionary<string, DatabaseTableObject> Tables { get; set; } = new();
-
-    public Dictionary<string, DatabaseIndexObject> Indexes { get; set; } = new();
+public enum ConstraintType
+{
+    PrimaryKey,
+    IndexMulti,
+    IndexUnique
 }

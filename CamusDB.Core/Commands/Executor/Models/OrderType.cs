@@ -8,7 +8,7 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
-public enum QueryOrderByType
+public enum OrderType
 {
     Ascending = 0,
     Descending = 1

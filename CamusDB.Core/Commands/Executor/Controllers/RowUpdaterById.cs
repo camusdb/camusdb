@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
@@ -57,10 +58,7 @@ public sealed class RowUpdaterById
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid or empty column name in values list");
 
                 if (string.Equals(column.Name, columnValue.Key))
-                {
-                    if (column.Primary)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key field");
-
+                {                    
                     hasColumn = true;
                     break;
                 }
@@ -71,7 +69,14 @@ public sealed class RowUpdaterById
                     CamusDBErrorCodes.UnknownColumn,
                     $"Unknown column '{columnValue.Key}' in column list"
                 );
-        }
+
+            // Step #2. Check if primary key is going to be updated
+            if (table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? indexSchema))
+            {
+                if (indexSchema.Columns.Contains(columnValue.Key))
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key field");
+            }
+        }        
 
         // Step #2. Check for not null violations
         foreach (TableColumnSchema columnSchema in columns)

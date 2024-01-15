@@ -86,33 +86,33 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
             return null;
         
         List<QueryOrderBy> orderClauses = new();
-        LinkedList<(string, QueryOrderByType)> sortList = new();
+        LinkedList<(string, OrderType)> sortList = new();
 
         GetSortList(ast.extendedTwo, sortList);
 
-        foreach ((string projectionName, QueryOrderByType type) in sortList)
+        foreach ((string projectionName, OrderType type) in sortList)
             orderClauses.Add(new QueryOrderBy(projectionName, type));
 
         return orderClauses;
     }
 
-    private static void GetSortList(NodeAst orderByAst, LinkedList<(string, QueryOrderByType)> sortList)
+    private static void GetSortList(NodeAst orderByAst, LinkedList<(string, OrderType)> sortList)
     {
         if (orderByAst.nodeType == NodeType.Identifier)
         {
-            sortList.AddLast((orderByAst.yytext ?? "", QueryOrderByType.Ascending));
+            sortList.AddLast((orderByAst.yytext ?? "", OrderType.Ascending));
             return;
         }
 
         if (orderByAst.nodeType == NodeType.SortAsc)
         {
-            sortList.AddLast((orderByAst.leftAst!.yytext ?? "", QueryOrderByType.Ascending));
+            sortList.AddLast((orderByAst.leftAst!.yytext ?? "", OrderType.Ascending));
             return;
         }
 
         if (orderByAst.nodeType == NodeType.SortDesc)
         {
-            sortList.AddLast((orderByAst.leftAst!.yytext ?? "", QueryOrderByType.Descending));
+            sortList.AddLast((orderByAst.leftAst!.yytext ?? "", OrderType.Descending));
             return;
         }
 

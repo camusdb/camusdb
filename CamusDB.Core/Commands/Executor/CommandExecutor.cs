@@ -134,7 +134,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
 
-        return await tableCreator.Create(database, ticket);
+        return await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, ticket);
     }
 
     public async Task<bool> AlterTable(AlterTableTicket ticket)
@@ -194,12 +194,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             case NodeType.CreateTable:
             case NodeType.CreateTableIfNotExists:
-            {
-                    CreateTableTicket createTableTicket = sqlExecutor.CreateCreateTableTicket(ticket, ast);
+                {
+                    CreateTableTicket createTableTicket = await sqlExecutor.CreateCreateTableTicket(this, ticket, ast);
 
                     validator.Validate(createTableTicket);
 
-                    return await tableCreator.Create(database, createTableTicket);
+                    return await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, createTableTicket);
                 }
 
             case NodeType.AlterTableAddColumn:

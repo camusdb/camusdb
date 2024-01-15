@@ -10,12 +10,25 @@ using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
+/// <summary>
+/// Represents an index object in a database.
+/// </summary>
 public sealed record DatabaseIndexObject
 {
     /// <summary>
     /// Unique identifier of the index. It remains immutable throughout the life of the index.
     /// </summary>
     public string Id { get; }
+
+    /// <summary>
+    /// Name of the index
+    /// </summary>
+    public string Name { get; }
+
+    /// <summary>
+    /// The table to which the index belongs.
+    /// </summary>
+    public string TableId { get; set; }
 
     /// <summary>
     /// IDs of the indexed columns. Instead of using the name, the ID of the column 
@@ -33,9 +46,20 @@ public sealed record DatabaseIndexObject
     /// </summary>
     public string StartOffset { get; }
 
-    public DatabaseIndexObject(string id, string[] columnIds, IndexType type, string startOffset)
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="id"></param>
+    /// <param name="name"></param>
+    /// <param name="tableId"></param>
+    /// <param name="columnIds"></param>
+    /// <param name="type"></param>
+    /// <param name="startOffset"></param>
+    public DatabaseIndexObject(string id, string name, string tableId, string[] columnIds, IndexType type, string startOffset)
     {
         Id = id;
+        Name = name;
+        TableId = tableId;
         ColumnIds = columnIds;        
         Type = type;
         StartOffset = startOffset;

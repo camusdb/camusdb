@@ -8,6 +8,7 @@
 
 using NUnit.Framework;
 
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
@@ -20,7 +21,6 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
-using CamusDB.Core;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -56,14 +56,19 @@ public class TestExecuteSqlSelect
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            new ColumnInfo[]
+            columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("year", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -102,14 +107,19 @@ public class TestExecuteSqlSelect
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            new ColumnInfo[]
+            columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("year", ColumnType.Integer64, defaultValue: new ColumnValue(ColumnType.Integer64, 1999)),
                 new ColumnInfo("enabled", ColumnType.Bool)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );

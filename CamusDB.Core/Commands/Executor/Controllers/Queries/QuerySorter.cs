@@ -28,7 +28,7 @@ internal sealed class QuerySorter
 
         SortedDictionary<ColumnValue, SortedDictionary<ColumnValue, List<QueryResultRow>>> sortedRows;
 
-        if (ticket.OrderBy[0].Type == QueryOrderByType.Ascending)
+        if (ticket.OrderBy[0].Type == OrderType.Ascending)
             sortedRows = new();
         else
             sortedRows = new(new DescendingComparer<ColumnValue>());
@@ -54,7 +54,7 @@ internal sealed class QuerySorter
             {
                 SortedDictionary<ColumnValue, List<QueryResultRow>> secondSortGroup;
                 
-                if (ticket.OrderBy.Count == 1 || ticket.OrderBy[1].Type == QueryOrderByType.Ascending)
+                if (ticket.OrderBy.Count == 1 || ticket.OrderBy[1].Type == OrderType.Ascending)
                     secondSortGroup = new()
                     {
                         { secondSortColumnValue, new() { resultRow } }

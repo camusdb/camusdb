@@ -52,9 +52,7 @@ public sealed class CatalogsManager
                         id: ObjectIdGenerator.Generate().ToString(),
                         name: column.Name,
                         type: column.Type,
-                        primary: column.Primary,
-                        notNull: column.Primary ? true : column.NotNull,
-                        index: column.Index,
+                        notNull: column.NotNull,
                         defaultValue: column.Default
                     )
                 );
@@ -176,9 +174,7 @@ public sealed class CatalogsManager
                 id: ObjectIdGenerator.Generate().ToString(),
                 name: newColumn.Name,
                 type: newColumn.Type,
-                primary: false,
                 notNull: newColumn.NotNull,
-                index: IndexType.None,
                 defaultValue: newColumn.Default
             )
         );
@@ -204,5 +200,5 @@ public sealed class CatalogsManager
             throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Unknown column '{columnName}'");
 
         tableSchema.Columns = tableColumns;
-    }    
+    }
 }

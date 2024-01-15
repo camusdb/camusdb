@@ -17,6 +17,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Catalogs;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
@@ -92,15 +93,24 @@ internal sealed class TableIndexAdder
     /// <summary>
     /// Schedules a new add index operation by the specified filters
     /// </summary>
+    /// <param name="catalogs"></param>
+    /// <param name="queryExecutor"></param>
     /// <param name="database"></param>
     /// <param name="table"></param>
     /// <param name="ticket"></param>
     /// <returns></returns>
-    internal async Task<int> AddIndex(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
+    internal async Task<int> AddIndex(
+        CatalogsManager catalogs,
+        QueryExecutor queryExecutor,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        AlterIndexTicket ticket
+    )
     {
         Validate(table, ticket);
 
         AddIndexFluxState state = new(
+            catalogs: catalogs,
             database: database,
             table: table,
             ticket: ticket,
@@ -281,39 +291,29 @@ internal sealed class TableIndexAdder
 
         try
         {
-            await database.SystemSchema.Semaphore.WaitAsync();
+            await database.SystemSchemaSemaphore.WaitAsync();
 
-            Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
+            Dictionary<string, DatabaseIndexObject> indexes = database.SystemSchema.Indexes;
 
-            foreach (KeyValuePair<string, DatabaseObject> systemObject in objects)
-            {
-                DatabaseObject databaseObject = systemObject.Value;
+            string indexId = database.BufferPool.GetNextFreeOffset().ToString();
 
-                if (databaseObject.Type != DatabaseObjectType.Table)
-                    continue;
-
-                if (databaseObject.Name != state.Table.Name)
-                    continue;
-
-                if (databaseObject.Indexes is null)
-                    databaseObject.Indexes = new();
-
-                databaseObject.Indexes.Add(
+            indexes.Add(
+                indexId,
+                new DatabaseIndexObject(
+                    indexId,
                     ticket.IndexName,
-                    new DatabaseIndexObject(
-                        database.BufferPool.GetNextFreeOffset().ToString(),
-                        GetColumnIds(table, ticket.ColumnName),
-                        indexType, 
-                        state.IndexOffset.ToString()
-                    )
-                );
-            }
+                    table.Id,
+                    GetColumnIds(table, ticket.ColumnName),
+                    indexType,
+                    state.IndexOffset.ToString()
+                )
+            );
 
-            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema.Objects));
+            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema));
         }
         finally
         {
-            database.SystemSchema.Semaphore.Release();
+            database.SystemSchemaSemaphore.Release();
         }
 
         table.Indexes.Add(
@@ -365,7 +365,7 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket = state.Ticket;
 
         Stopwatch timer = Stopwatch.StartNew();
-
+        
         machine.When(AddIndexFluxSteps.AllocateNewIndex, AllocateNewIndex);
         machine.When(AddIndexFluxSteps.LocateTuplesToFeedTheIndex, LocateTuplesToFeedTheIndex);
         machine.When(AddIndexFluxSteps.FeedTheIndex, FeedTheIndex);

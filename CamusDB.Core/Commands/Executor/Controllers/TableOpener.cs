@@ -13,6 +13,7 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
+using System;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -54,43 +55,41 @@ internal sealed class TableOpener
     }
 
     private async Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
-    {                       
+    {
         BufferPoolManager tablespace = database.BufferPool;
-        
-        DatabaseObject systemObject = GetSystemObject(database, tableSchema.Name ?? "");
+
+        DatabaseTableObject tableObject = GetSystemObject(database, tableSchema.Id ?? "");
+        List<DatabaseIndexObject> indexObjects = GetSystemObjectIndexes(database, tableObject.Id);
 
         TableDescriptor tableDescriptor = new(
             tableSchema.Id ?? "",
             tableSchema.Name ?? "",
             tableSchema,
-            await indexReader.ReadOffsets(tablespace, ObjectId.ToValue(systemObject.StartOffset ?? ""))
+            await indexReader.ReadOffsets(tablespace, ObjectId.ToValue(tableObject.StartOffset ?? ""))
         );
 
-        // @todo read indexes in parallel
-
-        if (systemObject.Indexes is not null)
+        foreach (DatabaseIndexObject index in indexObjects)
         {
-            foreach (KeyValuePair<string, DatabaseIndexObject> index in systemObject.Indexes)
+            switch (index.Type)
             {
-                switch (index.Value.Type)
-                {
-                    case IndexType.Unique:
-                    case IndexType.Multi:
-                        {
-                            BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> btree = await indexReader.Read(tablespace, ObjectId.ToValue(index.Value.StartOffset ?? ""));
+                case IndexType.Unique:
+                case IndexType.Multi:
+                    {
+                        BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> btree = await indexReader.Read(tablespace, ObjectId.ToValue(index.StartOffset ?? ""));
 
-                            tableDescriptor.Indexes.Add(
-                                index.Key,
-                                new TableIndexSchema(MapColumnsIdsToNames(tableSchema.Columns, index.Value.ColumnIds), index.Value.Type, btree)
-                            );
-                        }
-                        break;                                           
+                        tableDescriptor.Indexes.Add(
+                            index.Name,
+                            new TableIndexSchema(MapColumnsIdsToNames(tableSchema.Columns, index.ColumnIds), index.Type, btree)
+                        );
+                    }
+                    break;
 
-                    default:
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot load invalid type of index");
-                }
+                default:
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot load invalid type of index");
             }
         }
+
+        Console.WriteLine("Table {0} opened at offset={1}", tableSchema.Name, tableObject.StartOffset);
 
         return tableDescriptor;
     }
@@ -99,7 +98,7 @@ internal sealed class TableOpener
     {
         string[] columNames = new string[columnIds.Length];
 
-        for (int i  = 0; i < columnIds.Length;  i++)
+        for (int i = 0; i < columnIds.Length; i++)
         {
             foreach (TableColumnSchema column in columns!)
             {
@@ -107,19 +106,30 @@ internal sealed class TableOpener
                     columNames[i] = column.Name ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Table system data is corrupt");
             }
         }
-       
+
         return columNames;
     }
 
-    private static DatabaseObject GetSystemObject(DatabaseDescriptor database, string tableName)
+    private static DatabaseTableObject GetSystemObject(DatabaseDescriptor database, string tableId)
     {
-        Dictionary<string, DatabaseObject> objects = database.SystemSchema.Objects;
+        Dictionary<string, DatabaseTableObject> objects = database.SystemSchema.Tables;
 
-        if (!objects.TryGetValue(tableName, out DatabaseObject? databaseObject))
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Table system data is corrupt");
-
-        Console.WriteLine("Table {0} opened at offset={1}", tableName, databaseObject.StartOffset);
+        if (!objects.TryGetValue(tableId, out DatabaseTableObject? databaseObject))
+            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Table system data is corrupt: " + tableId);
 
         return databaseObject;
+    }
+
+    private static List<DatabaseIndexObject> GetSystemObjectIndexes(DatabaseDescriptor database, string tableId)
+    {
+        List<DatabaseIndexObject> indexes = new();
+
+        foreach (KeyValuePair<string, DatabaseIndexObject> index in database.SystemSchema.Indexes)
+        {
+            if (index.Value.TableId == tableId)
+                indexes.Add(index.Value);
+        }
+
+        return indexes;
     }
 }

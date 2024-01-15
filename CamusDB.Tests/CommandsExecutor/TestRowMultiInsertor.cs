@@ -1,6 +1,7 @@
 ﻿
 using NUnit.Framework;
 
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
@@ -48,13 +49,19 @@ internal sealed class TestRowMultiInsertor
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "user_robots",
-            new ColumnInfo[]
+            columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
-                new ColumnInfo("robots_id", ColumnType.Id, notNull: true, index: IndexType.Multi),
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("robots_id", ColumnType.Id, notNull: true),
                 new ColumnInfo("amount", ColumnType.Integer64)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                new ConstraintInfo(ConstraintType.IndexMulti, "robots_id_idx", new ColumnIndexInfo[] { new("robots_id", OrderType.Ascending) })
             },
             ifNotExists: false
         );

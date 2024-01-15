@@ -8,6 +8,7 @@
 
 using NUnit.Framework;
 
+using System;
 using System.Threading.Tasks;
 
 using CamusDB.Core;
@@ -31,7 +32,7 @@ internal sealed class TestTableCreator
 
     private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupDatabase()
     {
-        string dbname = System.Guid.NewGuid().ToString("n");
+        string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
@@ -55,14 +56,19 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "my_table",
             new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("age", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -96,9 +102,11 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "my_table",
-            new ColumnInfo[] { },
+            columns: new ColumnInfo[] { },
+            constraints: Array.Empty<ConstraintInfo>(),
             ifNotExists: false
         );
 
@@ -113,11 +121,16 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: "",
             tableName: "my_table",
-            new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+            columns: new ColumnInfo[] {
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -133,11 +146,16 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "",
-            new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+            columns: new ColumnInfo[] {
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -153,11 +171,16 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "my_table",
-            new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+            columns: new ColumnInfo[] {
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("id", ColumnType.String, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -173,11 +196,17 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "my_table",
-            new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
-                new ColumnInfo("name", ColumnType.String, primary: true),
+            columns: new ColumnInfo[] {
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("name", ColumnType.String),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("name", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -193,11 +222,16 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: new string('a', 300),
-            new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+            columns: new ColumnInfo[] {
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -213,11 +247,16 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "my_täble",
-            new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+            columns: new ColumnInfo[] {
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -233,14 +272,19 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "my_table",
-            new ColumnInfo[]
+            columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("age", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -258,14 +302,19 @@ internal sealed class TestTableCreator
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
         CreateTableTicket ticket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "my_table",
-            new ColumnInfo[]
+            columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("age", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: true
         );

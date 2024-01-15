@@ -6,10 +6,10 @@
  * file that was distributed with this source code.
  */
 
+using Nito.AsyncEx;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.GC;
 using CamusDB.Core.Storage;
-using Nito.AsyncEx;
 using System.Collections.Concurrent;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
@@ -24,9 +24,11 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public GCManager GC { get; }
 
+    public SemaphoreSlim SystemSchemaSemaphore { get; } = new(1, 1);
+
     public Schema Schema { get; } = new();
 
-    public SystemSchema SystemSchema { get; } = new();
+    public SystemSchema SystemSchema { get; set; } = new();    
 
     public ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> TableDescriptors { get; }
 
@@ -49,7 +51,7 @@ public sealed record DatabaseDescriptor : IDisposable
     {
         Storage?.Dispose();
         Schema?.Dispose();
-        SystemSchema?.Dispose();
+        SystemSchemaSemaphore?.Dispose();
         GC?.Dispose();
     }
 }

@@ -8,6 +8,7 @@
 
 using NUnit.Framework;
 
+using System;
 using System.Linq;
 using System.Diagnostics;
 using System.Threading.Tasks;
@@ -57,14 +58,19 @@ internal sealed class TestRowInsertor
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
         CreateTableTicket tableTicket = new(
+            txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            new ColumnInfo[]
+            columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id, primary: true),
+                new ColumnInfo("id", ColumnType.Id),
                 new ColumnInfo("name", ColumnType.String, notNull: true),
                 new ColumnInfo("year", ColumnType.Integer64),
                 new ColumnInfo("enabled", ColumnType.Bool)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -79,7 +85,7 @@ internal sealed class TestRowInsertor
     public async Task TestInvalidTypeAssigned()
     {
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
-        
+
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () =>
         {
             InsertTicket ticket = new(
@@ -105,7 +111,7 @@ internal sealed class TestRowInsertor
     public async Task TestInvalidIntegerType()
     {
         (string dbname, CommandExecutor executor) = await SetupBasicTable();
-        
+
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () =>
         {
             InsertTicket ticket = new(
@@ -131,7 +137,7 @@ internal sealed class TestRowInsertor
     [NonParallelizable]
     public async Task TestInvalidBoolType()
     {
-        (string dbname, CommandExecutor executor) = await SetupBasicTable();        
+        (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () =>
         {
@@ -534,7 +540,7 @@ internal sealed class TestRowInsertor
     [NonParallelizable]
     public async Task TestSuccessfulMultipleParallelInserts()
     {
-        (string dbname, CommandExecutor executor) = await SetupBasicTable();        
+        (string dbname, CommandExecutor executor) = await SetupBasicTable();
 
         List<Task> tasks = new();
 
@@ -586,7 +592,7 @@ internal sealed class TestRowInsertor
 
             Assert.AreEqual(row["enabled"].Type, ColumnType.Bool);
             Assert.AreEqual(row["enabled"].BoolValue, false);
-        }              
+        }
     }
 
     [Test]
@@ -701,5 +707,5 @@ internal sealed class TestRowInsertor
             Assert.AreEqual(ColumnType.Integer64, row["year"].Type);
             Assert.AreEqual(i * 1000, row["year"].LongValue);
         }
-    }    
+    }
 }

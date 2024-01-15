@@ -17,11 +17,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal abstract class SQLExecutorBaseCreator
 {
-    protected static void GetIdentifierList(NodeAst orderByAst, LinkedList<string> identifierList)
+    protected static void GetIdentifierList(NodeAst orderByAst, List<string> identifierList)
     {
         if (orderByAst.nodeType == NodeType.Identifier)
         {
-            identifierList.AddLast(orderByAst.yytext ?? "");
+            identifierList.Add(orderByAst.yytext ?? "");
             return;
         }
 
