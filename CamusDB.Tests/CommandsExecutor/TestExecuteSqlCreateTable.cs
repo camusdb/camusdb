@@ -19,6 +19,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.Time;
+using CamusDB.Core;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -221,5 +222,21 @@ public class TestExecuteSqlCreateTable
 
         List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
         Assert.IsEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteCreateTableDoublePk()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+
+        ExecuteSQLTicket createTableTicket = new(
+            database: dbname,
+            sql: "CREATE TABLE robots (id OID NOT NULL PRIMARY KEY, name STRING NOT NULL, year INT64 NOT NULL) PRIMARY KEY (id)",
+            parameters: null
+        );
+
+        CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () => await executor.ExecuteDDLSQL(createTableTicket));
+        Assert.AreEqual("Primary key already exists on table 'robots'", exception!.Message);
     }
 }

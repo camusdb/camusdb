@@ -212,7 +212,7 @@ internal sealed class TestTableCreator
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
-        Assert.AreEqual("Multiple primary key defined", e!.Message);
+        Assert.AreEqual("Primary key already exists on table 'my_table'", e!.Message);
     }
 
     [Test]

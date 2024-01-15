@@ -33,7 +33,7 @@ internal sealed class TableCreator
         CreateTableTicket ticket
     )
     {
-        if (ticket.IfNotExists && database.SystemSchema.Tables.ContainsKey(ticket.TableName))
+        if (ticket.IfNotExists && catalogs.TableExists(database, ticket.TableName))
             return false;
 
         TableSchema tableSchema = await catalogs.CreateTable(database, ticket);

@@ -152,6 +152,17 @@ public sealed class CatalogsManager
         throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{tableName}' doesn't exist");
     }
 
+    /// <summary>
+    /// Returns true if a table exists
+    /// </summary>
+    /// <param name="database"></param>
+    /// <param name="tableName"></param>
+    /// <returns></returns>
+    internal bool TableExists(DatabaseDescriptor database, string tableName)
+    {
+        return database.Schema.Tables.ContainsKey(tableName);
+    }
+
     private static void AddColumn(TableSchema tableSchema, ColumnInfo newColumn)
     {
         bool hasColumn = false;
@@ -200,5 +211,5 @@ public sealed class CatalogsManager
             throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Unknown column '{columnName}'");
 
         tableSchema.Columns = tableColumns;
-    }
+    }    
 }

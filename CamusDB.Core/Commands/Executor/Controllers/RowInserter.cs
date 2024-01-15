@@ -255,6 +255,9 @@ internal sealed class RowInserter
     /// <returns></returns>
     private async Task<FluxAction> UpdateUniqueIndexes(InsertFluxState state)
     {
+        if (state.Indexes.UniqueIndexes.Count == 0)
+            return FluxAction.Continue;
+
         InsertTicket insertTicket = state.Ticket;
 
         List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
@@ -287,7 +290,10 @@ internal sealed class RowInserter
     /// <param name="state"></param>
     /// <returns></returns>
     private async Task<FluxAction> UpdateMultiIndexes(InsertFluxState state)
-    {
+    {        
+        if (state.Indexes.MultiIndexes.Count == 0)
+            return FluxAction.Continue;
+
         InsertTicket insertTicket = state.Ticket;
 
         List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
