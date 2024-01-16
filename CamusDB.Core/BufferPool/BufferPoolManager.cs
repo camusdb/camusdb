@@ -15,6 +15,7 @@ using CamusDB.Core.Util.ObjectIds;
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.BufferPool;
 
@@ -55,6 +56,8 @@ public sealed class BufferPoolManager
 
     private readonly LC logicalClock;
 
+    private readonly ILogger<ICamusDB> logger;
+
     private readonly BufferPoolBucket[] buckets = new BufferPoolBucket[CamusConfig.NumberBuckets];
 
     /// <summary>
@@ -81,10 +84,11 @@ public sealed class BufferPoolManager
     /// </summary>
     /// <param name="storage"></param>
     /// <param name="logicalClock"></param>
-    public BufferPoolManager(StorageManager storage, LC logicalClock)
+    public BufferPoolManager(StorageManager storage, LC logicalClock, ILogger<ICamusDB> logger)
     {
         this.storage = storage;
         this.logicalClock = logicalClock;
+        this.logger = logger;
 
         for (int i = 0; i < buckets.Length; i++)
             buckets[i] = new BufferPoolBucket();
