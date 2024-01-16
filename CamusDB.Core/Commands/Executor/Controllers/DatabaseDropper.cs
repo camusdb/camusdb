@@ -16,7 +16,7 @@ internal sealed class DatabaseDropper
 {
     private readonly DatabaseDescriptors databaseDescriptors;
 
-    public DatabaseDropper(DatabaseDescriptors databaseDescriptors)
+    public DatabaseDropper(DatabaseDescriptors databaseDescriptors, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
     {
         this.databaseDescriptors = databaseDescriptors;
     }

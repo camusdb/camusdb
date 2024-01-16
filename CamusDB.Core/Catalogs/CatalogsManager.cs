@@ -158,7 +158,7 @@ public sealed class CatalogsManager
     /// <param name="database"></param>
     /// <param name="tableName"></param>
     /// <returns></returns>
-    internal bool TableExists(DatabaseDescriptor database, string tableName)
+    public bool TableExists(DatabaseDescriptor database, string tableName)
     {
         return database.Schema.Tables.ContainsKey(tableName);
     }

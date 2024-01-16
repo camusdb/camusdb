@@ -17,6 +17,7 @@ using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -28,6 +29,12 @@ internal sealed class RowDeleterById
     private readonly IndexSaver indexSaver = new();
 
     private readonly RowDeserializer rowDeserializer = new();
+    private ILogger<ICamusDB> logger;
+
+    public RowDeleterById(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
 
     /// <summary>
     /// Schedules a new delete operation by the row id

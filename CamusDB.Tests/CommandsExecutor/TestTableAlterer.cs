@@ -196,6 +196,15 @@ internal sealed class TestTableAlterer
         Assert.AreEqual(1, tableSchema.Version);
 
         Assert.AreEqual(3, tableSchema.Columns!.Count);
+
+        Assert.AreEqual("id", tableSchema.Columns![0].Name);
+        Assert.AreEqual(ColumnType.Id, tableSchema.Columns![0].Type);        
+
+        Assert.AreEqual("year", tableSchema.Columns![1].Name);
+        Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![1].Type);
+
+        Assert.AreEqual("enabled", tableSchema.Columns![2].Name);
+        Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![2].Type);
     }
 
     [Test]

@@ -20,7 +20,7 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
         if (ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
 
-        LinkedList<(string, NodeAst)> updateItemList = new();
+        List<(string, NodeAst)> updateItemList = new();
 
         GetUpdateItemList(ast.rightAst, updateItemList);
 
@@ -41,11 +41,11 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
         );
     }
 
-    private static void GetUpdateItemList(NodeAst updateAstItemList, LinkedList<(string, NodeAst)> updateItemList)
+    private static void GetUpdateItemList(NodeAst updateAstItemList, List<(string, NodeAst)> updateItemList)
     {
         if (updateAstItemList.nodeType == NodeType.UpdateItem)
         {
-            updateItemList.AddLast((updateAstItemList.leftAst!.yytext ?? "", updateAstItemList.rightAst!));
+            updateItemList.Add((updateAstItemList.leftAst!.yytext ?? "", updateAstItemList.rightAst!));
             return;
         }
 

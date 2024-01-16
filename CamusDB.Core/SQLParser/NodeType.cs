@@ -37,6 +37,8 @@ public enum NodeType
     ExprLike,
     ExprILike,
     ExprDefault,
+    ExprIsNull,
+    ExprIsNotNull,
     Select,
     Update,
     UpdateList,

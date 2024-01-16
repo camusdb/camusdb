@@ -20,9 +20,11 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class ExecuteSQLController : CommandsController
 {
-    public ExecuteSQLController(CommandExecutor executor) : base(executor)
-    {
+    private readonly ILogger<ICamusDB> logger;
 
+    public ExecuteSQLController(ILogger<ICamusDB> logger, CommandExecutor executor) : base(executor)
+    {
+        this.logger = logger;
     }
 
     [HttpPost]
@@ -36,7 +38,7 @@ public sealed class ExecuteSQLController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
 
-            Console.WriteLine(body);
+            logger.LogInformation("{Body}", body);
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)
@@ -78,7 +80,7 @@ public sealed class ExecuteSQLController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
 
-            Console.WriteLine(body);
+            logger.LogInformation("{Body}", body);
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)
@@ -115,7 +117,7 @@ public sealed class ExecuteSQLController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
 
-            Console.WriteLine(body);
+            logger.LogInformation("{Body}", body);
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)

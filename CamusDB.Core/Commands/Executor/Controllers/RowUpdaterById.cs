@@ -17,6 +17,7 @@ using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -31,6 +32,12 @@ public sealed class RowUpdaterById
     private readonly RowSerializer rowSerializer = new();
 
     private readonly RowDeserializer rowDeserializer = new();
+    private ILogger<ICamusDB> logger;
+
+    public RowUpdaterById(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
 
     /// <summary>
     /// Validates that all columns and values in the update statement are valid

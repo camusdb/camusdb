@@ -34,7 +34,7 @@ public class TestExecuteSqlSelect
 
     private static async Task<(string, CommandExecutor)> SetupDatabase()
     {
-        string dbname = System.Guid.NewGuid().ToString("n");
+        string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
@@ -141,6 +141,57 @@ public class TestExecuteSqlSelect
                     { "id", new ColumnValue(ColumnType.Id, objectId) },
                     { "name", new ColumnValue(ColumnType.String, "some name " + i) },
                     { "year", new ColumnValue(ColumnType.Integer64, 2024 - i) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0) },
+                }
+            );
+
+            await executor.Insert(ticket);
+
+            objectsId.Add(objectId);
+        }
+
+        return (dbname, executor, objectsId);
+    }
+
+    private static async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTableWithNulls()
+    {
+        (string dbname, CommandExecutor executor) = await SetupDatabase();
+
+        CreateTableTicket tableTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            columns: new ColumnInfo[]
+            {
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("name", ColumnType.String, notNull: true),
+                new ColumnInfo("year", ColumnType.Integer64),
+                new ColumnInfo("enabled", ColumnType.Bool)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false
+        );
+
+        await executor.CreateTable(tableTicket);
+
+        List<string> objectsId = new(25);
+
+        for (int i = 0; i < 25; i++)
+        {
+            string objectId = ObjectIdGenerator.Generate().ToString();
+
+            InsertTicket ticket = new(
+                txnId: await executor.NextTxnId(),
+                databaseName: dbname,
+                tableName: "robots",
+                values: new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, objectId) },
+                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
+                    { "year", new ColumnValue(ColumnType.Null, "") },
                     { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0) },
                 }
             );
@@ -1090,5 +1141,73 @@ public class TestExecuteSqlSelect
 
         List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
         Assert.IsNotEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectIsNull()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE year IS NULL",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectIsNotNull()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE year IS NOT NULL",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectIsNullAll()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTableWithNulls();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE year IS NULL",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectIsNotNullNone()
+    {
+        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTableWithNulls();
+
+        ExecuteSQLTicket ticket = new(
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE year IS NOT NULL",
+            parameters: null
+        );
+
+        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(ticket)).ToListAsync();
+        Assert.IsEmpty(result);
     }
 }

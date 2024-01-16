@@ -54,7 +54,7 @@ internal sealed class TableDropper
             filters: null
         );
 
-        await rowDeleter.Delete(queryExecutor, database, table, deleteTicket);        
+        await rowDeleter.Delete(queryExecutor, database, table, deleteTicket);
 
         try
         {
@@ -85,6 +85,8 @@ internal sealed class TableDropper
         {
             database.SystemSchemaSemaphore.Release();
         }
+
+        database.TableDescriptors.TryRemove(ticket.TableName, out _);
 
         Console.WriteLine("Dropped table {0}", ticket.TableName);
 

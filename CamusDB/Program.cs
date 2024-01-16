@@ -14,6 +14,10 @@ using CamusDB.Core.Util.Time;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
+// Add logging
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+
 // Add services to the container.
 builder.Services.AddRazorPages();
 
@@ -28,7 +32,7 @@ ThreadPool.SetMinThreads(1024, 512);
 WebApplication app = builder.Build();
 
 // Initialize DB system
-CamusStartup camus = new(
+CamusStartup camus = new(    
     app.Services.GetRequiredService<CommandExecutor>()
 );
 

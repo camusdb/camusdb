@@ -35,7 +35,7 @@ internal sealed class SqlExecutor
 
     private readonly SQLExecutorAlterIndexCreator sqlExecutorAlterIndexCreator = new();
 
-    public SqlExecutor()
+    public SqlExecutor(Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
     {
 
     }

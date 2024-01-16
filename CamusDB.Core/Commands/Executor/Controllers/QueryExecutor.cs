@@ -12,6 +12,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -32,6 +33,12 @@ internal sealed class QueryExecutor
     private readonly QueryLimiter queryLimiter = new();
 
     private readonly QueryScanner queryScanner = new();
+    private ILogger<ICamusDB> logger;
+
+    public QueryExecutor(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
 
     public IAsyncEnumerable<QueryResultRow> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {

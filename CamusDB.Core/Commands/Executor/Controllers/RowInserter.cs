@@ -17,6 +17,7 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -25,11 +26,22 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// </summary>
 internal sealed class RowInserter
 {
+    private readonly ILogger<ICamusDB> logger;
+
     private readonly IndexSaver indexSaver = new();
 
     private readonly RowSerializer rowSerializer = new();
 
-    private readonly DMLUniqueKeySaver insertUniqueKeySaver = new();
+    private readonly DMLUniqueKeySaver insertUniqueKeySaver = new();    
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="logger"></param>
+    public RowInserter(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
 
     /// <summary>
     /// Validates that all columns and values in the insert statement are valid
@@ -398,7 +410,7 @@ internal sealed class RowInserter
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        Console.WriteLine(
+        logger.LogInformation(
             "Row {0} inserted at {1}, Time taken: {2}",
             state.RowTuple.SlotOne,
             state.RowTuple.SlotTwo,
@@ -406,4 +418,3 @@ internal sealed class RowInserter
         );
     }
 }
-

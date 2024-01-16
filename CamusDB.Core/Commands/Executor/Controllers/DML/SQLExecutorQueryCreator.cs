@@ -57,14 +57,14 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
         if (ast is null)
             return null;
 
-        LinkedList<NodeAst> projectionList = new();
+        List<NodeAst> projectionList = new();
 
         GetProjectionFields(ast.leftAst!, projectionList);
 
         return projectionList.ToList();
     }
 
-    private static void GetProjectionFields(NodeAst ast, LinkedList<NodeAst> projectionList)
+    private static void GetProjectionFields(NodeAst ast, List<NodeAst> projectionList)
     {        
         if (ast.nodeType == NodeType.IdentifierList)
         {
@@ -77,7 +77,7 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
             return;
         }
 
-        projectionList.AddLast(ast);
+        projectionList.Add(ast);
     }
 
     private static List<QueryOrderBy>? GetQueryClause(NodeAst ast)
@@ -86,7 +86,7 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
             return null;
         
         List<QueryOrderBy> orderClauses = new();
-        LinkedList<(string, OrderType)> sortList = new();
+        List<(string, OrderType)> sortList = new();
 
         GetSortList(ast.extendedTwo, sortList);
 
@@ -96,23 +96,23 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
         return orderClauses;
     }
 
-    private static void GetSortList(NodeAst orderByAst, LinkedList<(string, OrderType)> sortList)
+    private static void GetSortList(NodeAst orderByAst, List<(string, OrderType)> sortList)
     {
         if (orderByAst.nodeType == NodeType.Identifier)
         {
-            sortList.AddLast((orderByAst.yytext ?? "", OrderType.Ascending));
+            sortList.Add((orderByAst.yytext ?? "", OrderType.Ascending));
             return;
         }
 
         if (orderByAst.nodeType == NodeType.SortAsc)
         {
-            sortList.AddLast((orderByAst.leftAst!.yytext ?? "", OrderType.Ascending));
+            sortList.Add((orderByAst.leftAst!.yytext ?? "", OrderType.Ascending));
             return;
         }
 
         if (orderByAst.nodeType == NodeType.SortDesc)
         {
-            sortList.AddLast((orderByAst.leftAst!.yytext ?? "", OrderType.Descending));
+            sortList.Add((orderByAst.leftAst!.yytext ?? "", OrderType.Descending));
             return;
         }
 

@@ -30,7 +30,7 @@ internal abstract class IndexBaseSaver
             ColumnType.Id => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeObjectId,
             ColumnType.Integer64 => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger64,
             ColumnType.String => SerializatorTypeSizes.TypeInteger16 + SerializatorTypeSizes.TypeInteger32 + GetStringLengthInBytes(columnValue.StrValue!),
-            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Can't use this type as index"),
+            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Can't use this type as index: " + columnValue.Type),
         };
     }
 
@@ -116,7 +116,7 @@ internal abstract class IndexBaseSaver
                 break;
 
             default:
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Can't use this type as index");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Can't use this type as index: " + columnValue.Type);
         }
     }   
 }

@@ -60,7 +60,7 @@ public sealed class QueryPlanner
 
         if (ticket.Where is not null)
         {
-            LinkedList<NodeAst> equalities = new();
+            List<NodeAst> equalities = new();
 
             GetEqualities(ticket.Where, equalities);
 
@@ -103,11 +103,11 @@ public sealed class QueryPlanner
         return false;
     }
 
-    private static void GetEqualities(NodeAst where, LinkedList<NodeAst> equalities)
+    private static void GetEqualities(NodeAst where, List<NodeAst> equalities)
     {
         if (where.nodeType == NodeType.ExprEquals)
         {
-            equalities.AddLast(where);
+            equalities.Add(where);
             return;
         }
 

@@ -30,7 +30,7 @@ internal sealed class DatabaseOpener
 {
     private readonly DatabaseDescriptors databaseDescriptors;
 
-    public DatabaseOpener(DatabaseDescriptors databaseDescriptors)
+    public DatabaseOpener(DatabaseDescriptors databaseDescriptors, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
     {
         this.databaseDescriptors = databaseDescriptors;
     }

@@ -19,7 +19,7 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 {
     private readonly DatabaseDescriptors databaseDescriptors;
 
-    public DatabaseCloser(DatabaseDescriptors databaseDescriptors)
+    public DatabaseCloser(DatabaseDescriptors databaseDescriptors, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
     {
         this.databaseDescriptors = databaseDescriptors;
     }

@@ -193,8 +193,7 @@ internal abstract class SQLExecutorBaseCreator
                             return new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString());
 
                         case "str_id":
-
-                            LinkedList<ColumnValue> argumentList = new();
+                            List<ColumnValue> argumentList = new();
 
                             GetArgumentList(expr.rightAst!, row, parameters, argumentList);
 
@@ -206,6 +205,20 @@ internal abstract class SQLExecutorBaseCreator
                         default:
                             throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Function not found '" + funcCall + "'");
                     }
+                }
+
+            case NodeType.ExprIsNull:
+                {
+                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters);
+
+                    return new ColumnValue(ColumnType.Bool, columnValue.Type == ColumnType.Null);
+                }
+
+            case NodeType.ExprIsNotNull:
+                {
+                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters);
+
+                    return new ColumnValue(ColumnType.Bool, columnValue.Type != ColumnType.Null);
                 }
 
             case NodeType.ExprLike:
@@ -235,7 +248,12 @@ internal abstract class SQLExecutorBaseCreator
         }
     }
 
-    private static void GetArgumentList(NodeAst argumentAst, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters, LinkedList<ColumnValue> argumentList)
+    private static void GetArgumentList(
+        NodeAst argumentAst, 
+        Dictionary<string, ColumnValue> row, 
+        Dictionary<string, ColumnValue>? parameters, 
+        List<ColumnValue> argumentList
+    )
     {        
         if (argumentAst.nodeType == NodeType.ExprArgumentList)
         {
@@ -248,7 +266,7 @@ internal abstract class SQLExecutorBaseCreator
             return;
         }
 
-        argumentList.AddLast(EvalExpr(argumentAst, row, parameters));
+        argumentList.Add(EvalExpr(argumentAst, row, parameters));
     }
 
     private static bool Like(string text, string pattern)
@@ -257,7 +275,7 @@ internal abstract class SQLExecutorBaseCreator
         string escapedPattern = Regex.Escape(pattern);
 
         // Replace the escaped '%' with '.*' to simulate SQL LIKE wildcard
-        string regexPattern = "^" + escapedPattern.Replace("%", ".*") + "$";
+        string regexPattern = string.Concat("^", escapedPattern.Replace("%", ".*"), "$");
 
         return Regex.IsMatch(text, regexPattern);
     }
@@ -268,7 +286,7 @@ internal abstract class SQLExecutorBaseCreator
         string escapedPattern = Regex.Escape(pattern);
 
         // Replace the escaped '%' with '.*' to simulate SQL LIKE wildcard
-        string regexPattern = "^" + escapedPattern.Replace("%", ".*") + "$";
+        string regexPattern = string.Concat("^", escapedPattern.Replace("%", ".*"), "$");
 
         return Regex.IsMatch(text, regexPattern, RegexOptions.IgnoreCase);
     }

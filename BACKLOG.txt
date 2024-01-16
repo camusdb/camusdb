@@ -10,6 +10,7 @@ Query
 - Use Temp Table to Order (Materialize)
 - Support for other aggregations
 - Fix aliases to work propertly with aggregations
+- Fix SQL force index
 
 BufferPool/Storage
 - Store txnid alongside records

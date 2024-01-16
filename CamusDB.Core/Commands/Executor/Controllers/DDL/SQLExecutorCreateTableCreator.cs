@@ -240,6 +240,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         if (constraintsList.nodeType == NodeType.ConstraintPrimaryKey)
         {
             constraintTypes.Add((ColumnConstraintType.PrimaryKey, null));
+            constraintTypes.Add((ColumnConstraintType.NotNull, null));
             return;
         }
 

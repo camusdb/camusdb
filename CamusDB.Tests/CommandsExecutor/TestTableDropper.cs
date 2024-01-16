@@ -96,7 +96,7 @@ internal sealed class TestTableDropper
 
     [Test]
     [NonParallelizable]
-    public async Task TestCreateTableFillAndDropColumn()
+    public async Task TestCreateTableFillAndDrop()
     {
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupBasicTable();
 
@@ -106,6 +106,70 @@ internal sealed class TestTableDropper
             tableName: "robots"
         );
 
-        await executor.DropTable(dropTableTicket);
+        Assert.True(await executor.DropTable(dropTableTicket));
+        Assert.False(catalogs.TableExists(database, "robots"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestCreateTableFillDropAndRecreate()
+    {
+        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupBasicTable();
+
+        DropTableTicket dropTableTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots"
+        );
+
+        Assert.True(await executor.DropTable(dropTableTicket));
+        Assert.False(catalogs.TableExists(database, "robots"));
+
+        CreateTableTicket createTicket = new(
+            txnId: await executor.NextTxnId(),
+            databaseName: dbname,
+            tableName: "robots",
+            new ColumnInfo[]
+            {
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("name", ColumnType.String, notNull: true),
+                new ColumnInfo("type", ColumnType.String, notNull: true),
+                new ColumnInfo("year", ColumnType.Integer64),
+                new ColumnInfo("status", ColumnType.Integer64),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false
+        );
+
+        await executor.CreateTable(createTicket);
+
+        Assert.True(catalogs.TableExists(database, "robots"));
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
+
+        Assert.AreEqual("robots", tableSchema.Name);
+        Assert.AreEqual(0, tableSchema.Version);
+
+        Assert.AreEqual(5, tableSchema.Columns!.Count);
+
+        Assert.AreEqual("id", tableSchema.Columns![0].Name);
+        Assert.AreEqual(ColumnType.Id, tableSchema.Columns![0].Type);
+
+        Assert.AreEqual("name", tableSchema.Columns![1].Name);
+        Assert.AreEqual(ColumnType.String, tableSchema.Columns![1].Type);
+        Assert.True(tableSchema.Columns![1].NotNull);
+
+        Assert.AreEqual("type", tableSchema.Columns![2].Name);
+        Assert.AreEqual(ColumnType.String, tableSchema.Columns![2].Type);
+        Assert.True(tableSchema.Columns![2].NotNull);
+
+        Assert.AreEqual("year", tableSchema.Columns![3].Name);
+        Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![3].Type);
+
+        Assert.AreEqual("status", tableSchema.Columns![4].Name);
+        Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![4].Type);
     }
 }

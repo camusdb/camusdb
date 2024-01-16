@@ -14,13 +14,13 @@ namespace CamusDB.Core;
 
 public sealed class CamusStartup
 {
-    private CommandExecutor executor;
+    private readonly CommandExecutor executor;
 
     public CamusStartup(CommandExecutor? executor)
     {
         if (executor is null)
             throw new CamusDBException("?", "failed to initialize");
-
+        
         this.executor = executor;
     }
 

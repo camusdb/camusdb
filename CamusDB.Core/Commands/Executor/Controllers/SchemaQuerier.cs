@@ -22,7 +22,7 @@ internal sealed class SchemaQuerier
 {
     private readonly CatalogsManager catalogs;
 
-    public SchemaQuerier(CatalogsManager catalogsManager)
+    public SchemaQuerier(CatalogsManager catalogsManager, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
     {
         this.catalogs = catalogsManager;
     }

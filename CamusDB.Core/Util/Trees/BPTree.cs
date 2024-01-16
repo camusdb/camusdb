@@ -36,7 +36,7 @@ public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>
     /// <summary>
     /// Returns the first value associated with the given key.
     /// </summary>
-    /// /// <param name="txType"></param>
+    /// <param name="txType"></param>
     /// <param name="txnid"></param>
     /// <param name="key"></param>
     /// <returns>the value associated with the given key if the key is in the symbol table

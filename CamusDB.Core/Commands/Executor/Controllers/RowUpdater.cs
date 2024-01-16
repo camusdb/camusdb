@@ -18,6 +18,7 @@ using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -29,6 +30,12 @@ public sealed class RowUpdater
     private readonly IndexSaver indexSaver = new();
 
     private readonly RowSerializer rowSerializer = new();
+    private ILogger<ICamusDB> logger;
+
+    public RowUpdater(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
 
     /// <summary>
     /// Validates that the column name exists in the current table schema

@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.Time;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor;
 
@@ -23,6 +24,8 @@ namespace CamusDB.Core.CommandsExecutor;
 /// </summary>
 public sealed class CommandExecutor : IAsyncDisposable
 {
+    private readonly ILogger<ICamusDB> logger;
+
     private readonly HybridLogicalClock hybridLogicalClock;
 
     private readonly DatabaseOpener databaseOpener;
@@ -66,32 +69,35 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>
     /// Initializes the command executor
     /// </summary>
+    /// <param name="logger"></param>
     /// <param name="hybridLogicalClock"></param>
     /// <param name="validator"></param>
     /// <param name="catalogs"></param>
-    public CommandExecutor(HybridLogicalClock hybridLogicalClock, CommandValidator validator, CatalogsManager catalogs)
+    public CommandExecutor(ILogger<ICamusDB> logger, HybridLogicalClock hybridLogicalClock, CommandValidator validator, CatalogsManager catalogs)
     {
+        this.logger = logger;
         this.hybridLogicalClock = hybridLogicalClock;
         this.validator = validator;
 
         databaseDescriptors = new();
-        databaseOpener = new(databaseDescriptors);
-        databaseCloser = new(databaseDescriptors);
-        databaseDroper = new(databaseDescriptors);
-        databaseCreator = new();
+        databaseOpener = new(databaseDescriptors, logger);
+        databaseCloser = new(databaseDescriptors, logger);
+        databaseDroper = new(databaseDescriptors, logger);
+        databaseCreator = new(logger);
         tableOpener = new(catalogs);
         tableCreator = new(catalogs);
         tableColumnAlterer = new(catalogs);
         tableIndexAlterer = new(catalogs);
         tableDropper = new(catalogs);
-        rowInserter = new();
-        rowUpdaterById = new();
-        rowUpdater = new();
-        rowDeleterById = new();
-        rowDeleter = new();
-        queryExecutor = new();
-        sqlExecutor = new();
-        schemaQuerier = new(catalogs);
+        rowInserter = new(logger);
+        RowUpdaterById rowUpdaterById1 = new(logger);
+        rowUpdaterById = rowUpdaterById1;
+        rowUpdater = new(logger);
+        rowDeleterById = new(logger);
+        rowDeleter = new(logger);
+        queryExecutor = new(logger);
+        sqlExecutor = new(logger);
+        schemaQuerier = new(catalogs, logger);
     }
 
     #region database

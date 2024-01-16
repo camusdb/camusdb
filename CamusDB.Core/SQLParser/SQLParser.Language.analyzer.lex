@@ -15,6 +15,7 @@ TAnd            (A|a)(N|n)(D|d)
 TOr             (O|o)(R|r)
 TOn             (O|o)(N|n)
 TIn             (I|i)(N|n)
+TIs             (I|i)(S|s)
 TAsc            (A|a)(S|s)(C|c)
 TLike           (L|l)(I|i)(K|k)(E|e)
 TILike          (I|i)(L|l)(I|i)(K|k)(E|e)
@@ -150,6 +151,8 @@ TGreaterEquals  >=
 {TValues} { return (int)Token.TVALUES; }
 
 {TCreate} { return (int)Token.TCREATE; }
+
+{TIs} { return (int)Token.TIS; }
 
 {TIf} { return (int)Token.TIF; }
 

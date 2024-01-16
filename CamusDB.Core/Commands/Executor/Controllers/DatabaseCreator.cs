@@ -8,6 +8,7 @@
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -17,6 +18,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// </summary>
 internal sealed class DatabaseCreator
 {
+    private ILogger<ICamusDB> logger;
+
+    public DatabaseCreator(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
+
     public bool Create(CreateDatabaseTicket ticket)
     {
         string name = ticket.DatabaseName;

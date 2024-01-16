@@ -24,7 +24,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
 %token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW
-%token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN
+%token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 
 %%
 
@@ -92,6 +92,7 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
 				 ;
 
 create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $7.n, null, null, null, null); }
+                  | TCREATE TUNIQUE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddUniqueIndex, $6.n, $4.n, $8.n, null, null, null, null); }
                   ;
 
 show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null); }
@@ -101,6 +102,7 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TCREATE TTABLE any_identifier { $$.n = new(NodeType.ShowCreateTable, $4.n, null, null, null, null, null, null); }
           | TSHOW TDATABASE { $$.n = new(NodeType.ShowDatabase, null, null, null, null, null, null, null); }
           | TSHOW TINDEXES TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null); }
+          | TSHOW TINDEX TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null); }
           ;
 
 identifier_index_list : identifier_index_list TCOMMA identifier_index { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null); }
@@ -213,6 +215,8 @@ expr       : equals_expr { $$.n = $1.n; }
            | fcall_expr { $$.n = $1.n; }
            | projection_all { $$.n = $1.n; }
            | use_default_expr { $$.n = $1.n; }
+           | is_null_expr { $$.n = $1.n; }
+           | is_not_null_expr { $$.n = $1.n; }
            ;
 
 and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, null, null, null, null, null); }
@@ -252,7 +256,13 @@ like_expr : condition TLIKE condition { $$.n = new(NodeType.ExprLike, $1.n, $3.n
           ;
 
 ilike_expr : condition TILIKE condition { $$.n = new(NodeType.ExprILike, $1.n, $3.n, null, null, null, null, null); }
-           ;  
+           ;
+
+is_null_expr : condition TIS TNULL { $$.n = new(NodeType.ExprIsNull, $1.n, $3.n, null, null, null, null, null); }
+             ;
+
+is_not_null_expr : condition TIS TNOT TNULL { $$.n = new(NodeType.ExprIsNotNull, $1.n, $3.n, null, null, null, null, null); }
+                 ;
 
 fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, null, null, null, null, null, null); }
            | identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, $3.n, null, null, null, null, null); }

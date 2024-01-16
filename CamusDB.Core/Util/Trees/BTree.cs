@@ -284,7 +284,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     }
 
     /// <summary>
-    /// Inserts new nodes in the tree. In case of dublicate key the value is overriden    
+    /// Inserts new nodes in the tree. In case of duplicate key the value is overriden    
     /// </summary>
     /// <param name="txnid"></param>
     /// <param name="key"></param>

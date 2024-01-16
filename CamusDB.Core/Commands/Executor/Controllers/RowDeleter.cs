@@ -16,6 +16,7 @@ using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -25,6 +26,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 internal sealed class RowDeleter
 {
     private readonly IndexSaver indexSaver = new();
+    private ILogger<ICamusDB> logger;
+
+    public RowDeleter(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
 
     /// <summary>
     /// Step #1. Creates a new delete plan for the table defining which unique indexes will be updated

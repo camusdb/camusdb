@@ -226,6 +226,28 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSimpleSelectWhere16()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table WHERE xx IS NULL");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprIsNull, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectWhere17()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table WHERE xx IS NOT NULL");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprIsNotNull, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
     public void TestParseSimpleSelectOrderBy()
     {
         NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table ORDER BY xx");
@@ -1083,7 +1105,33 @@ public class TestSQLParser
         Assert.AreEqual("some_table", ast.leftAst!.yytext);
         Assert.AreEqual("usersid_idx", ast.rightAst!.yytext);
         Assert.AreEqual(NodeType.IndexIdentifierList, ast.extendedOne!.nodeType);
-    }    
+    }
+
+    [Test]
+    public void TestParseCreateIndex1()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE INDEX `usersid_idx` ON `some_table` (`usersId`, `id`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddIndex, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("usersid_idx", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.IndexIdentifierList, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
+    public void TestParseCreateIndex2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE UNIQUE INDEX `usersid_idx` ON `some_table` (`usersId`, `id`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddUniqueIndex, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("usersid_idx", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.IndexIdentifierList, ast.extendedOne!.nodeType);
+    }
 
     [Test]
     public void TestParseShowDatabase()
@@ -1132,6 +1180,15 @@ public class TestSQLParser
     public void TestParseShowIndexes()
     {
         NodeAst ast = SQLParserProcessor.Parse("SHOW INDEXES FROM robots");
+
+        Assert.AreEqual(NodeType.ShowIndexes, ast.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseShowIndexes2()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW INDEX FROM robots");
 
         Assert.AreEqual(NodeType.ShowIndexes, ast.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
