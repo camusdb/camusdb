@@ -109,7 +109,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
         if (root is null)
         {
-            Console.WriteLine("root is null");
+            //Console.WriteLine("root is null");
             return default;
         }
 

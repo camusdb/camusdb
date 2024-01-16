@@ -22,7 +22,7 @@ public sealed class ExecuteSQLController : CommandsController
 {
     private readonly ILogger<ICamusDB> logger;
 
-    public ExecuteSQLController(ILogger<ICamusDB> logger, CommandExecutor executor) : base(executor)
+    public ExecuteSQLController(CommandExecutor executor, ILogger<ICamusDB> logger) : base(executor)
     {
         this.logger = logger;
     }

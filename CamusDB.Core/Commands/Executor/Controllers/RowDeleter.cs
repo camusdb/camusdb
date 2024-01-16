@@ -25,8 +25,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// </summary>
 internal sealed class RowDeleter
 {
-    private readonly IndexSaver indexSaver = new();
-    private ILogger<ICamusDB> logger;
+    private readonly ILogger<ICamusDB> logger;
+
+    private readonly IndexSaver indexSaver = new();    
 
     public RowDeleter(ILogger<ICamusDB> logger)
     {
@@ -143,7 +144,8 @@ internal sealed class RowDeleter
     {
         if (state.DataCursor is null)
         {
-            Console.WriteLine("Invalid rows to delete");
+            logger.LogError("Invalid rows to delete");
+
             return FluxAction.Abort;
         }
 
@@ -169,8 +171,8 @@ internal sealed class RowDeleter
 
             await PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas, multiIndexDeltas);
 
-            Console.WriteLine(
-                "Row with rowid {0} deleted to tombstone page {1}",
+            logger.LogInformation(
+                "Row with rowid {SlotOne} deleted to tombstone page {SlotTwo}",
                 tuple.SlotOne,
                 tuple.SlotTwo
             );
@@ -344,7 +346,7 @@ internal sealed class RowDeleter
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        Console.WriteLine(
+        logger.LogInformation(
             "Deleted {0} rows, Time taken: {1}",
             state.DeletedRows,
             timeTaken.ToString(@"m\:ss\.fff")

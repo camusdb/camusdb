@@ -128,20 +128,20 @@ internal sealed class RowDeleterById
 
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+            //Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
             return FluxAction.Abort;
         }
 
         byte[] data = await tablespace.GetDataFromPage(state.RowTuple.SlotTwo);
         if (data.Length == 0)
         {
-            Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
+            //Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
             return FluxAction.Abort;
         }
 
         state.ColumnValues = rowDeserializer.Deserialize(table.Schema, data);
 
-        Console.WriteLine("Data to Delete Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
+        //Console.WriteLine("Data to Delete Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
 
         return FluxAction.Continue;
     }
@@ -235,6 +235,7 @@ internal sealed class RowDeleterById
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
             Console.WriteLine("Invalid row to Update {0}", state.Ticket.Id);
+
             return FluxAction.Abort;
         }
 
@@ -331,7 +332,7 @@ internal sealed class RowDeleterById
 
         if (state.RowTuple is null)
         {
-            Console.WriteLine(
+            logger.LogWarning(
                 "Row pk {0} not found, Time taken: {1}",
                 ticket.Id,
                 timeTaken.ToString(@"m\:ss\.fff")
@@ -340,7 +341,7 @@ internal sealed class RowDeleterById
             return 0;
         }
 
-        Console.WriteLine(
+        logger.LogInformation(
             "Row pk {0} with id {1} deleted from page offset {2}, Time taken: {3}, Modified pages: {4}",
             ticket.Id,
             state.RowTuple?.SlotOne,

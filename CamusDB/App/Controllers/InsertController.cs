@@ -19,9 +19,11 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class InsertController : CommandsController
 {
-    public InsertController(CommandExecutor executor) : base(executor)
-    {
+    private readonly ILogger<ICamusDB> logger;
 
+    public InsertController(CommandExecutor executor, ILogger<ICamusDB> logger) : base(executor)
+    {
+        this.logger = logger;
     }
 
     [HttpPost]
@@ -33,7 +35,7 @@ public sealed class InsertController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync();
 
-            Console.WriteLine(body);
+            logger.LogInformation("{0}", body);
 
             InsertRequest? request = JsonSerializer.Deserialize<InsertRequest>(body, jsonOptions);
             if (request == null)
@@ -52,12 +54,14 @@ public sealed class InsertController : CommandsController
         }
         catch (CamusDBException e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new InsertResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new InsertResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }

@@ -16,6 +16,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -30,9 +31,12 @@ internal sealed class DatabaseOpener
 {
     private readonly DatabaseDescriptors databaseDescriptors;
 
-    public DatabaseOpener(DatabaseDescriptors databaseDescriptors, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
+    private readonly ILogger<ICamusDB> logger;
+
+    public DatabaseOpener(DatabaseDescriptors databaseDescriptors, ILogger<ICamusDB> logger)
     {
         this.databaseDescriptors = databaseDescriptors;
+        this.logger = logger;
     }
 
     public async ValueTask<DatabaseDescriptor> Open(CommandExecutor executor, HybridLogicalClock hybridLogicalClock, string name, bool recoveryMode = false)
@@ -44,21 +48,21 @@ internal sealed class DatabaseOpener
         return await openDatabaseLazy;
     }
 
-    private static async Task<DatabaseDescriptor> LoadDatabase(HybridLogicalClock hybridLogicalClock, string name)
+    private async Task<DatabaseDescriptor> LoadDatabase(HybridLogicalClock hybridLogicalClock, string name)
     {
         //if (!Directory.Exists(path))
         //    throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
 
         LC logicalClock = new();
         StorageManager storage = new(name);
-        BufferPoolManager bufferPool = new(storage, logicalClock);
+        BufferPoolManager bufferPool = new(storage, logicalClock, logger);
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new();
 
         DatabaseDescriptor databaseDescriptor = new(
             name: name,
             storage: storage,
             bufferPool: bufferPool,
-            gc: new GCManager(bufferPool, hybridLogicalClock, logicalClock, tableDescriptors),
+            gc: new GCManager(bufferPool, hybridLogicalClock, logicalClock, tableDescriptors, logger),
             tableDescriptors: tableDescriptors
         );
 
@@ -73,7 +77,7 @@ internal sealed class DatabaseOpener
         return databaseDescriptor;
     }
 
-    private static Task LoadDatabaseSchema(DatabaseDescriptor database)
+    private Task LoadDatabaseSchema(DatabaseDescriptor database)
     {
         byte[]? data = database.Storage.Get(CamusConfig.SchemaKey); //SchemaSpace!.GetDataFromPage(Config.SchemaHeaderPage);
 
@@ -82,12 +86,12 @@ internal sealed class DatabaseOpener
         else
             database.Schema.Tables = new();
 
-        Console.WriteLine("Schema tablespaces read. Loaded {0} tables", database.Schema.Tables.Count);
+        logger.LogInformation("Schema tablespaces read. Loaded {0} tables", database.Schema.Tables.Count);
 
         return Task.CompletedTask;
     }
 
-    private static Task LoadDatabaseSystemSpace(DatabaseDescriptor database)
+    private Task LoadDatabaseSystemSpace(DatabaseDescriptor database)
     {
         byte[]? data = database.Storage.Get(CamusConfig.SystemKey);
 
@@ -96,7 +100,7 @@ internal sealed class DatabaseOpener
         else
             database.SystemSchema = new();
 
-        Console.WriteLine("System tablespaces read. Found {0} objects", database.SystemSchema.Tables.Count);
+        logger.LogInformation("System tablespaces read. Found {0} objects", database.SystemSchema.Tables.Count);
 
         return Task.CompletedTask;
     }

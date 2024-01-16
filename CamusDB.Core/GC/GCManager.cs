@@ -19,6 +19,7 @@ using CamusDB.Core.Util.Comparers;
 using CamusDB.Core.CommandsExecutor.Models;
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.GC;
 
@@ -71,6 +72,8 @@ public sealed class GCManager : IDisposable
 
     private readonly LC logicalClock;
 
+    private readonly ILogger<ICamusDB> logger;
+
     private readonly SortedDictionary<ulong, List<BufferPage>> lruPages = new(new DescendingComparer<ulong>());
 
     private readonly ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors;
@@ -79,12 +82,19 @@ public sealed class GCManager : IDisposable
 
     private readonly Timer indexReleaser;
 
-    public GCManager(BufferPoolManager bufferPool, HybridLogicalClock hybridLogicalClock, LC logicalClock, ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors)
+    public GCManager(
+        BufferPoolManager bufferPool,
+        HybridLogicalClock hybridLogicalClock,
+        LC logicalClock,
+        ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors,
+        ILogger<ICamusDB> logger
+    )
     {
         this.bufferPool = bufferPool;
         this.hlc = hybridLogicalClock;
         this.logicalClock = logicalClock;
         this.tableDescriptors = tableDescriptors;
+        this.logger = logger;
 
         pagesReleaser = new(ReleasePages, null, TimeSpan.FromSeconds(CamusConfig.GCPagesIntervalSeconds), TimeSpan.FromSeconds(CamusConfig.GCPagesIntervalSeconds));
         indexReleaser = new(ReleaseIndexNodesAndEntries, null, TimeSpan.FromSeconds(CamusConfig.GCIndexIntervalSeconds), TimeSpan.FromSeconds(CamusConfig.GCIndexIntervalSeconds));
@@ -103,7 +113,7 @@ public sealed class GCManager : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine("ReleasePages: {0}", ex.Message, ex.StackTrace);
+            logger.LogError("ReleasePages: {Message}\n{StackTrace}", ex.Message, ex.StackTrace);
         }
     }
 
@@ -172,7 +182,7 @@ public sealed class GCManager : IDisposable
         }
 
         if (numberFreed > 0)
-            Console.WriteLine("Total pages freed: {0}, remaining: {1}", numberFreed, pages.Count);
+            logger.LogInformation("Total pages freed: {NumberFreed}, remaining: {Count}", numberFreed, pages.Count);
 
         lruPages.Clear();
     }
@@ -248,7 +258,7 @@ public sealed class GCManager : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine("ReleaseIndexNodesAndEntries: {0}", ex.Message, ex.StackTrace);
+            logger.LogError("ReleaseIndexNodesAndEntries: {Message}\n{StackTrace}", ex.Message, ex.StackTrace);
         }
     }
 

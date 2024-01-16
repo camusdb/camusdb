@@ -15,6 +15,14 @@ using CamusDB.Core.Util.Time;
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // Add logging
+builder.Services.AddLogging(logging =>
+    logging.AddSimpleConsole(options =>
+    {
+        options.SingleLine = true;
+        options.TimestampFormat = "yyyy-MM-dd HH:mm:ss ";
+    })
+);
+
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 

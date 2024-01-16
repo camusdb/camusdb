@@ -11,6 +11,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.Catalogs;
 
@@ -20,6 +21,13 @@ namespace CamusDB.Core.Catalogs;
 /// </summary>
 public sealed class CatalogsManager
 {
+    private readonly ILogger<ICamusDB> logger;
+
+    public CatalogsManager(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
+
     /// <summary>
     /// Adds a new table object to the database schema as well as its indexes.    
     /// </summary>
@@ -75,7 +83,7 @@ public sealed class CatalogsManager
 
             database.Storage.Put(CamusDBConfig.SchemaKey, encoded);
 
-            Console.WriteLine("Added table {0} to schema", ticket.TableName);
+            logger.LogInformation("Added table {TableName} to schema", ticket.TableName);
 
             return tableSchema;
         }
@@ -127,7 +135,7 @@ public sealed class CatalogsManager
 
             database.Storage.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
 
-            Console.WriteLine("Modifed table {0} schema", ticket.TableName);
+            logger.LogInformation("Modifed table {TableName} schema", ticket.TableName);
 
             return tableSchema;
         }

@@ -18,9 +18,11 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class CloseDatabaseController : CommandsController
 {
-    public CloseDatabaseController(CommandExecutor executor) : base(executor)
-    {
+    private readonly ILogger<ICamusDB> logger;
 
+    public CloseDatabaseController(CommandExecutor executor, ILogger<ICamusDB> logger) : base(executor)
+    {
+        this.logger = logger;
     }
 
     [HttpPost]
@@ -46,12 +48,14 @@ public sealed class CloseDatabaseController : CommandsController
         }
         catch (CamusDBException e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new CloseDatabaseResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new CloseDatabaseResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }

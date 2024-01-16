@@ -69,15 +69,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>
     /// Initializes the command executor
     /// </summary>
-    /// <param name="logger"></param>
     /// <param name="hybridLogicalClock"></param>
     /// <param name="validator"></param>
     /// <param name="catalogs"></param>
-    public CommandExecutor(ILogger<ICamusDB> logger, HybridLogicalClock hybridLogicalClock, CommandValidator validator, CatalogsManager catalogs)
-    {
-        this.logger = logger;
+    /// <param name="logger"></param>
+    public CommandExecutor(HybridLogicalClock hybridLogicalClock, CommandValidator validator, CatalogsManager catalogs, ILogger<ICamusDB> logger)
+    {       
         this.hybridLogicalClock = hybridLogicalClock;
         this.validator = validator;
+        this.logger = logger;
 
         databaseDescriptors = new();
         databaseOpener = new(databaseDescriptors, logger);

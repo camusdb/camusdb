@@ -12,10 +12,10 @@ using CamusDB.Core.Util.Hashes;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.ObjectIds;
+using Microsoft.Extensions.Logging;
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 using BConfig = CamusDB.Core.BufferPool.Models.BufferPoolConfig;
-using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.BufferPool;
 
@@ -389,7 +389,7 @@ public sealed class BufferPoolManager
     /// <param name="modifiedPages"></param>
     public void ApplyPageOperations(List<BufferPageOperation> modifiedPages)
     {
-        //Console.WriteLine("Wrote {0} pages in the batch", modifiedPages.Count);
+        logger.LogInformation("Wrote {Count} pages in the batch", modifiedPages.Count);
 
         storage.WriteBatch(modifiedPages);
     }
@@ -514,7 +514,7 @@ public sealed class BufferPoolManager
                 disposable.Dispose();
         }
 
-        Console.WriteLine("Removed {0} pages from disk, length={1}", pagesChain.Count, length);
+        logger.LogInformation("Removed {0} pages from disk, length={1}", pagesChain.Count, length);
     }
 
     public void Flush()

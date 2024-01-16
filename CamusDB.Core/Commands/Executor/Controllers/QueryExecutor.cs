@@ -18,6 +18,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class QueryExecutor
 {
+    private readonly ILogger<ICamusDB> logger;
+
     private readonly RowDeserializer rowDeserializer = new();
 
     private readonly QueryPlanner queryPlanner = new();
@@ -32,8 +34,7 @@ internal sealed class QueryExecutor
 
     private readonly QueryLimiter queryLimiter = new();
 
-    private readonly QueryScanner queryScanner = new();
-    private ILogger<ICamusDB> logger;
+    private readonly QueryScanner queryScanner = new();    
 
     public QueryExecutor(ILogger<ICamusDB> logger)
     {
@@ -51,7 +52,7 @@ internal sealed class QueryExecutor
     {
         foreach (QueryPlanStep step in plan.Steps)
         {
-            Console.WriteLine("Executing step {0}", step.Type);
+            logger.LogInformation("Executing step {Type}", step.Type);
 
             switch (step.Type)
             {
