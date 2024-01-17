@@ -32,7 +32,8 @@ public sealed class RowUpdaterById
     private readonly RowSerializer rowSerializer = new();
 
     private readonly RowDeserializer rowDeserializer = new();
-    private ILogger<ICamusDB> logger;
+
+    private readonly ILogger<ICamusDB> logger;
 
     public RowUpdaterById(ILogger<ICamusDB> logger)
     {
@@ -151,7 +152,7 @@ public sealed class RowUpdaterById
 
         FluxMachine<UpdateByIdFluxSteps, UpdateByIdFluxState> machine = new(state);
 
-        return await UpdateByIdInternal(machine, state);
+        return await UpdateByIdInternal(machine, state).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -206,24 +207,26 @@ public sealed class RowUpdaterById
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        state.RowTuple = await index.BTree.Get(TransactionType.Write, ticket.TxnId, new CompositeColumnValue(columnId));
+        state.RowTuple = await index.BTree.Get(TransactionType.Write, ticket.TxnId, new CompositeColumnValue(columnId)).ConfigureAwait(false);
 
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+            logger.LogWarning("Index Pk={0} does not exist", ticket.Id);
+
             return FluxAction.Abort;
         }
 
-        byte[] data = await tablespace.GetDataFromPage(state.RowTuple.SlotTwo);
+        byte[] data = await tablespace.GetDataFromPage(state.RowTuple.SlotTwo).ConfigureAwait(false);
         if (data.Length == 0)
         {
-            Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
+            logger.LogWarning("Index RowId={0} has an empty page data", ticket.Id);
+
             return FluxAction.Abort;
         }
 
         state.ColumnValues = rowDeserializer.Deserialize(table.Schema, data);
 
-        Console.WriteLine("Data to Update Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
+        logger.LogInformation("Data to Update Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
 
         return FluxAction.Continue;
     }
@@ -259,7 +262,7 @@ public sealed class RowUpdaterById
                 value: state.RowTuple
             );
 
-            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
+            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false)));
         }
 
         state.Indexes.UniqueIndexDeltas = deltas;
@@ -278,7 +281,8 @@ public sealed class RowUpdaterById
 
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+            logger.LogWarning("Index Pk={0} does not exist", ticket.Id);
+
             return FluxAction.Abort;
         }
 
@@ -298,7 +302,7 @@ public sealed class RowUpdaterById
                 value: state.RowTuple
             );
 
-            deltas.Add((multiIndex, await indexSaver.Save(saveUniqueIndexTicket)));
+            deltas.Add((multiIndex, await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false)));
         }
 
         state.Indexes.MultiIndexDeltas = deltas;
@@ -315,7 +319,8 @@ public sealed class RowUpdaterById
     {
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            Console.WriteLine("Invalid row to Update {0}", state.Ticket.Id);
+            logger.LogWarning("Invalid row to Update {0}", state.Ticket.Id);
+
             return Task.FromResult(FluxAction.Abort);
         }
 
@@ -351,7 +356,8 @@ public sealed class RowUpdaterById
     {
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            Console.WriteLine("Invalid row to Update {0}", state.Ticket.Id);
+            logger.LogWarning("Invalid row to Update {0}", state.Ticket.Id);
+
             return FluxAction.Abort;
         }
 
@@ -363,7 +369,7 @@ public sealed class RowUpdaterById
         );
 
         // Main table index stores rowid pointing to page offset
-        state.Indexes.MainIndexDeltas = await indexSaver.Save(saveUniqueOffsetIndex);
+        state.Indexes.MainIndexDeltas = await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
@@ -381,7 +387,7 @@ public sealed class RowUpdaterById
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in state.Indexes.MainIndexDeltas.MvccEntries)
             btreeEntry.CommitState = BTreeCommitState.Committed;
 
-        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas);
+        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas).ConfigureAwait(false);
 
         if (state.Indexes.UniqueIndexDeltas is not null)
         {
@@ -390,7 +396,7 @@ public sealed class RowUpdaterById
                 foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                     uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
-                await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+                await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas).ConfigureAwait(false);
             }
         }
 
@@ -401,7 +407,7 @@ public sealed class RowUpdaterById
                 foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multIndex.deltas.MvccEntries)
                     multiIndexEntry.CommitState = BTreeCommitState.Committed;
 
-                await indexSaver.Persist(state.Database.BufferPool, multIndex.index, state.ModifiedPages, multIndex.deltas);
+                await indexSaver.Persist(state.Database.BufferPool, multIndex.index, state.ModifiedPages, multIndex.deltas).ConfigureAwait(false);
             }
         }
 
@@ -446,7 +452,7 @@ public sealed class RowUpdaterById
         //machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep());
+            await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
 
         timer.Stop();
 
@@ -454,7 +460,7 @@ public sealed class RowUpdaterById
 
         if (state.RowTuple is null)
         {
-            Console.WriteLine(
+            logger.LogWarning(
                 "Row pk {0} not found, Time taken: {1}",
                 ticket.Id,
                 timeTaken.ToString(@"m\:ss\.fff")
@@ -463,7 +469,7 @@ public sealed class RowUpdaterById
             return 0;
         }
 
-        Console.WriteLine(
+        logger.LogInformation(
             "Row pk {0} with id {1} updated to page {2}, Time taken: {3}",
             ticket.Id,
             state.RowTuple?.SlotOne,

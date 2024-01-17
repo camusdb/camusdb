@@ -35,7 +35,6 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="BufferPool\" />
-    <Folder Include="Indexes\" />
     <Folder Include="Fixtures\" />
     <Folder Include="Serialization\" />
     <Folder Include="Utils\" />

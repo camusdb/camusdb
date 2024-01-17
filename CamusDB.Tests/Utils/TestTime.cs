@@ -39,4 +39,23 @@ public class TestTime
         for (int i = 0; i < events.Length; i++)
             Console.WriteLine(events[i]);
     }
+
+    /*[Test]
+    public async Task X()
+    {
+        var lines = await System.IO.File.ReadAllLinesAsync("C:\\tmp\\lala-0.txt");
+
+        int sum = 0;
+
+        foreach (var line in lines)
+        {
+            if (line.StartsWith("split "))
+            {
+                Console.WriteLine(line);
+                sum++;
+            }
+        }
+
+        Console.WriteLine(sum);
+    }*/
 }

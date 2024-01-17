@@ -74,7 +74,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     {
         // @todo this lock will produce contention
         using (await index.WriterLockAsync().ConfigureAwait(false))
-        { 
+        {
             foreach (BTreeNode<ObjectIdValue, ObjectIdValue> node in deltas.Nodes)
             {
                 if (node.PageOffset.IsNull())
@@ -121,16 +121,24 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
                     if (entry is not null)
                     {
-                        (HLCTimestamp timestamp, ObjectIdValue value) = entry.GetMaxCommittedValue();
-
                         //Console.WriteLine("Saved K={0} T={1} V={2}", entry.Key, timestamp, value);
-
                         Serializator.WriteObjectId(nodeBuffer, entry.Key, ref pointer);
-                        Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer); // @todo LastValue
-                        Serializator.WriteObjectId(nodeBuffer, value, ref pointer); // @todo LastValue
 
-                        BTreeNode<ObjectIdValue, ObjectIdValue>? next = (await entry.Next.ConfigureAwait(false));
-                        Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : nullAddressValue, ref pointer);
+                        BTreeNode<ObjectIdValue, ObjectIdValue>? next = await entry.Next.ConfigureAwait(false);
+
+                        if (next is not null)
+                        {
+                            Serializator.WriteHLCTimestamp(nodeBuffer, nullTimestamp, ref pointer);
+                            Serializator.WriteObjectId(nodeBuffer, nullAddressValue, ref pointer);
+                            Serializator.WriteObjectId(nodeBuffer, next.PageOffset, ref pointer);
+                        }
+                        else
+                        {
+                            (HLCTimestamp timestamp, ObjectIdValue value) = entry.GetMaxCommittedValue();
+                            Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer); // @todo LastValue
+                            Serializator.WriteObjectId(nodeBuffer, value, ref pointer); // @todo LastValue
+                            Serializator.WriteObjectId(nodeBuffer, nullAddressValue, ref pointer);
+                        }
                     }
                     else
                     {
@@ -149,5 +157,5 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
                 //Console.WriteLine("Modified Node {0}/{1} at {2} Pointer={3} BufferLength={4}", node.Id, node.KeyCount, node.PageOffset, pointer, nodeBuffer.Length);
             }
         }
-    }
+    }    
 }

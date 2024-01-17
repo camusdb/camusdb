@@ -36,7 +36,7 @@ public class BTreeIncr
  * the same transaction id (timestamp).
  */
 public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
-{    
+{
     private readonly int maxNodeCapacity;
 
     private readonly int maxNodeCapacityHalf;
@@ -304,11 +304,16 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     /// <param name="commitState"></param>
     /// <param name="value"></param>
     /// <returns></returns>
-    public async Task<BTreeMutationDeltas<TKey, TValue>> Put(HLCTimestamp txnid, BTreeCommitState commitState, TKey key, TValue? value)
+    public async Task<BTreeMutationDeltas<TKey, TValue>> Put(
+        HLCTimestamp txnid,
+        BTreeCommitState commitState,
+        TKey key,
+        TValue? value
+    )
     {
         using (await WriterLockAsync().ConfigureAwait(false))
         {
-            //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("{0} {1} {2} {3}\n", key, txnid, commitState, value)).ConfigureAwait(false);
+            await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("{0} {1} {2} {3}\n", key, txnid, commitState, value)).ConfigureAwait(false);
 
             BTreeMutationDeltas<TKey, TValue> deltas = new();
 
@@ -329,7 +334,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             if (split is null)
                 return deltas;
 
-            //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", "need to split root\n").ConfigureAwait(false);
+            await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", "need to split root\n").ConfigureAwait(false);
 
             //using IDisposable disposable = await root.WriterLockAsync();
 
@@ -391,7 +396,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                 {
                     //Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);
 
-                    //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("Replaced at {0}/{1} SetV={2} {3} {4} {5}\n", node.Id, j, key, txnid, commitState, value)).ConfigureAwait(false);
+                    await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("Replaced at {0}/{1} SetV={2} {3} {4} {5}\n", node.Id, j, key, txnid, commitState, value)).ConfigureAwait(false);
 
                     node.NumberWrites++;
 
@@ -419,12 +424,14 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                 {
                     BTreeEntry<TKey, TValue> entry = children[j++];
 
-                    BTreeNode<TKey, TValue>? split = await Insert(await entry.Next.ConfigureAwait(false), txnid, key, commitState, value, ht - 1, deltas).ConfigureAwait(false);
+                    BTreeNode<TKey, TValue>? next = await entry.Next.ConfigureAwait(false);
+
+                    BTreeNode<TKey, TValue>? split = await Insert(next, txnid, key, commitState, value, ht - 1, deltas).ConfigureAwait(false);
 
                     if (split == null)
                         return null;
 
-                    //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", $"split internal node {split.Id}\n").ConfigureAwait(false);
+                    await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", $"split internal node {split.Id}\n").ConfigureAwait(false);
 
                     newEntry = new(split.children[0].Key, reader, split);
                     deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
@@ -437,13 +444,13 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             throw new Exception("?");
 
         for (int i = node.KeyCount; i > j; i--)
-            node.children[i] = node.children[i - 1];        
+            node.children[i] = node.children[i - 1];
 
         node.children[j] = newEntry;
         node.KeyCount++;
         node.NumberWrites++;
 
-        //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("Insert at {0}/{1} {2} {3} {4} {5} {6}\n", node.Id, j, node.KeyCount, key, txnid, commitState, value)).ConfigureAwait(false);
+        await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("Insert at {0}/{1} {2} {3} {4} {5} {6} {7}\n", node.Id, j, ht, node.KeyCount, key, txnid, commitState, value)).ConfigureAwait(false);
 
         deltas.Nodes.Add(node);
 
@@ -452,7 +459,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
         var p = Split(node, txnid, deltas);
 
-        //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", $"split node in {node.Id} {p.Id}\n").ConfigureAwait(false);
+        await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", $"split node in {node.Id} {p.Id}\n").ConfigureAwait(false);
 
         return p;
     }
@@ -472,7 +479,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         deltas.Nodes.Add(current);
 
         for (int j = 0; j < maxNodeCapacityHalf; j++)
-            newNode.children[j] = current.children[maxNodeCapacityHalf + j];        
+            newNode.children[j] = current.children[maxNodeCapacityHalf + j];
 
         return newNode;
     }

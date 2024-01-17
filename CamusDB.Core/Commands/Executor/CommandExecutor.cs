@@ -178,14 +178,14 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     public async Task<TableDescriptor> OpenTable(OpenTableTicket ticket)
     {
-        DatabaseDescriptor descriptor = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor descriptor = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        return await tableOpener.Open(descriptor, ticket.TableName);
+        return await tableOpener.Open(descriptor, ticket.TableName).ConfigureAwait(false);
     }
 
     public async Task<TableDescriptor> OpenTableWithDescriptor(DatabaseDescriptor descriptor, OpenTableTicket ticket)
     {
-        return await tableOpener.Open(descriptor, ticket.TableName);
+        return await tableOpener.Open(descriptor, ticket.TableName).ConfigureAwait(false);
     }
 
     public async Task<bool> ExecuteDDLSQL(ExecuteSQLTicket ticket)
@@ -205,7 +205,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     validator.Validate(createTableTicket);
 
-                    return await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, createTableTicket);
+                    return await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, createTableTicket).ConfigureAwait(false);
                 }
 
             case NodeType.AlterTableAddColumn:
@@ -215,9 +215,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     validator.Validate(alterTableTicket);
 
-                    TableDescriptor table = await tableOpener.Open(database, alterTableTicket.TableName);
+                    TableDescriptor table = await tableOpener.Open(database, alterTableTicket.TableName).ConfigureAwait(false);
 
-                    return await tableColumnAlterer.Alter(queryExecutor, database, table, alterTableTicket);
+                    return await tableColumnAlterer.Alter(queryExecutor, database, table, alterTableTicket).ConfigureAwait(false);
                 }
 
             case NodeType.AlterTableAddIndex:
@@ -230,9 +230,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     validator.Validate(alterIndexTicket);
 
-                    TableDescriptor table = await tableOpener.Open(database, alterIndexTicket.TableName);
+                    TableDescriptor table = await tableOpener.Open(database, alterIndexTicket.TableName).ConfigureAwait(false);
 
-                    return await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket);
+                    return await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket).ConfigureAwait(false);
                 }
 
             case NodeType.DropTable:
@@ -241,9 +241,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     validator.Validate(dropTableTicket);
 
-                    TableDescriptor table = await tableOpener.Open(database, dropTableTicket.TableName);
+                    TableDescriptor table = await tableOpener.Open(database, dropTableTicket.TableName).ConfigureAwait(false);
 
-                    return await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, dropTableTicket);
+                    return await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, dropTableTicket).ConfigureAwait(false);
                 }
 
             default:
@@ -432,9 +432,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             case NodeType.Select:
                 {
-                    QueryTicket queryTicket = await sqlExecutor.CreateQueryTicket(this, ticket, ast);
+                    QueryTicket queryTicket = await sqlExecutor.CreateQueryTicket(this, ticket, ast).ConfigureAwait(false);
 
-                    TableDescriptor table = await tableOpener.Open(database, queryTicket.TableName);
+                    TableDescriptor table = await tableOpener.Open(database, queryTicket.TableName).ConfigureAwait(false);
 
                     return queryExecutor.Query(database, table, queryTicket);
                 }
@@ -446,21 +446,21 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.ShowColumns:
                 {
-                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!);
+                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
 
                     return schemaQuerier.ShowColumns(table);
                 }
 
             case NodeType.ShowIndexes:
                 {
-                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!);
+                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
 
                     return schemaQuerier.ShowIndexes(table);
                 }
 
             case NodeType.ShowCreateTable:
                 {
-                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!);
+                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
 
                     return schemaQuerier.ShowCreateTable(table);
                 }
