@@ -25,22 +25,16 @@ using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestRowDeletor
+public class TestRowDeletor : BaseTest
 {
-    [SetUp]
-    public void Setup()
-    {
-        //SetupDb.Remove("factory");
-    }
-
-    private static async Task<(string, CommandExecutor)> SetupDatabase()
+    private async Task<(string, CommandExecutor)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(hlc, validator, catalogsManager);
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -52,7 +46,7 @@ public class TestRowDeletor
         return (dbname, executor);
     }
 
-    private static async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
     {
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 
@@ -103,7 +97,7 @@ public class TestRowDeletor
         return (dbname, executor, objectsId);
     }
 
-    private static async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupLargeDataTable()
+    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupLargeDataTable()
     {
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 

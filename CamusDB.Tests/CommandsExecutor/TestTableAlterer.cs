@@ -18,23 +18,17 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-internal sealed class TestTableAlterer
-{
-    [SetUp]
-    public void Setup()
-    {
-        //SetupDb.Remove("test");
-    }
-
-    private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupDatabase()
+internal sealed class TestTableAlterer : BaseTest
+{    
+    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogs = new();
+        CatalogsManager catalogs = new(logger);
 
-        CommandExecutor executor = new(hlc, validator, catalogs);
+        CommandExecutor executor = new(hlc, validator, catalogs, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -46,7 +40,7 @@ internal sealed class TestTableAlterer
         return (dbname, executor, catalogs, descriptor);
     }
 
-    private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupEmptyTable()
+    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupEmptyTable()
     {
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
 
@@ -73,7 +67,7 @@ internal sealed class TestTableAlterer
         return (dbname, executor, catalogs, database);
     }
 
-    private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupBasicTable()
     {
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
 
@@ -104,7 +98,7 @@ internal sealed class TestTableAlterer
         return (dbname, executor, catalogs, database, objectsId);
     }
 
-    private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupTableRepeatedData()
+    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupTableRepeatedData()
     {
         (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
 

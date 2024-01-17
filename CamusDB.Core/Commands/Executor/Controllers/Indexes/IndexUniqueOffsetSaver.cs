@@ -33,7 +33,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
     public async Task Remove(RemoveUniqueOffsetIndexTicket ticket)
     {
-        await RemoveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.ModifiedPages, ticket.Deltas);
+        await RemoveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.ModifiedPages, ticket.Deltas).ConfigureAwait(false);
     }
 
     private static async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> SaveInternal(
@@ -58,7 +58,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
     {
         if (deltas is null)
         {
-            (bool found, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> newDeltas) = await index.Remove(key);
+            (bool found, BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> newDeltas) = await index.Remove(key).ConfigureAwait(false);
 
             //if (found)
             //    Persist(tablespace, index, modifiedPages, newDeltas);

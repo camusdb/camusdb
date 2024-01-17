@@ -9,6 +9,7 @@
 using Nito.AsyncEx;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -16,9 +17,12 @@ internal sealed class DatabaseDropper
 {
     private readonly DatabaseDescriptors databaseDescriptors;
 
-    public DatabaseDropper(DatabaseDescriptors databaseDescriptors, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
+    private readonly ILogger<ICamusDB> logger;
+
+    public DatabaseDropper(DatabaseDescriptors databaseDescriptors, ILogger<ICamusDB> logger)
     {
         this.databaseDescriptors = databaseDescriptors;
+        this.logger = logger;
     }
 
     public async Task Drop(string name)
@@ -37,7 +41,7 @@ internal sealed class DatabaseDropper
 
         DropInternal(name);
 
-        Console.WriteLine("Database {0} dropped", name);
+        logger.LogInformation("Database {Name} dropped", name);
     }
 
     private static void DropInternal(string name)

@@ -11,23 +11,17 @@ using NUnit.Framework;
 using System.Threading.Tasks;
 
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Util.Time;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
-using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-internal class TestDatabaseCreator
+internal class TestDatabaseCreator : BaseTest
 {
-    [SetUp]
-    public void Setup()
-    {
-        //SetupDb.Remove("test");
-    }
-
     [Test]
     [NonParallelizable]
     public async Task TestCreateDatabase()
@@ -36,8 +30,8 @@ internal class TestDatabaseCreator
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(hlc, validator, catalogsManager);
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -59,8 +53,8 @@ internal class TestDatabaseCreator
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(hlc, validator, catalogsManager);
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,

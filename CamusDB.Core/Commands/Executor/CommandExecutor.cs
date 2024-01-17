@@ -108,26 +108,26 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         databaseCreator.Create(ticket);
 
-        return await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        return await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
     }
 
     public async Task<DatabaseDescriptor> OpenDatabase(string database, bool recoveryMode = false)
     {
-        return await databaseOpener.Open(this, hybridLogicalClock, database, recoveryMode);
+        return await databaseOpener.Open(this, hybridLogicalClock, database, recoveryMode).ConfigureAwait(false);
     }
 
     public async Task CloseDatabase(CloseDatabaseTicket ticket)
     {
         validator.Validate(ticket);
 
-        await databaseCloser.Close(ticket.DatabaseName);
+        await databaseCloser.Close(ticket.DatabaseName).ConfigureAwait(false);
     }
 
     public async Task DropDatabase(DropDatabaseTicket ticket)
     {
         validator.Validate(ticket);
 
-        await databaseDroper.Drop(ticket.DatabaseName);
+        await databaseDroper.Drop(ticket.DatabaseName).ConfigureAwait(false);
     }
 
     #endregion
@@ -138,42 +138,42 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        return await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, ticket);
+        return await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, ticket).ConfigureAwait(false);
     }
 
     public async Task<bool> AlterTable(AlterTableTicket ticket)
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await tableColumnAlterer.Alter(queryExecutor, database, table, ticket);
+        return await tableColumnAlterer.Alter(queryExecutor, database, table, ticket).ConfigureAwait(false);
     }
 
     public async Task<bool> AlterIndex(AlterIndexTicket ticket)
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await tableIndexAlterer.Alter(queryExecutor, database, table, ticket);
+        return await tableIndexAlterer.Alter(queryExecutor, database, table, ticket).ConfigureAwait(false);
     }
 
     public async Task<bool> DropTable(DropTableTicket ticket)
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket);
+        return await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket).ConfigureAwait(false);
     }
 
     public async Task<TableDescriptor> OpenTable(OpenTableTicket ticket)
@@ -194,14 +194,14 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
         switch (ast.nodeType)
         {
             case NodeType.CreateTable:
             case NodeType.CreateTableIfNotExists:
                 {
-                    CreateTableTicket createTableTicket = await sqlExecutor.CreateCreateTableTicket(this, ticket, ast);
+                    CreateTableTicket createTableTicket = await sqlExecutor.CreateCreateTableTicket(this, ticket, ast).ConfigureAwait(false);
 
                     validator.Validate(createTableTicket);
 
@@ -211,7 +211,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.AlterTableAddColumn:
             case NodeType.AlterTableDropColumn:
                 {
-                    AlterTableTicket alterTableTicket = sqlExecutor.CreateAlterTableTicket(await NextTxnId(), ticket, ast);
+                    AlterTableTicket alterTableTicket = sqlExecutor.CreateAlterTableTicket(await NextTxnId().ConfigureAwait(false), ticket, ast);
 
                     validator.Validate(alterTableTicket);
 
@@ -268,7 +268,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     public async Task InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
     {
-        await rowInserter.InsertWithState(machine, state);
+        await rowInserter.InsertWithState(machine, state).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -280,11 +280,11 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await rowUpdater.Update(queryExecutor, database, table, ticket);
+        return await rowUpdater.Update(queryExecutor, database, table, ticket).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -296,11 +296,11 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await rowUpdaterById.UpdateById(database, table, ticket);
+        return await rowUpdaterById.UpdateById(database, table, ticket).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -312,11 +312,11 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await rowDeleterById.DeleteById(database, table, ticket);
+        return await rowDeleterById.DeleteById(database, table, ticket).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -328,11 +328,11 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await rowDeleter.Delete(queryExecutor, database, table, ticket);
+        return await rowDeleter.Delete(queryExecutor, database, table, ticket).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -344,9 +344,9 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
         return queryExecutor.Query(database, table, ticket);
     }
@@ -360,9 +360,9 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
         return queryExecutor.QueryById(database, table, ticket);
     }
@@ -378,17 +378,17 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
         switch (ast.nodeType)
         {
             case NodeType.Insert:
                 {
-                    InsertTicket updateTicket = await sqlExecutor.CreateInsertTicket(this, database, ticket, ast);
+                    InsertTicket updateTicket = await sqlExecutor.CreateInsertTicket(this, database, ticket, ast).ConfigureAwait(false);
 
-                    TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
+                    TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName).ConfigureAwait(false);
 
-                    return await rowInserter.Insert(database, table, updateTicket);
+                    return await rowInserter.Insert(database, table, updateTicket).ConfigureAwait(false);
                 }
 
             case NodeType.Update:

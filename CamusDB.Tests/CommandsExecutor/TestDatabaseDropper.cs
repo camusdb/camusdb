@@ -20,14 +20,8 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-internal class TestDatabaseDropper
-{
-    [SetUp]
-    public void Setup()
-    {
-        //SetupDb.Remove("test");
-    }
-
+internal class TestDatabaseDropper : BaseTest
+{    
     [Test]
     [NonParallelizable]
     public async Task TestDropDatabase()
@@ -36,8 +30,8 @@ internal class TestDatabaseDropper
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(hlc, validator, catalogsManager);
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,

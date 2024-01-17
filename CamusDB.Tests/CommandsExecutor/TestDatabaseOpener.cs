@@ -19,14 +19,8 @@ using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestDatabaseOpener
-{
-    [SetUp]
-    public void Setup()
-    {
-        //SetupDb.Remove("test");
-    }
-
+public class TestDatabaseOpener : BaseTest
+{    
     [Test]
     [NonParallelizable]
     public async Task TestOpenDatabase()
@@ -35,8 +29,8 @@ public class TestDatabaseOpener
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(hlc, validator, catalogsManager);
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,

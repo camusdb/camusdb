@@ -24,22 +24,16 @@ using System;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestRowUpdaterUnique
-{
-    [SetUp]
-    public void Setup()
+public class TestRowUpdaterUnique : BaseTest
+{    
+    private async Task<(string, CommandExecutor)> SetupDatabase()
     {
-        //SetupDb.Remove("factory");
-    }
-
-    private static async Task<(string, CommandExecutor)> SetupDatabase()
-    {
-        string dbname = System.Guid.NewGuid().ToString("n");
+        string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(hlc, validator, catalogsManager);
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -51,7 +45,7 @@ public class TestRowUpdaterUnique
         return (dbname, executor);
     }
 
-    private static async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
     {
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 

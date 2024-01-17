@@ -17,22 +17,16 @@ using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-internal sealed class TestRowMultiInsertor
-{
-    [SetUp]
-    public void Setup()
-    {
-        //SetupDb.Remove("factory");
-    }
-
+internal sealed class TestRowMultiInsertor : BaseTest
+{    
     private async Task<(string, CommandExecutor)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(hlc, validator, catalogsManager);
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,

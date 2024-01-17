@@ -120,7 +120,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                 return default;
             }
 
-            return await GetInternal(root, txType, txnid, key, height);
+            return await GetInternal(root, txType, txnid, key, height).ConfigureAwait(false);
         }
     }
 
@@ -168,7 +168,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                 {
                     BTreeEntry<TKey, TValue> entry = children[j];
 
-                    return await GetInternal(await entry.Next, txType, txnid, key, ht - 1).ConfigureAwait(false);
+                    return await GetInternal(await entry.Next.ConfigureAwait(false), txType, txnid, key, ht - 1).ConfigureAwait(false);
                 }
             }
         }
@@ -216,7 +216,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             {
                 BTreeEntry<TKey, TValue> entry = children[j];
 
-                await foreach (BTreeEntry<TKey, TValue> childEntry in EntriesTraverseInternal(await entry.Next, txnId, ht - 1))
+                await foreach (BTreeEntry<TKey, TValue> childEntry in EntriesTraverseInternal(await entry.Next.ConfigureAwait(false), txnId, ht - 1))
                     yield return childEntry;
             }
         }
@@ -256,7 +256,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         {
             BTreeEntry<TKey, TValue> entry = node.children[j];
 
-            await foreach (BTreeNode<TKey, TValue> childNode in NodesTraverseInternal(await entry.Next, txnId, ht - 1))
+            await foreach (BTreeNode<TKey, TValue> childNode in NodesTraverseInternal(await entry.Next.ConfigureAwait(false), txnId, ht - 1))
                 yield return childNode;
         }
     }
@@ -289,7 +289,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         {
             BTreeEntry<TKey, TValue> entry = node.children[j];
 
-            await foreach (BTreeNode<TKey, TValue> childNode in NodesReverseTraverseInternal(await entry.Next, txnId, ht - 1))
+            await foreach (BTreeNode<TKey, TValue> childNode in NodesReverseTraverseInternal(await entry.Next.ConfigureAwait(false), txnId, ht - 1))
                 yield return childNode;
         }
 
@@ -308,7 +308,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     {
         using (await WriterLockAsync().ConfigureAwait(false))
         {
-            await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("{0} {1} {2} {3}\n", key, txnid, commitState, value)).ConfigureAwait(false);
+            //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("{0} {1} {2} {3}\n", key, txnid, commitState, value)).ConfigureAwait(false);
 
             BTreeMutationDeltas<TKey, TValue> deltas = new();
 
@@ -329,7 +329,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             if (split is null)
                 return deltas;
 
-            //Console.WriteLine("need to split root");
+            //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", "need to split root\n").ConfigureAwait(false);
 
             //using IDisposable disposable = await root.WriterLockAsync();
 
@@ -391,7 +391,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                 {
                     //Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);
 
-                    await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("Replaced at {0}/{1} SetV={2} {3} {4} {5}\n", node.Id, j, key, txnid, commitState, value)).ConfigureAwait(false);
+                    //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("Replaced at {0}/{1} SetV={2} {3} {4} {5}\n", node.Id, j, key, txnid, commitState, value)).ConfigureAwait(false);
 
                     node.NumberWrites++;
 
@@ -424,7 +424,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                     if (split == null)
                         return null;
 
-                    //Console.WriteLine("splitting internal node");
+                    //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", $"split internal node {split.Id}\n").ConfigureAwait(false);
 
                     newEntry = new(split.children[0].Key, reader, split);
                     deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
@@ -443,14 +443,18 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         node.KeyCount++;
         node.NumberWrites++;
 
-        await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("Insert at {0}/{1} {2} {3} {4} {5} {6}\n", node.Id, j, node.KeyCount, key, txnid, commitState, value)).ConfigureAwait(false);
+        //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("Insert at {0}/{1} {2} {3} {4} {5} {6}\n", node.Id, j, node.KeyCount, key, txnid, commitState, value)).ConfigureAwait(false);
 
         deltas.Nodes.Add(node);
 
         if (node.KeyCount < maxNodeCapacity)
             return null;
 
-        return Split(node, txnid, deltas);
+        var p = Split(node, txnid, deltas);
+
+        //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", $"split node in {node.Id} {p.Id}\n").ConfigureAwait(false);
+
+        return p;
     }
 
     // split node in half
@@ -468,7 +472,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         deltas.Nodes.Add(current);
 
         for (int j = 0; j < maxNodeCapacityHalf; j++)
-            newNode.children[j] = current.children[maxNodeCapacityHalf + j];
+            newNode.children[j] = current.children[maxNodeCapacityHalf + j];        
 
         return newNode;
     }
@@ -484,7 +488,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         {
             BTreeMutationDeltas<TKey, TValue> deltas = new();
 
-            bool found = await Delete(root, key, height, deltas);
+            bool found = await Delete(root, key, height, deltas).ConfigureAwait(false);
 
             if (found)
                 size--;
@@ -543,7 +547,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             for (int j = 0; j < node.KeyCount; j++)
             {
                 if (j + 1 == node.KeyCount || Less(key, children[j + 1].Key))
-                    return await Delete(await children[j].Next, key, ht - 1, deltas);
+                    return await Delete(await children[j].Next.ConfigureAwait(false), key, ht - 1, deltas).ConfigureAwait(false);
             }
         }
 
@@ -566,7 +570,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         if (root is null)
             return false;
 
-        return await MarkInternal(root, txnid, height, deltas);
+        return await MarkInternal(root, txnid, height, deltas).ConfigureAwait(false);
     }
 
     private async Task<bool> MarkInternal(BTreeNode<TKey, TValue>? node, HLCTimestamp txnid, int ht, BTreeMutationDeltas<TKey, TValue> deltas)
@@ -601,7 +605,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
                 if (entry.Next.IsStarted) // ignore unloaded nodes
                 {
-                    if (await MarkInternal(await entry.Next, txnid, ht - 1, deltas))
+                    if (await MarkInternal(await entry.Next.ConfigureAwait(false), txnid, ht - 1, deltas).ConfigureAwait(false))
                         hasExpiredEntries = true;
                 }
             }
@@ -625,7 +629,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         if (root is null)
             return;
 
-        await SweepInternal(root, height);
+        await SweepInternal(root, height).ConfigureAwait(false);
     }
 
     private async ValueTask SweepInternal(BTreeNode<TKey, TValue>? node, int ht)
@@ -653,7 +657,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
                 if (entry.Next.IsStarted && !entry.NextPageOffset.IsNull()) // ignore unloaded nodes
                 {
-                    await SweepInternal(await entry.Next, ht - 1);
+                    await SweepInternal(await entry.Next, ht - 1).ConfigureAwait(false);
 
                     children[j] = new BTreeEntry<TKey, TValue>(entry.Key, reader, null)
                     {
@@ -713,7 +717,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     /// <returns></returns>
     public async Task<IDisposable> ReaderLockAsync()
     {
-        return await readerWriterLock.ReaderLockAsync();
+        return await readerWriterLock.ReaderLockAsync().ConfigureAwait(false);
     }
 
     /// <summary>
@@ -723,6 +727,6 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     /// <returns></returns>
     public async Task<IDisposable> WriterLockAsync()
     {
-        return await readerWriterLock.WriterLockAsync();
+        return await readerWriterLock.WriterLockAsync().ConfigureAwait(false);
     }
 }

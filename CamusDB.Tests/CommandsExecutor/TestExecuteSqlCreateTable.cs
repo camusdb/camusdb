@@ -23,7 +23,7 @@ using CamusDB.Core;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestExecuteSqlCreateTable
+public class TestExecuteSqlCreateTable : BaseTest
 {
     [SetUp]
     public void Setup()
@@ -31,14 +31,14 @@ public class TestExecuteSqlCreateTable
         //SetupDb.Remove("factory");
     }
 
-    private static async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupDatabase()
+    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupDatabase()
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(hlc, validator, catalogsManager);
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,

@@ -30,7 +30,7 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
 
         BTree<ObjectIdValue, ObjectIdValue> index = new(offset, reader);
 
-        byte[] data = await bufferpool.GetDataFromPage(offset);
+        byte[] data = await bufferpool.GetDataFromPage(offset).ConfigureAwait(false);
         if (data.Length == 0)
             return index;
 
@@ -45,7 +45,7 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
 
         if (!rootPageOffset.IsNull())
         {
-            BTreeNode<ObjectIdValue, ObjectIdValue>? node = await reader.GetNode(rootPageOffset);
+            BTreeNode<ObjectIdValue, ObjectIdValue>? node = await reader.GetNode(rootPageOffset).ConfigureAwait(false);
             if (node is not null)
             {
                 index.root = node;

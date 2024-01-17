@@ -84,7 +84,7 @@ public sealed class IndexUniqueNodeReader : IBTreeNodeReader<CompositeColumnValu
 
     public async Task<BTreeNode<CompositeColumnValue, BTreeTuple>?> GetNode(ObjectIdValue offset)
     {
-        byte[] data = await bufferpool.GetDataFromPage(offset);
+        byte[] data = await bufferpool.GetDataFromPage(offset).ConfigureAwait(false);
         if (data.Length == 0)
             return null;
 

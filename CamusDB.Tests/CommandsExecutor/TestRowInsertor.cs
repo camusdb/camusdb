@@ -26,22 +26,16 @@ using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-internal sealed class TestRowInsertor
-{
-    [SetUp]
-    public void Setup()
+internal sealed class TestRowInsertor : BaseTest
+{    
+    private async Task<(string, CommandExecutor)> SetupDatabase()
     {
-        //SetupDb.Remove("factory");
-    }
-
-    private static async Task<(string, CommandExecutor)> SetupDatabase()
-    {
-        string dbname = System.Guid.NewGuid().ToString("n");
+        string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new();
-        CommandExecutor executor = new(hlc, validator, catalogsManager);
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -53,7 +47,7 @@ internal sealed class TestRowInsertor
         return (dbname, executor);
     }
 
-    private static async Task<(string, CommandExecutor)> SetupBasicTable()
+    private async Task<(string, CommandExecutor)> SetupBasicTable()
     {
         (string dbname, CommandExecutor executor) = await SetupDatabase();
 

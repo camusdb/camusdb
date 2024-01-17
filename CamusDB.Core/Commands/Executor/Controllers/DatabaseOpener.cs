@@ -70,7 +70,7 @@ internal sealed class DatabaseOpener
         {
             LoadDatabaseSchema(databaseDescriptor),
             LoadDatabaseSystemSpace(databaseDescriptor),
-        });
+        }).ConfigureAwait(false);
 
         logger.LogInformation("Database {DbName} opened", name);
 

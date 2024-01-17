@@ -62,7 +62,7 @@ public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey> where
     /// <returns></returns>
     public async Task<IDisposable> ReaderLockAsync()
     {
-        return await readerWriterLock.ReaderLockAsync();
+        return await readerWriterLock.ReaderLockAsync().ConfigureAwait(false);
     }
 
     /// <summary>
@@ -72,6 +72,6 @@ public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey> where
     /// <returns></returns>
     public async Task<IDisposable> WriterLockAsync()
     {
-        return await readerWriterLock.WriterLockAsync();
+        return await readerWriterLock.WriterLockAsync().ConfigureAwait(false);
     }
 }

@@ -54,7 +54,7 @@ public sealed class QueryController : CommandsController
 
             List<Dictionary<string, ColumnValue>> rows = new();
 
-            await foreach (QueryResultRow row in await executor.Query(ticket))            
+            await foreach (QueryResultRow row in await executor.Query(ticket).ConfigureAwait(false))            
                 rows.Add(row.Row);
 
             return new JsonResult(new QueryResponse("ok", rows.Count, rows));
@@ -62,11 +62,13 @@ public sealed class QueryController : CommandsController
         catch (CamusDBException e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new QueryResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new QueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }
