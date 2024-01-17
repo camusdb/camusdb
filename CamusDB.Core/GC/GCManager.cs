@@ -195,64 +195,68 @@ public sealed class GCManager : IDisposable
     {
         try
         {
-            HLCTimestamp timestamp = await hlc.SendOrLocalEvent() - VersionRetentionPeriod;
+            HLCTimestamp timestamp = await hlc.SendOrLocalEvent().ConfigureAwait(false) - VersionRetentionPeriod;
 
             foreach (KeyValuePair<string, AsyncLazy<TableDescriptor>> keyValueDescriptor in tableDescriptors)
             {
                 if (!keyValueDescriptor.Value.IsStarted)
                     continue;
 
-                TableDescriptor tableDescriptor = await keyValueDescriptor.Value;
+                TableDescriptor tableDescriptor = await keyValueDescriptor.Value.ConfigureAwait(false);
 
                 BTree<ObjectIdValue, ObjectIdValue>? tableIndex = tableDescriptor.Rows;
 
                 if (tableIndex is not null)
                 {
-                    BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas = new();
-
-                    bool hasExpiredEntries = await tableIndex.Mark(timestamp, deltas);
-
-                    if (hasExpiredEntries)
+                    using (await tableIndex.WriterLockAsync().ConfigureAwait(false))
                     {
-                        foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in deltas.Entries)
-                        {
-                            List<ObjectIdValue>? removed = entry.RemoveExpired(timestamp, MaxVersionsToRemove);
+                        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas = new();
 
-                            if (removed is not null && removed.Count > 0)
+                        bool hasExpiredEntries = await tableIndex.Mark(timestamp, deltas).ConfigureAwait(false);
+
+                        if (hasExpiredEntries)
+                        {
+                            foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in deltas.Entries)
                             {
-                                foreach (ObjectIdValue pageOffset in removed)
+                                List<ObjectIdValue>? removed = entry.RemoveExpired(timestamp, MaxVersionsToRemove);
+
+                                if (removed is not null && removed.Count > 0)
                                 {
-                                    if (!pageOffset.IsNull())
-                                        await bufferPool.DeletePage(pageOffset);
+                                    foreach (ObjectIdValue pageOffset in removed)
+                                    {
+                                        if (!pageOffset.IsNull())
+                                            await bufferPool.DeletePage(pageOffset).ConfigureAwait(false);
+                                    }
                                 }
                             }
                         }
-                    }
-                    else
-                    {
-                        await tableIndex.Sweep();
+                        else
+                        {
+                            await tableIndex.Sweep().ConfigureAwait(false);
+                        }
                     }
                 }
 
                 foreach (KeyValuePair<string, TableIndexSchema> index in tableDescriptor.Indexes)
                 {
-                    BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex = index.Value.BTree;
+                    BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> btreeIndex = index.Value.BTree;
                     
                     BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas = new();
 
-                    using IDisposable writerLock = await uniqueIndex.WriterLockAsync();
-
-                    bool hasExpiredEntries = await uniqueIndex.Mark(timestamp, deltas);
-
-                    if (hasExpiredEntries)
+                    using (await btreeIndex.WriterLockAsync().ConfigureAwait(false))
                     {
-                        foreach (BTreeEntry<CompositeColumnValue, BTreeTuple> entry in deltas.Entries)
-                            entry.RemoveExpired(timestamp, MaxVersionsToRemove);
+                        bool hasExpiredEntries = await btreeIndex.Mark(timestamp, deltas).ConfigureAwait(false);
+
+                        if (hasExpiredEntries)
+                        {
+                            foreach (BTreeEntry<CompositeColumnValue, BTreeTuple> entry in deltas.Entries)
+                                entry.RemoveExpired(timestamp, MaxVersionsToRemove);
+                        }
+                        else
+                        {
+                            await btreeIndex.Sweep().ConfigureAwait(false);
+                        }
                     }
-                    else
-                    {
-                        await uniqueIndex.Sweep();
-                    }                    
                 }
             }
         }

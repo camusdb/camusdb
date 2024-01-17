@@ -190,7 +190,9 @@ internal abstract class SQLExecutorBaseCreator
                     switch (funcCall)
                     {
                         case "gen_id":
-                            return new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString());
+                            string myId = ObjectIdGenerator.Generate().ToString();
+                            Console.WriteLine("Generated my id: " + myId);
+                            return new ColumnValue(ColumnType.Id, myId);
 
                         case "str_id":
                             List<ColumnValue> argumentList = new();

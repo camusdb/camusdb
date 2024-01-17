@@ -13,7 +13,7 @@ using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
-using System;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -26,11 +26,14 @@ internal sealed class TableOpener
 {
     private readonly IndexReader indexReader = new();
 
-    private CatalogsManager Catalogs { get; }
+    private readonly CatalogsManager catalogs;
 
-    public TableOpener(CatalogsManager catalogsManager)
+    private readonly ILogger<ICamusDB> logger;
+
+    public TableOpener(CatalogsManager catalogs, ILogger<ICamusDB> logger)
     {
-        Catalogs = catalogsManager;
+        this.catalogs = catalogs;
+        this.logger = logger;
     }
 
     /// <summary>
@@ -45,7 +48,7 @@ internal sealed class TableOpener
         if (string.IsNullOrEmpty(tableName))
             throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, "Invalid or empty table name");
 
-        TableSchema tableSchema = Catalogs.GetTableSchema(database, tableName);
+        TableSchema tableSchema = catalogs.GetTableSchema(database, tableName);
 
         AsyncLazy<TableDescriptor> openTableLazy = database.TableDescriptors.GetOrAdd(
                                                         tableSchema.Name ?? "",
@@ -89,7 +92,7 @@ internal sealed class TableOpener
             }
         }
 
-        Console.WriteLine("Table {0} opened at offset={1}", tableSchema.Name, tableObject.StartOffset);
+        logger.LogInformation("Table {TableName} opened at offset={Offset}", tableSchema.Name, tableObject.StartOffset);
 
         return tableDescriptor;
     }

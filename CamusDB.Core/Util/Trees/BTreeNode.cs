@@ -19,8 +19,6 @@ namespace CamusDB.Core.Util.Trees;
 /// <typeparam name="TValue"></typeparam>
 public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
 {
-    private static int CurrentId = -1;
-
     public int Id; // unique identifier for this node
 
     public int KeyCount; // number of children    
@@ -51,7 +49,7 @@ public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey> where
     public BTreeNode(int keyCount, int capacity)
     {
         //Console.WriteLine("Allocated new node {0}", keyCount);
-        Id = Interlocked.Increment(ref CurrentId);
+        Id = Interlocked.Increment(ref BTreeIncr.CurrentNodeId);
 
         KeyCount = keyCount;
         children = new BTreeEntry<TKey, TValue>[capacity];

@@ -7,7 +7,6 @@
  */
 
 using System.Security;
-using System.Threading;
 using System.Runtime.CompilerServices;
 
 namespace CamusDB.Core.Util.ObjectIds;

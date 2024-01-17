@@ -72,7 +72,7 @@ internal sealed class DatabaseOpener
             LoadDatabaseSystemSpace(databaseDescriptor),
         });
 
-        Console.WriteLine("Database {0} opened", name);
+        logger.LogInformation("Database {DbName} opened", name);
 
         return databaseDescriptor;
     }
@@ -86,7 +86,7 @@ internal sealed class DatabaseOpener
         else
             database.Schema.Tables = new();
 
-        logger.LogInformation("Schema tablespaces read. Loaded {0} tables", database.Schema.Tables.Count);
+        logger.LogInformation("Schema tablespaces read. Loaded {Count} tables", database.Schema.Tables.Count);
 
         return Task.CompletedTask;
     }
@@ -100,7 +100,7 @@ internal sealed class DatabaseOpener
         else
             database.SystemSchema = new();
 
-        logger.LogInformation("System tablespaces read. Found {0} objects", database.SystemSchema.Tables.Count);
+        logger.LogInformation("System tablespaces read. Found {Count} objects", database.SystemSchema.Tables.Count);
 
         return Task.CompletedTask;
     }

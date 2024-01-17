@@ -142,7 +142,7 @@ public sealed class BufferPoolManager
             BufferPage memoryPage = ReadPage(offset);
             pages.Add(memoryPage);
 
-            disposables.Add(await memoryPage.ReaderLockAsync());
+            disposables.Add(await memoryPage.ReaderLockAsync().ConfigureAwait(false));
 
             byte[] pageBuffer = memoryPage.Buffer.Value; // get a pointer to the buffer to get a consistent read
 
@@ -176,7 +176,7 @@ public sealed class BufferPoolManager
             BufferPage memoryPage = ReadPage(offset);
             pages.Add(memoryPage);
 
-            disposables.Add(await memoryPage.WriterLockAsync());
+            disposables.Add(await memoryPage.WriterLockAsync().ConfigureAwait(false));
 
             byte[] pageBuffer = memoryPage.Buffer.Value; // get a pointer to the buffer to get a consistent read
 
@@ -198,7 +198,7 @@ public sealed class BufferPoolManager
     /// <returns></returns>
     public async Task<byte[]> GetDataFromPage(ObjectIdValue offset)
     {
-        (int length, List<BufferPage> pages, List<IDisposable> disposables) = await GetPagesToRead(offset);
+        (int length, List<BufferPage> pages, List<IDisposable> disposables) = await GetPagesToRead(offset).ConfigureAwait(false);
 
         try
         {
@@ -329,58 +329,59 @@ public sealed class BufferPoolManager
 
         BufferPage page = ReadPage(offset);
 
-        using IDisposable writeLock = await page.WriterLockAsync();
+        using (await page.WriterLockAsync().ConfigureAwait(false))
+        {
+            int length;
+            ObjectIdValue nextPage = new(0, 0, 0);
 
-        int length;
-        ObjectIdValue nextPage = new(0, 0, 0);
+            // Calculate remaining data length less the page's header
+            if (((data.Length - startOffset) + BConfig.DataOffset) < CamusConfig.PageSize)
+                length = data.Length - startOffset;
+            else
+                length = CamusConfig.PageSize - BConfig.DataOffset;
 
-        // Calculate remaining data length less the page's header
-        if (((data.Length - startOffset) + BConfig.DataOffset) < CamusConfig.PageSize)
-            length = data.Length - startOffset;
-        else
-            length = CamusConfig.PageSize - BConfig.DataOffset;
+            int remaining = (data.Length - startOffset) - length;
 
-        int remaining = (data.Length - startOffset) - length;
+            if (remaining > 0)
+                nextPage = GetNextFreeOffset();
 
-        if (remaining > 0)
-            nextPage = GetNextFreeOffset();
+            // Create a buffer to calculate the checksum
+            byte[] pageData = new byte[length];
+            Buffer.BlockCopy(data, startOffset, pageData, 0, length);
 
-        // Create a buffer to calculate the checksum
-        byte[] pageData = new byte[length];
-        Buffer.BlockCopy(data, startOffset, pageData, 0, length);
+            uint checksum = XXHash.Compute(pageData, 0, length);
 
-        uint checksum = XXHash.Compute(pageData, 0, length);
+            // Create a new page buffer to replace the existing one
+            byte[] pageBuffer = new byte[CamusConfig.PageSize];
 
-        // Create a new page buffer to replace the existing one
-        byte[] pageBuffer = new byte[CamusConfig.PageSize];
+            int pointer = WritePageHeader(pageBuffer, checksum, sequence, nextPage, length);
 
-        int pointer = WritePageHeader(pageBuffer, checksum, sequence, nextPage, length);
+            if (!nextPage.IsNull() && nextPage == offset)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "Cannot write recursively to the same page"
+                );
 
-        if (!nextPage.IsNull() && nextPage == offset)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "Cannot write recursively to the same page"
-            );
+            Buffer.BlockCopy(data, startOffset, pageBuffer, pointer, length);
+            storage.Write(offset, pageBuffer);
 
-        Buffer.BlockCopy(data, startOffset, pageBuffer, pointer, length);
-        storage.Write(offset, pageBuffer);
+            // Replace buffer, this helps to get readers consistent copies
+            page.Dirty = true;
+            page.Buffer = new Lazy<byte[]>(pageBuffer);
 
-        // Replace buffer, this helps to get readers consistent copies
-        page.Dirty = true;
-        page.Buffer = new Lazy<byte[]>(pageBuffer);
+            /*Console.WriteLine(
+                "Wrote {0} bytes to page {1}/{2} from buffer staring at {3}, remaining {4}, next page {5}",
+                length,
+                offset,
+                offset,
+                startOffset,
+                remaining,
+                nextPage
+            );*/
 
-        /*Console.WriteLine(
-            "Wrote {0} bytes to page {1}/{2} from buffer staring at {3}, remaining {4}, next page {5}",
-            length,
-            offset,
-            offset,
-            startOffset,
-            remaining,
-            nextPage
-        );*/
-
-        if (!nextPage.IsNull())
-            await WriteDataToPage(nextPage, sequence, data, startOffset + length);
+            if (!nextPage.IsNull())
+                await WriteDataToPage(nextPage, sequence, data, startOffset + length).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -490,7 +491,7 @@ public sealed class BufferPoolManager
                 "Invalid page offset"
             );
 
-        (int length, List<BufferPage> pagesChain, List<IDisposable> disposables) = await GetPagesToWrite(offset);
+        (int length, List<BufferPage> pagesChain, List<IDisposable> disposables) = await GetPagesToWrite(offset).ConfigureAwait(false);
 
         try
         {
@@ -514,7 +515,7 @@ public sealed class BufferPoolManager
                 disposable.Dispose();
         }
 
-        logger.LogInformation("Removed {0} pages from disk, length={1}", pagesChain.Count, length);
+        logger.LogInformation("Removed {Count} pages from disk, length={Length}", pagesChain.Count, length);
     }
 
     public void Flush()

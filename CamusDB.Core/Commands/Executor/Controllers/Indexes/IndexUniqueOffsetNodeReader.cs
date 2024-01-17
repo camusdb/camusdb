@@ -25,7 +25,7 @@ public sealed class IndexUniqueOffsetNodeReader : IBTreeNodeReader<ObjectIdValue
 
     public async Task<BTreeNode<ObjectIdValue, ObjectIdValue>?> GetNode(ObjectIdValue offset)
     {
-        byte[] data = await bufferpool.GetDataFromPage(offset);
+        byte[] data = await bufferpool.GetDataFromPage(offset).ConfigureAwait(false);
         if (data.Length == 0)
             return null;
 

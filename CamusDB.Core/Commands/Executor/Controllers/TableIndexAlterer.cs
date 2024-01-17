@@ -21,7 +21,7 @@ internal sealed class TableIndexAlterer
 
     private readonly TableIndexDropper tableIndexDropper = new();
 
-    public TableIndexAlterer(CatalogsManager catalogsManager)
+    public TableIndexAlterer(CatalogsManager catalogsManager, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
     {
         catalogs = catalogsManager;
     }

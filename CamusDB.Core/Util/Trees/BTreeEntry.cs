@@ -52,7 +52,7 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey> wher
         if (Reader is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
-        return await Reader.GetNode(NextPageOffset);
+        return await Reader.GetNode(NextPageOffset).ConfigureAwait(false);
     }
 
     /// <summary>

@@ -42,17 +42,17 @@ internal sealed class SqlExecutor
 
     public async Task<QueryTicket> CreateQueryTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return await sqlExecutorQueryCreator.CreateQueryTicket(executor, ticket, ast);
+        return await sqlExecutorQueryCreator.CreateQueryTicket(executor, ticket, ast).ConfigureAwait(false);
     }
 
     internal async Task<InsertTicket> CreateInsertTicket(CommandExecutor executor, DatabaseDescriptor database, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return await sqlExecutorInsertCreator.CreateInsertTicket(executor, database, ticket, ast);
+        return await sqlExecutorInsertCreator.CreateInsertTicket(executor, database, ticket, ast).ConfigureAwait(false);
     }
 
     internal async Task<UpdateTicket> CreateUpdateTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return await sqlExecutorUpdateCreator.CreateUpdateTicket(executor, ticket, ast);
+        return await sqlExecutorUpdateCreator.CreateUpdateTicket(executor, ticket, ast).ConfigureAwait(false);
     }
 
     internal async Task<DeleteTicket> CreateDeleteTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
@@ -80,7 +80,7 @@ internal sealed class SqlExecutor
     /// <returns></returns>
     internal async Task<CreateTableTicket> CreateCreateTableTicket(CommandExecutor commandExecutor, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return await sqlExecutorCreateTableCreator.CreateCreateTableTicket(commandExecutor, ticket, ast);
+        return await sqlExecutorCreateTableCreator.CreateCreateTableTicket(commandExecutor, ticket, ast).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -91,7 +91,7 @@ internal sealed class SqlExecutor
     /// <returns></returns>
     internal async Task<DropTableTicket> CreateDropTableTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return await sqlExecutorDropTableCreator.CreateDropTableTicket(executor, ticket, ast);
+        return await sqlExecutorDropTableCreator.CreateDropTableTicket(executor, ticket, ast).ConfigureAwait(false);
     }
 
     /// <summary>

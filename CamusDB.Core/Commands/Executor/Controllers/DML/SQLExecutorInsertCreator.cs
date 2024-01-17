@@ -28,7 +28,7 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         string tableName = ast.leftAst.yytext!;
 
         // If the fields are not provided, we consult them from the latest version of the schema.
-        TableDescriptor table = await commandExecutor.OpenTable(new(database.Name, tableName));
+        TableDescriptor table = await commandExecutor.OpenTable(new(database.Name, tableName)).ConfigureAwait(false);
 
         List<string> fields = new();
 
@@ -76,7 +76,7 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         }
 
         return new InsertTicket(
-            txnId: await commandExecutor.NextTxnId(),
+            txnId: await commandExecutor.NextTxnId().ConfigureAwait(false),
             databaseName: ticket.DatabaseName,
             tableName: tableName,
             values: values

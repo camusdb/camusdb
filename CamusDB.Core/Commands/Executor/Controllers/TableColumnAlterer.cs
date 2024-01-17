@@ -21,7 +21,7 @@ internal sealed class TableColumnAlterer
 
     private readonly TableColumnDropper tableColumnDropper = new();
 
-    public TableColumnAlterer(CatalogsManager catalogsManager)
+    public TableColumnAlterer(CatalogsManager catalogsManager, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
     {
         catalogs = catalogsManager;
     }

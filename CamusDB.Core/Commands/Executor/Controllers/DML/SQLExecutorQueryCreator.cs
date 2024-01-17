@@ -26,7 +26,7 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid table name");
 
         return new(
-            txnId: await executor.NextTxnId(),
+            txnId: await executor.NextTxnId().ConfigureAwait(false),
             txnType: TransactionType.ReadOnly,
             databaseName: ticket.DatabaseName,
             tableName: tableName,

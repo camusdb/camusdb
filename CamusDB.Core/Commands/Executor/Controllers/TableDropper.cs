@@ -18,7 +18,7 @@ internal sealed class TableDropper
 {
     private readonly CatalogsManager catalogs;
 
-    public TableDropper(CatalogsManager catalogsManager)
+    public TableDropper(CatalogsManager catalogsManager, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
     {
         catalogs = catalogsManager;
     }

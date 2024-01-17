@@ -33,28 +33,28 @@ public sealed class InsertController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
-            logger.LogInformation("{0}", body);
+            logger.LogInformation("{Body}", body);
 
             InsertRequest? request = JsonSerializer.Deserialize<InsertRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Insert request is not valid");
 
             InsertTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnId: await executor.NextTxnId().ConfigureAwait(false),
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 values: request.Values ?? new Dictionary<string, ColumnValue>()
             );
 
-            await executor.Insert(ticket);
+            await executor.Insert(ticket).ConfigureAwait(false);
 
             return new JsonResult(new InsertResponse("ok", 1));
         }
         catch (CamusDBException e)
         {
-            logger.LogError("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new InsertResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }

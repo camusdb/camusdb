@@ -119,7 +119,7 @@ internal sealed class RowInserter
 
         FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
 
-        await InsertInternal(machine, state);
+        await InsertInternal(machine, state).ConfigureAwait(false);
 
         return 1;
     }
@@ -132,7 +132,7 @@ internal sealed class RowInserter
     /// <returns></returns>
     public async Task InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
     {
-        await InsertInternal(machine, state);
+        await InsertInternal(machine, state).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -171,7 +171,7 @@ internal sealed class RowInserter
     /// <returns></returns>
     private async Task<FluxAction> CheckUniqueKeysStep(InsertFluxState state)
     {
-        await insertUniqueKeySaver.CheckUniqueKeys(state.Table, state.Ticket);
+        await insertUniqueKeySaver.CheckUniqueKeys(state.Table, state.Ticket).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
@@ -224,7 +224,7 @@ internal sealed class RowInserter
         );
 
         // Main table index stores rowid pointing to page offeset
-        state.Indexes.MainIndexDeltas = await indexSaver.Save(saveUniqueOffsetIndex);
+        state.Indexes.MainIndexDeltas = await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
@@ -288,7 +288,7 @@ internal sealed class RowInserter
                 value: state.RowTuple
             );
 
-            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket)));
+            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false)));
         }
 
         state.Indexes.UniqueIndexDeltas = deltas;
@@ -324,7 +324,7 @@ internal sealed class RowInserter
                 value: state.RowTuple
             );
 
-            deltas.Add((multiIndex, await indexSaver.Save(saveIndexTicket)));
+            deltas.Add((multiIndex, await indexSaver.Save(saveIndexTicket).ConfigureAwait(false)));
         }
 
         state.Indexes.MultiIndexDeltas = deltas;
@@ -345,7 +345,7 @@ internal sealed class RowInserter
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in state.Indexes.MainIndexDeltas.MvccEntries)
             btreeEntry.CommitState = BTreeCommitState.Committed;
 
-        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas);
+        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas).ConfigureAwait(false);
 
         if (state.Indexes.UniqueIndexDeltas is not null)
         {
@@ -354,7 +354,7 @@ internal sealed class RowInserter
                 foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                     uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
-                await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+                await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas).ConfigureAwait(false);
             }
         }
 
@@ -365,7 +365,7 @@ internal sealed class RowInserter
                 foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multiIndex.deltas.MvccEntries)
                     multiIndexEntry.CommitState = BTreeCommitState.Committed;
 
-                await indexSaver.Persist(state.Database.BufferPool, multiIndex.index, state.ModifiedPages, multiIndex.deltas);
+                await indexSaver.Persist(state.Database.BufferPool, multiIndex.index, state.ModifiedPages, multiIndex.deltas).ConfigureAwait(false);
             }
         }
 
@@ -406,12 +406,12 @@ internal sealed class RowInserter
         // machine.WhenAbort(ReleaseLocks);?
 
         while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep());
+            await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
 
         TimeSpan timeTaken = timer.Elapsed;
 
         logger.LogInformation(
-            "Row {0} inserted at {1}, Time taken: {2}",
+            "Row {SlotOne} inserted at {SlotTwo}, Time taken: {Time}",
             state.RowTuple.SlotOne,
             state.RowTuple.SlotTwo,
             timeTaken.ToString(@"m\:ss\.fff")

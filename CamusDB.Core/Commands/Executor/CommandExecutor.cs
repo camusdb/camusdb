@@ -84,11 +84,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         databaseCloser = new(databaseDescriptors, logger);
         databaseDroper = new(databaseDescriptors, logger);
         databaseCreator = new(logger);
-        tableOpener = new(catalogs);
-        tableCreator = new(catalogs);
-        tableColumnAlterer = new(catalogs);
-        tableIndexAlterer = new(catalogs);
-        tableDropper = new(catalogs);
+        tableOpener = new(catalogs, logger);
+        tableCreator = new(catalogs, logger);
+        tableColumnAlterer = new(catalogs, logger);
+        tableIndexAlterer = new(catalogs, logger);
+        tableDropper = new(catalogs, logger);
         rowInserter = new(logger);
         RowUpdaterById rowUpdaterById1 = new(logger);
         rowUpdaterById = rowUpdaterById1;
@@ -259,11 +259,11 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName);
+        DatabaseDescriptor database = await databaseOpener.Open(this, hybridLogicalClock, ticket.DatabaseName).ConfigureAwait(false);
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        await rowInserter.Insert(database, table, ticket);
+        await rowInserter.Insert(database, table, ticket).ConfigureAwait(false);
     }
 
     public async Task InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
@@ -483,7 +483,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <returns></returns>
     public async Task<HLCTimestamp> NextTxnId()
     {
-        return await hybridLogicalClock.SendOrLocalEvent();
+        return await hybridLogicalClock.SendOrLocalEvent().ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()

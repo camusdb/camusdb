@@ -36,7 +36,7 @@ public sealed class ExecuteSQLController : CommandsController
             Stopwatch stopwatch = Stopwatch.StartNew();
 
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             logger.LogInformation("{Body}", body);
 
@@ -78,7 +78,7 @@ public sealed class ExecuteSQLController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             logger.LogInformation("{Body}", body);
 
@@ -92,7 +92,7 @@ public sealed class ExecuteSQLController : CommandsController
                 parameters: request.Parameters
             );
 
-            int modifiedRows = await executor.ExecuteNonSQLQuery(ticket);
+            int modifiedRows = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
 
             return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows));
         }
@@ -115,7 +115,7 @@ public sealed class ExecuteSQLController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             logger.LogInformation("{Body}", body);
 
@@ -129,7 +129,7 @@ public sealed class ExecuteSQLController : CommandsController
                 parameters: request.Parameters
             );
 
-            bool success = await executor.ExecuteDDLSQL(ticket);
+            bool success = await executor.ExecuteDDLSQL(ticket).ConfigureAwait(false);
 
             return new JsonResult(new ExecuteDDLSQLResponse("ok"));
         }

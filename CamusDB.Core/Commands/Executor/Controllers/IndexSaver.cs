@@ -30,12 +30,12 @@ internal sealed class IndexSaver
 
     public async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> Save(SaveOffsetIndexTicket ticket)
     {
-        return await indexUniqueOffsetSaver.Save(ticket);
+        return await indexUniqueOffsetSaver.Save(ticket).ConfigureAwait(false);
     }
 
     public async Task<BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveIndexTicket ticket)
     {
-        return await indexUniqueSaver.Save(ticket);
+        return await indexUniqueSaver.Save(ticket).ConfigureAwait(false);
     }  
 
     public async Task Persist(
@@ -49,7 +49,7 @@ internal sealed class IndexSaver
             index,
             modifiedPages,
             deltas
-        );
+        ).ConfigureAwait(false);
     }
 
     public async Task Persist(
@@ -63,16 +63,16 @@ internal sealed class IndexSaver
             index,
             modifiedPages,
             deltas
-        );
+        ).ConfigureAwait(false);
     }
 
     public async Task Remove(RemoveUniqueIndexTicket ticket)
     {
-        await indexUniqueSaver.Remove(ticket);        
+        await indexUniqueSaver.Remove(ticket).ConfigureAwait(false);        
     }
 
     public async Task Remove(RemoveUniqueOffsetIndexTicket ticket)
     {
-        await indexUniqueOffsetSaver.Remove(ticket);
+        await indexUniqueOffsetSaver.Remove(ticket).ConfigureAwait(false);
     }
 }

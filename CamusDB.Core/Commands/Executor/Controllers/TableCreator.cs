@@ -13,6 +13,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -20,9 +21,12 @@ internal sealed class TableCreator
 {
     private readonly CatalogsManager catalogs;
 
-    public TableCreator(CatalogsManager catalogsManager)
+    private readonly ILogger<ICamusDB> logger;
+
+    public TableCreator(CatalogsManager catalogs, ILogger<ICamusDB> logger)
     {
-        catalogs = catalogsManager;
+        this.catalogs = catalogs;
+        this.logger = logger;
     }
 
     public async Task<bool> Create(
@@ -45,7 +49,7 @@ internal sealed class TableCreator
         return true;
     }
 
-    private static async Task SetInitialTablePages(DatabaseDescriptor database, TableSchema tableSchema)
+    private async Task SetInitialTablePages(DatabaseDescriptor database, TableSchema tableSchema)
     {
         try
         {
@@ -70,7 +74,7 @@ internal sealed class TableCreator
 
             database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema));
 
-            Console.WriteLine("Added table {0} to system, data table staring at {1}", tableName, pageOffset);
+            logger.LogInformation("Added table {TableName} to system, data table staring at {PageOffset}", tableName, pageOffset);
         }
         finally
         {

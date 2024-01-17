@@ -68,8 +68,8 @@ public sealed class FluxMachine<TSteps, TState> where TSteps : Enum
     {
         //Console.WriteLine(status);
 
-        await TryExecuteHandler(status);
-        await TryExecuteAsyncHandler(status);
+        await TryExecuteHandler(status).ConfigureAwait(false);
+        await TryExecuteAsyncHandler(status).ConfigureAwait(false);
     }
 
     private async Task TryExecuteHandler(TSteps status)
@@ -90,17 +90,17 @@ public sealed class FluxMachine<TSteps, TState> where TSteps : Enum
             if (LastAction == FluxAction.Abort)
             {
                 IsAborted = true;
-                await RunAbortHandlers();
+                await RunAbortHandlers().ConfigureAwait(false);
             }
         }
         catch (CamusDBException)
         {
-            await RunAbortHandlers();
+            await RunAbortHandlers().ConfigureAwait(false);
             throw;
         }
         catch (Exception)
         {
-            await RunAbortHandlers();
+            await RunAbortHandlers().ConfigureAwait(false);
             throw;
         }
     }
@@ -123,17 +123,17 @@ public sealed class FluxMachine<TSteps, TState> where TSteps : Enum
             if (LastAction == FluxAction.Abort)
             {
                 IsAborted = true;
-                await RunAbortHandlers();
+                await RunAbortHandlers().ConfigureAwait(false);
             }
         }
         catch (CamusDBException)
         {
-            await RunAbortHandlers();
+            await RunAbortHandlers().ConfigureAwait(false);
             throw;
         }
         catch (Exception)
         {
-            await RunAbortHandlers();
+            await RunAbortHandlers().ConfigureAwait(false);
             throw;
         }
     }
@@ -143,7 +143,7 @@ public sealed class FluxMachine<TSteps, TState> where TSteps : Enum
         abortHandler?.Invoke(state);
 
         if (abortAsyncHandler != null)
-            await abortAsyncHandler(state);
+            await abortAsyncHandler(state).ConfigureAwait(false);
     }
 
     public TSteps NextStep()

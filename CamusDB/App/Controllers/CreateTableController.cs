@@ -89,7 +89,7 @@ public sealed class CreateTableController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             CreateTableRequest? request = JsonSerializer.Deserialize<CreateTableRequest>(body, jsonOptions);
             if (request == null)
