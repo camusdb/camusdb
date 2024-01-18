@@ -16,6 +16,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
@@ -64,7 +65,7 @@ internal sealed class TableIndexDropper
         BufferPoolManager tableSpace = state.Database.BufferPool;
         //using IDisposable writerLock = await state.Btree.WriterLockAsync();
 
-        await foreach (BTreeNode<CompositeColumnValue, BTreeTuple> x in state.Btree.NodesTraverse(state.Ticket.TxnId))                    
+        await foreach (BPlusTreeNode<CompositeColumnValue, BTreeTuple> x in state.Btree.NodesTraverse(state.Ticket.TxnId))                    
             await tableSpace.DeletePage(x.PageOffset);
 
         await Task.CompletedTask;

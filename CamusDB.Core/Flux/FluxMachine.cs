@@ -66,7 +66,7 @@ public sealed class FluxMachine<TSteps, TState> where TSteps : Enum
 
     public async Task RunStep(TSteps status)
     {
-        //Console.WriteLine(status);
+        Console.WriteLine(status);
 
         await TryExecuteHandler(status).ConfigureAwait(false);
         await TryExecuteAsyncHandler(status).ConfigureAwait(false);

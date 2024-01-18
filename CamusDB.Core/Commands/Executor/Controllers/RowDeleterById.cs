@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System;
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
@@ -17,6 +16,7 @@ using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Util.Trees.Experimental;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -29,7 +29,8 @@ internal sealed class RowDeleterById
     private readonly IndexSaver indexSaver = new();
 
     private readonly RowDeserializer rowDeserializer = new();
-    private ILogger<ICamusDB> logger;
+
+    private readonly ILogger<ICamusDB> logger;
 
     public RowDeleterById(ILogger<ICamusDB> logger)
     {
@@ -54,7 +55,7 @@ internal sealed class RowDeleterById
 
         FluxMachine<DeleteByIdFluxSteps, DeleteByIdFluxState> machine = new(state);
 
-        return await DeleteByIdInternal(machine, state);
+        return await DeleteByIdInternal(machine, state).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -124,7 +125,7 @@ internal sealed class RowDeleterById
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        state.RowTuple = await index.BTree.Get(TransactionType.Write, ticket.TxnId, new CompositeColumnValue(columnId));
+        state.RowTuple = await index.BTree.Get(TransactionType.Write, ticket.TxnId, new CompositeColumnValue(columnId)).ConfigureAwait(false);
 
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
@@ -132,7 +133,7 @@ internal sealed class RowDeleterById
             return FluxAction.Abort;
         }
 
-        byte[] data = await tablespace.GetDataFromPage(state.RowTuple.SlotTwo);
+        byte[] data = await tablespace.GetDataFromPage(state.RowTuple.SlotTwo).ConfigureAwait(false);
         if (data.Length == 0)
         {
             //Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
@@ -158,15 +159,16 @@ internal sealed class RowDeleterById
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
             Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+
             return FluxAction.Abort;
         }
 
         BTreeTuple nullTuple = new(new(), new());
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.BTree;            
+            BPlusTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.BTree;            
 
             CompositeColumnValue uniqueKeyValue = GetColumnValue(state.ColumnValues, index.Columns);            
 
@@ -193,7 +195,7 @@ internal sealed class RowDeleterById
     /// <returns></returns>
     private async Task<FluxAction> DeleteMultiIndexes(DeleteByIdFluxState state)
     {
-        await DeleteMultiIndexes(state.Database, state.Table, state.ColumnValues);
+        await DeleteMultiIndexes(state.Database, state.Table, state.ColumnValues).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
@@ -265,17 +267,17 @@ internal sealed class RowDeleterById
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in state.Indexes.MainIndexDeltas.MvccEntries)
             btreeEntry.CommitState = BTreeCommitState.Committed;
 
-        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas);
+        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas).ConfigureAwait(false);
 
         if (state.Indexes.UniqueIndexDeltas is null)
             return FluxAction.Continue;
 
-        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+        foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
         {
             foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
-            await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+            await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas).ConfigureAwait(false);
         }
 
         return FluxAction.Continue;
@@ -324,7 +326,7 @@ internal sealed class RowDeleterById
         // machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep());
+            await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
 
         timer.Stop();
 

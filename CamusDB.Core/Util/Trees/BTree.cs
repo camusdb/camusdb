@@ -53,7 +53,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
     public int loaded;   // number of loaded nodes
 
-    public ObjectIdValue PageOffset; // page offset to root node    
+    public ObjectIdValue PageOffset; // page offset to root node
 
     private readonly AsyncReaderWriterLock readerWriterLock = new();
 

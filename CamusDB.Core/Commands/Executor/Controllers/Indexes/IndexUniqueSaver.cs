@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -27,7 +28,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task<BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveIndexTicket ticket)
+    public async Task<BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveIndexTicket ticket)
     {
         return await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value).ConfigureAwait(false);
     }
@@ -47,9 +48,9 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
     public async Task Persist(
         BufferPoolManager tablespace,
-        BTree<CompositeColumnValue, BTreeTuple> index,
+        BPlusTree<CompositeColumnValue, BTreeTuple> index,
         List<BufferPageOperation> modifiedPages,
-        BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas
+        BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas
     )
     {
         if (deltas.Nodes.Count == 0)
@@ -61,7 +62,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         // @todo this lock will produce contention
         using (await index.WriterLockAsync().ConfigureAwait(false))
         {
-            foreach (BTreeNode<CompositeColumnValue, BTreeTuple> node in deltas.Nodes)
+            foreach (BPlusTreeNode<CompositeColumnValue, BTreeTuple> node in deltas.Nodes)
             {
                 if (node.PageOffset.IsNull())
                     node.PageOffset = tablespace.GetNextFreeOffset();
@@ -74,9 +75,14 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
             ];
 
             int pointer = 0;
-            Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
-            Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
-            Serializator.WriteObjectId(treeBuffer, index.root!.PageOffset, ref pointer);
+            //Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
+            //Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
+
+            BPlusTreeNode<CompositeColumnValue, BTreeTuple>? rootNode = (await index.root.Next.ConfigureAwait(false));
+            if (rootNode is null)
+                return;
+
+            Serializator.WriteObjectId(treeBuffer, rootNode.PageOffset, ref pointer);
 
             // Write to buffer page
             //await tablespace.WriteDataToPage(index.PageOffset, sequence, treeBuffer);
@@ -89,7 +95,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
             BTreeTuple nullTuple = new(nullValue, nullValue);
             HLCTimestamp timestampZero = HLCTimestamp.Zero;
 
-            foreach (BTreeNode<CompositeColumnValue, BTreeTuple> node in deltas.Nodes)
+            foreach (BPlusTreeNode<CompositeColumnValue, BTreeTuple> node in deltas.Nodes)
             {
                 //using IDisposable readerLock = await node.ReaderLockAsync();
 
@@ -100,17 +106,17 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
                 ];
 
                 pointer = 0;
-                Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);
+                Serializator.WriteInt32(nodeBuffer, node.Entries.Count, ref pointer);
                 Serializator.WriteObjectId(nodeBuffer, node.PageOffset, ref pointer);
 
-                for (int i = 0; i < node.KeyCount; i++)
+                for (int i = 0; i < node.Entries.Count; i++)
                 {
-                    BTreeEntry<CompositeColumnValue, BTreeTuple> entry = node.children[i];
+                    BPlusTreeEntry<CompositeColumnValue, BTreeTuple> entry = node.Entries[i];
 
                     if (entry is not null)
                     {
                         (HLCTimestamp timestamp, BTreeTuple? tuple) = entry.GetMaxCommittedValue();
-                        BTreeNode<CompositeColumnValue, BTreeTuple>? next = (await entry.Next.ConfigureAwait(false));
+                        BPlusTreeNode<CompositeColumnValue, BTreeTuple>? next = (await entry.Next.ConfigureAwait(false));
 
                         //Console.WriteLine("Saved K={0} T={1} V={2}", entry.Key, timestamp, tuple);
 

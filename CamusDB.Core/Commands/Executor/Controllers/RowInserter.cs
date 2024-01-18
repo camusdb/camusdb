@@ -18,6 +18,7 @@ using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
 using Microsoft.Extensions.Logging;
+using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -224,7 +225,7 @@ internal sealed class RowInserter
         );
 
         // Main table index stores rowid pointing to page offeset
-        state.Indexes.MainIndexDeltas = await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
+        state.Indexes.MainIndexDeltas = await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);        
 
         return FluxAction.Continue;
     }
@@ -272,11 +273,11 @@ internal sealed class RowInserter
 
         InsertTicket insertTicket = state.Ticket;
 
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;
+            BPlusTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;
 
             CompositeColumnValue uniqueKeyValue = GetColumnValue(insertTicket.Values, index.Columns);
 
@@ -288,7 +289,10 @@ internal sealed class RowInserter
                 value: state.RowTuple
             );
 
-            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false)));
+            var p = await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
+            Console.WriteLine(p.Entries.Count);
+
+            deltas.Add((uniqueIndex, p));
         }
 
         state.Indexes.UniqueIndexDeltas = deltas;
@@ -308,11 +312,11 @@ internal sealed class RowInserter
 
         InsertTicket insertTicket = state.Ticket;
 
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.MultiIndexes)
         {
-            BTree<CompositeColumnValue, BTreeTuple> multiIndex = index.BTree;
+            BPlusTree<CompositeColumnValue, BTreeTuple> multiIndex = index.BTree;
 
             CompositeColumnValue multiKeyValue = GetColumnValue(insertTicket.Values, index.Columns, new ColumnValue(ColumnType.Id, state.RowTuple.SlotOne.ToString()));
 
@@ -349,8 +353,10 @@ internal sealed class RowInserter
 
         if (state.Indexes.UniqueIndexDeltas is not null)
         {
-            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+            foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
             {
+                Console.WriteLine("Entries={0}", uniqueIndex.deltas.MvccEntries.Count);
+
                 foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                     uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
@@ -360,7 +366,7 @@ internal sealed class RowInserter
 
         if (state.Indexes.MultiIndexDeltas is not null)
         {
-            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multiIndex in state.Indexes.MultiIndexDeltas)
+            foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multiIndex in state.Indexes.MultiIndexDeltas)
             {
                 foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multiIndex.deltas.MvccEntries)
                     multiIndexEntry.CommitState = BTreeCommitState.Committed;

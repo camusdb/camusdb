@@ -9,6 +9,7 @@
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -17,10 +18,9 @@ namespace CamusDB.Core.Util.Trees;
  *  
  * BPTree or Prefixed is a variation of the B+Tree that allows searches by the prefix of the composite key.
  */
-public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>
+public sealed class BPTree<TKey, TSubKey, TValue> : BPlusTree<TKey, TValue>
     where TKey : IComparable<TKey>, IPrefixComparable<TSubKey>
     where TValue : IComparable<TValue>
-
 {
     /// <summary>
     /// Initializes an empty B-tree.
@@ -28,7 +28,7 @@ public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>
     /// <param name="rootOffset"></param>
     /// <param name="maxNodeCapacity"></param>
     /// <param name="reader"></param>
-    public BPTree(ObjectIdValue rootOffset, IBTreeNodeReader<TKey, TValue>? reader = null) : base(rootOffset, reader)
+    public BPTree(ObjectIdValue rootOffset, IBPlusTreeNodeReader<TKey, TValue>? reader = null) : base(rootOffset, reader)
     {
 
     }
@@ -45,29 +45,31 @@ public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>
     {
         using IDisposable readerLock = await ReaderLockAsync();
 
+        BPlusTreeNode<TKey, TValue>? node = await root.Next.ConfigureAwait(false);
+
         if (root is null)
         {
             Console.WriteLine("root is null");
             yield break;
         }
 
-        await foreach (TValue value in GetPrefixInternal(root, txType, txnid, key, height))
+        await foreach (TValue value in GetPrefixInternal(root, txType, txnid, key))
             yield return value;
     }
 
-    private async IAsyncEnumerable<TValue> GetPrefixInternal(BTreeNode<TKey, TValue>? node, TransactionType txType, HLCTimestamp txnid, TSubKey key, int ht)
-    {
+    private async IAsyncEnumerable<TValue> GetPrefixInternal(BPlusTreeEntry<TKey, TValue> parent, TransactionType txType, HLCTimestamp txnid, TSubKey key)
+    {        
+        BPlusTreeNode<TKey, TValue>? node = await parent.Next.ConfigureAwait(false);
+
         if (node is null)
             yield break;
 
-        BTreeEntry<TKey, TValue>[] children = node.children;
-
         // external node
-        if (ht == 0)
+        if (node.Type == BTreeLeafType.External)
         {
-            for (int j = 0; j < node.KeyCount; j++)
+            for (int i = 0; i < node.Entries.Count; i++)
             {
-                BTreeEntry<TKey, TValue> entry = children[j];
+                BPlusTreeEntry<TKey, TValue> entry = node.Entries[i];
 
                 //Console.WriteLine("Z {0} {1}", key, entry.Key);
 
@@ -89,25 +91,25 @@ public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>
         // internal node
         else
         {
-            for (int j = 0; j < node.KeyCount; j++)
+            for (int i = 0; i < node.Entries.Count; i++)
             {
-                if (j + 1 == node.KeyCount || IsPrefixLess(key, children[j + 1].Key))
-                {
-                    BTreeEntry<TKey, TValue> entry = children[j];
+                BPlusTreeEntry<TKey, TValue> entry = node.Entries[i];
 
-                    await foreach (TValue value in GetPrefixInternal(await entry.Next, txType, txnid, key, ht - 1))
+                if (IsPrefixLess(key, entry.Key) || i == (node.Entries.Count - 1))                
+                {                    
+                    await foreach (TValue value in GetPrefixInternal(entry, txType, txnid, key))
                         yield return value;
                 }
             }
         }
     }
 
-    private bool IsPrefixLess(TSubKey? key1, TKey key2)
+    private static bool IsPrefixLess(TSubKey? key1, TKey key2)
     {
         return key2.IsPrefixedBy(key1) < 0;
     }
 
-    private bool IsPrefixed(TSubKey? key1, TKey key2)
+    private static bool IsPrefixed(TSubKey? key1, TKey key2)
     {
         return key2.IsPrefixedBy(key1) == 0;
     }

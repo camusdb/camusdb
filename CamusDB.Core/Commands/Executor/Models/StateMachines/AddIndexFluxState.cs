@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
@@ -39,7 +40,7 @@ internal sealed class AddIndexFluxState
 
     public int ModifiedRows { get; set; }
 
-    public List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? IndexDeltas { get; set; }
+    public List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? IndexDeltas { get; set; }
 
     public AddIndexFluxState(
         CatalogsManager catalogs,

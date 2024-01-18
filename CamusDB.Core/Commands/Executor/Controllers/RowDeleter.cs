@@ -16,6 +16,7 @@ using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Util.Trees.Experimental;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -150,8 +151,8 @@ internal sealed class RowDeleter
         }
 
         DeleteTicket ticket = state.Ticket;
-        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? uniqueIndexDeltas, multiIndexDeltas;
+        BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? uniqueIndexDeltas, multiIndexDeltas;
 
         // @todo we need to take a snapshot of the data to prevent deadlocks
         // but probably need to optimize this for larger datasets
@@ -183,7 +184,7 @@ internal sealed class RowDeleter
         return FluxAction.Continue;
     }
 
-    private async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>?> DeleteFromTableIndex(DeleteFluxState state, BTreeTuple tuple)
+    private async Task<BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue>?> DeleteFromTableIndex(DeleteFluxState state, BTreeTuple tuple)
     {
         SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
             index: state.Table.Rows,
@@ -196,14 +197,14 @@ internal sealed class RowDeleter
         return await indexSaver.Save(saveUniqueOffsetIndex);
     }
 
-    private async Task<List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>> UpdateUniqueIndexes(
+    private async Task<List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>> UpdateUniqueIndexes(
         DeleteFluxState state,
         DeleteTicket ticket,
         BTreeTuple tuple,
         QueryResultRow row
     )
     {
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
         //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
 
@@ -229,14 +230,14 @@ internal sealed class RowDeleter
         return deltas;
     }
 
-    private async Task<List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>> UpdateMultiIndexes(
+    private async Task<List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>> UpdateMultiIndexes(
         DeleteFluxState state,
         DeleteTicket ticket,
         BTreeTuple tuple,
         QueryResultRow row
     )
     {
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
         //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
 
@@ -268,10 +269,10 @@ internal sealed class RowDeleter
     /// <param name="state"></param>
     /// <returns></returns>
     private async Task PersistIndexChanges(
-        DeleteFluxState state, 
-        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, 
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> uniqueIndexDeltas,
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> multiIndexDeltas
+        DeleteFluxState state,
+        BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, 
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> uniqueIndexDeltas,
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> multiIndexDeltas
     )
     {
         if (mainIndexDeltas is null)
@@ -284,7 +285,7 @@ internal sealed class RowDeleter
 
         if (uniqueIndexDeltas is not null)
         {
-            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in uniqueIndexDeltas)
+            foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in uniqueIndexDeltas)
             {
                 foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                     uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
@@ -295,12 +296,12 @@ internal sealed class RowDeleter
 
         if (multiIndexDeltas is not null)
         {
-            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multiIndex in multiIndexDeltas)
+            foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multiIndex in multiIndexDeltas)
             {
                 foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multiIndex.deltas.MvccEntries)
                     multiIndexEntry.CommitState = BTreeCommitState.Committed;
 
-                await indexSaver.Persist(state.Database.BufferPool, multiIndex.index, state.ModifiedPages, multiIndex.deltas);
+                await indexSaver.Persist(state.Database.BufferPool, multiIndex.index, state.ModifiedPages, multiIndex.deltas).ConfigureAwait(false);
             }
         }
     }
@@ -340,7 +341,7 @@ internal sealed class RowDeleter
         // machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep());
+            await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
 
         timer.Stop();
 

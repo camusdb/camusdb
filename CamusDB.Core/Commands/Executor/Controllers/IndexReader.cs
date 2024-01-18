@@ -11,6 +11,7 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Indexes;
+using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -26,7 +27,7 @@ internal sealed class IndexReader
         indexOffsetReader = new(this);
     }
 
-    public async Task<BTree<ObjectIdValue, ObjectIdValue>> ReadOffsets(BufferPoolManager tablespace, ObjectIdValue offset)
+    public async Task<BPlusTree<ObjectIdValue, ObjectIdValue>> ReadOffsets(BufferPoolManager tablespace, ObjectIdValue offset)
     {
         return await indexOffsetReader.ReadOffsets(tablespace, offset);
     }

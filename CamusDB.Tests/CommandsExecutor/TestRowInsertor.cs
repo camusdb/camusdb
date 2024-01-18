@@ -372,6 +372,7 @@ internal sealed class TestRowInsertor : BaseTest
         );
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryTicket)).ToListAsync();
+        Assert.IsNotEmpty(result);
 
         Dictionary<string, ColumnValue> row = result[0];
 

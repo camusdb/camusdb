@@ -20,6 +20,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 using Microsoft.Extensions.Logging;
+using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.GC;
 
@@ -204,9 +205,9 @@ public sealed class GCManager : IDisposable
 
                 TableDescriptor tableDescriptor = await keyValueDescriptor.Value.ConfigureAwait(false);
 
-                BTree<ObjectIdValue, ObjectIdValue>? tableIndex = tableDescriptor.Rows;
+                BPlusTree<ObjectIdValue, ObjectIdValue>? tableIndex = tableDescriptor.Rows;
 
-                if (tableIndex is not null)
+                /*if (tableIndex is not null)
                 {
                     using (await tableIndex.WriterLockAsync().ConfigureAwait(false))
                     {
@@ -257,7 +258,7 @@ public sealed class GCManager : IDisposable
                             await btreeIndex.Sweep().ConfigureAwait(false);
                         }
                     }
-                }
+                }*/
             }
         }
         catch (Exception ex)

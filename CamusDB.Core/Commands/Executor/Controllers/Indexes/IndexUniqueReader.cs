@@ -11,6 +11,7 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -37,16 +38,16 @@ internal sealed class IndexUniqueReader : IndexBaseReader
 
         int pointer = 0;
 
-        index.height = Serializator.ReadInt32(data, ref pointer);
-        index.size = Serializator.ReadInt32(data, ref pointer);
+        //index.height = Serializator.ReadInt32(data, ref pointer);
+        //index.size = Serializator.ReadInt32(data, ref pointer);
 
         ObjectIdValue rootPageOffset = Serializator.ReadObjectId(data, ref pointer);
 
         if (!rootPageOffset.IsNull())
         {
-            BTreeNode<CompositeColumnValue, BTreeTuple>? node = await reader.GetNode(rootPageOffset);
+            BPlusTreeNode<CompositeColumnValue, BTreeTuple>? node = await reader.GetNode(rootPageOffset);
             if (node is not null)
-                index.root = node;
+                index.root = new BPlusTreeEntry<CompositeColumnValue, BTreeTuple>(default!, reader, node);
         }
 
         return index;

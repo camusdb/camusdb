@@ -18,6 +18,7 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
@@ -170,13 +171,13 @@ internal sealed class TableIndexAdder
 
         AlterIndexTicket ticket = state.Ticket;
 
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
 
         await foreach (QueryResultRow row in state.DataCursor)
         {
             BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = state.Btree;
 
-            BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> mutations;
+            BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> mutations;
 
             if (ticket.Operation == AlterIndexOperation.AddPrimaryKey || ticket.Operation == AlterIndexOperation.AddUniqueIndex)
                 mutations = await ValidateAndInsertUniqueValue(index, row, ticket);
@@ -191,7 +192,7 @@ internal sealed class TableIndexAdder
         return FluxAction.Continue;
     }
 
-    private async Task<BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> ValidateAndInsertUniqueValue(
+    private async Task<BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> ValidateAndInsertUniqueValue(
         BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex,
         QueryResultRow row,
         AlterIndexTicket ticket
@@ -224,7 +225,7 @@ internal sealed class TableIndexAdder
         return await indexSaver.Save(saveUniqueIndexTicket);
     }
 
-    private async Task<BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> ValidateAndInsertMultiValue(
+    private async Task<BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> ValidateAndInsertMultiValue(
         BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex,
         QueryResultRow row,
         AlterIndexTicket ticket
@@ -265,7 +266,7 @@ internal sealed class TableIndexAdder
             return FluxAction.Abort;
         }
 
-        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) index in state.IndexDeltas)
+        foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) index in state.IndexDeltas)
         {
             foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in index.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;

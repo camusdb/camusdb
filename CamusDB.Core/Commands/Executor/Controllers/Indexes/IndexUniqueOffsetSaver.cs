@@ -14,6 +14,8 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.Util.Trees.Experimental;
+using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -26,7 +28,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> Save(SaveOffsetIndexTicket ticket)
+    public async Task<BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> Save(SaveOffsetIndexTicket ticket)
     {
         return await SaveInternal(ticket.Index, ticket.TxnId, ticket.Key, ticket.Value).ConfigureAwait(false);
     }
@@ -36,8 +38,8 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
         await RemoveInternal(ticket.Tablespace, ticket.Index, ticket.Key, ticket.ModifiedPages, ticket.Deltas).ConfigureAwait(false);
     }
 
-    private static async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> SaveInternal(
-        BTree<ObjectIdValue, ObjectIdValue> index,
+    private static async Task<BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> SaveInternal(
+        BPlusTree<ObjectIdValue, ObjectIdValue> index,
         HLCTimestamp txnid,
         ObjectIdValue key,
         ObjectIdValue value
@@ -67,15 +69,15 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
     public async Task Persist(
         BufferPoolManager tablespace,
-        BTree<ObjectIdValue, ObjectIdValue> index,
+        BPlusTree<ObjectIdValue, ObjectIdValue> index,
         List<BufferPageOperation> modifiedPages,
-        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas
+        BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas
     )
     {
         // @todo this lock will produce contention
         using (await index.WriterLockAsync().ConfigureAwait(false))
         {
-            foreach (BTreeNode<ObjectIdValue, ObjectIdValue> node in deltas.Nodes)
+            foreach (BPlusTreeNode<ObjectIdValue, ObjectIdValue> node in deltas.Nodes)
             {
                 if (node.PageOffset.IsNull())
                     node.PageOffset = tablespace.GetNextFreeOffset();
@@ -88,9 +90,14 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
             ];
 
             int pointer = 0;
-            Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
-            Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
-            Serializator.WriteObjectId(treeBuffer, index.root!.PageOffset, ref pointer);
+
+            BPlusTreeNode<ObjectIdValue, ObjectIdValue>? rootNode = (await index.root.Next.ConfigureAwait(false));
+            if (rootNode is null)
+                return;
+
+            //Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
+            //Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
+            Serializator.WriteObjectId(treeBuffer, rootNode.PageOffset, ref pointer);
 
             //await tablespace.WriteDataToPage(index.PageOffset, 0, treeBuffer);
             //modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, index.PageOffset, 0, treeBuffer));
@@ -101,30 +108,30 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
             HLCTimestamp nullTimestamp = HLCTimestamp.Zero;
             //@todo update nodes concurrently        
 
-            foreach (BTreeNode<ObjectIdValue, ObjectIdValue> node in deltas.Nodes)
+            foreach (BPlusTreeNode<ObjectIdValue, ObjectIdValue> node in deltas.Nodes)
             {
                 //using IDisposable readerLock = await node.ReaderLockAsync();
 
                 byte[] nodeBuffer = new byte[
                     SerializatorTypeSizes.TypeInteger32 + // key count
                     SerializatorTypeSizes.TypeObjectId +  // page offset
-                    (36 + 12) * node.KeyCount             // 36 bytes * node (key + value + next)
+                    (36 + 12) * node.Entries.Count        // 36 bytes * node (key + value + next)
                 ];
 
                 pointer = 0;
-                Serializator.WriteInt32(nodeBuffer, node.KeyCount, ref pointer);
+                Serializator.WriteInt32(nodeBuffer, node.Entries.Count, ref pointer);
                 Serializator.WriteObjectId(nodeBuffer, node.PageOffset, ref pointer);
 
-                for (int i = 0; i < node.KeyCount; i++)
+                for (int i = 0; i < node.Entries.Count; i++)
                 {
-                    BTreeEntry<ObjectIdValue, ObjectIdValue> entry = node.children[i];
+                    BPlusTreeEntry<ObjectIdValue, ObjectIdValue> entry = node.Entries[i];
 
                     if (entry is not null)
                     {
                         //Console.WriteLine("Saved K={0} T={1} V={2}", entry.Key, timestamp, value);
                         Serializator.WriteObjectId(nodeBuffer, entry.Key, ref pointer);
 
-                        BTreeNode<ObjectIdValue, ObjectIdValue>? next = await entry.Next.ConfigureAwait(false);
+                        BPlusTreeNode<ObjectIdValue, ObjectIdValue>? next = await entry.Next.ConfigureAwait(false);
 
                         if (next is not null)
                         {

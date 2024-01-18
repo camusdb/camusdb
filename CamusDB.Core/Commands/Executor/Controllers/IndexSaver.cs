@@ -13,6 +13,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.BufferPool.Models;
+using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -28,21 +29,21 @@ internal sealed class IndexSaver
         indexUniqueOffsetSaver = new(this);
     }
 
-    public async Task<BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> Save(SaveOffsetIndexTicket ticket)
+    public async Task<BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue>> Save(SaveOffsetIndexTicket ticket)
     {
         return await indexUniqueOffsetSaver.Save(ticket).ConfigureAwait(false);
     }
 
-    public async Task<BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveIndexTicket ticket)
+    public async Task<BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveIndexTicket ticket)
     {
         return await indexUniqueSaver.Save(ticket).ConfigureAwait(false);
     }  
 
     public async Task Persist(
         BufferPoolManager tablespace,
-        BTree<ObjectIdValue, ObjectIdValue> index,
+        BPlusTree<ObjectIdValue, ObjectIdValue> index,
         List<BufferPageOperation> modifiedPages,
-        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas)
+        BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue> deltas)
     {
         await indexUniqueOffsetSaver.Persist(
             tablespace,
@@ -54,9 +55,9 @@ internal sealed class IndexSaver
 
     public async Task Persist(
         BufferPoolManager tablespace,
-        BTree<CompositeColumnValue, BTreeTuple> index,
+        BPlusTree<CompositeColumnValue, BTreeTuple> index,
         List<BufferPageOperation> modifiedPages,
-        BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas)
+        BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas)
     {
         await indexUniqueSaver.Persist(
             tablespace,

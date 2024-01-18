@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -27,7 +28,7 @@ internal sealed class QueryScanner
     {
         BufferPoolManager tablespace = database.BufferPool;
 
-        await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse(ticket.TxnId))
+        await foreach (BPlusTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse(ticket.TxnId))
         {
             ObjectIdValue dataOffset = entry.GetValue(ticket.TxnType, ticket.TxnId);
 
@@ -86,7 +87,7 @@ internal sealed class QueryScanner
     private async IAsyncEnumerable<QueryResultRow> ScanUsingIndex(
         DatabaseDescriptor database,
         TableDescriptor table,
-        BTree<CompositeColumnValue, BTreeTuple> index,
+        BPlusTree<CompositeColumnValue, BTreeTuple> index,
         QueryTicket ticket,
         QueryFilterer queryFilterer,
         RowDeserializer rowDeserializer
@@ -94,7 +95,7 @@ internal sealed class QueryScanner
     {
         BufferPoolManager tablespace = database.BufferPool;
 
-        await foreach (BTreeEntry<CompositeColumnValue, BTreeTuple> entry in index.EntriesTraverse(ticket.TxnId))
+        await foreach (BPlusTreeEntry<CompositeColumnValue, BTreeTuple> entry in index.EntriesTraverse(ticket.TxnId))
         {
             BTreeTuple? txnValue = entry.GetValue(ticket.TxnType, ticket.TxnId);
 

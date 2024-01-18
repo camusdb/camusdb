@@ -241,22 +241,22 @@ internal sealed class QueryExecutor
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        BTreeTuple? pageOffset = await index.BTree.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue(columnId));
+        BTreeTuple? pageOffset = await index.BTree.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue(columnId)).ConfigureAwait(false);
 
         if (pageOffset is null || pageOffset.IsNull())
         {
-            //Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
             yield break;
         }
 
-        byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo);
+        byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo).ConfigureAwait(false);
         if (data.Length == 0)
         {
-            //Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
+            Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
             yield break;
         }
 
-        //Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
+        Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
 
         yield return rowDeserializer.Deserialize(table.Schema, data);
     }
