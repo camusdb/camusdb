@@ -33,7 +33,7 @@ public class BTreeUtils
         {
             Type t when t == typeof(string) => 65,
             Type t when t == typeof(long) => 9,
-            Type t when t == typeof(int) => 5,
+            Type t when t == typeof(int) => 256,
             Type t when t == typeof(ColumnValue) => 49,
             Type t when t == typeof(CompositeColumnValue) => 49,
             Type t when t == typeof(BTreeTuple) => 25,

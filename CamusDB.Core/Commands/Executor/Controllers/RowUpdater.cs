@@ -31,7 +31,8 @@ public sealed class RowUpdater
     private readonly IndexSaver indexSaver = new();
 
     private readonly RowSerializer rowSerializer = new();
-    private ILogger<ICamusDB> logger;
+
+    private readonly ILogger<ICamusDB> logger;
 
     public RowUpdater(ILogger<ICamusDB> logger)
     {
@@ -348,7 +349,7 @@ public sealed class RowUpdater
         UpdateTicket ticket = state.Ticket;
         BufferPoolManager tablespace = state.Database.BufferPool;
         BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? uniqueIndexDeltas, multiIndexDeltas;
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? uniqueIndexDeltas, multiIndexDeltas;
 
         // @todo we need to take a snapshot of the data to prevent deadlocks
         // but probably need to optimize this for larger datasets
@@ -366,13 +367,11 @@ public sealed class RowUpdater
 
             BTreeTuple tuple = UpdateNewRowVersionDisk(tablespace, table, state, queryRow, rowValues);
 
-            mainTableDeltas = await UpdateTableIndex(state, tuple).ConfigureAwait(false);
+            await UpdateTableIndex(state, tuple).ConfigureAwait(false);
 
             uniqueIndexDeltas = await UpdateUniqueIndexes(state, ticket, tuple, queryRow).ConfigureAwait(false);
 
-            multiIndexDeltas = await UpdateMultiIndexes(state, ticket, tuple, queryRow).ConfigureAwait(false);
-
-            await PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas, multiIndexDeltas);
+            multiIndexDeltas = await UpdateMultiIndexes(state, ticket, tuple, queryRow).ConfigureAwait(false);            
 
             logger.LogInformation(
                 "Row with rowid {0} updated to page {1}",
@@ -382,6 +381,8 @@ public sealed class RowUpdater
 
             state.ModifiedRows++;
         }
+
+        //await PersistIndexChanges(state, mainTableDeltas, uniqueIndexDeltas, multiIndexDeltas);
 
         return FluxAction.Continue;
     }
@@ -483,27 +484,30 @@ public sealed class RowUpdater
         return tuple;
     }
 
-    private async Task<BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue>?> UpdateTableIndex(UpdateFluxState state, BTreeTuple tuple)
+    private async Task UpdateTableIndex(UpdateFluxState state, BTreeTuple tuple)
     {
         SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
+            tablespace: state.Database.BufferPool,
             index: state.Table.Rows,
             txnId: state.Ticket.TxnId,
+            commitState: BTreeCommitState.Uncommitted,
             key: tuple.SlotOne,
-            value: tuple.SlotTwo
+            value: tuple.SlotTwo,
+            modifiedPages: state.ModifiedPages
         );
 
         // Main table index stores rowid pointing to page offset
-        return await indexSaver.Save(saveUniqueOffsetIndex);
+        await indexSaver.Save(saveUniqueOffsetIndex);
     }
 
-    private async Task<List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>> UpdateUniqueIndexes(
+    private async Task<List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>> UpdateUniqueIndexes(
         UpdateFluxState state,
         UpdateTicket ticket,
         BTreeTuple tuple,
         QueryResultRow row
     )
     {
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
 
@@ -514,29 +518,33 @@ public sealed class RowUpdater
             CompositeColumnValue uniqueKeyValue = GetColumnValue(row.Row, index.Columns);            
 
             SaveIndexTicket saveIndexTicket = new(
+                tablespace: state.Database.BufferPool,
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
                 key: uniqueKeyValue,
-                value: tuple
+                value: tuple,
+                modifiedPages: state.ModifiedPages
             );
 
             //Console.WriteLine("Saving unique index {0} {1} {2}", uniqueIndex, uniqueKeyValue, tuple);
 
-            deltas.Add((uniqueIndex, await indexSaver.Save(saveIndexTicket).ConfigureAwait(false)));
+            await indexSaver.Save(saveIndexTicket).ConfigureAwait(false);
+
+            deltas.Add((uniqueIndex, uniqueKeyValue));
         }
 
         return deltas;
     }
 
-    private async Task<List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>> UpdateMultiIndexes(
+    private async Task<List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>> UpdateMultiIndexes(
         UpdateFluxState state,
         UpdateTicket ticket,
         BTreeTuple tuple,
         QueryResultRow row
     )
     {
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
 
@@ -547,16 +555,20 @@ public sealed class RowUpdater
             CompositeColumnValue multiKeyValue = GetColumnValue(row.Row, index.Columns, new ColumnValue(ColumnType.Id, tuple.SlotOne.ToString()));
 
             SaveIndexTicket saveIndexTicket = new(
+                tablespace: state.Database.BufferPool,
                 index: multiIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
                 key: multiKeyValue,
-                value: tuple
+                value: tuple,
+                modifiedPages: state.ModifiedPages
             );
 
             //Console.WriteLine("Saving unique index {0} {1} {2}", uniqueIndex, uniqueKeyValue, tuple);
 
-            deltas.Add((multiIndex, await indexSaver.Save(saveIndexTicket)));
+            await indexSaver.Save(saveIndexTicket);
+
+            deltas.Add((multiIndex, multiKeyValue));
         }
 
         return deltas;
@@ -573,7 +585,7 @@ public sealed class RowUpdater
         List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> uniqueIndexDeltas,
         List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> multiIndexDeltas)
     {
-        if (mainIndexDeltas is null)
+        /*if (mainIndexDeltas is null)
             return;
 
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in mainIndexDeltas.MvccEntries)
@@ -601,7 +613,7 @@ public sealed class RowUpdater
 
                 await indexSaver.Persist(state.Database.BufferPool, multiIndex.index, state.ModifiedPages, multiIndex.deltas).ConfigureAwait(false);
             }
-        }
+        }*/
     }
 
     /// <summary>

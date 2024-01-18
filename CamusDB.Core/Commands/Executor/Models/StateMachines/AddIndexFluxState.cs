@@ -36,11 +36,11 @@ internal sealed class AddIndexFluxState
 
     public List<BufferPageOperation> ModifiedPages { get; } = new();
 
-    public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }    
+    public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }
 
     public int ModifiedRows { get; set; }
 
-    public List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? IndexDeltas { get; set; }
+    public List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? IndexDeltas { get; set; }
 
     public AddIndexFluxState(
         CatalogsManager catalogs,

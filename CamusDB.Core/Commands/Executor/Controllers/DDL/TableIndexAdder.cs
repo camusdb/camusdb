@@ -19,6 +19,8 @@ using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Trees.Experimental;
+using System.Net.Sockets;
+using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
@@ -170,21 +172,21 @@ internal sealed class TableIndexAdder
         }
 
         AlterIndexTicket ticket = state.Ticket;
+        BufferPoolManager tablespace = state.Database.BufferPool;
 
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         await foreach (QueryResultRow row in state.DataCursor)
         {
-            BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = state.Btree;
-
-            BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> mutations;
+            CompositeColumnValue indexKeyValue;
+            BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = state.Btree;            
 
             if (ticket.Operation == AlterIndexOperation.AddPrimaryKey || ticket.Operation == AlterIndexOperation.AddUniqueIndex)
-                mutations = await ValidateAndInsertUniqueValue(index, row, ticket);
+                indexKeyValue = await ValidateAndInsertUniqueValue(tablespace, index, row, ticket, state.ModifiedPages);
             else
-                mutations = await ValidateAndInsertMultiValue(index, row, ticket);
+                indexKeyValue = await ValidateAndInsertMultiValue(tablespace, index, row, ticket, state.ModifiedPages);
 
-            deltas.Add((index, mutations));
+            deltas.Add((index, indexKeyValue));
         }
 
         state.IndexDeltas = deltas;
@@ -192,10 +194,12 @@ internal sealed class TableIndexAdder
         return FluxAction.Continue;
     }
 
-    private async Task<BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> ValidateAndInsertUniqueValue(
+    private async Task<CompositeColumnValue> ValidateAndInsertUniqueValue(
+        BufferPoolManager tablespace,
         BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex,
         QueryResultRow row,
-        AlterIndexTicket ticket
+        AlterIndexTicket ticket,
+        List<BufferPageOperation> modifiedPages
     )
     {
         ColumnValue? uniqueKeyValue = GetColumnValue(row.Row, ticket.ColumnName);
@@ -206,7 +210,9 @@ internal sealed class TableIndexAdder
                 "A null value was found for unique key field " + ticket.ColumnName
             );
 
-        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue(uniqueKeyValue));
+        CompositeColumnValue compositeUniqueKeyValue = new(uniqueKeyValue);
+
+        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, compositeUniqueKeyValue);
 
         if (rowTuple is not null && !rowTuple.IsNull())
             throw new CamusDBException(
@@ -215,20 +221,26 @@ internal sealed class TableIndexAdder
             );
 
         SaveIndexTicket saveUniqueIndexTicket = new(
+            tablespace: tablespace,
             index: uniqueIndex,
             txnId: ticket.TxnId,
             commitState: BTreeCommitState.Uncommitted,
-            key: new CompositeColumnValue(uniqueKeyValue),
-            value: row.Tuple
+            key: compositeUniqueKeyValue,
+            value: row.Tuple,
+            modifiedPages: modifiedPages
         );
 
-        return await indexSaver.Save(saveUniqueIndexTicket);
+        await indexSaver.Save(saveUniqueIndexTicket);
+
+        return compositeUniqueKeyValue;
     }
 
-    private async Task<BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> ValidateAndInsertMultiValue(
+    private async Task<CompositeColumnValue> ValidateAndInsertMultiValue(
+        BufferPoolManager tablespace,
         BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex,
         QueryResultRow row,
-        AlterIndexTicket ticket
+        AlterIndexTicket ticket,
+        List<BufferPageOperation> modifiedPages
     )
     {
         ColumnValue? multiKeyValue = GetColumnValue(row.Row, ticket.ColumnName);
@@ -243,14 +255,18 @@ internal sealed class TableIndexAdder
         //Console.WriteLine(x);
 
         SaveIndexTicket saveUniqueIndexTicket = new(
+            tablespace: tablespace,
             index: uniqueIndex,
             txnId: ticket.TxnId,
             commitState: BTreeCommitState.Uncommitted,
             key: x,
-            value: row.Tuple
+            value: row.Tuple,
+            modifiedPages: modifiedPages
         );
 
-        return await indexSaver.Save(saveUniqueIndexTicket);
+        await indexSaver.Save(saveUniqueIndexTicket);
+
+        return x;
     }
 
     /// <summary>
@@ -266,12 +282,24 @@ internal sealed class TableIndexAdder
             return FluxAction.Abort;
         }
 
-        foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) index in state.IndexDeltas)
+        foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue keyValue) index in state.IndexDeltas)
         {
-            foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in index.deltas.MvccEntries)
+            /*foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in index.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
             await indexSaver.Persist(state.Database.BufferPool, index.index, state.ModifiedPages, index.deltas);
+
+            SaveIndexTicket saveUniqueIndexTicket = new(
+                tablespace: state.Database.BufferPool,
+                index: index.index,
+                txnId: state.Ticket.TxnId,
+                commitState: BTreeCommitState.Committed,
+                key: state.RowTuple.SlotOne,
+                value: index.keyValue,
+                modifiedPages: state.ModifiedPages
+            );
+
+            await indexSaver.Save(saveUniqueIndexTicket);*/
         }
 
         return FluxAction.Continue;

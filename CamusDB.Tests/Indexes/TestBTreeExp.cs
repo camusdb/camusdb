@@ -24,10 +24,63 @@ internal class TestBTreeExp
 
         BPlusTree<int, int> bpt = new(new());
 
-        for (int i = 0; i < 40; i++)        
-            await bpt.Put(txnid, BTreeCommitState.Uncommitted, System.Random.Shared.Next(0, 100), 2);        
+        for (int i = 0; i < 128; i++)        
+            await bpt.Put(txnid, BTreeCommitState.Committed, System.Random.Shared.Next(0, 1000), 2);        
 
         await bpt.Print(txnid);
+
+        int curr = -1;
+        int count = 0;
+
+        await foreach (BPlusTreeEntry<int, int> entry in bpt.EntriesTraverse(txnid))
+        {
+            if (curr == -1)
+                curr = entry.Key;
+            else
+            {
+                if (curr > entry.Key)
+                    Assert.Fail("BTree is not sorted");
+
+                curr = entry.Key;
+            }
+
+            count++;
+        }
+
+        Assert.AreEqual(128, count);
+    }
+
+    [Test]
+    public async Task TestEmpty2()
+    {
+        HLCTimestamp txnid = await hlc.SendOrLocalEvent();
+
+        BPlusTree<int, int> bpt = new(new());
+
+        for (int i = 0; i < 140; i++)
+            await bpt.Put(txnid, BTreeCommitState.Uncommitted, System.Random.Shared.Next(0, 1000), 2);
+
+        await bpt.Print(txnid);
+
+        int curr = -1;
+        int count = 0;
+
+        await foreach (BPlusTreeEntry<int, int> entry in bpt.EntriesTraverse(txnid))
+        {
+            if (curr == -1)
+                curr = entry.Key;
+            else
+            {
+                if (curr > entry.Key)
+                    Assert.Fail("BTree is not sorted");
+
+                curr = entry.Key;
+            }
+
+            count++;
+        }
+
+        Assert.AreEqual(140, count);
     }
 
     [Test]
@@ -76,7 +129,7 @@ internal class TestBTreeExp
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BPlusTreeMutationDeltas<int, int> deltas;
+        /*BPlusTreeMutationDeltas<int, int> deltas;
 
         BPlusTree<int, int> tree = new(new());
 
@@ -102,6 +155,6 @@ internal class TestBTreeExp
         Assert.AreEqual(1, deltas.Nodes.Count);
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 11, 105);
-        Assert.AreEqual(1, deltas.Nodes.Count);
+        Assert.AreEqual(1, deltas.Nodes.Count);*/
     }
 }

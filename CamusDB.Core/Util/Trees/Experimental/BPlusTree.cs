@@ -47,11 +47,12 @@ public class BPlusTree<TKey, TValue> where TKey : IComparable<TKey> where TValue
         maxNodeCapacityHalf = maxNodeCapacity / 2;
     }
 
-    public async Task<BPlusTreeMutationDeltas<TKey, TValue>> Put(
+    public async Task Put(
         HLCTimestamp txnid,
         BTreeCommitState commitState,
         TKey key,
-        TValue value
+        TValue value,
+        Func<HashSet<BPlusTreeNode<TKey, TValue>>, Task>? persistNodeCallback = null
     )
     {
         using (await WriterLockAsync().ConfigureAwait(false))
@@ -69,9 +70,10 @@ public class BPlusTree<TKey, TValue> where TKey : IComparable<TKey> where TValue
 
             await Insert(root, txnid, commitState, key, value, deltas);
 
-            return deltas;
+            if (commitState == BTreeCommitState.Committed && deltas.Nodes.Count > 0 && persistNodeCallback is not null)
+                await persistNodeCallback(deltas.Nodes).ConfigureAwait(false);
         }
-    }
+    }    
 
     private async Task Insert(
         BPlusTreeEntry<TKey, TValue> parent,

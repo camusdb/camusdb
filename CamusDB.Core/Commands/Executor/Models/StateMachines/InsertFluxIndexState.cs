@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Util.Trees.Experimental;
 
@@ -17,13 +16,11 @@ public sealed class InsertFluxIndexState
 {
 	public List<TableIndexSchema> UniqueIndexes { get; } = new();
 
-	public List<TableIndexSchema> MultiIndexes { get; } = new();
+	public List<TableIndexSchema> MultiIndexes { get; } = new();    
 
-    public BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? MainIndexDeltas { get; set; }
+    public List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? UniqueIndexDeltas { get; set; }
 
-    public List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? UniqueIndexDeltas { get; set; }
-
-    public List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)>? MultiIndexDeltas { get; set; }
+    public List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? MultiIndexDeltas { get; set; }
 
     public InsertFluxIndexState()
 	{

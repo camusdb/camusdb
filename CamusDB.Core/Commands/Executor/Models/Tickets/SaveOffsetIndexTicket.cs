@@ -6,33 +6,48 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.BufferPool;
+using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct SaveOffsetIndexTicket
-{	
-	public BPlusTree<ObjectIdValue, ObjectIdValue> Index { get; }
+{
+    public BufferPoolManager Tablespace { get; }
 
-	public HLCTimestamp TxnId { get; }
+    public BPlusTree<ObjectIdValue, ObjectIdValue> Index { get; }
 
-	public ObjectIdValue Key { get; }
+    public HLCTimestamp TxnId { get; }
 
-	public ObjectIdValue Value { get; }    
+    public BTreeCommitState CommitState { get; }
+
+    public ObjectIdValue Key { get; }
+
+	public ObjectIdValue Value { get; }
+
+    public List<BufferPageOperation> ModifiedPages { get; }
 
     public SaveOffsetIndexTicket(
+		BufferPoolManager tablespace,
         BPlusTree<ObjectIdValue, ObjectIdValue> index,
         HLCTimestamp txnId,
+        BTreeCommitState commitState,
         ObjectIdValue key,
-        ObjectIdValue value
-	)
-	{		
+        ObjectIdValue value,
+        List<BufferPageOperation> modifiedPages
+    )
+	{
+		Tablespace = tablespace;
 		Index = index;
 		TxnId = txnId;
+        CommitState = commitState;
 		Key = key;
 		Value = value;
+		ModifiedPages = modifiedPages;
 	}
 }
 

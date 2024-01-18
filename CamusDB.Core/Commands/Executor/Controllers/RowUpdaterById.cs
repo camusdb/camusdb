@@ -247,7 +247,7 @@ public sealed class RowUpdaterById
             return FluxAction.Abort;
         }
 
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
@@ -256,14 +256,18 @@ public sealed class RowUpdaterById
             CompositeColumnValue uniqueKeyValue = GetColumnValue(state.ColumnValues, index.Columns);            
 
             SaveIndexTicket saveUniqueIndexTicket = new(
+                tablespace: state.Database.BufferPool,
                 index: uniqueIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
                 key: uniqueKeyValue,
-                value: state.RowTuple
+                value: state.RowTuple,
+                modifiedPages: state.ModifiedPages
             );
 
-            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false)));
+            await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
+
+            deltas.Add((uniqueIndex, uniqueKeyValue));
         }
 
         state.Indexes.UniqueIndexDeltas = deltas;
@@ -287,7 +291,7 @@ public sealed class RowUpdaterById
             return FluxAction.Abort;
         }
 
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> deltas = new();
+        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.MultiIndexes)
         {
@@ -296,14 +300,18 @@ public sealed class RowUpdaterById
             CompositeColumnValue multiKeyValue = GetColumnValue(state.ColumnValues, index.Columns, new ColumnValue(ColumnType.Id, state.RowTuple.SlotOne.ToString()));          
 
             SaveIndexTicket saveUniqueIndexTicket = new(
+                tablespace: state.Database.BufferPool,
                 index: multiIndex,
                 txnId: ticket.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
                 key: multiKeyValue,
-                value: state.RowTuple
+                value: state.RowTuple,
+                modifiedPages: state.ModifiedPages
             );
 
-            deltas.Add((multiIndex, await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false)));
+            await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
+
+            deltas.Add((multiIndex, multiKeyValue));
         }
 
         state.Indexes.MultiIndexDeltas = deltas;
@@ -363,14 +371,17 @@ public sealed class RowUpdaterById
         }
 
         SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
+            tablespace: state.Database.BufferPool,
             index: state.Table.Rows,
             txnId: state.Ticket.TxnId,
             key: state.RowTuple.SlotOne,
-            value: state.RowTuple.SlotTwo
+            value: state.RowTuple.SlotTwo,
+            commitState: BTreeCommitState.Uncommitted,
+            modifiedPages: state.ModifiedPages
         );
 
         // Main table index stores rowid pointing to page offset
-        state.Indexes.MainIndexDeltas = await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
+        await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
@@ -382,7 +393,7 @@ public sealed class RowUpdaterById
     /// <returns></returns>
     private async Task<FluxAction> PersistIndexChanges(UpdateByIdFluxState state)
     {
-        if (state.Indexes.MainIndexDeltas is null)
+        /*if (state.Indexes.MainIndexDeltas is null)
             return FluxAction.Abort;
 
         foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in state.Indexes.MainIndexDeltas.MvccEntries)
@@ -410,7 +421,7 @@ public sealed class RowUpdaterById
 
                 await indexSaver.Persist(state.Database.BufferPool, multIndex.index, state.ModifiedPages, multIndex.deltas).ConfigureAwait(false);
             }
-        }
+        }*/
 
         return FluxAction.Continue;
     }

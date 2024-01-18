@@ -28,9 +28,15 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         this.indexSaver = indexSaver;
     }
 
-    public async Task<BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>> Save(SaveIndexTicket ticket)
+    public async Task Save(SaveIndexTicket ticket)
     {
-        return await ticket.Index.Put(ticket.TxnId, ticket.CommitState, ticket.Key, ticket.Value).ConfigureAwait(false);
+        await ticket.Index.Put(
+            ticket.TxnId, 
+            ticket.CommitState, 
+            ticket.Key, 
+            ticket.Value, 
+            async (nodes) => await PersistNodes(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, nodes)
+        ).ConfigureAwait(false);
     }
 
     public async Task Remove(RemoveUniqueIndexTicket ticket)
@@ -141,6 +147,100 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
                 //Console.WriteLine("Modified Node {0}/{1} at {2} Pointer={3} BufferLength={4}", node.Id, node.KeyCount, node.PageOffset, pointer, nodeBuffer.Length);            
             }
+        }
+    }
+
+    public async Task PersistNodes(
+        BufferPoolManager tablespace,
+        BPlusTree<CompositeColumnValue, BTreeTuple> index,
+        List<BufferPageOperation> modifiedPages,
+        HashSet<BPlusTreeNode<CompositeColumnValue, BTreeTuple>> nodes
+    )
+    {
+        if (nodes.Count == 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Deltas cannot be null or empty"
+            );
+        
+        foreach (BPlusTreeNode<CompositeColumnValue, BTreeTuple> node in nodes)
+        {
+            if (node.PageOffset.IsNull())
+                node.PageOffset = tablespace.GetNextFreeOffset();
+        }
+
+        byte[] treeBuffer = new byte[
+            SerializatorTypeSizes.TypeInteger32 + // height(4 byte) +
+            SerializatorTypeSizes.TypeInteger32 + // size(4 byte)
+            SerializatorTypeSizes.TypeObjectId    // root(4 byte)
+        ];
+
+        int pointer = 0;
+        //Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
+        //Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
+
+        BPlusTreeNode<CompositeColumnValue, BTreeTuple>? rootNode = (await index.root.Next.ConfigureAwait(false));
+        if (rootNode is null)
+            return;
+
+        Serializator.WriteObjectId(treeBuffer, rootNode.PageOffset, ref pointer);
+
+        // Write to buffer page
+        //await tablespace.WriteDataToPage(index.PageOffset, sequence, treeBuffer);
+        //modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, index.PageOffset, sequence, treeBuffer));
+
+        tablespace.WriteDataToPageBatch(modifiedPages, index.PageOffset, 0, treeBuffer);
+
+        //@todo update nodes concurrently
+        ObjectIdValue nullValue = new();
+        BTreeTuple nullTuple = new(nullValue, nullValue);
+        HLCTimestamp timestampZero = HLCTimestamp.Zero;
+
+        foreach (BPlusTreeNode<CompositeColumnValue, BTreeTuple> node in nodes)
+        {
+            //using IDisposable readerLock = await node.ReaderLockAsync();
+
+            byte[] nodeBuffer = new byte[
+                SerializatorTypeSizes.TypeInteger32 + // keyCount(4 byte) + 
+                SerializatorTypeSizes.TypeObjectId +  // pageOffset(4 byte)
+                GetEntrySizes(node)
+            ];
+
+            pointer = 0;
+            Serializator.WriteInt32(nodeBuffer, node.Entries.Count, ref pointer);
+            Serializator.WriteObjectId(nodeBuffer, node.PageOffset, ref pointer);
+
+            for (int i = 0; i < node.Entries.Count; i++)
+            {
+                BPlusTreeEntry<CompositeColumnValue, BTreeTuple> entry = node.Entries[i];
+
+                if (entry is not null)
+                {
+                    (HLCTimestamp timestamp, BTreeTuple? tuple) = entry.GetMaxCommittedValue();
+                    BPlusTreeNode<CompositeColumnValue, BTreeTuple>? next = (await entry.Next.ConfigureAwait(false));
+
+                    //Console.WriteLine("Saved K={0} T={1} V={2}", entry.Key, timestamp, tuple);
+
+                    SerializeKey(nodeBuffer, entry.Key, ref pointer);
+                    Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer);
+                    Serializator.WriteTuple(nodeBuffer, tuple ?? nullTuple, ref pointer); // @todo LastValue                    
+                    Serializator.WriteObjectId(nodeBuffer, next is not null ? next.PageOffset : nullValue, ref pointer);
+                }
+                else
+                {
+                    Serializator.WriteInt8(nodeBuffer, 0, ref pointer);
+                    Serializator.WriteHLCTimestamp(nodeBuffer, timestampZero, ref pointer);
+                    Serializator.WriteTuple(nodeBuffer, nullTuple, ref pointer);
+                    Serializator.WriteObjectId(nodeBuffer, nullValue, ref pointer);
+                }
+            }
+
+            //await tablespace.WriteDataToPage(node.PageOffset, sequence, nodeBuffer);
+            //modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, node.PageOffset, sequence, nodeBuffer));
+
+            tablespace.WriteDataToPageBatch(modifiedPages, node.PageOffset, 0, nodeBuffer);
+
+            //Console.WriteLine("Modified Node {0}/{1} at {2} Pointer={3} BufferLength={4}", node.Id, node.KeyCount, node.PageOffset, pointer, nodeBuffer.Length);                        
         }
     }
 }
