@@ -97,8 +97,7 @@ public class BPlusTree<TKey, TValue> where TKey : IComparable<TKey> where TValue
 
                 if (Eq(currEntry.Key, key))
                 {
-                    node.Entries[i].SetValue(txnid, commitState, value);
-
+                    deltas.MvccEntries.Add(node.Entries[i].SetValue(txnid, commitState, value));
                     deltas.Nodes.Add(node);
                     deltas.Entries.Add(currEntry);
                     return;
@@ -106,10 +105,10 @@ public class BPlusTree<TKey, TValue> where TKey : IComparable<TKey> where TValue
 
                 if (Greater(currEntry.Key, key))
                 {
-                    entry = new BPlusTreeEntry<TKey, TValue>(key, reader, null);
-                    entry.SetValue(txnid, commitState, value);
+                    entry = new BPlusTreeEntry<TKey, TValue>(key, reader, null);                    
                     node.Entries.Insert(i, entry);
-                    
+
+                    deltas.MvccEntries.Add(entry.SetValue(txnid, commitState, value));
                     deltas.Nodes.Add(node);
                     deltas.Entries.Add(entry);
 
@@ -120,10 +119,10 @@ public class BPlusTree<TKey, TValue> where TKey : IComparable<TKey> where TValue
                 }
             }
 
-            entry = new BPlusTreeEntry<TKey, TValue>(key, reader, null);
-            entry.SetValue(txnid, commitState, value);
+            entry = new BPlusTreeEntry<TKey, TValue>(key, reader, null);            
             node.Entries.Add(entry);
 
+            deltas.MvccEntries.Add(entry.SetValue(txnid, commitState, value));
             deltas.Nodes.Add(node);
             deltas.Entries.Add(entry);
 

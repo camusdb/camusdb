@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.Flux;
-using System.Diagnostics;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Catalogs.Models;
@@ -17,8 +16,10 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
-using Microsoft.Extensions.Logging;
 using CamusDB.Core.Util.Trees.Experimental;
+
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -288,11 +289,8 @@ internal sealed class RowInserter
                 key: uniqueKeyValue,
                 value: state.RowTuple
             );
-
-            var p = await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
-            Console.WriteLine(p.Entries.Count);
-
-            deltas.Add((uniqueIndex, p));
+            
+            deltas.Add((uniqueIndex, await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false)));
         }
 
         state.Indexes.UniqueIndexDeltas = deltas;
@@ -355,8 +353,6 @@ internal sealed class RowInserter
         {
             foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
             {
-                Console.WriteLine("Entries={0}", uniqueIndex.deltas.MvccEntries.Count);
-
                 foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                     uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
 
