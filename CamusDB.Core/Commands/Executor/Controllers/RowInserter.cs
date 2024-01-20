@@ -15,7 +15,6 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Util.Trees.Experimental;
 
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
@@ -276,11 +275,11 @@ internal sealed class RowInserter
 
         InsertTicket insertTicket = state.Ticket;
 
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BPlusTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;
+            BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;
 
             CompositeColumnValue uniqueKeyValue = GetColumnValue(insertTicket.Values, index.Columns);
 
@@ -316,11 +315,11 @@ internal sealed class RowInserter
 
         InsertTicket insertTicket = state.Ticket;
 
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.MultiIndexes)
         {
-            BPlusTree<CompositeColumnValue, BTreeTuple> multiIndex = index.BTree;
+            BTree<CompositeColumnValue, BTreeTuple> multiIndex = index.BTree;
 
             CompositeColumnValue multiKeyValue = GetColumnValue(insertTicket.Values, index.Columns, new ColumnValue(ColumnType.Id, state.RowTuple.SlotOne.ToString()));
 
@@ -369,7 +368,7 @@ internal sealed class RowInserter
 
         if (state.Indexes.UniqueIndexDeltas is not null)
         {
-            foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue uniqueKeyValue) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue uniqueKeyValue) uniqueIndex in state.Indexes.UniqueIndexDeltas)
             {
                 SaveIndexTicket saveUniqueIndexTicket = new(
                     tablespace: state.Database.BufferPool,
@@ -387,7 +386,7 @@ internal sealed class RowInserter
 
         /*if (state.Indexes.MultiIndexDeltas is not null)
         {
-            foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multiIndex in state.Indexes.MultiIndexDeltas)
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multiIndex in state.Indexes.MultiIndexDeltas)
             {
                 foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multiIndex.deltas.MvccEntries)
                     multiIndexEntry.CommitState = BTreeCommitState.Committed;

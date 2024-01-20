@@ -16,12 +16,19 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer;
-using CamusDB.Core.Util.Trees.Experimental;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 internal sealed class TableIndexDropper
 {
+    private ILogger<ICamusDB> logger;
+
+    public TableIndexDropper(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
+
     private static void Validate(TableDescriptor table, AlterIndexTicket ticket)
     {
         if (!table.Indexes.ContainsKey(ticket.IndexName))
@@ -65,7 +72,7 @@ internal sealed class TableIndexDropper
         BufferPoolManager tableSpace = state.Database.BufferPool;
         //using IDisposable writerLock = await state.Btree.WriterLockAsync();
 
-        await foreach (BPlusTreeNode<CompositeColumnValue, BTreeTuple> x in state.Btree.NodesTraverse(state.Ticket.TxnId))                    
+        await foreach (BTreeNode<CompositeColumnValue, BTreeTuple> x in state.Btree.NodesTraverse(state.Ticket.TxnId))                    
             await tableSpace.DeletePage(x.PageOffset);
 
         await Task.CompletedTask;

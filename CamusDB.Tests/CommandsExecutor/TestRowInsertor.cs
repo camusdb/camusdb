@@ -544,16 +544,12 @@ internal sealed class TestRowInsertor : BaseTest
 
         await Task.WhenAll(tasks);
 
-        Stopwatch stopwatch = Stopwatch.StartNew();
-
         tasks = new();
 
         for (int i = 0; i < 100; i++)
             tasks.Add(DoInsert(dbname, executor));
 
         await Task.WhenAll(tasks);
-
-        System.Console.WriteLine(stopwatch.ElapsedMilliseconds);
 
         QueryTicket queryTicket = new(
             txnId: await executor.NextTxnId(),

@@ -8,7 +8,6 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
@@ -18,9 +17,9 @@ public sealed class InsertFluxIndexState
 
 	public List<TableIndexSchema> MultiIndexes { get; } = new();    
 
-    public List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? UniqueIndexDeltas { get; set; }
+    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? UniqueIndexDeltas { get; set; }
 
-    public List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? MultiIndexDeltas { get; set; }
+    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? MultiIndexDeltas { get; set; }
 
     public InsertFluxIndexState()
 	{

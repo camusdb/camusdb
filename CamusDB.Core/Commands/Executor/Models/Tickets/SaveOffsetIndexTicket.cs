@@ -11,7 +11,6 @@ using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -19,7 +18,7 @@ public readonly struct SaveOffsetIndexTicket
 {
     public BufferPoolManager Tablespace { get; }
 
-    public BPlusTree<ObjectIdValue, ObjectIdValue> Index { get; }
+    public BTree<ObjectIdValue, ObjectIdValue> Index { get; }
 
     public HLCTimestamp TxnId { get; }
 
@@ -33,7 +32,7 @@ public readonly struct SaveOffsetIndexTicket
 
     public SaveOffsetIndexTicket(
 		BufferPoolManager tablespace,
-        BPlusTree<ObjectIdValue, ObjectIdValue> index,
+        BTree<ObjectIdValue, ObjectIdValue> index,
         HLCTimestamp txnId,
         BTreeCommitState commitState,
         ObjectIdValue key,

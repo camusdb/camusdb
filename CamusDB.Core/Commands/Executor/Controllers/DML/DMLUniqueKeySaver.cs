@@ -10,7 +10,6 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
@@ -27,7 +26,7 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
     /// <exception cref="CamusDBException"></exception>
     private static async Task<CompositeColumnValue> CheckUniqueKeyViolations(
         TableDescriptor table,
-        BPlusTree<CompositeColumnValue, BTreeTuple> uniqueIndex, 
+        BTree<CompositeColumnValue, BTreeTuple> uniqueIndex, 
         InsertTicket ticket, 
         string[] columnNames
     )

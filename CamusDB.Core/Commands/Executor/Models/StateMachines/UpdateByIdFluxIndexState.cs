@@ -10,7 +10,6 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Util.Trees.Experimental;
 
 public sealed class UpdateByIdFluxIndexState
 {
@@ -18,9 +17,9 @@ public sealed class UpdateByIdFluxIndexState
 
     public List<TableIndexSchema> MultiIndexes { get; } = new();
 
-    public List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? UniqueIndexDeltas { get; set; }
+    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? UniqueIndexDeltas { get; set; }
 
-    public List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? MultiIndexDeltas { get; set; }
+    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? MultiIndexDeltas { get; set; }
 
     public UpdateByIdFluxIndexState()
     {

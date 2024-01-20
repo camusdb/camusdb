@@ -13,11 +13,10 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
-public sealed class IndexUniqueNodeReader : IBPlusTreeNodeReader<CompositeColumnValue, BTreeTuple>
+public sealed class IndexUniqueNodeReader : IBTreeNodeReader<CompositeColumnValue, BTreeTuple>
 {
     private readonly BufferPoolManager bufferpool;
 
@@ -83,28 +82,28 @@ public sealed class IndexUniqueNodeReader : IBPlusTreeNodeReader<CompositeColumn
         return new BTreeTuple(slotOne, slotTwo);
     }
 
-    public async Task<BPlusTreeNode<CompositeColumnValue, BTreeTuple>?> GetNode(ObjectIdValue offset)
+    public async Task<BTreeNode<CompositeColumnValue, BTreeTuple>?> GetNode(ObjectIdValue offset)
     {
-        byte[] data = await bufferpool.GetDataFromPage(offset).ConfigureAwait(false);
+        byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
             return null;
 
-        BPlusTreeNode<CompositeColumnValue, BTreeTuple> node = new(); // -1, BTreeUtils.GetNodeCapacity<CompositeColumnValue, BTreeTuple?>()
+        BTreeNode<CompositeColumnValue, BTreeTuple> node = new(-1, BTreeUtils.GetNodeCapacity<CompositeColumnValue, BTreeTuple?>());
 
         int pointer = 0;
-        int keyCount = Serializator.ReadInt32(data, ref pointer);
-        //node.PageOffset = Serializator.ReadObjectId(data, ref pointer);
+        node.KeyCount = Serializator.ReadInt32(data, ref pointer);
+        node.PageOffset = Serializator.ReadObjectId(data, ref pointer);
 
         //Console.WriteLine("Node Read KeyCount={0} PageOffset={1}", node.KeyCount, node.PageOffset);
 
-        for (int i = 0; i < node.Entries.Count; i++)
+        for (int i = 0; i < node.KeyCount; i++)
         {
             CompositeColumnValue key = UnserializeCompositeKey(data, ref pointer);
 
             HLCTimestamp timestamp = UnserializeTimestamp(data, ref pointer);
             BTreeTuple? tuple = UnserializeTuple(data, ref pointer);
 
-            BPlusTreeEntry<CompositeColumnValue, BTreeTuple> entry = new(key, this, null)
+            BTreeEntry<CompositeColumnValue, BTreeTuple> entry = new(key, this, null)
             {
                 NextPageOffset = Serializator.ReadObjectId(data, ref pointer)
             };
@@ -112,8 +111,7 @@ public sealed class IndexUniqueNodeReader : IBPlusTreeNodeReader<CompositeColumn
             if (!timestamp.IsNull())
                 entry.SetValue(timestamp, BTreeCommitState.Committed, tuple);
 
-            //node.children[i] = entry;
-            node.Entries.Add(entry);
+            node.children[i] = entry;
         }
 
         return node;

@@ -13,7 +13,6 @@ using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
 using System.Text;
-using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -62,13 +61,13 @@ internal abstract class IndexBaseSaver
         return length;
     }
 
-    protected static int GetEntrySizes(BPlusTreeNode<CompositeColumnValue, BTreeTuple> node)
+    protected static int GetEntrySizes(BTreeNode<CompositeColumnValue, BTreeTuple> node)
     {
         int length = 0;
 
-        for (int i = 0; i < node.Entries.Count; i++)
+        for (int i = 0; i < node.KeyCount; i++)
         {
-            BPlusTreeEntry<CompositeColumnValue, BTreeTuple> entry = node.Entries[i];
+            BTreeEntry<CompositeColumnValue, BTreeTuple> entry = node.children[i];
 
             if (entry is null)
                 length += (

@@ -14,13 +14,11 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.Comparers;
 using CamusDB.Core.CommandsExecutor.Models;
 
-using CamusConfig = CamusDB.Core.CamusDBConfig;
 using Microsoft.Extensions.Logging;
-using CamusDB.Core.Util.Trees.Experimental;
+using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.GC;
 
@@ -205,7 +203,7 @@ public sealed class GCManager : IDisposable
 
                 TableDescriptor tableDescriptor = await keyValueDescriptor.Value.ConfigureAwait(false);
 
-                BPlusTree<ObjectIdValue, ObjectIdValue>? tableIndex = tableDescriptor.Rows;
+                BTree<ObjectIdValue, ObjectIdValue>? tableIndex = tableDescriptor.Rows;
 
                 /*if (tableIndex is not null)
                 {

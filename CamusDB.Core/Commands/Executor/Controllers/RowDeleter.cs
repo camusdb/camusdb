@@ -16,7 +16,6 @@ using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Util.Trees.Experimental;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -151,8 +150,8 @@ internal sealed class RowDeleter
         }
 
         DeleteTicket ticket = state.Ticket;
-        ///BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? uniqueIndexDeltas, multiIndexDeltas;
+        ///BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
+        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? uniqueIndexDeltas, multiIndexDeltas;
 
         // @todo we need to take a snapshot of the data to prevent deadlocks
         // but probably need to optimize this for larger datasets
@@ -200,14 +199,14 @@ internal sealed class RowDeleter
         await indexSaver.Save(saveUniqueOffsetIndex);
     }
 
-    private async Task<List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>> UpdateUniqueIndexes(
+    private async Task<List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>> UpdateUniqueIndexes(
         DeleteFluxState state,
         DeleteTicket ticket,
         BTreeTuple tuple,
         QueryResultRow row
     )
     {
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
 
@@ -237,14 +236,14 @@ internal sealed class RowDeleter
         return deltas;
     }
 
-    private async Task<List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>> UpdateMultiIndexes(
+    private async Task<List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>> UpdateMultiIndexes(
         DeleteFluxState state,
         DeleteTicket ticket,
         BTreeTuple tuple,
         QueryResultRow row
     )
     {
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
 
@@ -281,9 +280,9 @@ internal sealed class RowDeleter
     /// <returns></returns>
     private async Task PersistIndexChanges(
         DeleteFluxState state,
-        BPlusTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, 
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> uniqueIndexDeltas,
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> multiIndexDeltas
+        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, 
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> uniqueIndexDeltas,
+        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> multiIndexDeltas
     )
     {
         if (mainIndexDeltas is null)
@@ -298,7 +297,7 @@ internal sealed class RowDeleter
 
         if (uniqueIndexDeltas is not null)
         {
-            foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in uniqueIndexDeltas)
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in uniqueIndexDeltas)
             {
                 foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                     uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
@@ -309,7 +308,7 @@ internal sealed class RowDeleter
 
         if (multiIndexDeltas is not null)
         {
-            foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multiIndex in multiIndexDeltas)
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multiIndex in multiIndexDeltas)
             {
                 foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multiIndex.deltas.MvccEntries)
                     multiIndexEntry.CommitState = BTreeCommitState.Committed;

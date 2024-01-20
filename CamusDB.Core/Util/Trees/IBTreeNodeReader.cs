@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.Util.Trees;
 
@@ -16,7 +15,3 @@ public interface IBTreeNodeReader<TKey, TValue> where TKey : IComparable<TKey> w
 	Task<BTreeNode<TKey, TValue>?> GetNode(ObjectIdValue offset);
 }
 
-public interface IBPlusTreeNodeReader<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
-{
-    Task<BPlusTreeNode<TKey, TValue>?> GetNode(ObjectIdValue offset);
-}

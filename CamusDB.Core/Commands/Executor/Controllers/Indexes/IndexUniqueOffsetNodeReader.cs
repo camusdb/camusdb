@@ -11,11 +11,10 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Util.Trees.Experimental;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
-public sealed class IndexUniqueOffsetNodeReader : IBPlusTreeNodeReader<ObjectIdValue, ObjectIdValue>
+public sealed class IndexUniqueOffsetNodeReader : IBTreeNodeReader<ObjectIdValue, ObjectIdValue>
 {
     private readonly BufferPoolManager bufferpool;
 
@@ -24,23 +23,23 @@ public sealed class IndexUniqueOffsetNodeReader : IBPlusTreeNodeReader<ObjectIdV
         this.bufferpool = bufferpool;
     }
 
-    public async Task<BPlusTreeNode<ObjectIdValue, ObjectIdValue>?> GetNode(ObjectIdValue offset)
+    public async Task<BTreeNode<ObjectIdValue, ObjectIdValue>?> GetNode(ObjectIdValue offset)
     {
         byte[] data = await bufferpool.GetDataFromPage(offset).ConfigureAwait(false);
         if (data.Length == 0)
             return null;
 
-        BPlusTreeNode<ObjectIdValue, ObjectIdValue> node = new(); // new(-1, BTreeUtils.GetNodeCapacity<ObjectIdValue, ObjectIdValue>());
+        BTreeNode<ObjectIdValue, ObjectIdValue> node = new(-1, BTreeUtils.GetNodeCapacity<ObjectIdValue, ObjectIdValue>());
 
         int pointer = 0;
-        int keyCount = Serializator.ReadInt32(data, ref pointer);
+        node.KeyCount = Serializator.ReadInt32(data, ref pointer);
         node.PageOffset = Serializator.ReadObjectId(data, ref pointer);
 
         //Console.WriteLine("Node Read KeyCount={0} PageOffset={1}", node.KeyCount, node.PageOffset);
 
-        for (int i = 0; i < keyCount; i++)
+        for (int i = 0; i < node.KeyCount; i++)
         {
-            BPlusTreeEntry<ObjectIdValue, ObjectIdValue> entry = new(
+            BTreeEntry<ObjectIdValue, ObjectIdValue> entry = new(
                 key: Serializator.ReadObjectId(data, ref pointer),
                 reader: this,
                 next: null
@@ -53,12 +52,12 @@ public sealed class IndexUniqueOffsetNodeReader : IBPlusTreeNodeReader<ObjectIdV
                 entry.SetValue(
                     timestamp: timestamp,
                     commitState: BTreeCommitState.Committed,
-                    value: value 
+                    value: value
                 );
 
             entry.NextPageOffset = Serializator.ReadObjectId(data, ref pointer);
 
-            node.Entries.Add(entry);
+            node.children[i] = entry;
         }
 
         return node;

@@ -9,7 +9,7 @@
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.Util.Trees.Experimental;
+using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Indexes;
 
@@ -22,22 +22,22 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
         this.indexReader = indexReader;
     }
 
-    public async Task<BPlusTree<ObjectIdValue, ObjectIdValue>> ReadOffsets(BufferPoolManager bufferpool, ObjectIdValue offset)
+    public async Task<BTree<ObjectIdValue, ObjectIdValue>> ReadOffsets(BufferPoolManager bufferpool, ObjectIdValue offset)
     {
         //Console.WriteLine("***");
 
         IndexUniqueOffsetNodeReader reader = new(bufferpool);
 
-        BPlusTree<ObjectIdValue, ObjectIdValue> index = new(offset, reader);
+        BTree<ObjectIdValue, ObjectIdValue> index = new(offset, reader);
 
-        byte[] data = await bufferpool.GetDataFromPage(offset).ConfigureAwait(false);
+        byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
             return index;
 
         int pointer = 0;
 
-        //index.height = Serializator.ReadInt32(data, ref pointer);
-        //index.size = Serializator.ReadInt32(data, ref pointer);
+        index.height = Serializator.ReadInt32(data, ref pointer);
+        index.size = Serializator.ReadInt32(data, ref pointer);
 
         ObjectIdValue rootPageOffset = Serializator.ReadObjectId(data, ref pointer);
 
@@ -45,11 +45,11 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
 
         if (!rootPageOffset.IsNull())
         {
-            BPlusTreeNode<ObjectIdValue, ObjectIdValue>? node = await reader.GetNode(rootPageOffset).ConfigureAwait(false);
+            BTreeNode<ObjectIdValue, ObjectIdValue>? node = await reader.GetNode(rootPageOffset);
             if (node is not null)
             {
-                index.root = new(default!, reader, node);
-                //index.loaded++;
+                index.root = node;
+                index.loaded++;
             }
         }
 

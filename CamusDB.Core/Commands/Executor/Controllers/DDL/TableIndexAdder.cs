@@ -18,9 +18,8 @@ using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.Util.Trees.Experimental;
-using System.Net.Sockets;
 using CamusDB.Core.BufferPool.Models;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
@@ -29,6 +28,13 @@ internal sealed class TableIndexAdder
     private readonly IndexSaver indexSaver = new();
 
     private readonly IndexReader indexReader = new();
+
+    private readonly ILogger<ICamusDB> logger;
+
+    public TableIndexAdder(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
 
     private static void Validate(TableDescriptor table, AlterIndexTicket ticket)
     {
@@ -174,7 +180,7 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket = state.Ticket;
         BufferPoolManager tablespace = state.Database.BufferPool;
 
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         await foreach (QueryResultRow row in state.DataCursor)
         {
@@ -282,7 +288,7 @@ internal sealed class TableIndexAdder
             return FluxAction.Abort;
         }
 
-        foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue keyValue) index in state.IndexDeltas)
+        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue keyValue) index in state.IndexDeltas)
         {
             /*foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in index.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
@@ -411,7 +417,7 @@ internal sealed class TableIndexAdder
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        Console.WriteLine(
+        logger.LogInformation(
             "Added index {0} to {1} at {2}, Time taken: {3}",
             ticket.IndexName,
             table.Name,

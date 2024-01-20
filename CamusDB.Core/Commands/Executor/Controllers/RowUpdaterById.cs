@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System;
 using System.Diagnostics;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
@@ -15,9 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
-using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Util.Trees.Experimental;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -247,11 +244,11 @@ public sealed class RowUpdaterById
             return FluxAction.Abort;
         }
 
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BPlusTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.BTree;
+            BTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.BTree;
 
             CompositeColumnValue uniqueKeyValue = GetColumnValue(state.ColumnValues, index.Columns);            
 
@@ -291,11 +288,11 @@ public sealed class RowUpdaterById
             return FluxAction.Abort;
         }
 
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.MultiIndexes)
         {
-            BPlusTree<CompositeColumnValue, BTreeTuple>? multiIndex = index.BTree;
+            BTree<CompositeColumnValue, BTreeTuple>? multiIndex = index.BTree;
 
             CompositeColumnValue multiKeyValue = GetColumnValue(state.ColumnValues, index.Columns, new ColumnValue(ColumnType.Id, state.RowTuple.SlotOne.ToString()));          
 
@@ -403,7 +400,7 @@ public sealed class RowUpdaterById
 
         if (state.Indexes.UniqueIndexDeltas is not null)
         {
-            foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
             {
                 foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                     uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
@@ -414,7 +411,7 @@ public sealed class RowUpdaterById
 
         if (state.Indexes.MultiIndexDeltas is not null)
         {
-            foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multIndex in state.Indexes.MultiIndexDeltas)
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multIndex in state.Indexes.MultiIndexDeltas)
             {
                 foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multIndex.deltas.MvccEntries)
                     multiIndexEntry.CommitState = BTreeCommitState.Committed;

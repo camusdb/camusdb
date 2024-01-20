@@ -16,7 +16,6 @@ using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
-using CamusDB.Core.Util.Trees.Experimental;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -164,11 +163,11 @@ internal sealed class RowDeleterById
         }
 
         BTreeTuple nullTuple = new(new(), new());
-        List<(BPlusTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
-            BPlusTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.BTree;            
+            BTree<CompositeColumnValue, BTreeTuple>? uniqueIndex = index.BTree;            
 
             CompositeColumnValue uniqueKeyValue = GetColumnValue(state.ColumnValues, index.Columns);            
 
@@ -279,7 +278,7 @@ internal sealed class RowDeleterById
         if (state.Indexes.UniqueIndexDeltas is null)
             return FluxAction.Continue;
 
-        foreach ((BPlusTree<CompositeColumnValue, BTreeTuple> index, BPlusTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
         {
             foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
                 uniqueIndexEntry.CommitState = BTreeCommitState.Committed;

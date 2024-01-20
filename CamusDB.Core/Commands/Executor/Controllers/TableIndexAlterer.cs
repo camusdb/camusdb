@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -17,13 +18,16 @@ internal sealed class TableIndexAlterer
 {
     private readonly CatalogsManager catalogs;
 
-    private readonly TableIndexAdder tableIndexAdder = new();
+    private readonly TableIndexAdder tableIndexAdder;
 
-    private readonly TableIndexDropper tableIndexDropper = new();
+    private readonly TableIndexDropper tableIndexDropper;
 
-    public TableIndexAlterer(CatalogsManager catalogsManager, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
+    public TableIndexAlterer(CatalogsManager catalogsManager, ILogger<ICamusDB> logger)
     {
         catalogs = catalogsManager;
+
+        tableIndexAdder = new(logger);
+        tableIndexDropper = new(logger);
     }
 
     public async Task<bool> Alter(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)

@@ -7,6 +7,7 @@
  */
 
 using Nito.AsyncEx;
+using Microsoft.Extensions.Logging;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 
@@ -19,9 +20,12 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 {
     private readonly DatabaseDescriptors databaseDescriptors;
 
-    public DatabaseCloser(DatabaseDescriptors databaseDescriptors, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
+    private readonly ILogger<ICamusDB> logger;
+
+    public DatabaseCloser(DatabaseDescriptors databaseDescriptors, ILogger<ICamusDB> logger)
     {
         this.databaseDescriptors = databaseDescriptors;
+        this.logger = logger;
     }
 
     /// <summary>
@@ -49,7 +53,7 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 
         databaseDescriptors.Descriptors.TryRemove(name, out _);
 
-        Console.WriteLine("Database {0} closed", name);
+        logger.LogInformation("Database {0} closed", name);
     }
 
     public async ValueTask DisposeAsync()
