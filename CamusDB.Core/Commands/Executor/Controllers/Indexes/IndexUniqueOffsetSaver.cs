@@ -98,7 +98,7 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
         foreach (BTreeNode<ObjectIdValue, ObjectIdValue> node in nodes)
         {
-            Console.WriteLine("Persisting Node {0} at {1} KeyCount={2}", node.Id, node.PageOffset, node.KeyCount);            
+            Console.WriteLine("> Persisting Node {0} at {1} KeyCount={2}", node.Id, node.PageOffset, node.KeyCount);            
 
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // key count
@@ -116,11 +116,11 @@ internal sealed class IndexUniqueOffsetSaver : IndexBaseSaver
 
                 if (entry is not null)
                 {
-                    Console.WriteLine("Persisting Entry {0} from {1} Key={2}", i, node.Id, entry.Key);
+                    Console.WriteLine("-> Persisting Entry {0} from {1} Key={2}", i, node.Id, entry.Key);
 
                     (HLCTimestamp timestamp, ObjectIdValue value) = entry.GetMaxCommittedValue();
 
-                    Console.WriteLine("Saved K={0} T={1} V={2}", entry.Key, timestamp, value);
+                    Console.WriteLine("-> Saved K={0} T={1} V={2}", entry.Key, timestamp, value);
 
                     Serializator.WriteObjectId(nodeBuffer, entry.Key, ref pointer);
                     Serializator.WriteHLCTimestamp(nodeBuffer, timestamp, ref pointer); // @todo LastValue

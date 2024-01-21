@@ -390,6 +390,7 @@ public sealed class BufferPoolManager
     /// <param name="modifiedPages"></param>
     public void ApplyPageOperations(List<BufferPageOperation> modifiedPages)
     {
+
         logger.LogInformation("Wrote {Count} pages in the batch", modifiedPages.Count);
 
         storage.WriteBatch(modifiedPages);

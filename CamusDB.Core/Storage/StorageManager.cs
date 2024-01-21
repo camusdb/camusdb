@@ -19,6 +19,8 @@ namespace CamusDB.Core.Storage;
 /// </summary>
 public sealed class StorageManager
 {
+    private readonly static object _lock = new();
+
     private readonly RocksDb dbHandler;
 
     public StorageManager(string name)
@@ -73,19 +75,28 @@ public sealed class StorageManager
 
     internal void WriteBatch(List<BufferPageOperation> pageOperations)
     {
-        using WriteBatch batch = new();
-
-        foreach (BufferPageOperation pageOperation in pageOperations)
+        lock (_lock)
         {
-            byte[] offset = pageOperation.Offset.ToBytes();
+            using WriteBatch batch = new();
 
-            if (pageOperation.Operation == BufferPageOperationType.InsertOrUpdate)
-                batch.Put(offset, pageOperation.Buffer);
-            else
-                batch.Delete(offset);
+            var x = DateTime.UtcNow.Ticks;
+
+            foreach (BufferPageOperation pageOperation in pageOperations)
+            {
+                byte[] offset = pageOperation.Offset.ToBytes();
+
+                if (pageOperation.Operation == BufferPageOperationType.InsertOrUpdate)
+                {
+                    Console.WriteLine(x + " " + pageOperation.Offset);
+
+                    batch.Put(offset, pageOperation.Buffer);
+                }
+                else
+                    batch.Delete(offset);
+            }
+
+            dbHandler.Write(batch);
         }
-
-        dbHandler.Write(batch);
     }
 
     internal void Delete(ObjectIdValue offset)
