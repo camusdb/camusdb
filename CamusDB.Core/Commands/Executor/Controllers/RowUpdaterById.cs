@@ -222,7 +222,7 @@ public sealed class RowUpdaterById
             return FluxAction.Abort;
         }
 
-        state.ColumnValues = rowDeserializer.Deserialize(table.Schema, data);
+        state.ColumnValues = rowDeserializer.Deserialize(table.Schema, state.RowTuple.SlotOne, data);
 
         logger.LogInformation("Data to Update Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
 

@@ -160,7 +160,7 @@ internal sealed class QueryExecutor
 
         //Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
 
-        Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, data);
+        Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, pageOffset.SlotOne, data);
 
         if (ticket.Filters is not null && ticket.Filters.Count > 0)
         {
@@ -205,7 +205,7 @@ internal sealed class QueryExecutor
 
             //Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
 
-            Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, data);
+            Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, pageOffset.SlotOne, data);
 
             if (ticket.Filters is not null && ticket.Filters.Count > 0)
             {
@@ -258,6 +258,6 @@ internal sealed class QueryExecutor
 
         //Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
 
-        yield return rowDeserializer.Deserialize(table.Schema, data);
+        yield return rowDeserializer.Deserialize(table.Schema, pageOffset.SlotOne, data);
     }
 }

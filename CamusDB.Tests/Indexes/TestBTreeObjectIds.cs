@@ -47,4 +47,18 @@ internal sealed class TestBTreeObjectIds
         Assert.AreEqual(tree.Size(), 5);
         Assert.AreEqual(tree.Height(), 1);
     }
+
+    [Test]
+    public async Task TestBasicInsert2()
+    {
+        HLCTimestamp txnid = await hlc.SendOrLocalEvent();
+
+        BTree<ObjectIdValue, ObjectIdValue> tree = new(new());
+
+        for (int i = 0; i < 8; i++)
+            await tree.Put(txnid, BTreeCommitState.Committed, ObjectIdGenerator.Generate(), ObjectIdGenerator.Generate());
+
+        Assert.AreEqual(tree.Size(), 5);
+        Assert.AreEqual(tree.Height(), 1);
+    }
 }

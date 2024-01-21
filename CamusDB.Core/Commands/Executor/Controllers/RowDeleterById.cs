@@ -139,7 +139,7 @@ internal sealed class RowDeleterById
             return FluxAction.Abort;
         }
 
-        state.ColumnValues = rowDeserializer.Deserialize(table.Schema, data);
+        state.ColumnValues = rowDeserializer.Deserialize(table.Schema, state.RowTuple.SlotOne, data);
 
         //Console.WriteLine("Data to Delete Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
 

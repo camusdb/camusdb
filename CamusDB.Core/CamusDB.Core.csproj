@@ -40,7 +40,6 @@
     <Folder Include="Config\Models\" />
     <Folder Include="Statistics\" />
     <Folder Include="Statistics\Models\" />
-    <Folder Include="Util\Trees\Experimental\" />
   </ItemGroup>
 
   <ItemGroup Label="SQLParser">

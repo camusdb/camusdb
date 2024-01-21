@@ -71,7 +71,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
         //Console.WriteLine("Created BTree {0}", Id);
 
-        maxNodeCapacity = BTreeUtils.GetNodeCapacity<TKey, TValue>();
+        maxNodeCapacity = 8; // BTreeUtils.GetNodeCapacity<TKey, TValue>();
         maxNodeCapacityHalf = maxNodeCapacity / 2;
     }
 
@@ -314,8 +314,6 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     {
         using (await WriterLockAsync().ConfigureAwait(false))
         {
-            //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("{0} {1} {2} {3}\n", key, txnid, commitState, value)).ConfigureAwait(false);
-
             BTreeMutationDeltas<TKey, TValue> deltas = new();
 
             if (root is null) // create root
@@ -330,19 +328,16 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             }
 
             BTreeNode<TKey, TValue>? split = await Insert(root, txnid, key, commitState, value, height, deltas).ConfigureAwait(false);
-            size++;
 
             if (split is null)
             {
-                if (commitState == BTreeCommitState.Committed && deltas.Nodes.Count > 0 && persistNodeCallback is not null)
+                if (deltas.Nodes.Count > 0 && persistNodeCallback is not null)
                     await persistNodeCallback(deltas.Nodes).ConfigureAwait(false);
 
                 return deltas;
             }
 
-            //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", "need to split root\n").ConfigureAwait(false);
-
-            //using IDisposable disposable = await root.WriterLockAsync();
+            Console.WriteLine("Split root node {0} {1}", root.Id, split.Id);
 
             // need to split root
             BTreeNode<TKey, TValue> newRoot = new(2, maxNodeCapacity)
@@ -350,13 +345,14 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                 CreatedAt = txnid
             };
 
+            deltas.Nodes.Add(root);
             deltas.Nodes.Add(newRoot);
+            deltas.Nodes.Add(split);
+
             loaded++;
 
             newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, reader, root);
             newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, reader, split);
-
-            deltas.Nodes.Add(root);
 
             root = newRoot;
 
@@ -365,7 +361,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
             height++;
 
-            if (commitState == BTreeCommitState.Committed && deltas.Nodes.Count > 0 && persistNodeCallback is not null)
+            if (deltas.Nodes.Count > 0 && persistNodeCallback is not null)
                 await persistNodeCallback(deltas.Nodes).ConfigureAwait(false);
 
             return deltas;
@@ -403,9 +399,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
                 if (Eq(key, childrenEntry.Key))
                 {
-                    //Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);
-
-                    //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("Replaced at {0}/{1} SetV={2} {3} {4} {5}\n", node.Id, j, key, txnid, commitState, value)).ConfigureAwait(false);
+                    Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);                    
 
                     node.NumberWrites++;
 
@@ -418,8 +412,9 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                     break;
             }
 
-            //Console.WriteLine("Not found in external node SetV={0} {1} {2} {3}", key, txnid, commitState, value);
+            Console.WriteLine("Not found in external node SetV={0} {1} {2} {3}", key, txnid, commitState, value);
 
+            size++;
             newEntry = new(key, reader, null);
             deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
         }
@@ -440,8 +435,6 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                     if (split == null)
                         return null;
 
-                    //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", $"split internal node {split.Id}\n").ConfigureAwait(false);
-
                     newEntry = new(split.children[0].Key, reader, split);
                     //deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
                     break;
@@ -450,7 +443,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         }
 
         if (newEntry is null)
-            throw new Exception("?");
+            throw new Exception(j + " " + node.KeyCount);
 
         for (int i = node.KeyCount; i > j; i--)
             node.children[i] = node.children[i - 1];
@@ -459,23 +452,19 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         node.KeyCount++;
         node.NumberWrites++;
 
-        //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", string.Format("Insert at {0}/{1} {2} {3} {4} {5} {6} {7}\n", node.Id, j, ht, node.KeyCount, key, txnid, commitState, value)).ConfigureAwait(false);
-
         deltas.Nodes.Add(node);
 
         if (node.KeyCount < maxNodeCapacity)
             return null;
 
-        var p = Split(node, txnid, deltas);
-
-        //await System.IO.File.AppendAllTextAsync("c:\\tmp\\lala-" + Id + ".txt", $"split node in {node.Id} {p.Id}\n").ConfigureAwait(false);
-
-        return p;
+        return Split(node, txnid, deltas);
     }
 
     // split node in half
     private BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, HLCTimestamp txnid, BTreeMutationDeltas<TKey, TValue> deltas)
     {
+        Console.WriteLine("Split node {0} {1} [2]", current.Id, current.KeyCount);
+
         BTreeNode<TKey, TValue> newNode = new(maxNodeCapacityHalf, maxNodeCapacity)
         {
             CreatedAt = txnid

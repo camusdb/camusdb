@@ -44,7 +44,7 @@ internal sealed class QueryScanner
                 continue;
             }
 
-            Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, data);
+            Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, entry.Key, data);
 
             if (ticket.Filters is not null && ticket.Filters.Count > 0)
             {
@@ -111,7 +111,7 @@ internal sealed class QueryScanner
                 continue;
             }
 
-            Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, data);
+            Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, txnValue.SlotOne, data);
 
             if (ticket.Filters is not null && ticket.Filters.Count > 0)
             {

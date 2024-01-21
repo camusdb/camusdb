@@ -19,7 +19,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// </summary>
 internal sealed class RowDeserializer
 {
-    public Dictionary<string, ColumnValue> Deserialize(TableSchema tableSchema, byte[] data)
+    public Dictionary<string, ColumnValue> Deserialize(TableSchema tableSchema, ObjectIdValue slotOne, byte[] data)
     {
         //catalogs.GetTableSchema(database, tableName);
 
@@ -44,7 +44,10 @@ internal sealed class RowDeserializer
 
         List<TableColumnSchema> columns = tableSchema.SchemaHistory![schemaVersion].Columns!;
 
-        Dictionary<string, ColumnValue> columnValues = new(columns.Count);
+        Dictionary<string, ColumnValue> columnValues = new(columns.Count + 1)
+        {
+            { "_id", new(ColumnType.Id, slotOne.ToString()) }
+        };
 
         for (int i = 0; i < columns.Count; i++)
         {

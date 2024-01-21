@@ -33,7 +33,10 @@ internal sealed class IndexUniqueReader : IndexBaseReader
 
         byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
+        {
+            Console.WriteLine("Index is empty");
             return index;
+        }
 
         int pointer = 0;
 
