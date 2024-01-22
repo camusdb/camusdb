@@ -311,61 +311,58 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         TValue? value,
         Func<HashSet<BTreeNode<TKey, TValue>>, Task>? persistNodeCallback = null
     )
-    {
-        using (await WriterLockAsync().ConfigureAwait(false))
+    {        
+        BTreeMutationDeltas<TKey, TValue> deltas = new();
+
+        if (root is null) // create root
         {
-            BTreeMutationDeltas<TKey, TValue> deltas = new();
-
-            if (root is null) // create root
-            {
-                root = new BTreeNode<TKey, TValue>(0, maxNodeCapacity)
-                {
-                    CreatedAt = txnid
-                };
-
-                deltas.Nodes.Add(root);
-                loaded++;
-            }
-
-            BTreeNode<TKey, TValue>? split = await Insert(root, txnid, key, commitState, value, height, deltas).ConfigureAwait(false);
-
-            if (split is null)
-            {
-                if (deltas.Nodes.Count > 0 && persistNodeCallback is not null)
-                    await persistNodeCallback(deltas.Nodes).ConfigureAwait(false);
-
-                return deltas;
-            }
-
-            Console.WriteLine("Split root node {0} {1}", root.Id, split.Id);
-
-            // need to split root
-            BTreeNode<TKey, TValue> newRoot = new(2, maxNodeCapacity)
+            root = new BTreeNode<TKey, TValue>(0, maxNodeCapacity)
             {
                 CreatedAt = txnid
             };
 
             deltas.Nodes.Add(root);
-            deltas.Nodes.Add(newRoot);
-            deltas.Nodes.Add(split);
-
             loaded++;
+        }
 
-            newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, reader, root);
-            newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, reader, split);
+        BTreeNode<TKey, TValue>? split = await Insert(root, txnid, key, commitState, value, height, deltas).ConfigureAwait(false);
 
-            root = newRoot;
-
-            newRoot.PageOffset = root.PageOffset;
-            root.PageOffset = new();
-
-            height++;
-
+        if (split is null)
+        {
             if (deltas.Nodes.Count > 0 && persistNodeCallback is not null)
                 await persistNodeCallback(deltas.Nodes).ConfigureAwait(false);
 
             return deltas;
         }
+
+        Console.WriteLine("Split root node {0} {1}", root.Id, split.Id);
+
+        // need to split root
+        BTreeNode<TKey, TValue> newRoot = new(2, maxNodeCapacity)
+        {
+            CreatedAt = txnid
+        };
+
+        deltas.Nodes.Add(root);
+        deltas.Nodes.Add(newRoot);
+        deltas.Nodes.Add(split);
+
+        loaded++;
+
+        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, reader, root);
+        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, reader, split);
+
+        root = newRoot;
+
+        newRoot.PageOffset = root.PageOffset;
+        root.PageOffset = new();
+
+        height++;
+
+        if (deltas.Nodes.Count > 0 && persistNodeCallback is not null)
+            await persistNodeCallback(deltas.Nodes).ConfigureAwait(false);
+
+        return deltas;
     }
 
     private async Task<BTreeNode<TKey, TValue>?> Insert(

@@ -75,28 +75,25 @@ public sealed class StorageManager
 
     internal void WriteBatch(List<BufferPageOperation> pageOperations)
     {
-        lock (_lock)
+        using WriteBatch batch = new();
+
+        var x = DateTime.UtcNow.Ticks;
+
+        foreach (BufferPageOperation pageOperation in pageOperations)
         {
-            using WriteBatch batch = new();
+            byte[] offset = pageOperation.Offset.ToBytes();
 
-            var x = DateTime.UtcNow.Ticks;
-
-            foreach (BufferPageOperation pageOperation in pageOperations)
+            if (pageOperation.Operation == BufferPageOperationType.InsertOrUpdate)
             {
-                byte[] offset = pageOperation.Offset.ToBytes();
+                Console.WriteLine(x + " " + pageOperation.Offset);
 
-                if (pageOperation.Operation == BufferPageOperationType.InsertOrUpdate)
-                {
-                    Console.WriteLine(x + " " + pageOperation.Offset);
-
-                    batch.Put(offset, pageOperation.Buffer);
-                }
-                else
-                    batch.Delete(offset);
+                batch.Put(offset, pageOperation.Buffer);
             }
-
-            dbHandler.Write(batch);
+            else
+                batch.Delete(offset);
         }
+
+        dbHandler.Write(batch);
     }
 
     internal void Delete(ObjectIdValue offset)

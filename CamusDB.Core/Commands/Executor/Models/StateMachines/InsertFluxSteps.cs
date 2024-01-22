@@ -18,9 +18,11 @@ public enum InsertFluxSteps
     CheckUniqueKeys = 1,    
     AllocateInsertTuple = 2,    
     InsertToPage = 3,
-    UpdateTableIndex = 4,
-    UpdateUniqueIndexes = 5,
-    UpdateMultiIndexes = 6,
-    PersistIndexChanges = 7,
-    ApplyPageOperations = 8
+    AdquireLocks = 4,
+    UpdateTableIndex = 5,
+    UpdateUniqueIndexes = 6,
+    UpdateMultiIndexes = 7,
+    PersistIndexChanges = 8,
+    ApplyPageOperations = 9,
+    ReleaseLocks = 10
 }
