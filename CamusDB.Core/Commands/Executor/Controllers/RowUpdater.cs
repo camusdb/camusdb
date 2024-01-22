@@ -183,7 +183,7 @@ public sealed class RowUpdater
 
         FluxMachine<UpdateFluxSteps, UpdateFluxState> machine = new(state);
 
-        return await UpdateInternal(machine, state);
+        return await UpdateInternal(machine, state).ConfigureAwait(false);
     }
 
     /// <summary>

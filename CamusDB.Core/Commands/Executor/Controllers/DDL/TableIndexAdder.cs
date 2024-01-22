@@ -134,10 +134,11 @@ internal sealed class TableIndexAdder
 
     /// <summary>
     /// We need to locate the row tuples to AlterColumn
+    /// Perform a full scan of the table to create the initial version of the index with all the available data.
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private Task<FluxAction> LocateTuplesToFeedTheIndex(AddIndexFluxState state)
+    private async Task<FluxAction> LocateTuplesToFeedTheIndex(AddIndexFluxState state)
     {
         AlterIndexTicket ticket = state.Ticket;
 
@@ -155,34 +156,55 @@ internal sealed class TableIndexAdder
             offset: null,
             parameters: null
         );
+        
+        IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
-        state.DataCursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
+        // @todo we need to take a snapshot of the data to prevent deadlocks
+        // but probably need to optimize this for larger datasets
+        state.RowsToFeed = await cursor.ToListAsync().ConfigureAwait(false);
 
         //Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, state.RowTuple.SlotTwo);*/
 
-        return Task.FromResult(FluxAction.Continue);
+        return FluxAction.Continue;
     }
 
+    /// <summary>
+    /// Acquire write locks on the indices to ensure consistency in writing.
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    /// <exception cref="NotImplementedException"></exception>
+    private async Task<FluxAction> AdquireLocks(AddIndexFluxState state)
+    {
+        state.Locks.Add(await state.Table.Rows.WriterLockAsync().ConfigureAwait(false));        
+        return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private async Task<FluxAction> FeedTheIndex(AddIndexFluxState state)
     {
-        if (state.DataCursor is null)
+        if (state.RowsToFeed is null)
         {
-            Console.WriteLine("Invalid rows to AlterIndex");
+            logger.LogWarning("Invalid rows to AlterIndex");
             return FluxAction.Abort;
         }
 
         if (state.Btree is null)
         {
-            Console.WriteLine("Invalid btree in AlterIndex");
+            logger.LogWarning("Invalid btree in AlterIndex");
             return FluxAction.Abort;
         }
 
         AlterIndexTicket ticket = state.Ticket;
         BufferPoolManager tablespace = state.Database.BufferPool;
 
-        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
+        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue, BTreeTuple)> deltas = new();
 
-        await foreach (QueryResultRow row in state.DataCursor)
+        foreach (QueryResultRow row in state.RowsToFeed)
         {
             CompositeColumnValue indexKeyValue;
             BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = state.Btree;            
@@ -192,7 +214,7 @@ internal sealed class TableIndexAdder
             else
                 indexKeyValue = await ValidateAndInsertMultiValue(tablespace, index, row, ticket, state.ModifiedPages);
 
-            deltas.Add((index, indexKeyValue));
+            deltas.Add((index, indexKeyValue, row.Tuple));
         }
 
         state.IndexDeltas = deltas;
@@ -257,22 +279,21 @@ internal sealed class TableIndexAdder
                 "A null value was found for multi key field " + ticket.ColumnName
             );
 
-        var x = new CompositeColumnValue(new ColumnValue[] { multiKeyValue, new ColumnValue(ColumnType.Id, row.Tuple.SlotOne.ToString()) });
-        //Console.WriteLine(x);
-
+        CompositeColumnValue compositeIndexValue = new(new ColumnValue[] { multiKeyValue, new(ColumnType.Id, row.Tuple.SlotOne.ToString()) });
+        
         SaveIndexTicket saveUniqueIndexTicket = new(
             tablespace: tablespace,
             index: uniqueIndex,
             txnId: ticket.TxnId,
             commitState: BTreeCommitState.Uncommitted,
-            key: x,
+            key: compositeIndexValue,
             value: row.Tuple,
             modifiedPages: modifiedPages
         );
 
-        await indexSaver.Save(saveUniqueIndexTicket);
+        await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
 
-        return x;
+        return compositeIndexValue;
     }
 
     /// <summary>
@@ -284,28 +305,24 @@ internal sealed class TableIndexAdder
     {
         if (state.IndexDeltas is null)
         {
-            Console.WriteLine("Invalid index deltas in AlterIndex");
+            logger.LogWarning("Invalid index deltas in AlterIndex");
+
             return FluxAction.Abort;
         }
 
-        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue keyValue) index in state.IndexDeltas)
-        {
-            /*foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in index.deltas.MvccEntries)
-                uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
-
-            await indexSaver.Persist(state.Database.BufferPool, index.index, state.ModifiedPages, index.deltas);
-
+        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue keyValue, BTreeTuple tuple) index in state.IndexDeltas)
+        {            
             SaveIndexTicket saveUniqueIndexTicket = new(
                 tablespace: state.Database.BufferPool,
                 index: index.index,
                 txnId: state.Ticket.TxnId,
                 commitState: BTreeCommitState.Committed,
-                key: state.RowTuple.SlotOne,
-                value: index.keyValue,
+                key: index.keyValue,
+                value: index.tuple,
                 modifiedPages: state.ModifiedPages
             );
 
-            await indexSaver.Save(saveUniqueIndexTicket);*/
+            await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
         }
 
         return FluxAction.Continue;
@@ -315,7 +332,7 @@ internal sealed class TableIndexAdder
     {
         if (state.Btree is null)
         {
-            Console.WriteLine("Invalid btree in AlterIndex");
+            logger.LogWarning("Invalid btree in AlterIndex");
             return FluxAction.Abort;
         }
 
@@ -326,7 +343,7 @@ internal sealed class TableIndexAdder
 
         try
         {
-            await database.SystemSchemaSemaphore.WaitAsync();
+            await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
 
             Dictionary<string, DatabaseIndexObject> indexes = database.SystemSchema.Indexes;
 
@@ -387,6 +404,19 @@ internal sealed class TableIndexAdder
     }
 
     /// <summary>
+    /// Release all the locks acquired in the previous steps
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private Task<FluxAction> ReleaseLocks(AddIndexFluxState state)
+    {
+        foreach (IDisposable disposable in state.Locks)
+            disposable.Dispose();
+
+        return Task.FromResult(FluxAction.Continue);
+    }
+
+    /// <summary>
     /// Executes the flux state machine to AlterIndex records by the specified filters
     /// </summary>
     /// <param name="machine"></param>
@@ -404,13 +434,15 @@ internal sealed class TableIndexAdder
         // @TODO: Adquire and release locks
         
         machine.When(AddIndexFluxSteps.AllocateNewIndex, AllocateNewIndex);
+        machine.When(AddIndexFluxSteps.AdquireLocks, AdquireLocks);
         machine.When(AddIndexFluxSteps.LocateTuplesToFeedTheIndex, LocateTuplesToFeedTheIndex);
         machine.When(AddIndexFluxSteps.FeedTheIndex, FeedTheIndex);
         machine.When(AddIndexFluxSteps.PersistIndexChanges, PersistIndexChanges);
         machine.When(AddIndexFluxSteps.ApplyPageOperations, ApplyPageOperations);
         machine.When(AddIndexFluxSteps.AddSystemObject, AddSystemObject);
+        machine.When(AddIndexFluxSteps.ReleaseLocks, ReleaseLocks);
 
-        //machine.WhenAbort(ReleaseLocks);
+        machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());

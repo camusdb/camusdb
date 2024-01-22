@@ -34,7 +34,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
             ticket.CommitState,
             ticket.Key,
             ticket.Value,
-            async (nodes) => await PersistNodes(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, nodes)
+            async (nodes) => await PersistNodes(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, nodes).ConfigureAwait(false)
         ).ConfigureAwait(false);
     }
 

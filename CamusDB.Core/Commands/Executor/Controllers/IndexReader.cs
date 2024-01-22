@@ -28,11 +28,11 @@ internal sealed class IndexReader
 
     public async Task<BTree<ObjectIdValue, ObjectIdValue>> ReadOffsets(BufferPoolManager tablespace, ObjectIdValue offset)
     {
-        return await indexOffsetReader.ReadOffsets(tablespace, offset);
+        return await indexOffsetReader.ReadOffsets(tablespace, offset).ConfigureAwait(false);
     }
 
     public async Task<BPTree<CompositeColumnValue, ColumnValue, BTreeTuple>> Read(BufferPoolManager tablespace, ObjectIdValue offset)
     {
-        return await indexReader.Read(tablespace, offset);
+        return await indexReader.Read(tablespace, offset).ConfigureAwait(false);
     }
 }

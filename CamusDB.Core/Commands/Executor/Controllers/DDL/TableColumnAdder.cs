@@ -15,12 +15,20 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 public sealed class TableColumnAdder
 {
+    private readonly ILogger<ICamusDB> logger;
+
     private readonly RowSerializer rowSerializer = new();
+
+    public TableColumnAdder(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
 
     private static void Validate(TableDescriptor table, AlterColumnTicket ticket)
     {
@@ -72,7 +80,7 @@ public sealed class TableColumnAdder
 
         FluxMachine<AlterColumnFluxSteps, AlterColumnFluxState> machine = new(state);
 
-        return await AlterColumnInternal(machine, state);
+        return await AlterColumnInternal(machine, state).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -100,7 +108,7 @@ public sealed class TableColumnAdder
         CatalogsManager catalogs = state.Catalogs;
         AlterColumnTicket ticket = state.Ticket;
 
-        await catalogs.AlterTable(database, ticket);
+        await catalogs.AlterTable(database, ticket).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
@@ -198,7 +206,8 @@ public sealed class TableColumnAdder
     {
         if (state.DataCursor is null)
         {
-            Console.WriteLine("Invalid rows to AlterColumn");
+            logger.LogWarning("Invalid rows to AlterColumn");
+
             return FluxAction.Abort;
         }
 
@@ -259,14 +268,14 @@ public sealed class TableColumnAdder
         //machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep());
+            await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
 
         timer.Stop();
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        Console.WriteLine(
-            "Column drop, modified {0} rows, Time taken: {1}",
+        logger.LogInformation(
+            "Column drop, modified {ModifiedRows} rows, Time taken: {Time}",
             state.ModifiedRows,
             timeTaken.ToString(@"m\:ss\.fff")
         );

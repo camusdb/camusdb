@@ -53,12 +53,12 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 
         databaseDescriptors.Descriptors.TryRemove(name, out _);
 
-        logger.LogInformation("Database {0} closed", name);
+        logger.LogInformation("Database {Name} closed", name);
     }
 
     public async ValueTask DisposeAsync()
     {
         foreach (KeyValuePair<string, AsyncLazy<DatabaseDescriptor>> keyValuePair in databaseDescriptors.Descriptors)
-            await Close(keyValuePair.Key);
+            await Close(keyValuePair.Key).ConfigureAwait(false);
     }
 }

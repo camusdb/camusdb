@@ -33,13 +33,15 @@ internal sealed class AddIndexFluxState
 
     public BPTree<CompositeColumnValue, ColumnValue, BTreeTuple>? Btree { get; set; }
 
-    public List<BufferPageOperation> ModifiedPages { get; } = new();
+    public List<QueryResultRow>? RowsToFeed { get; set; }
 
-    public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }
+    public List<IDisposable> Locks { get; } = new();
+
+    public List<BufferPageOperation> ModifiedPages { get; } = new();        
 
     public int ModifiedRows { get; set; }
 
-    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? IndexDeltas { get; set; }
+    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue, BTreeTuple)>? IndexDeltas { get; set; }    
 
     public AddIndexFluxState(
         CatalogsManager catalogs,

@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
@@ -23,6 +24,10 @@ public sealed class TableColumnDropper
     private readonly IndexSaver indexSaver = new();
 
     private readonly RowSerializer rowSerializer = new();
+
+    public TableColumnDropper(ILogger<ICamusDB> logger)
+    {
+    }
 
     private void Validate(TableDescriptor table, AlterColumnTicket ticket)
     {

@@ -6,9 +6,9 @@
  * file that was distributed with this source code.
  */
 
+using Microsoft.Extensions.Logging;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -18,7 +18,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// </summary>
 internal sealed class DatabaseCreator
 {
-    private ILogger<ICamusDB> logger;
+    private readonly ILogger<ICamusDB> logger;
 
     public DatabaseCreator(ILogger<ICamusDB> logger)
     {

@@ -31,7 +31,7 @@ internal sealed class IndexUniqueReader : IndexBaseReader
 
         BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = new(offset, reader);
 
-        byte[] data = await bufferpool.GetDataFromPage(offset);
+        byte[] data = await bufferpool.GetDataFromPage(offset).ConfigureAwait(false);
         if (data.Length == 0)
         {
             // Console.WriteLine("Index is empty");
@@ -47,7 +47,7 @@ internal sealed class IndexUniqueReader : IndexBaseReader
 
         if (!rootPageOffset.IsNull())
         {
-            BTreeNode<CompositeColumnValue, BTreeTuple>? node = await reader.GetNode(rootPageOffset);
+            BTreeNode<CompositeColumnValue, BTreeTuple>? node = await reader.GetNode(rootPageOffset).ConfigureAwait(false);
             if (node is not null)
                 index.root = node;
         }
