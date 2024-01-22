@@ -42,8 +42,6 @@ public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>
     /// and {@code null} if the key is not in the symbol table</returns>
     public async IAsyncEnumerable<TValue> GetPrefix(TransactionType txType, HLCTimestamp txnid, TSubKey key)
     {
-        using IDisposable readerLock = await ReaderLockAsync();        
-
         if (root is null)
         {
             Console.WriteLine("root is null");

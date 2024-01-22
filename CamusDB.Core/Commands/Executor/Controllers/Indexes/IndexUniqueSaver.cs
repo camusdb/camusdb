@@ -94,8 +94,6 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
         foreach (BTreeNode<CompositeColumnValue, BTreeTuple> node in nodes)
         {
-            //using IDisposable readerLock = await node.ReaderLockAsync();
-
             byte[] nodeBuffer = new byte[
                 SerializatorTypeSizes.TypeInteger32 + // keyCount(4 byte) + 
                 SerializatorTypeSizes.TypeObjectId +  // pageOffset(4 byte)

@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
@@ -15,6 +16,12 @@ public readonly struct UpdateFluxIndexState
     public List<TableIndexSchema> UniqueIndexes { get; } = new();
 
     public List<TableIndexSchema> MultiIndexes { get; } = new();
+
+    public List<BTreeTuple> MainTableDeltas { get; } = new();
+
+    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue, BTreeTuple)> UniqueIndexDeltas { get; } = new();
+
+    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue, BTreeTuple)> MultiIndexDeltas { get; } = new();
 
     public UpdateFluxIndexState()
     {

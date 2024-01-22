@@ -7,6 +7,7 @@
  */
 
 using System.Diagnostics;
+using System.Net.Sockets;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -205,11 +206,13 @@ public sealed class RowUpdaterById
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
+        using IDisposable? _ = await index.BTree.ReaderLockAsync();
+
         state.RowTuple = await index.BTree.Get(TransactionType.Write, ticket.TxnId, new CompositeColumnValue(columnId)).ConfigureAwait(false);
 
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            logger.LogWarning("Index Pk={0} does not exist", ticket.Id);
+            logger.LogWarning("Index Pk={Id} does not exist", ticket.Id);
 
             return FluxAction.Abort;
         }
@@ -217,14 +220,100 @@ public sealed class RowUpdaterById
         byte[] data = await tablespace.GetDataFromPage(state.RowTuple.SlotTwo).ConfigureAwait(false);
         if (data.Length == 0)
         {
-            logger.LogWarning("Index RowId={0} has an empty page data", ticket.Id);
+            logger.LogWarning("Index RowId={Id} has an empty page data", ticket.Id);
 
             return FluxAction.Abort;
         }
 
         state.ColumnValues = rowDeserializer.Deserialize(table.Schema, state.RowTuple.SlotOne, data);
 
-        logger.LogInformation("Data to Update Pk={0} is at page offset {1}/{2}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
+        logger.LogInformation("Data to Update Pk={Id} is at page offset {SlotOne}/{SlotTwo}", ticket.Id, state.RowTuple.SlotOne, state.RowTuple.SlotTwo);
+
+        return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// Updates the row on the disk
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private Task<FluxAction> UpdateRowToDisk(UpdateByIdFluxState state)
+    {
+        if (state.RowTuple is null || state.RowTuple.IsNull())
+        {
+            logger.LogWarning("Invalid row to Update {Id}", state.Ticket.Id);
+
+            return Task.FromResult(FluxAction.Abort);
+        }
+
+        TableDescriptor table = state.Table;
+        UpdateByIdTicket ticket = state.Ticket;
+        BufferPoolManager tablespace = state.Database.BufferPool;
+
+        foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)
+            state.ColumnValues[keyValuePair.Key] = keyValuePair.Value;
+
+        byte[] buffer = rowSerializer.Serialize(table, state.ColumnValues, state.RowTuple.SlotOne);
+
+        // Allocate a new page for the row
+        BTreeTuple tuple = new(
+            slotOne: state.RowTuple.SlotOne,
+            slotTwo: tablespace.GetNextFreeOffset()
+        );
+
+        state.RowTuple = tuple;
+
+        tablespace.WriteDataToPageBatch(state.ModifiedPages, state.RowTuple.SlotTwo, 0, buffer);
+
+        return Task.FromResult(FluxAction.Continue);
+    }
+
+    /// <summary>
+    /// Acquire write locks on the indices to ensure consistency in writing.
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    /// <exception cref="NotImplementedException"></exception>
+    private async Task<FluxAction> AdquireLocks(UpdateByIdFluxState state)
+    {
+        state.Locks.Add(await state.Table.Rows.WriterLockAsync());
+
+        foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
+            state.Locks.Add(await index.BTree.WriterLockAsync());
+
+        foreach (TableIndexSchema index in state.Indexes.MultiIndexes)
+            state.Locks.Add(await index.BTree.WriterLockAsync());
+
+        return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// Every table has a B+Tree index where the data can be easily located by rowid
+    /// We update the rowid to point to the new page offset
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private async Task<FluxAction> UpdateTableIndex(UpdateByIdFluxState state)
+    {
+        if (state.RowTuple is null || state.RowTuple.IsNull())
+        {
+            logger.LogWarning("Invalid row to Update {Id}", state.Ticket.Id);
+
+            return FluxAction.Abort;
+        }
+
+        SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
+            tablespace: state.Database.BufferPool,
+            index: state.Table.Rows,
+            txnId: state.Ticket.TxnId,
+            key: state.RowTuple.SlotOne,
+            value: state.RowTuple.SlotTwo,
+            commitState: BTreeCommitState.Uncommitted,
+            modifiedPages: state.ModifiedPages
+        );
+
+        // Main table index stores rowid pointing to page offset
+        await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
@@ -240,7 +329,7 @@ public sealed class RowUpdaterById
 
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+            Console.WriteLine("Index Pk={Id} does not exist", ticket.Id);
             return FluxAction.Abort;
         }
 
@@ -283,7 +372,7 @@ public sealed class RowUpdaterById
 
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            logger.LogWarning("Index Pk={0} does not exist", ticket.Id);
+            logger.LogWarning("Index Pk={Id} does not exist", ticket.Id);
 
             return FluxAction.Abort;
         }
@@ -317,52 +406,17 @@ public sealed class RowUpdaterById
     }
 
     /// <summary>
-    /// Updates the row on the disk
+    /// Commit the changes in the indices after being sure that the update had no issues.
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private Task<FluxAction> UpdateRowToDisk(UpdateByIdFluxState state)
+    private async Task<FluxAction> PersistIndexChanges(UpdateByIdFluxState state)
     {
-        if (state.RowTuple is null || state.RowTuple.IsNull())
-        {
-            logger.LogWarning("Invalid row to Update {0}", state.Ticket.Id);
-
-            return Task.FromResult(FluxAction.Abort);
-        }
-
-        TableDescriptor table = state.Table;
         UpdateByIdTicket ticket = state.Ticket;
-        BufferPoolManager tablespace = state.Database.BufferPool;
 
-        foreach (KeyValuePair<string, ColumnValue> keyValuePair in ticket.Values)
-            state.ColumnValues[keyValuePair.Key] = keyValuePair.Value;
-
-        byte[] buffer = rowSerializer.Serialize(table, state.ColumnValues, state.RowTuple.SlotOne);
-
-        // Allocate a new page for the row
-        BTreeTuple tuple = new(
-            slotOne: state.RowTuple.SlotOne,
-            slotTwo: tablespace.GetNextFreeOffset()
-        );
-
-        state.RowTuple = tuple;
-
-        tablespace.WriteDataToPageBatch(state.ModifiedPages, state.RowTuple.SlotTwo, 0, buffer);
-
-        return Task.FromResult(FluxAction.Continue);
-    }
-
-    /// <summary>
-    /// Every table has a B+Tree index where the data can be easily located by rowid
-    /// We update the rowid to point to the new page offset
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> UpdateTableIndex(UpdateByIdFluxState state)
-    {
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            logger.LogWarning("Invalid row to Update {0}", state.Ticket.Id);
+            logger.LogWarning("Index Pk={Id} does not exist", ticket.Id);
 
             return FluxAction.Abort;
         }
@@ -371,54 +425,50 @@ public sealed class RowUpdaterById
             tablespace: state.Database.BufferPool,
             index: state.Table.Rows,
             txnId: state.Ticket.TxnId,
+            commitState: BTreeCommitState.Committed,
             key: state.RowTuple.SlotOne,
             value: state.RowTuple.SlotTwo,
-            commitState: BTreeCommitState.Uncommitted,
             modifiedPages: state.ModifiedPages
         );
 
-        // Main table index stores rowid pointing to page offset
+        // Main table index stores rowid pointing to page offeset
         await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
-
-        return FluxAction.Continue;
-    }
-
-    /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> PersistIndexChanges(UpdateByIdFluxState state)
-    {
-        /*if (state.Indexes.MainIndexDeltas is null)
-            return FluxAction.Abort;
-
-        foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in state.Indexes.MainIndexDeltas.MvccEntries)
-            btreeEntry.CommitState = BTreeCommitState.Committed;
-
-        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, state.Indexes.MainIndexDeltas).ConfigureAwait(false);
 
         if (state.Indexes.UniqueIndexDeltas is not null)
         {
-            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue uniqueKeyValue) uniqueIndex in state.Indexes.UniqueIndexDeltas)
             {
-                foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
-                    uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
+                SaveIndexTicket saveUniqueIndexTicket = new(
+                    tablespace: state.Database.BufferPool,
+                    index: uniqueIndex.index,
+                    txnId: state.Ticket.TxnId,
+                    commitState: BTreeCommitState.Committed,
+                    key: uniqueIndex.uniqueKeyValue,
+                    value: state.RowTuple,
+                    modifiedPages: state.ModifiedPages
+                );
 
-                await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas).ConfigureAwait(false);
+                await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
             }
         }
 
         if (state.Indexes.MultiIndexDeltas is not null)
         {
-            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multIndex in state.Indexes.MultiIndexDeltas)
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue multiKeyValue) multIndex in state.Indexes.MultiIndexDeltas)
             {
-                foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multIndex.deltas.MvccEntries)
-                    multiIndexEntry.CommitState = BTreeCommitState.Committed;
+                SaveIndexTicket saveMultiIndexTicket = new(
+                    tablespace: state.Database.BufferPool,
+                    index: multIndex.index,
+                    txnId: state.Ticket.TxnId,
+                    commitState: BTreeCommitState.Committed,
+                    key: multIndex.multiKeyValue,
+                    value: state.RowTuple,
+                    modifiedPages: state.ModifiedPages
+                );
 
-                await indexSaver.Persist(state.Database.BufferPool, multIndex.index, state.ModifiedPages, multIndex.deltas).ConfigureAwait(false);
+                await indexSaver.Save(saveMultiIndexTicket).ConfigureAwait(false);
             }
-        }*/
+        }
 
         return FluxAction.Continue;
     }
@@ -431,6 +481,19 @@ public sealed class RowUpdaterById
     private Task<FluxAction> ApplyPageOperations(UpdateByIdFluxState state)
     {
         state.Database.BufferPool.ApplyPageOperations(state.ModifiedPages);
+
+        return Task.FromResult(FluxAction.Continue);
+    }
+
+    /// <summary>
+    /// Release all the locks acquired in the previous steps
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private Task<FluxAction> ReleaseLocks(UpdateByIdFluxState state)
+    {
+        foreach (IDisposable disposable in state.Locks)
+            disposable.Dispose();
 
         return Task.FromResult(FluxAction.Continue);
     }
@@ -452,13 +515,15 @@ public sealed class RowUpdaterById
 
         machine.When(UpdateByIdFluxSteps.LocateTupleToUpdate, LocateTupleToUpdate);
         machine.When(UpdateByIdFluxSteps.UpdateRow, UpdateRowToDisk);
+        machine.When(UpdateByIdFluxSteps.AdquireLocks, AdquireLocks);
         machine.When(UpdateByIdFluxSteps.UpdateTableIndex, UpdateTableIndex);
         machine.When(UpdateByIdFluxSteps.UpdateUniqueIndexes, UpdateUniqueIndexes);
         machine.When(UpdateByIdFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
         machine.When(UpdateByIdFluxSteps.PersistIndexChanges, PersistIndexChanges);
         machine.When(UpdateByIdFluxSteps.ApplyPageOperations, ApplyPageOperations);
+        machine.When(UpdateByIdFluxSteps.ReleaseLocks, ReleaseLocks);
 
-        //machine.WhenAbort(ReleaseLocks);
+        machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
@@ -470,7 +535,7 @@ public sealed class RowUpdaterById
         if (state.RowTuple is null)
         {
             logger.LogWarning(
-                "Row pk {0} not found, Time taken: {1}",
+                "Row pk {Id} not found, Time taken: {Time}",
                 ticket.Id,
                 timeTaken.ToString(@"m\:ss\.fff")
             );
@@ -479,7 +544,7 @@ public sealed class RowUpdaterById
         }
 
         logger.LogInformation(
-            "Row pk {0} with id {1} updated to page {2}, Time taken: {3}",
+            "Row pk {Id} with id {SlotOne} updated to page {SlotTwo}, Time taken: {Time}",
             ticket.Id,
             state.RowTuple?.SlotOne,
             state.RowTuple?.SlotTwo,
@@ -487,5 +552,5 @@ public sealed class RowUpdaterById
         );
 
         return 1;
-    }
+    }    
 }

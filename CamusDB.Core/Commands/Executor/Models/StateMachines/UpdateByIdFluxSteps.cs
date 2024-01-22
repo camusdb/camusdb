@@ -17,9 +17,11 @@ public enum UpdateByIdFluxSteps
     NotInitialized = 0,
     LocateTupleToUpdate = 1,
     UpdateRow = 2,
-    UpdateTableIndex = 3,
-    UpdateUniqueIndexes = 4,
-    UpdateMultiIndexes = 5,
-    PersistIndexChanges = 6,
-    ApplyPageOperations = 7
+    AdquireLocks = 3,
+    UpdateTableIndex = 4,
+    UpdateUniqueIndexes = 5,
+    UpdateMultiIndexes = 6,
+    PersistIndexChanges = 7,
+    ApplyPageOperations = 8,    
+    ReleaseLocks = 9
 }

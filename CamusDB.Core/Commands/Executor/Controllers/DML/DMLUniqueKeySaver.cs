@@ -39,6 +39,8 @@ internal sealed class DMLUniqueKeySaver : DMLKeyBase
                 "The primary key of the table \"" + table.Name + "\" is not present in the list of values."
             );
 
+        using IDisposable? _ = await uniqueIndex.ReaderLockAsync();
+
         BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, uniqueValue);
 
         if (rowTuple is not null && !rowTuple.IsNull())

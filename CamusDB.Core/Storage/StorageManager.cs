@@ -77,16 +77,12 @@ public sealed class StorageManager
     {
         using WriteBatch batch = new();
 
-        var x = DateTime.UtcNow.Ticks;
-
         foreach (BufferPageOperation pageOperation in pageOperations)
         {
             byte[] offset = pageOperation.Offset.ToBytes();
 
             if (pageOperation.Operation == BufferPageOperationType.InsertOrUpdate)
             {
-                Console.WriteLine(x + " " + pageOperation.Offset);
-
                 batch.Put(offset, pageOperation.Buffer);
             }
             else

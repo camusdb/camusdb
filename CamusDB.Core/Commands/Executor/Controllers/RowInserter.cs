@@ -240,7 +240,7 @@ internal sealed class RowInserter
     }
 
     /// <summary>
-    /// 
+    /// Acquire write locks on the indices to ensure consistency in writing.
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
@@ -362,7 +362,7 @@ internal sealed class RowInserter
     }
 
     /// <summary>
-    /// 
+    /// Commit the changes in the indices after being sure that the insert had no issues.
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
@@ -402,16 +402,23 @@ internal sealed class RowInserter
             }
         }
 
-        /*if (state.Indexes.MultiIndexDeltas is not null)
+        if (state.Indexes.MultiIndexDeltas is not null)
         {
-            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multiIndex in state.Indexes.MultiIndexDeltas)
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue multiKeyValue) multIndex in state.Indexes.MultiIndexDeltas)
             {
-                foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multiIndex.deltas.MvccEntries)
-                    multiIndexEntry.CommitState = BTreeCommitState.Committed;
+                SaveIndexTicket saveMultiIndexTicket = new(
+                    tablespace: state.Database.BufferPool,
+                    index: multIndex.index,
+                    txnId: state.Ticket.TxnId,
+                    commitState: BTreeCommitState.Committed,
+                    key: multIndex.multiKeyValue,
+                    value: state.RowTuple,
+                    modifiedPages: state.ModifiedPages
+                );
 
-                await indexSaver.Persist(state.Database.BufferPool, multiIndex.index, state.ModifiedPages, multiIndex.deltas).ConfigureAwait(false);
+                await indexSaver.Save(saveMultiIndexTicket).ConfigureAwait(false);
             }
-        }*/
+        }
 
         return FluxAction.Continue;
     }
@@ -428,6 +435,11 @@ internal sealed class RowInserter
         return Task.FromResult(FluxAction.Continue);
     }
 
+    /// <summary>
+    /// Release all the locks acquired in the previous steps
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
     private Task<FluxAction> ReleaseLocks(InsertFluxState state)
     {
         foreach (IDisposable disposable in state.Locks)

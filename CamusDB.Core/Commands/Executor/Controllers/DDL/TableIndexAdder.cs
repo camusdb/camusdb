@@ -400,6 +400,8 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket = state.Ticket;
 
         Stopwatch timer = Stopwatch.StartNew();
+
+        // @TODO: Adquire and release locks
         
         machine.When(AddIndexFluxSteps.AllocateNewIndex, AllocateNewIndex);
         machine.When(AddIndexFluxSteps.LocateTuplesToFeedTheIndex, LocateTuplesToFeedTheIndex);
