@@ -28,6 +28,8 @@ public sealed class DeleteByIdFluxState
 
     public BTreeTuple? RowTuple { get; set; } = new(new(), new());
 
+    public List<IDisposable> Locks { get; } = new();
+
     public DeleteByIdFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteByIdTicket ticket, DeleteByIdFluxIndexState indexes)
     {
         Database = database;

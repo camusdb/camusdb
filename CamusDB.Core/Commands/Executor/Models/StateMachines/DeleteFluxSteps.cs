@@ -16,8 +16,9 @@ public enum DeleteFluxSteps
 {
     NotInitialized = 0,    
     LocateTupleToDelete = 1,
-    DeleteUniqueIndexes = 2,
-    //DeleteMultiIndexes = 4,
-    DeleteRows = 3,
-    ApplyPageOperations = 4    
+    AdquireLocks = 2,    
+    DeleteRowsAndIndexesFromDisk = 3,
+    PersistIndexChanges = 4,
+    ApplyPageOperations = 5,
+    ReleaseLocks = 6
 }

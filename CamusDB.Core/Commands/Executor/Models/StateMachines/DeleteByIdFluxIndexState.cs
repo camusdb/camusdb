@@ -15,9 +15,11 @@ public sealed class DeleteByIdFluxIndexState
 {
     public List<TableIndexSchema> UniqueIndexes { get; } = new();
 
-    public List<TableIndexSchema>? MultiIndexes { get; } = null;
+    public List<TableIndexSchema> MultiIndexes { get; } = new();
 
-    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? UniqueIndexDeltas { get; set; }
+    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue, BTreeTuple)>? UniqueIndexDeltas { get; set; }
+
+    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue, BTreeTuple)>? MultiIndexDeltas { get; set; }
 
     public DeleteByIdFluxIndexState()
     {

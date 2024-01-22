@@ -74,7 +74,7 @@ internal sealed class RowDeleter
 
         FluxMachine<DeleteFluxSteps, DeleteFluxState> machine = new(state);
 
-        return await DeleteInternal(machine, state);
+        return await DeleteInternal(machine, state).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -111,7 +111,7 @@ internal sealed class RowDeleter
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private Task<FluxAction> LocateTupleToDelete(DeleteFluxState state)
+    private async Task<FluxAction> LocateTupleToDelete(DeleteFluxState state)
     {
         DeleteTicket ticket = state.Ticket;
 
@@ -130,10 +130,33 @@ internal sealed class RowDeleter
             parameters: null
         );
 
-        state.DataCursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
+        var cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
-        return Task.FromResult(FluxAction.Continue);
-    }    
+        // @todo we need to take a snapshot of the data to prevent deadlocks
+        // but probably need to optimize this for larger datasets
+        state.RowsToDelete = await cursor.ToListAsync().ConfigureAwait(false);
+
+        return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// Acquire write locks on the indices to ensure consistency in writing.
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    /// <exception cref="NotImplementedException"></exception>
+    private async Task<FluxAction> AdquireLocks(DeleteFluxState state)
+    {
+        state.Locks.Add(await state.Table.Rows.WriterLockAsync().ConfigureAwait(false));
+
+        foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
+            state.Locks.Add(await index.BTree.WriterLockAsync().ConfigureAwait(false));
+
+        foreach (TableIndexSchema index in state.Indexes.MultiIndexes)
+            state.Locks.Add(await index.BTree.WriterLockAsync().ConfigureAwait(false));
+
+        return FluxAction.Continue;
+    }
 
     /// <summary>
     /// Deletes the row from disk
@@ -142,32 +165,26 @@ internal sealed class RowDeleter
     /// <returns></returns>
     private async Task<FluxAction> DeleteRowsAndIndexesFromDisk(DeleteFluxState state)
     {
-        if (state.DataCursor is null)
+        if (state.RowsToDelete is null || state.RowsToDelete.Count == 0)
         {
             logger.LogError("Invalid rows to delete");
 
             return FluxAction.Abort;
         }
 
-        DeleteTicket ticket = state.Ticket;
-        ///BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainTableDeltas;
-        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>? uniqueIndexDeltas, multiIndexDeltas;
-
-        // @todo we need to take a snapshot of the data to prevent deadlocks
-        // but probably need to optimize this for larger datasets
-        List<QueryResultRow> rowsToDelete = await state.DataCursor.ToListAsync();
+        DeleteTicket ticket = state.Ticket;        
 
         ObjectIdValue nullPageOffset = new();
 
-        foreach (QueryResultRow row in rowsToDelete)
+        foreach (QueryResultRow row in state.RowsToDelete)
         {
             BTreeTuple tuple = new(row.Tuple.SlotOne, nullPageOffset);
 
-            await DeleteFromTableIndex(state, tuple);
+            await DeleteFromTableIndex(state, tuple).ConfigureAwait(false);
 
-            uniqueIndexDeltas = await UpdateUniqueIndexes(state, ticket, tuple, row);
+            await UpdateUniqueIndexes(state, ticket, tuple, row).ConfigureAwait(false);
 
-            multiIndexDeltas = await UpdateMultiIndexes(state, ticket, tuple, row);            
+            await UpdateMultiIndexes(state, ticket, tuple, row).ConfigureAwait(false);            
 
             logger.LogInformation(
                 "Row with rowid {SlotOne} deleted to tombstone page {SlotTwo}",
@@ -177,8 +194,6 @@ internal sealed class RowDeleter
 
             state.DeletedRows++;
         }
-
-        //await PersistIndexChanges(state, uniqueIndexDeltas, multiIndexDeltas);
 
         return FluxAction.Continue;
     }
@@ -196,20 +211,18 @@ internal sealed class RowDeleter
         );
 
         // Main table index stores rowid pointing to page offset
-        await indexSaver.Save(saveUniqueOffsetIndex);
+        await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
+
+        state.Indexes.MainTableDeltas.Add(tuple);
     }
 
-    private async Task<List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>> UpdateUniqueIndexes(
+    private async Task UpdateUniqueIndexes(
         DeleteFluxState state,
         DeleteTicket ticket,
         BTreeTuple tuple,
         QueryResultRow row
     )
-    {
-        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
-
-        //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
-
+    {        
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
         {
             BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex = index.BTree;
@@ -228,25 +241,19 @@ internal sealed class RowDeleter
 
             //Console.WriteLine("Saving unique index {0} {1} {2}", uniqueIndex, uniqueKeyValue, tuple);
 
-            await indexSaver.Save(saveUniqueIndexTicket);
+            await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
 
-            deltas.Add((uniqueIndex, uniqueKeyValue));
-        }
-
-        return deltas;
+            state.Indexes.UniqueIndexDeltas.Add((uniqueIndex, uniqueKeyValue, tuple));
+        }        
     }
 
-    private async Task<List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)>> UpdateMultiIndexes(
+    private async Task UpdateMultiIndexes(
         DeleteFluxState state,
         DeleteTicket ticket,
         BTreeTuple tuple,
         QueryResultRow row
     )
-    {
-        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue)> deltas = new();
-
-        //Console.WriteLine("Updating unique indexes {0}", state.Indexes.UniqueIndexes.Count);
-
+    {        
         foreach (TableIndexSchema index in state.Indexes.MultiIndexes)
         {
             BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex = index.BTree;
@@ -265,57 +272,72 @@ internal sealed class RowDeleter
 
             //Console.WriteLine("Saving unique index {0} {1} {2}", uniqueIndex, uniqueKeyValue, tuple);
 
-            await indexSaver.Save(saveUniqueIndexTicket);
+            await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
 
-            deltas.Add((uniqueIndex, multiKeyValue));
-        }
-
-        return deltas;
+            state.Indexes.MultiIndexDeltas.Add((uniqueIndex, multiKeyValue, tuple));
+        }        
     }
 
     /// <summary>
-    /// 
+    /// Commit the changes in the indices after being sure that the update had no issues.
     /// </summary>
     /// <param name="state"></param>
     /// <returns></returns>
-    private async Task PersistIndexChanges(
-        DeleteFluxState state,
-        BTreeMutationDeltas<ObjectIdValue, ObjectIdValue>? mainIndexDeltas, 
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> uniqueIndexDeltas,
-        List<(BTree<CompositeColumnValue, BTreeTuple>, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple>)> multiIndexDeltas
-    )
+    private async Task<FluxAction> PersistIndexChanges(DeleteFluxState state)
     {
-        if (mainIndexDeltas is null)
-            return;
-
-
-
-        /*foreach (BTreeMvccEntry<ObjectIdValue> btreeEntry in mainIndexDeltas.MvccEntries)
-            btreeEntry.CommitState = BTreeCommitState.Committed;
-
-        await indexSaver.Persist(state.Database.BufferPool, state.Table.Rows, state.ModifiedPages, mainIndexDeltas);
-
-        if (uniqueIndexDeltas is not null)
+        foreach (BTreeTuple tuple in state.Indexes.MainTableDeltas)
         {
-            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) uniqueIndex in uniqueIndexDeltas)
-            {
-                foreach (BTreeMvccEntry<BTreeTuple> uniqueIndexEntry in uniqueIndex.deltas.MvccEntries)
-                    uniqueIndexEntry.CommitState = BTreeCommitState.Committed;
+            SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
+               tablespace: state.Database.BufferPool,
+               index: state.Table.Rows,
+               txnId: state.Ticket.TxnId,
+               commitState: BTreeCommitState.Committed,
+               key: tuple.SlotOne,
+               value: tuple.SlotTwo,
+               modifiedPages: state.ModifiedPages
+           );
 
-                await indexSaver.Persist(state.Database.BufferPool, uniqueIndex.index, state.ModifiedPages, uniqueIndex.deltas);
+            // Main table index stores rowid pointing to page offeset
+            await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
+        }
+
+        if (state.Indexes.UniqueIndexDeltas is not null)
+        {
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue uniqueKeyValue, BTreeTuple tuple) uniqueIndex in state.Indexes.UniqueIndexDeltas)
+            {
+                SaveIndexTicket saveUniqueIndexTicket = new(
+                    tablespace: state.Database.BufferPool,
+                    index: uniqueIndex.index,
+                    txnId: state.Ticket.TxnId,
+                    commitState: BTreeCommitState.Committed,
+                    key: uniqueIndex.uniqueKeyValue,
+                    value: uniqueIndex.tuple,
+                    modifiedPages: state.ModifiedPages
+                );
+
+                await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
             }
         }
 
-        if (multiIndexDeltas is not null)
+        if (state.Indexes.MultiIndexDeltas is not null)
         {
-            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, BTreeMutationDeltas<CompositeColumnValue, BTreeTuple> deltas) multiIndex in multiIndexDeltas)
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue multiKeyValue, BTreeTuple tuple) multIndex in state.Indexes.MultiIndexDeltas)
             {
-                foreach (BTreeMvccEntry<BTreeTuple> multiIndexEntry in multiIndex.deltas.MvccEntries)
-                    multiIndexEntry.CommitState = BTreeCommitState.Committed;
+                SaveIndexTicket saveMultiIndexTicket = new(
+                    tablespace: state.Database.BufferPool,
+                    index: multIndex.index,
+                    txnId: state.Ticket.TxnId,
+                    commitState: BTreeCommitState.Committed,
+                    key: multIndex.multiKeyValue,
+                    value: multIndex.tuple,
+                    modifiedPages: state.ModifiedPages
+                );
 
-                await indexSaver.Persist(state.Database.BufferPool, multiIndex.index, state.ModifiedPages, multiIndex.deltas).ConfigureAwait(false);
+                await indexSaver.Save(saveMultiIndexTicket).ConfigureAwait(false);
             }
-        }*/
+        }
+
+        return FluxAction.Continue;
     }
 
     /// <summary>
@@ -327,6 +349,19 @@ internal sealed class RowDeleter
     {
         if (state.ModifiedPages.Count > 0)
             state.Database.BufferPool.ApplyPageOperations(state.ModifiedPages);
+
+        return Task.FromResult(FluxAction.Continue);
+    }
+
+    /// <summary>
+    /// Release all the locks acquired in the previous steps
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private Task<FluxAction> ReleaseLocks(DeleteFluxState state)
+    {
+        foreach (IDisposable disposable in state.Locks)
+            disposable.Dispose();
 
         return Task.FromResult(FluxAction.Continue);
     }
@@ -347,10 +382,13 @@ internal sealed class RowDeleter
         Stopwatch timer = Stopwatch.StartNew();
 
         machine.When(DeleteFluxSteps.LocateTupleToDelete, LocateTupleToDelete);
-        machine.When(DeleteFluxSteps.DeleteRows, DeleteRowsAndIndexesFromDisk);
-        machine.When(DeleteFluxSteps.ApplyPageOperations, ApplyPageOperations);
+        machine.When(DeleteFluxSteps.AdquireLocks, AdquireLocks);
+        machine.When(DeleteFluxSteps.DeleteRowsAndIndexesFromDisk, DeleteRowsAndIndexesFromDisk);
+        machine.When(DeleteFluxSteps.PersistIndexChanges, PersistIndexChanges);
+        machine.When(DeleteFluxSteps.ApplyPageOperations, ApplyPageOperations);        
+        machine.When(DeleteFluxSteps.ReleaseLocks, ReleaseLocks);
 
-        // machine.WhenAbort(ReleaseLocks);
+        machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep()).ConfigureAwait(false);

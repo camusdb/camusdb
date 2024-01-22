@@ -139,13 +139,13 @@ internal sealed class QueryExecutor
     {
         BufferPoolManager tablespace = database.BufferPool;
 
-        using IDisposable? _ = await index.BTree.ReaderLockAsync();
+        using IDisposable? _ = await index.BTree.ReaderLockAsync().ConfigureAwait(false);
 
         BTreeTuple? pageOffset = await index.BTree.Get(
                                             TransactionType.ReadOnly,
                                             ticket.TxnId,
                                             new CompositeColumnValue(columnValue)
-                                       );
+                                       ).ConfigureAwait(false);
 
         if (pageOffset is null || pageOffset.IsNull())
         {
@@ -190,7 +190,7 @@ internal sealed class QueryExecutor
             Console.WriteLine("Entry={0} Value={1}", x.Key, x.GetValue(TransactionType.ReadOnly, ticket.TxnId));
         }*/
 
-        using IDisposable? _ = await index.BTree.ReaderLockAsync();
+        using IDisposable? _ = await index.BTree.ReaderLockAsync().ConfigureAwait(false);
 
         await foreach (BTreeTuple? pageOffset in index.BTree.GetPrefix(TransactionType.ReadOnly, ticket.TxnId, columnValue))
         {
@@ -245,7 +245,7 @@ internal sealed class QueryExecutor
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        using IDisposable? _ = await index.BTree.ReaderLockAsync();
+        using IDisposable? _ = await index.BTree.ReaderLockAsync().ConfigureAwait(false);
 
         BTreeTuple? pageOffset = await index.BTree.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue(columnId)).ConfigureAwait(false);
 

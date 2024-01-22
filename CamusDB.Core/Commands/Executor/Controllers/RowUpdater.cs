@@ -342,13 +342,13 @@ public sealed class RowUpdater
     /// <exception cref="NotImplementedException"></exception>
     private async Task<FluxAction> AdquireLocks(UpdateFluxState state)
     {
-        state.Locks.Add(await state.Table.Rows.WriterLockAsync());
+        state.Locks.Add(await state.Table.Rows.WriterLockAsync().ConfigureAwait(false));
 
         foreach (TableIndexSchema index in state.Indexes.UniqueIndexes)
-            state.Locks.Add(await index.BTree.WriterLockAsync());
+            state.Locks.Add(await index.BTree.WriterLockAsync().ConfigureAwait(false));
 
         foreach (TableIndexSchema index in state.Indexes.MultiIndexes)
-            state.Locks.Add(await index.BTree.WriterLockAsync());
+            state.Locks.Add(await index.BTree.WriterLockAsync().ConfigureAwait(false));
 
         return FluxAction.Continue;
     }
@@ -681,8 +681,8 @@ public sealed class RowUpdater
         machine.When(UpdateFluxSteps.LocateTupleToUpdate, LocateTuplesToUpdate);
         machine.When(UpdateFluxSteps.AdquireLocks, AdquireLocks);
         machine.When(UpdateFluxSteps.UpdateRowsAndIndexes, UpdateRowsAndIndexes);
-        machine.When(UpdateFluxSteps.ApplyPageOperations, ApplyPageOperations);
         machine.When(UpdateFluxSteps.PersistIndexChanges, PersistIndexChanges);
+        machine.When(UpdateFluxSteps.ApplyPageOperations, ApplyPageOperations);
         machine.When(UpdateFluxSteps.ReleaseLocks, ReleaseLocks);
 
         machine.WhenAbort(ReleaseLocks);

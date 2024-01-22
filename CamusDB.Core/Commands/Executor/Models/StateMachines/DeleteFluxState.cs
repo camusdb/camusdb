@@ -26,11 +26,11 @@ internal sealed class DeleteFluxState
 
     public List<BufferPageOperation> ModifiedPages { get; } = new();
 
-    public List<IDisposable> Locks { get; } = new();
+    public List<IDisposable> Locks { get; } = new();    
 
-    public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }
+    public List<QueryResultRow> RowsToDelete { get; set; } = new();
 
-    public int DeletedRows { get; set; }
+    public int DeletedRows { get; set; }    
 
     public DeleteFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteTicket ticket, QueryExecutor queryExecutor, DeleteFluxIndexState indexes)
     {

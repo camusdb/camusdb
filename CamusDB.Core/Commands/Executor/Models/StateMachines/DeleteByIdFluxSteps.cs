@@ -16,9 +16,11 @@ public enum DeleteByIdFluxSteps
 {
     NotInitialized = 0,    
     LocateTupleToDelete = 1,
-    DeleteUniqueIndexes = 2,
-    DeleteMultiIndexes = 3,
-    UpdateTableIndex = 4,
-    PersistIndexChanges = 5,
-    ApplyPageOperations = 6
+    AdquireLocks = 2,
+    DeleteUniqueIndexes = 3,
+    DeleteMultiIndexes = 4,
+    UpdateTableIndex = 5,
+    PersistIndexChanges = 6,
+    ApplyPageOperations = 7,
+    ReleaseLocks = 8,
 }

@@ -206,7 +206,7 @@ public sealed class RowUpdaterById
 
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        using IDisposable? _ = await index.BTree.ReaderLockAsync();
+        using IDisposable? _ = await index.BTree.ReaderLockAsync().ConfigureAwait(false);
 
         state.RowTuple = await index.BTree.Get(TransactionType.Write, ticket.TxnId, new CompositeColumnValue(columnId)).ConfigureAwait(false);
 
@@ -329,7 +329,8 @@ public sealed class RowUpdaterById
 
         if (state.RowTuple is null || state.RowTuple.IsNull())
         {
-            Console.WriteLine("Index Pk={Id} does not exist", ticket.Id);
+            logger.LogWarning("Index Pk={Id} does not exist", ticket.Id);
+
             return FluxAction.Abort;
         }
 
