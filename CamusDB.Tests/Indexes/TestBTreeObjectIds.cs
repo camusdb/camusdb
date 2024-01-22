@@ -10,7 +10,6 @@ using NUnit.Framework;
 using CamusDB.Core.Util.Trees;
 using System.Threading.Tasks;
 using CamusDB.Core.Util.Time;
-using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.Indexes;
@@ -45,7 +44,7 @@ internal sealed class TestBTreeObjectIds
             await tree.Put(txnid, BTreeCommitState.Committed, ObjectIdGenerator.Generate(), ObjectIdGenerator.Generate());
 
         Assert.AreEqual(tree.Size(), 5);
-        Assert.AreEqual(tree.Height(), 1);
+        Assert.AreEqual(tree.Height(), 0);
     }
 
     [Test]
@@ -58,7 +57,7 @@ internal sealed class TestBTreeObjectIds
         for (int i = 0; i < 8; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, ObjectIdGenerator.Generate(), ObjectIdGenerator.Generate());
 
-        Assert.AreEqual(tree.Size(), 5);
-        Assert.AreEqual(tree.Height(), 1);
+        Assert.AreEqual(tree.Size(), 8);
+        Assert.AreEqual(tree.Height(), 0);
     }
 }

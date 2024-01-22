@@ -39,7 +39,7 @@ public sealed class CatalogsManager
     {
         try
         {
-            await database.Schema.Semaphore.WaitAsync();
+            await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
 
             if (database.Schema.Tables.ContainsKey(ticket.TableName))
                 throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{ticket.TableName}' already exists");
@@ -49,7 +49,7 @@ public sealed class CatalogsManager
                 Id = ObjectIdGenerator.Generate().ToString(),
                 Version = 0,
                 Name = ticket.TableName,
-                Columns = new(),
+                Columns = new(ticket.Columns.Length),
                 SchemaHistory = new()
             };
 
@@ -104,7 +104,7 @@ public sealed class CatalogsManager
     {
         try
         {
-            await database.Schema.Semaphore.WaitAsync();
+            await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
 
             if (!database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema))
                 throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{ticket.TableName}' does not exist");

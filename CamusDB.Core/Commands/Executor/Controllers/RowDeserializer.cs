@@ -46,7 +46,7 @@ internal sealed class RowDeserializer
 
         Dictionary<string, ColumnValue> columnValues = new(columns.Count + 1)
         {
-            { "_id", new(ColumnType.Id, slotOne.ToString()) }
+            //{ "_id", new(ColumnType.Id, slotOne.ToString()) }
         };
 
         for (int i = 0; i < columns.Count; i++)
