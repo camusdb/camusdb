@@ -22,12 +22,12 @@ internal sealed class TestBPTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new());
+        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8);
 
         await tree.Put(txnid, BTreeCommitState.Committed, new CompositeColumnValue(new ColumnValue(ColumnType.Integer64, 5)), 100);
 
-        //Assert.AreEqual(tree.Size(), 1);
-        //Assert.AreEqual(tree.Height(), 0);
+        Assert.AreEqual(tree.Size(), 1);
+        Assert.AreEqual(tree.Height(), 0);
     }
 
     [Test]
@@ -35,7 +35,7 @@ internal sealed class TestBPTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new());
+        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8);
 
         CompositeColumnValue key = new(new ColumnValue(ColumnType.Integer64, 5));
 
@@ -54,7 +54,7 @@ internal sealed class TestBPTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new());
+        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8);
 
         ColumnValue cv = new(ColumnType.Integer64, 5);
         CompositeColumnValue key = new(cv);
@@ -73,7 +73,7 @@ internal sealed class TestBPTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new());
+        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8);
 
         ColumnValue cv = new(ColumnType.Integer64, 5);
         CompositeColumnValue key = new(cv);
@@ -93,7 +93,7 @@ internal sealed class TestBPTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new());
+        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8);
 
         ColumnValue cv1 = new(ColumnType.Integer64, 5);
         ColumnValue cv2 = new(ColumnType.Integer64, 25);

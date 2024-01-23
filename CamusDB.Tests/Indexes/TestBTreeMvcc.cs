@@ -29,7 +29,7 @@ internal sealed class TestBTreeMvcc
         HLCTimestamp txnid1 = await hlc.SendOrLocalEvent();
         HLCTimestamp txnid2 = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new());
+        BTree<int, int> tree = new(new(), 8);
 
         await tree.Put(txnid1, BTreeCommitState.Committed, 5, 100);
         await tree.Put(txnid2, BTreeCommitState.Committed, 7, 100);
@@ -44,7 +44,7 @@ internal sealed class TestBTreeMvcc
         HLCTimestamp txnid1 = await hlc.SendOrLocalEvent();
         HLCTimestamp txnid2 = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new());
+        BTree<int, int> tree = new(new(), 8);
 
         await tree.Put(txnid1, BTreeCommitState.Committed, 5, 100);
         await tree.Put(txnid2, BTreeCommitState.Committed, 7, 100);        
@@ -62,7 +62,7 @@ internal sealed class TestBTreeMvcc
         HLCTimestamp txnid1 = await hlc.SendOrLocalEvent();
         HLCTimestamp txnid2 = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new());
+        BTree<int, int> tree = new(new(), 8);
 
         await tree.Put(txnid1, BTreeCommitState.Committed, 5, 100);
         await tree.Put(txnid2, BTreeCommitState.Committed, 7, 100);
@@ -86,7 +86,7 @@ internal sealed class TestBTreeMvcc
         HLCTimestamp txnid1 = await hlc.SendOrLocalEvent();
         HLCTimestamp txnid2 = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new());
+        BTree<int, int> tree = new(new(), 8);
 
         await tree.Put(txnid1, BTreeCommitState.Uncommitted, 5, 100);
         await tree.Put(txnid2, BTreeCommitState.Uncommitted, 7, 100);
@@ -110,7 +110,7 @@ internal sealed class TestBTreeMvcc
         HLCTimestamp txnid1 = await hlc.SendOrLocalEvent();
         HLCTimestamp txnid2 = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new());
+        BTree<int, int> tree = new(new(), 8);
 
         BTreeMutationDeltas<int, int> deltas1 = await tree.Put(txnid1, BTreeCommitState.Uncommitted, 5, 100);
         BTreeMutationDeltas<int, int> deltas2 = await tree.Put(txnid2, BTreeCommitState.Uncommitted, 7, 100);

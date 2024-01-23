@@ -74,7 +74,7 @@ internal sealed class TestBTree
         for (int i = 0; i < 9; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
-        Assert.AreEqual(tree.Size(), 16384);
+        Assert.AreEqual(tree.Size(), 9);
         Assert.AreEqual(tree.Height(), 1);
     }
 
@@ -166,10 +166,10 @@ internal sealed class TestBTree
         Assert.AreEqual(1, deltas.Nodes.Count);        
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 11, 105);
-        Assert.AreEqual(1, deltas.Nodes.Count);        
+        Assert.AreEqual(3, deltas.Nodes.Count);        
 
         Assert.AreEqual(tree.Size(), 8);
-        Assert.AreEqual(tree.Height(), 0);
+        Assert.AreEqual(tree.Height(), 1);
     }
 
     [Test]
