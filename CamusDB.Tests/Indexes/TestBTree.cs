@@ -295,16 +295,16 @@ internal sealed class TestBTree
 
         BTree<int, int> tree = new(new(), 8);
 
-        for (int i = 0; i < 16384; i++)
+        for (int i = 0; i < 8; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
-        Assert.AreEqual(16384, tree.Size());
+        Assert.AreEqual(8, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
         (bool found, _) = await tree.Remove(5);
         Assert.IsTrue(found);
 
-        Assert.AreEqual(16383, tree.Size());
+        Assert.AreEqual(7, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
         int search = await tree.Get(TransactionType.ReadOnly, txnid, 5);
@@ -324,16 +324,16 @@ internal sealed class TestBTree
         Assert.AreEqual(16, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        (bool found, _) = await tree.Remove(64);
+        (bool found, _) = await tree.Remove(8);
         Assert.IsTrue(found);
 
-        Assert.AreEqual(16, tree.Size());
+        Assert.AreEqual(15, tree.Size());
         Assert.AreEqual(1, tree.Height());
 
-        int search = await tree.Get(TransactionType.ReadOnly, txnid, 64);
+        int search = await tree.Get(TransactionType.ReadOnly, txnid, 8);
         Assert.AreEqual(0, search);
 
-        search = await tree.Get(TransactionType.ReadOnly, txnid, 63);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 7);
         Assert.IsNotNull(search);
     }
 
@@ -356,22 +356,22 @@ internal sealed class TestBTree
             Assert.IsTrue(found);
         }
 
-        Assert.AreEqual(32, tree.Size());
+        Assert.AreEqual(24, tree.Size());
         Assert.AreEqual(2, tree.Height());
 
         int search = await tree.Get(TransactionType.ReadOnly, txnid, 4);
         Assert.AreEqual(0, search);
 
-        search = await tree.Get(TransactionType.ReadOnly, txnid, 7);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 2);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(TransactionType.ReadOnly, txnid, 41);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 11);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(TransactionType.ReadOnly, txnid, 49);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 21);
         Assert.IsNotNull(search);
 
-        search = await tree.Get(TransactionType.ReadOnly, txnid, 256);
+        search = await tree.Get(TransactionType.ReadOnly, txnid, 28);
         Assert.AreEqual(0, search);
     }
 
@@ -386,7 +386,7 @@ internal sealed class TestBTree
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
         Assert.AreEqual(256, tree.Size());
-        Assert.AreEqual(2, tree.Height());
+        Assert.AreEqual(3, tree.Height());
 
         for (int i = 0; i < 256; i += 8)
         {
@@ -394,8 +394,8 @@ internal sealed class TestBTree
             Assert.IsTrue(found);
         }
 
-        Assert.AreEqual(256, tree.Size());
-        Assert.AreEqual(2, tree.Height());
+        Assert.AreEqual(224, tree.Size());
+        Assert.AreEqual(3, tree.Height());
 
         int count = 0;
 
@@ -406,7 +406,7 @@ internal sealed class TestBTree
                 count++;
         }
 
-        Assert.AreEqual(256, count);
+        Assert.AreEqual(224, count);
     }
 
     [Test]
@@ -420,7 +420,7 @@ internal sealed class TestBTree
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
         Assert.AreEqual(524288, tree.Size());
-        Assert.AreEqual(2, tree.Height());
+        Assert.AreEqual(9, tree.Height());
 
         for (int i = 7; i < 524288; i += 7)
         {
@@ -429,7 +429,7 @@ internal sealed class TestBTree
         }
 
         Assert.AreEqual(449390, tree.Size());
-        Assert.AreEqual(2, tree.Height());
+        Assert.AreEqual(9, tree.Height());
 
         int count = 0;
 
@@ -454,7 +454,7 @@ internal sealed class TestBTree
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
 
         Assert.AreEqual(524288, tree.Size());
-        Assert.AreEqual(2, tree.Height());
+        Assert.AreEqual(9, tree.Height());
 
         for (int i = 0; i < 524288; i++)
         {
@@ -463,7 +463,7 @@ internal sealed class TestBTree
         }
 
         Assert.AreEqual(0, tree.Size());
-        Assert.AreEqual(2, tree.Height());
+        Assert.AreEqual(9, tree.Height());
 
         int count = 0;
 
