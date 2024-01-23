@@ -12,6 +12,6 @@ namespace CamusDB.Core.Util.Trees;
 
 public interface IBTreeNodeReader<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
 {
-	Task<BTreeNode<TKey, TValue>?> GetNode(ObjectIdValue offset);
+	Task<BTreeNode<TKey, TValue>?> GetNode(ObjectIdValue offset, int maxNodeCapacity);
 }
 

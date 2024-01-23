@@ -28,7 +28,14 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey> wher
 
     public AsyncLazy<BTreeNode<TKey, TValue>?> Next { get; } // helper field to iterate over array entries    
 
-    public BTreeEntry(TKey key, IBTreeNodeReader<TKey, TValue>? reader, BTreeNode<TKey, TValue>? next)
+    /// <summary>
+    /// Constructor
+    /// </summary>
+    /// <param name="key"></param>
+    /// <param name="reader"></param>
+    /// <param name="next"></param>
+    /// <param name="maxNodeCapacity"></param>
+    public BTreeEntry(TKey key, IBTreeNodeReader<TKey, TValue>? reader, BTreeNode<TKey, TValue>? next, int maxNodeCapacity)
     {
         Key = key;
         Reader = reader;
@@ -36,15 +43,16 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey> wher
         if (next is not null)
             Next = new AsyncLazy<BTreeNode<TKey, TValue>?>(() => Task.FromResult<BTreeNode<TKey, TValue>?>(next));
         else
-            Next = new AsyncLazy<BTreeNode<TKey, TValue>?>(LoadNode);
+            Next = new AsyncLazy<BTreeNode<TKey, TValue>?>(() => LoadNode(maxNodeCapacity));
     }
 
     /// <summary>
     /// Loads the node from the buffer pool or disk
     /// </summary>
+    /// <param name="maxNodeCapacity"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
-    private async Task<BTreeNode<TKey, TValue>?> LoadNode()
+    private async Task<BTreeNode<TKey, TValue>?> LoadNode(int maxNodeCapacity)
     {
         if (NextPageOffset.IsNull())
             return null;
@@ -52,7 +60,7 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey> wher
         if (Reader is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot read lazy node because reader is null");
 
-        return await Reader.GetNode(NextPageOffset).ConfigureAwait(false);
+        return await Reader.GetNode(NextPageOffset, maxNodeCapacity).ConfigureAwait(false);
     }
 
     /// <summary>

@@ -129,7 +129,7 @@ internal sealed class TableIndexAdder
 
         FluxMachine<AddIndexFluxSteps, AddIndexFluxState> machine = new(state);
 
-        return await AlterIndexInternal(machine, state);
+        return await AlterIndexInternal(machine, state).ConfigureAwait(false);
     }
 
     /// <summary>

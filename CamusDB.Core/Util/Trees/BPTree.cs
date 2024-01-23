@@ -27,7 +27,7 @@ public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>
     /// <param name="rootOffset"></param>
     /// <param name="maxNodeCapacity"></param>
     /// <param name="reader"></param>
-    public BPTree(ObjectIdValue rootOffset, IBTreeNodeReader<TKey, TValue>? reader = null) : base(rootOffset, reader)
+    public BPTree(ObjectIdValue rootOffset, int maxNodeCapacity, IBTreeNodeReader<TKey, TValue>? reader = null) : base(rootOffset, maxNodeCapacity, reader)
     {
 
     }

@@ -74,6 +74,7 @@ public enum NodeType
     TypeString,
     TypeInteger64,
     TypeFloat64,
+    TypeBool,
     ShowColumns,
     ShowTables,
     ShowCreateTable,

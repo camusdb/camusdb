@@ -28,16 +28,23 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
 
         IndexUniqueOffsetNodeReader reader = new(bufferpool);
 
-        BTree<ObjectIdValue, ObjectIdValue> index = new(offset, reader);
-
         byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
-            return index;
+            return new(offset, BTreeUtils.GetNodeCapacity<ObjectIdValue, ObjectIdValue>(), reader);
 
         int pointer = 0;
 
-        index.height = Serializator.ReadInt32(data, ref pointer);
-        index.size = Serializator.ReadInt32(data, ref pointer);
+        int version = Serializator.ReadInt32(data, ref pointer);
+        if (version != BTreeConfig.LayoutVersion)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidIndexLayout, "Unsupported b+tree version found");
+
+        int maxCapacity = Serializator.ReadInt32(data, ref pointer);
+
+        BTree<ObjectIdValue, ObjectIdValue> index = new(offset, maxCapacity, reader)
+        {
+            height = Serializator.ReadInt32(data, ref pointer),
+            size = Serializator.ReadInt32(data, ref pointer)
+        };
 
         ObjectIdValue rootPageOffset = Serializator.ReadObjectId(data, ref pointer);
 
@@ -45,22 +52,13 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
 
         if (!rootPageOffset.IsNull())
         {
-            BTreeNode<ObjectIdValue, ObjectIdValue>? node = await reader.GetNode(rootPageOffset);
+            BTreeNode<ObjectIdValue, ObjectIdValue>? node = await reader.GetNode(rootPageOffset, index.maxNodeCapacity);
             if (node is not null)
             {
                 index.root = node;
                 index.loaded++;
             }
         }
-
-        /*foreach (Entry entry in index.EntriesTraverse())
-        {
-            Console.WriteLine("Index RowId={0} PageOffset={1}", entry.Key, entry.Value);
-        }*/
-
-        //Console.WriteLine("***");
-
-        //Console.WriteLine("Loaded index of size {0} {1}", index.size, index.loaded);
 
         return index;
     }

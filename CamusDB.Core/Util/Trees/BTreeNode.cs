@@ -48,8 +48,12 @@ public sealed class BTreeNode<TKey, TValue> where TKey : IComparable<TKey> where
     /// <param name="capacity"></param>
     public BTreeNode(int keyCount, int capacity)
     {
-        //Console.WriteLine("Allocated new node {0}", keyCount);
+        if (capacity == 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Capacity cannot be zero");
+
         Id = Interlocked.Increment(ref BTreeIncr.CurrentNodeId);
+
+        Console.WriteLine("Allocated new node {0} {1}", keyCount, capacity);
 
         KeyCount = keyCount;
         children = new BTreeEntry<TKey, TValue>[capacity];

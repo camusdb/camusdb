@@ -17,6 +17,7 @@ public static class CamusDBErrorCodes
     public const string SystemSpaceCorrupt = "CADB0014";
     public const string TableCorrupt = "CADB0015";
     public const string IndexDoesntExist = "CADB0016";
+    public const string InvalidIndexLayout = "CADB0017";
 
     public const string InvalidPageOffset = "CADB00297";
 

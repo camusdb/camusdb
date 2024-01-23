@@ -956,6 +956,20 @@ public class TestSQLParser
     [Test]
     public void TestParseSimpleAlterTable3()
     {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE some_table ADD COLUMN enabled BOOL NULL");
+
+        Assert.AreEqual(NodeType.AlterTableAddColumn, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("enabled", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TypeBool, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleAlterTable4()
+    {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE some_table DROP COLUMN year");
 
         Assert.AreEqual(NodeType.AlterTableDropColumn, ast.nodeType);
@@ -967,7 +981,7 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleAlterTable4()
+    public void TestParseSimpleAlterTable5()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` DROP COLUMN `year`");
 
@@ -980,7 +994,7 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleAlterTable5()
+    public void TestParseSimpleAlterTable6()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD INDEX `year_index` (`year`)");
 
@@ -994,7 +1008,7 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleAlterTable6()
+    public void TestParseSimpleAlterTable7()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` DROP INDEX `year_index`");
 
@@ -1006,7 +1020,7 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleAlterTable7()
+    public void TestParseSimpleAlterTable8()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD PRIMARY KEY (`id`)");
 
@@ -1018,7 +1032,7 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleAlterTable8()
+    public void TestParseSimpleAlterTable9()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` DROP PRIMARY KEY");
 
@@ -1029,7 +1043,7 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleAlterTable9()
+    public void TestParseSimpleAlterTable10()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD UNIQUE `year_index` (`year`)");
 
@@ -1043,7 +1057,7 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleAlterTable10()
+    public void TestParseSimpleAlterTable11()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD UNIQUE INDEX `year_index` (`year`)");
 
@@ -1057,7 +1071,7 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleAlterTable11()
+    public void TestParseSimpleAlterTable12()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD PRIMARY KEY (`usersId`, `id`)");
 
@@ -1069,7 +1083,7 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleAlterTable12()
+    public void TestParseSimpleAlterTable13()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD INDEX `usersid_idx` (`usersId`, `id`)");
 
@@ -1082,7 +1096,7 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleAlterTable13()
+    public void TestParseSimpleAlterTable14()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD UNIQUE INDEX `usersid_idx` (`usersId`, `id`)");
 
@@ -1095,7 +1109,7 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseSimpleAlterTable14()
+    public void TestParseSimpleAlterTable15()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE `some_table` ADD UNIQUE `usersid_idx` (`usersId`, `id`)");
 

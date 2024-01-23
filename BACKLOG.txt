@@ -3,6 +3,7 @@ Insert
 
 Indexes
 - Version b+trees on disk
+- Store max node capacity on disk
 - Reduce read/write locking to increase concurrency
 
 Query
@@ -15,7 +16,6 @@ Query
 BufferPool/Storage
 - Store txnid alongside records
 - Support multiple items per page to avoid storage waste
-- Support multiple storage adapters
 
 DDL:
 - Make schema operations transactional
@@ -26,11 +26,11 @@ Alter Table
 ColumnValue
 - Rethink column value as a lightweight struct
 
+Globals
+- Provide globals null object for BTreeTuple, ObjectIdValue, ColumnValue
+
 SQLParser
 - Make identifiers case insensitive
-
-DeleteById
-- Update multi indexes
 
 UpdateById
 - Add tests for multi indexes

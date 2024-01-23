@@ -10,10 +10,5 @@ namespace CamusDB.Core.Util.Trees;
 
 public sealed class BTreeConfig
 {
-    public const int Layout = 1;
-
-    // max children per B-tree node = M-1 (must be even and greater than 2)
-    public const int MaxChildren = 64;
-
-    public const int MaxChildrenHalf = MaxChildren / 2;
+    public const int LayoutVersion = 1;    
 }

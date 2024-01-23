@@ -56,6 +56,9 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
         if (nodeAst.nodeType == NodeType.TypeObjectId)
             return ColumnType.Id;
 
+        if (nodeAst.nodeType == NodeType.TypeBool)
+            return ColumnType.Bool;
+
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown field type: " + nodeAst.nodeType);
     }
 }

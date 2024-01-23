@@ -36,14 +36,14 @@ public class BTreeIncr
  * the same transaction id (timestamp).
  */
 public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
-{
-    private readonly int maxNodeCapacity;
-
-    private readonly int maxNodeCapacityHalf;
-
+{    
     public readonly IBTreeNodeReader<TKey, TValue>? reader; // lazy node reader
 
     public BTreeNode<TKey, TValue>? root;  // root of the B-tree
+
+    public int maxNodeCapacity;
+
+    private readonly int maxNodeCapacityHalf;
 
     public int Id;       // unique tree id
 
@@ -58,21 +58,24 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     private readonly AsyncReaderWriterLock readerWriterLock = new();
 
     /// <summary>
-    /// Initializes an empty B-tree.
+    /// Initializes an empty B+tree.
     /// </summary>
     /// <param name="rootOffset"></param>
     /// <param name="maxNodeCapacity"></param>
     /// <param name="reader"></param>
-    public BTree(ObjectIdValue rootOffset, IBTreeNodeReader<TKey, TValue>? reader = null)
+    public BTree(ObjectIdValue rootOffset, int maxNodeCapacity, IBTreeNodeReader<TKey, TValue>? reader = null)
     {
+        if (maxNodeCapacity == 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Tree capacity cannot be zero");
+
         this.reader = reader;
         PageOffset = rootOffset;
         Id = Interlocked.Increment(ref BTreeIncr.CurrentTreeId);
 
-        //Console.WriteLine("Created BTree {0}", Id);
+        // Console.WriteLine("Created BTree {0} MaxCapacity={1}", Id, maxNodeCapacity);
 
-        maxNodeCapacity = BTreeUtils.GetNodeCapacity<TKey, TValue>();
-        maxNodeCapacityHalf = maxNodeCapacity / 2;
+        this.maxNodeCapacity = maxNodeCapacity;
+        this.maxNodeCapacityHalf = maxNodeCapacity / 2;
     }
 
     /// <summary>
@@ -337,8 +340,8 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
         loaded++;
 
-        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, reader, root);
-        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, reader, split);
+        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, reader, root, maxNodeCapacity);
+        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, reader, split, maxNodeCapacity);
 
         root = newRoot;
 
@@ -400,7 +403,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             // Console.WriteLine("Not found in external node SetV={0} {1} {2} {3}", key, txnid, commitState, value);
 
             size++;
-            newEntry = new(key, reader, null);
+            newEntry = new(key, reader, null, maxNodeCapacity);
             deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
         }
 
@@ -420,7 +423,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                     if (split == null)
                         return null;
 
-                    newEntry = new(split.children[0].Key, reader, split);
+                    newEntry = new(split.children[0].Key, reader, split, maxNodeCapacity);
                     //deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
                     break;
                 }
@@ -646,7 +649,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                 {
                     await SweepInternal(await entry.Next, ht - 1).ConfigureAwait(false);
 
-                    children[j] = new BTreeEntry<TKey, TValue>(entry.Key, reader, null)
+                    children[j] = new BTreeEntry<TKey, TValue>(entry.Key, reader, null, maxNodeCapacity)
                     {
                         NextPageOffset = entry.NextPageOffset
                     };

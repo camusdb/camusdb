@@ -57,6 +57,8 @@ TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
 TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
 TTypeObjectId   (O|o)(B|b)(J|j)(E|e)(C|c)(T|t)(_)(I|i)(D|d)
 TTypeSObjectId  (O|o)(I|i)(D|d)
+TTypeBool       (B|b)(O|o)(O|o)(L|l)
+TTypeBoolean    (B|b)(O|o)(O|o)(L|l)(E|e)(A|a)(N|n)
 LParen          \(
 RParen          \)
 LBrace          \{
@@ -209,6 +211,10 @@ TGreaterEquals  >=
 {TTypeInt64} { return (int)Token.TTYPE_INT64; }
 
 {TTypeFloat64} { return (int)Token.TTYPE_FLOAT64; }
+
+{TTypeBool} { return (int)Token.TTYPE_BOOL; }
+
+{TTypeBoolean} { return (int)Token.TTYPE_BOOL; }
 
 {TAt} { return (int)Token.TAT; }
 

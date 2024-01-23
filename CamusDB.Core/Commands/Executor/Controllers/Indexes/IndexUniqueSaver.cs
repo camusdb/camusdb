@@ -51,7 +51,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         //    Persist(ticket.Tablespace, ticket.Index, ticket.ModifiedPages, deltas);
     }    
 
-    private async Task PersistNodes(
+    private static async Task PersistNodes(
         BufferPoolManager tablespace,
         BTree<CompositeColumnValue, BTreeTuple> index,
         List<BufferPageOperation> modifiedPages,
@@ -71,12 +71,16 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         }
 
         byte[] treeBuffer = new byte[
-            SerializatorTypeSizes.TypeInteger32 + // height(4 byte) +
-            SerializatorTypeSizes.TypeInteger32 + // size(4 byte)
-            SerializatorTypeSizes.TypeObjectId    // root(4 byte)
+            SerializatorTypeSizes.TypeInteger32 + // version (4 byte) +
+            SerializatorTypeSizes.TypeInteger32 + // capacity (4 byte) +
+            SerializatorTypeSizes.TypeInteger32 + // height (4 byte) +
+            SerializatorTypeSizes.TypeInteger32 + // size (4 byte)
+            SerializatorTypeSizes.TypeObjectId    // root (4 byte)
         ];
 
         int pointer = 0;
+        Serializator.WriteInt32(treeBuffer, BTreeConfig.LayoutVersion, ref pointer);
+        Serializator.WriteInt32(treeBuffer, index.maxNodeCapacity, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
         Serializator.WriteObjectId(treeBuffer, index.root!.PageOffset, ref pointer);

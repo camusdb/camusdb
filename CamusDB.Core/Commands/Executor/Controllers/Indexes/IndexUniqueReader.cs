@@ -25,29 +25,31 @@ internal sealed class IndexUniqueReader : IndexBaseReader
 
     public async Task<BPTree<CompositeColumnValue, ColumnValue, BTreeTuple>> Read(BufferPoolManager bufferpool, ObjectIdValue offset)
     {
-        //Console.WriteLine("***");
-
         IndexUniqueNodeReader reader = new(bufferpool);
-
-        BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = new(offset, reader);
 
         byte[] data = await bufferpool.GetDataFromPage(offset).ConfigureAwait(false);
         if (data.Length == 0)
-        {
-            // Console.WriteLine("Index is empty");
-            return index;
-        }
+            return new(offset, BTreeUtils.GetNodeCapacity<CompositeColumnValue, BTreeTuple>(), reader);
 
         int pointer = 0;
 
-        index.height = Serializator.ReadInt32(data, ref pointer);
-        index.size = Serializator.ReadInt32(data, ref pointer);
+        int version = Serializator.ReadInt32(data, ref pointer);
+        if (version != BTreeConfig.LayoutVersion)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidIndexLayout, "Unsupported b+tree version found");
+
+        int maxCapacity = Serializator.ReadInt32(data, ref pointer);
+
+        BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = new(offset, maxCapacity, reader)
+        {
+            height = Serializator.ReadInt32(data, ref pointer),
+            size = Serializator.ReadInt32(data, ref pointer)
+        };
 
         ObjectIdValue rootPageOffset = Serializator.ReadObjectId(data, ref pointer);
 
         if (!rootPageOffset.IsNull())
         {
-            BTreeNode<CompositeColumnValue, BTreeTuple>? node = await reader.GetNode(rootPageOffset).ConfigureAwait(false);
+            BTreeNode<CompositeColumnValue, BTreeTuple>? node = await reader.GetNode(rootPageOffset, maxCapacity).ConfigureAwait(false);
             if (node is not null)
                 index.root = node;
         }
