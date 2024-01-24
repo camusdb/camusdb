@@ -6,6 +6,8 @@ CamusDB also provides support for dialect of SQL, making it accessible and easy 
 
 [![Build Status](https://app.travis-ci.com/camusdb/camusdb.svg?branch=main)](https://app.travis-ci.com/camusdb/camusdb)
 
+[Documentation](https://camusdb.github.io/docs/intro)
+
 **This is an alpha project please don't use it in production.**
 
 ![camus-cli](https://media.giphy.com/media/vqs2XqX5mAxC4Ln0FO/giphy.gif)
