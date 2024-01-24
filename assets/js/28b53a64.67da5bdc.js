@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkcamusdb_docs=self.webpackChunkcamusdb_docs||[]).push([[449],{2552:s=>{s.exports=JSON.parse('{"label":"camusdb","permalink":"/blog/tags/camusdb","allTagsPath":"/blog/tags","count":1,"unlisted":false}')}}]);

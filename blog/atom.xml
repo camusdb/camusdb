@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+    <id>https://camusdb.github.io/blog</id>
+    <title>CamusDB Blog</title>
+    <updated>2023-01-14T00:00:00.000Z</updated>
+    <generator>https://github.com/jpmonette/feed</generator>
+    <link rel="alternate" href="https://camusdb.github.io/blog"/>
+    <subtitle>CamusDB Blog</subtitle>
+    <icon>https://camusdb.github.io/img/favicon.ico</icon>
+    <entry>
+        <title type="html"><![CDATA[Welcome]]></title>
+        <id>https://camusdb.github.io/blog/welcome</id>
+        <link href="https://camusdb.github.io/blog/welcome"/>
+        <updated>2023-01-14T00:00:00.000Z</updated>
+        <summary type="html"><![CDATA[Welcome to the CamusDB docs]]></summary>
+        <content type="html"><![CDATA[<p>Welcome to the CamusDB docs</p>]]></content>
+        <author>
+            <name>Andres Gutierrez</name>
+            <uri>https://github.com/andresgutierrez</uri>
+        </author>
+        <category label="camusdb" term="camusdb"/>
+    </entry>
+</feed>
