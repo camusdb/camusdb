@@ -73,6 +73,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         byte[] treeBuffer = new byte[
             SerializatorTypeSizes.TypeInteger32 + // version (4 byte) +
             SerializatorTypeSizes.TypeInteger32 + // capacity (4 byte) +
+            SerializatorTypeSizes.TypeInteger32 + // direction (4 byte) +
             SerializatorTypeSizes.TypeInteger32 + // height (4 byte) +
             SerializatorTypeSizes.TypeInteger32 + // size (4 byte)
             SerializatorTypeSizes.TypeObjectId    // root (4 byte)
@@ -81,6 +82,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         int pointer = 0;
         Serializator.WriteInt32(treeBuffer, BTreeConfig.LayoutVersion, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.maxNodeCapacity, ref pointer);
+        Serializator.WriteInt32(treeBuffer, (int)index.direction, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.height, ref pointer);
         Serializator.WriteInt32(treeBuffer, index.size, ref pointer);
         Serializator.WriteObjectId(treeBuffer, index.root!.PageOffset, ref pointer);
@@ -89,7 +91,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
         //await tablespace.WriteDataToPage(index.PageOffset, sequence, treeBuffer);
         //modifiedPages.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, index.PageOffset, sequence, treeBuffer));
 
-        tablespace.WriteDataToPageBatch(modifiedPages, index.PageOffset, 0, treeBuffer);
+        tablespace.WriteDataToPageBatch(modifiedPages, index.rootOffset, 0, treeBuffer);
 
         //@todo update nodes concurrently
         ObjectIdValue nullValue = new();

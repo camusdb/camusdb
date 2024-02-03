@@ -26,7 +26,7 @@ internal sealed class TestBTreeObjectIds
     [Test]
     public void TestEmpty()
     {
-        BTree<ObjectIdValue, ObjectIdValue> tree = new(new(), 8);
+        BTree<ObjectIdValue, ObjectIdValue> tree = new(new(), 8, BTreeDirection.Ascending);
 
         Assert.AreEqual(tree.Size(), 0);
         Assert.AreEqual(tree.Height(), 0);
@@ -38,7 +38,7 @@ internal sealed class TestBTreeObjectIds
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<ObjectIdValue, ObjectIdValue> tree = new(new(), 8);
+        BTree<ObjectIdValue, ObjectIdValue> tree = new(new(), 8, BTreeDirection.Ascending);
 
         for (int i = 0; i < 5; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, ObjectIdGenerator.Generate(), ObjectIdGenerator.Generate());
@@ -52,7 +52,7 @@ internal sealed class TestBTreeObjectIds
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<ObjectIdValue, ObjectIdValue> tree = new(new(), 8);
+        BTree<ObjectIdValue, ObjectIdValue> tree = new(new(), 8, BTreeDirection.Ascending);
 
         for (int i = 0; i < 8; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, ObjectIdGenerator.Generate(), ObjectIdGenerator.Generate());

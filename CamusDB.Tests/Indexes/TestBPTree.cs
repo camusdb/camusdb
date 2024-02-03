@@ -22,7 +22,7 @@ internal sealed class TestBPTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8);
+        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         await tree.Put(txnid, BTreeCommitState.Committed, new CompositeColumnValue(new ColumnValue(ColumnType.Integer64, 5)), 100);
 
@@ -35,7 +35,7 @@ internal sealed class TestBPTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8);
+        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         CompositeColumnValue key = new(new ColumnValue(ColumnType.Integer64, 5));
 
@@ -54,7 +54,7 @@ internal sealed class TestBPTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8);
+        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         ColumnValue cv = new(ColumnType.Integer64, 5);
         CompositeColumnValue key = new(cv);
@@ -73,7 +73,7 @@ internal sealed class TestBPTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8);
+        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         ColumnValue cv = new(ColumnType.Integer64, 5);
         CompositeColumnValue key = new(cv);
@@ -93,7 +93,7 @@ internal sealed class TestBPTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8);
+        BPTree<CompositeColumnValue, ColumnValue, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         ColumnValue cv1 = new(ColumnType.Integer64, 5);
         ColumnValue cv2 = new(ColumnType.Integer64, 25);

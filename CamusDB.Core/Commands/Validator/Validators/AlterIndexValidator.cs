@@ -36,11 +36,14 @@ internal sealed class AlterIndexValidator : ValidatorBase
 
         if (ticket.Operation == AlterIndexOperation.AddIndex || ticket.Operation == AlterIndexOperation.AddUniqueIndex || ticket.Operation == AlterIndexOperation.AddPrimaryKey)
         {
-            if (string.IsNullOrWhiteSpace(ticket.ColumnName))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Column name is required"
-                );            
+            foreach (ColumnIndexInfo column in ticket.Columns)
+            {
+                if (string.IsNullOrWhiteSpace(column.Name))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        "Column name is required"
+                    );
+            }
         }
 
         if (ticket.Operation == AlterIndexOperation.AddIndex || ticket.Operation == AlterIndexOperation.AddUniqueIndex)

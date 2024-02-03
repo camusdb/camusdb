@@ -503,14 +503,14 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableAndAddIndex()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
+        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _) = await SetupEmptyTable();
 
         AlterIndexTicket alterIndexTicket = new(
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columnName: "name",
+            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -537,7 +537,7 @@ internal sealed class TestTableAlterer : BaseTest
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columnName: "name",
+            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -558,7 +558,7 @@ internal sealed class TestTableAlterer : BaseTest
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columnName: "name",
+            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -569,7 +569,7 @@ internal sealed class TestTableAlterer : BaseTest
             databaseName: dbname,
             tableName: "robots",
             indexName: "year_idx",
-            columnName: "year",
+            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("year", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -593,14 +593,14 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableFillAndAddIndex()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _, _) = await SetupBasicTable();
 
         AlterIndexTicket alterIndexTicket = new(
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columnName: "name",
+            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -620,14 +620,14 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableFillRepeatedAndAddIndex()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupTableRepeatedData();
+        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _, _) = await SetupTableRepeatedData();
 
         AlterIndexTicket alterIndexTicket = new(
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columnName: "name",
+            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -647,14 +647,14 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableAndAddUniqueIndex()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
+        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _) = await SetupEmptyTable();
 
         AlterIndexTicket alterIndexTicket = new(
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columnName: "name",
+            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddUniqueIndex
         );
 
@@ -681,7 +681,7 @@ internal sealed class TestTableAlterer : BaseTest
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columnName: "name",
+            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddUniqueIndex
         );
 
@@ -700,7 +700,7 @@ internal sealed class TestTableAlterer : BaseTest
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columnName: "name",
+            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -720,7 +720,7 @@ internal sealed class TestTableAlterer : BaseTest
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columnName: "name",
+            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
             operation: AlterIndexOperation.DropIndex
         );
 
@@ -741,7 +741,7 @@ internal sealed class TestTableAlterer : BaseTest
             databaseName: dbname,
             tableName: "robots",
             indexName: "~pk",
-            columnName: "",
+            columns: Array.Empty<ColumnIndexInfo>(),
             operation: AlterIndexOperation.DropPrimaryKey
         );
 
@@ -767,7 +767,7 @@ internal sealed class TestTableAlterer : BaseTest
             databaseName: dbname,
             tableName: "robots",
             indexName: "~pk",
-            columnName: "",
+            columns: Array.Empty<ColumnIndexInfo>(),
             operation: AlterIndexOperation.DropPrimaryKey
         );
 
@@ -786,7 +786,7 @@ internal sealed class TestTableAlterer : BaseTest
             databaseName: dbname,
             tableName: "robots",
             indexName: "~pk",
-            columnName: "id",
+            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("id", OrderType.Ascending) },
             operation: AlterIndexOperation.AddPrimaryKey
         );
 

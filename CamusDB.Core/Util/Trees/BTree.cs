@@ -14,13 +14,6 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.Util.Trees;
 
-public class BTreeIncr
-{
-    public static int CurrentTreeId = -1;
-
-    public static int CurrentNodeId = -1;
-}
-
 /**
  * B+Tree 
  *  
@@ -36,12 +29,14 @@ public class BTreeIncr
  * the same transaction id (timestamp).
  */
 public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : IComparable<TValue>
-{    
+{
     public readonly IBTreeNodeReader<TKey, TValue>? reader; // lazy node reader
 
     public BTreeNode<TKey, TValue>? root;  // root of the B-tree
 
     public int maxNodeCapacity;
+
+    public BTreeDirection direction;
 
     private readonly int maxNodeCapacityHalf;
 
@@ -53,7 +48,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
     public int loaded;   // number of loaded nodes
 
-    public ObjectIdValue PageOffset; // page offset to root node
+    public ObjectIdValue rootOffset; // page offset to root node
 
     private readonly AsyncReaderWriterLock readerWriterLock = new();
 
@@ -62,20 +57,21 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     /// </summary>
     /// <param name="rootOffset"></param>
     /// <param name="maxNodeCapacity"></param>
+    /// <param name="direction"></param>
     /// <param name="reader"></param>
-    public BTree(ObjectIdValue rootOffset, int maxNodeCapacity, IBTreeNodeReader<TKey, TValue>? reader = null)
+    /// <exception cref="CamusDBException"></exception>
+    public BTree(ObjectIdValue rootOffset, int maxNodeCapacity, BTreeDirection direction, IBTreeNodeReader<TKey, TValue>? reader = null)
     {
         if (maxNodeCapacity == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Tree capacity cannot be zero");
 
-        this.reader = reader;
-        PageOffset = rootOffset;
-        Id = Interlocked.Increment(ref BTreeIncr.CurrentTreeId);
-
-        // Console.WriteLine("Created BTree {0} MaxCapacity={1}", Id, maxNodeCapacity);
-
+        this.rootOffset = rootOffset;
         this.maxNodeCapacity = maxNodeCapacity;
         this.maxNodeCapacityHalf = maxNodeCapacity / 2;
+        this.direction = direction;
+        this.reader = reader;
+
+        Id = Interlocked.Increment(ref BTreeIncr.CurrentTreeId);
     }
 
     /// <summary>
@@ -121,10 +117,13 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             return default;
         }
 
-        return await GetInternal(root, txType, txnid, key, height).ConfigureAwait(false);
+        if (direction == BTreeDirection.Ascending)
+            return await GetInternalAscending(root, txType, txnid, key, height).ConfigureAwait(false);
+
+        return await GetInternalDescending(root, txType, txnid, key, height).ConfigureAwait(false);
     }
 
-    private async Task<TValue?> GetInternal(BTreeNode<TKey, TValue>? node, TransactionType txType, HLCTimestamp txnid, TKey key, int ht)
+    private static async Task<TValue?> GetInternalAscending(BTreeNode<TKey, TValue>? node, TransactionType txType, HLCTimestamp txnid, TKey key, int ht)
     {
         if (node is null)
             return default;
@@ -153,7 +152,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                 }
             }*/
 
-            BTreeEntry<TKey, TValue>? entry = BinarySearch(children, node.KeyCount, key);
+            BTreeEntry<TKey, TValue>? entry = BinarySearchAscending(children, node.KeyCount, key);
 
             if (entry is not null && entry.CanBeSeenBy(txnid))
                 return entry.GetValue(txType, txnid);
@@ -168,7 +167,59 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
                 {
                     BTreeEntry<TKey, TValue> entry = children[j];
 
-                    return await GetInternal(await entry.Next.ConfigureAwait(false), txType, txnid, key, ht - 1).ConfigureAwait(false);
+                    return await GetInternalAscending(await entry.Next.ConfigureAwait(false), txType, txnid, key, ht - 1).ConfigureAwait(false);
+                }
+            }
+        }
+
+        return default;
+    }
+
+    private static async Task<TValue?> GetInternalDescending(BTreeNode<TKey, TValue>? node, TransactionType txType, HLCTimestamp txnid, TKey key, int ht)
+    {
+        if (node is null)
+            return default;
+
+        BTreeEntry<TKey, TValue>[] children = node.children;
+
+        // external node
+        if (ht == 0)
+        {
+            /*for (int j = 0; j < node.KeyCount; j++)
+            {
+                BTreeEntry<TKey, TValue> entry = children[j];
+
+                //Console.WriteLine("Z {0} {1}", key, entry.Key);
+
+                // verify if key can be seen by MVCC
+                if (!entry.CanBeSeenBy(txnid))
+                    continue;
+
+                //Console.WriteLine("X {0} {1}", key, entry.Key);
+
+                if (Eq(key, entry.Key))
+                {
+                    Console.WriteLine(j);
+                    return entry.GetValue(txType, txnid);
+                }
+            }*/
+
+            BTreeEntry<TKey, TValue>? entry = BinarySearchDescending(children, node.KeyCount, key);
+
+            if (entry is not null && entry.CanBeSeenBy(txnid))
+                return entry.GetValue(txType, txnid);
+        }
+
+        // internal node
+        else
+        {
+            for (int j = 0; j<node.KeyCount; j++)
+            {
+                if (j + 1 == node.KeyCount || Greater(key, children[j + 1].Key))
+                {
+                    BTreeEntry<TKey, TValue> entry = children[j];
+
+                    return await GetInternalDescending(await entry.Next.ConfigureAwait(false), txType, txnid, key, ht - 1).ConfigureAwait(false);
                 }
             }
         }
@@ -186,7 +237,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             yield return entry;
     }
 
-    private async IAsyncEnumerable<BTreeEntry<TKey, TValue>> EntriesTraverseInternal(BTreeNode<TKey, TValue>? node, HLCTimestamp txnId, int ht)
+    private static async IAsyncEnumerable<BTreeEntry<TKey, TValue>> EntriesTraverseInternal(BTreeNode<TKey, TValue>? node, HLCTimestamp txnId, int ht)
     {
         if (node is null)
             yield break;
@@ -230,7 +281,14 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             yield return node;
     }
 
-    private async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesTraverseInternal(BTreeNode<TKey, TValue>? node, HLCTimestamp txnId, int ht)
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="txnId"></param>
+    /// <param name="ht"></param>
+    /// <returns></returns>
+    private static async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesTraverseInternal(BTreeNode<TKey, TValue>? node, HLCTimestamp txnId, int ht)
     {
         if (node is null)
             yield break;
@@ -260,12 +318,19 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     /// </summary>
     /// <returns></returns>
     public async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesReverseTraverse(HLCTimestamp txnId)
-    {        
+    {
         await foreach (BTreeNode<TKey, TValue> node in NodesReverseTraverseInternal(root, txnId, height))
-           yield return node;     
+            yield return node;
     }
 
-    private async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesReverseTraverseInternal(BTreeNode<TKey, TValue>? node, HLCTimestamp txnId, int ht)
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="txnId"></param>
+    /// <param name="ht"></param>
+    /// <returns></returns>
+    private static async IAsyncEnumerable<BTreeNode<TKey, TValue>> NodesReverseTraverseInternal(BTreeNode<TKey, TValue>? node, HLCTimestamp txnId, int ht)
     {
         if (node is null)
             yield break;
@@ -316,7 +381,12 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             loaded++;
         }
 
-        BTreeNode<TKey, TValue>? split = await Insert(root, txnid, key, commitState, value, height, deltas).ConfigureAwait(false);
+        BTreeNode<TKey, TValue>? split;
+
+        if (direction == BTreeDirection.Ascending)
+            split = await InsertAscending(root, txnid, key, commitState, value, height, deltas).ConfigureAwait(false);
+        else
+            split = await InsertDescending(root, txnid, key, commitState, value, height, deltas).ConfigureAwait(false);
 
         if (split is null)
         {
@@ -356,7 +426,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         return deltas;
     }
 
-    private async Task<BTreeNode<TKey, TValue>?> Insert(
+    private async Task<BTreeNode<TKey, TValue>?> InsertAscending(
         BTreeNode<TKey, TValue>? node,
         HLCTimestamp txnid,
         TKey key,
@@ -418,7 +488,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
                     BTreeNode<TKey, TValue>? next = await entry.Next.ConfigureAwait(false);
 
-                    BTreeNode<TKey, TValue>? split = await Insert(next, txnid, key, commitState, value, ht - 1, deltas).ConfigureAwait(false);
+                    BTreeNode<TKey, TValue>? split = await InsertAscending(next, txnid, key, commitState, value, ht - 1, deltas).ConfigureAwait(false);
 
                     if (split == null)
                         return null;
@@ -448,7 +518,118 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         return Split(node, txnid, deltas);
     }
 
-    // split node in half
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="txnid"></param>
+    /// <param name="key"></param>
+    /// <param name="commitState"></param>
+    /// <param name="value"></param>
+    /// <param name="ht"></param>
+    /// <param name="deltas"></param>
+    /// <returns></returns>
+    /// <exception cref="ArgumentException"></exception>
+    /// <exception cref="Exception"></exception>
+    private async Task<BTreeNode<TKey, TValue>?> InsertDescending(
+        BTreeNode<TKey, TValue>? node,
+        HLCTimestamp txnid,
+        TKey key,
+        BTreeCommitState commitState,
+        TValue? value,
+        int ht,
+        BTreeMutationDeltas<TKey, TValue> deltas
+    )
+    {
+        if (node is null)
+            throw new ArgumentException("node cannot be null");
+
+        //using IDisposable disposable = await node.WriterLockAsync();
+
+        node.NumberAccesses++;
+        node.LastAccess = txnid;
+
+        int j;
+        BTreeEntry<TKey, TValue>? newEntry = null;
+        BTreeEntry<TKey, TValue>[] children = node.children;
+
+        // external node
+        if (ht == 0)
+        {
+            for (j = 0; j < node.KeyCount; j++)
+            {
+                BTreeEntry<TKey, TValue> childrenEntry = children[j];
+
+                if (Eq(key, childrenEntry.Key))
+                {
+                    // Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);                    
+
+                    node.NumberWrites++;
+
+                    deltas.Nodes.Add(node);
+                    deltas.MvccEntries.Add(childrenEntry.SetValue(txnid, commitState, value));
+                    return null;
+                }
+
+                if (Greater(key, childrenEntry.Key))
+                    break;
+            }
+
+            // Console.WriteLine("Not found in external node SetV={0} {1} {2} {3}", key, txnid, commitState, value);
+
+            size++;
+            newEntry = new(key, reader, null, maxNodeCapacity);
+            deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
+        }
+
+        // internal node
+        else
+        {
+            for (j = 0; j < node.KeyCount; j++)
+            {
+                if ((j + 1 == node.KeyCount) || Greater(key, children[j + 1].Key))
+                {
+                    BTreeEntry<TKey, TValue> entry = children[j++];
+
+                    BTreeNode<TKey, TValue>? next = await entry.Next.ConfigureAwait(false);
+
+                    BTreeNode<TKey, TValue>? split = await InsertDescending(next, txnid, key, commitState, value, ht - 1, deltas).ConfigureAwait(false);
+
+                    if (split == null)
+                        return null;
+
+                    newEntry = new(split.children[0].Key, reader, split, maxNodeCapacity);
+                    //deltas.MvccEntries.Add(newEntry.SetValue(txnid, commitState, value));
+                    break;
+                }
+            }
+        }
+
+        if (newEntry is null)
+            throw new Exception(j + " " + node.KeyCount);
+
+        for (int i = node.KeyCount; i > j; i--)
+            node.children[i] = node.children[i - 1];        
+
+        node.children[j] = newEntry;
+        node.KeyCount++;
+        node.NumberWrites++;
+
+        deltas.Nodes.Add(node);
+
+        if (node.KeyCount < maxNodeCapacity)
+            return null;
+
+        return Split(node, txnid, deltas);
+    }
+
+    /// <summary>
+    /// Split node in half
+    /// </summary>
+    /// <param name="current"></param>
+    /// <param name="txnid"></param>
+    /// <param name="deltas"></param>
+    /// <returns></returns>
     private BTreeNode<TKey, TValue> Split(BTreeNode<TKey, TValue> current, HLCTimestamp txnid, BTreeMutationDeltas<TKey, TValue> deltas)
     {
         // Console.WriteLine("Split node {0} {1} [2]", current.Id, current.KeyCount);
@@ -476,7 +657,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     /// <param name="key"></param>
     /// <returns></returns>
     public async Task<(bool found, BTreeMutationDeltas<TKey, TValue> deltas)> Remove(TKey key)
-    {        
+    {
         BTreeMutationDeltas<TKey, TValue> deltas = new();
 
         bool found = await Delete(root, key, height, deltas).ConfigureAwait(false);
@@ -484,7 +665,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         if (found)
             size--;
 
-        return (found, deltas);        
+        return (found, deltas);
     }
 
     /// <summary>
@@ -496,7 +677,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     /// <param name="deltas"></param>
     /// <returns></returns>
     /// <exception cref="Exception"></exception>
-    private async Task<bool> Delete(BTreeNode<TKey, TValue>? node, TKey key, int ht, BTreeMutationDeltas<TKey, TValue> deltas)
+    private static async Task<bool> Delete(BTreeNode<TKey, TValue>? node, TKey key, int ht, BTreeMutationDeltas<TKey, TValue> deltas)
     {
         if (node is null)
             return false;
@@ -662,6 +843,12 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
     // comparison functions - make Comparable instead of Key to avoid casts
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool Greater(TKey k1, TKey k2)
+    {
+        return k1!.CompareTo(k2) > 0;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool Less(TKey k1, TKey k2)
     {
         return k1!.CompareTo(k2) < 0;
@@ -673,7 +860,14 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
         return k1.CompareTo(k2) == 0;
     }
 
-    static BTreeEntry<TKey, TValue>? BinarySearch(BTreeEntry<TKey, TValue>[] arr, int length, TKey x)
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="arr"></param>
+    /// <param name="length"></param>
+    /// <param name="x"></param>
+    /// <returns></returns>
+    private static BTreeEntry<TKey, TValue>? BinarySearchAscending(BTreeEntry<TKey, TValue>[] arr, int length, TKey x)
     {
         int l = 0, r = length - 1;
 
@@ -689,6 +883,40 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
             // If x is greater, ignore left half
             if (Less(arr[m].Key, x))
+                l = m + 1;
+
+            // If x is smaller, ignore right half
+            else
+                r = m - 1;
+        }
+
+        // If we reach here, then element was not present
+        return default;
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="arr"></param>
+    /// <param name="length"></param>
+    /// <param name="x"></param>
+    /// <returns></returns>
+    private static BTreeEntry<TKey, TValue>? BinarySearchDescending(BTreeEntry<TKey, TValue>[] arr, int length, TKey x)
+    {
+        int l = 0, r = length - 1;
+
+        while (l <= r)
+        {
+            int m = l + (r - l) / 2;
+
+            //Console.WriteLine("Z {0} {1}", arr[m].Key, x);
+
+            // Check if x is present at mid
+            if (Eq(arr[m].Key, x))
+                return arr[m];
+
+            // If x is greater, ignore left half
+            if (Greater(arr[m].Key, x))
                 l = m + 1;
 
             // If x is smaller, ignore right half

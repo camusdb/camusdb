@@ -101,6 +101,7 @@ internal sealed class SchemaQuerier
                 { "Table", new ColumnValue(ColumnType.String, table.Name) },
                 { "Non_unique", new ColumnValue(ColumnType.String, index.Value.Type == IndexType.Unique ? "0" : "1") },
                 { "Key_name", new ColumnValue(ColumnType.String, index.Key) },
+                { "Columns", new ColumnValue(ColumnType.String, string.Join(",", index.Value.Columns)) },
                 { "Index_type", new ColumnValue(ColumnType.String, "BTREE") }
             });
         }

@@ -21,15 +21,18 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 public sealed class TableColumnDropper
 {
+    private readonly ILogger<ICamusDB> logger;
+
     private readonly IndexSaver indexSaver = new();
 
     private readonly RowSerializer rowSerializer = new();
 
     public TableColumnDropper(ILogger<ICamusDB> logger)
     {
+        this.logger = logger;
     }
 
-    private void Validate(TableDescriptor table, AlterColumnTicket ticket)
+    private static void Validate(TableDescriptor table, AlterColumnTicket ticket)
     {
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
@@ -274,8 +277,8 @@ public sealed class TableColumnDropper
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        Console.WriteLine(
-            "Column dropped, modified {0} rows, Time taken: {1}",
+        logger.LogInformation(
+            "Column dropped, modified {Rows} rows, Time taken: {Time}",
             state.ModifiedRows,
             timeTaken.ToString(@"m\:ss\.fff")
         );

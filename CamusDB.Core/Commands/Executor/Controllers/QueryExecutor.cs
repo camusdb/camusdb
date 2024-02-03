@@ -200,7 +200,7 @@ internal sealed class QueryExecutor
                 yield break;
             }
 
-            byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo);
+            byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo).ConfigureAwait(false);
             if (data.Length == 0)
             {
                 //Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);

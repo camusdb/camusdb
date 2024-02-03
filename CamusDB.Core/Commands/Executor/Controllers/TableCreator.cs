@@ -108,7 +108,7 @@ internal sealed class TableCreator
                             databaseName: database.Name,
                             tableName: ticket.TableName,
                             indexName: constraint.Name,
-                            columnName: constraint.Columns[0].Name,
+                            columns: constraint.Columns,
                             operation: AlterIndexOperation.AddPrimaryKey
                         );
 
@@ -123,7 +123,7 @@ internal sealed class TableCreator
                             databaseName: database.Name,
                             tableName: ticket.TableName,
                             indexName: constraint.Name,
-                            columnName: constraint.Columns[0].Name,
+                            columns: constraint.Columns,
                             operation: AlterIndexOperation.AddIndex
                         );
 
@@ -138,7 +138,7 @@ internal sealed class TableCreator
                             databaseName: database.Name,
                             tableName: ticket.TableName,
                             indexName: constraint.Name,
-                            columnName: constraint.Columns[0].Name,
+                            columns: constraint.Columns,
                             operation: AlterIndexOperation.AddUniqueIndex
                         );
 

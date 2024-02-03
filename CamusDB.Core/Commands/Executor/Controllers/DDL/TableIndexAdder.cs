@@ -41,31 +41,34 @@ internal sealed class TableIndexAdder
         if (ticket.Operation == AlterIndexOperation.AddPrimaryKey && table.Indexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "Primary key already exists on table '" + table.Name + "'"
+                $"Primary key already exists on table '{table.Name}'"
             );
 
         if (table.Indexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "Index '" + ticket.IndexName + "' already exists on table '" + table.Name + "'"
-            );        
-
-        bool hasColumn = false;
-
-        foreach (TableColumnSchema column in table.Schema.Columns!)
-        {
-            if (column.Name == ticket.ColumnName)
-            {
-                hasColumn = true;
-                break;
-            }
-        }
-
-        if (!hasColumn)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Column '" + ticket.ColumnName + "' does not exist on table '" + table.Name + "'"
+                $"Index '{ticket.IndexName}' already exists on table '{table.Name}'"
             );
+
+        foreach (ColumnIndexInfo indexColumn in ticket.Columns)
+        {
+            bool hasColumn = false;
+
+            foreach (TableColumnSchema column in table.Schema.Columns!)
+            {
+                if (column.Name == indexColumn.Name)
+                {
+                    hasColumn = true;
+                    break;
+                }
+            }
+
+            if (!hasColumn)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Column '{indexColumn.Name}' does not exist on table '{table.Name}'"
+                );
+        }
     }
 
     /// <summary>
@@ -156,7 +159,7 @@ internal sealed class TableIndexAdder
             offset: null,
             parameters: null
         );
-        
+
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
         // @todo we need to take a snapshot of the data to prevent deadlocks
@@ -176,7 +179,7 @@ internal sealed class TableIndexAdder
     /// <exception cref="NotImplementedException"></exception>
     private async Task<FluxAction> AdquireLocks(AddIndexFluxState state)
     {
-        state.Locks.Add(await state.Table.Rows.WriterLockAsync().ConfigureAwait(false));        
+        state.Locks.Add(await state.Table.Rows.WriterLockAsync().ConfigureAwait(false));
         return FluxAction.Continue;
     }
 
@@ -207,7 +210,7 @@ internal sealed class TableIndexAdder
         foreach (QueryResultRow row in state.RowsToFeed)
         {
             CompositeColumnValue indexKeyValue;
-            BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = state.Btree;            
+            BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = state.Btree;
 
             if (ticket.Operation == AlterIndexOperation.AddPrimaryKey || ticket.Operation == AlterIndexOperation.AddUniqueIndex)
                 indexKeyValue = await ValidateAndInsertUniqueValue(tablespace, index, row, ticket, state.ModifiedPages);
@@ -230,22 +233,29 @@ internal sealed class TableIndexAdder
         List<BufferPageOperation> modifiedPages
     )
     {
-        ColumnValue? uniqueKeyValue = GetColumnValue(row.Row, ticket.ColumnName);
+        ColumnValue[] columnValues = new ColumnValue[ticket.Columns.Length];
 
-        if (uniqueKeyValue is null)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "A null value was found for unique key field " + ticket.ColumnName
-            );
+        foreach (ColumnIndexInfo columnIndex in ticket.Columns)
+        {
+            ColumnValue? uniqueKeyValue = GetColumnValue(row.Row, columnIndex.Name);
 
-        CompositeColumnValue compositeUniqueKeyValue = new(uniqueKeyValue);
+            if (uniqueKeyValue is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for unique key field " + columnIndex.Name
+                );
+
+            columnValues[0] = uniqueKeyValue;
+        }
+
+        CompositeColumnValue compositeUniqueKeyValue = new(columnValues);
 
         BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, compositeUniqueKeyValue);
 
         if (rowTuple is not null && !rowTuple.IsNull())
             throw new CamusDBException(
                 CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                "Duplicate entry for key \"" + ticket.IndexName + "\" " + uniqueKeyValue.Type + " " + uniqueKeyValue
+                "Duplicate entry for key \"" + ticket.IndexName + "\" " + compositeUniqueKeyValue
             );
 
         SaveIndexTicket saveUniqueIndexTicket = new(
@@ -271,16 +281,26 @@ internal sealed class TableIndexAdder
         List<BufferPageOperation> modifiedPages
     )
     {
-        ColumnValue? multiKeyValue = GetColumnValue(row.Row, ticket.ColumnName);
+        int i = 0;
+        ColumnValue[] columnValues = new ColumnValue[ticket.Columns.Length + 1];
 
-        if (multiKeyValue is null)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "A null value was found for multi key field " + ticket.ColumnName
-            );
+        foreach (ColumnIndexInfo columnIndex in ticket.Columns)
+        {
+            ColumnValue? multiKeyValue = GetColumnValue(row.Row, columnIndex.Name);
 
-        CompositeColumnValue compositeIndexValue = new(new ColumnValue[] { multiKeyValue, new(ColumnType.Id, row.Tuple.SlotOne.ToString()) });
-        
+            if (multiKeyValue is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"A null value was found for multi key field '{columnIndex.Name}'"
+                );
+
+            columnValues[i++] = multiKeyValue;
+        }
+
+        columnValues[i++] = new(ColumnType.Id, row.Tuple.SlotOne.ToString());
+
+        CompositeColumnValue compositeIndexValue = new(columnValues);
+
         SaveIndexTicket saveUniqueIndexTicket = new(
             tablespace: tablespace,
             index: uniqueIndex,
@@ -311,7 +331,7 @@ internal sealed class TableIndexAdder
         }
 
         foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue keyValue, BTreeTuple tuple) index in state.IndexDeltas)
-        {            
+        {
             SaveIndexTicket saveUniqueIndexTicket = new(
                 tablespace: state.Database.BufferPool,
                 index: index.index,
@@ -355,7 +375,7 @@ internal sealed class TableIndexAdder
                     indexId,
                     ticket.IndexName,
                     table.Id,
-                    GetColumnIds(table, ticket.ColumnName),
+                    GetColumnIds(table, ticket.Columns),
                     indexType,
                     state.IndexOffset.ToString()
                 )
@@ -370,24 +390,36 @@ internal sealed class TableIndexAdder
 
         table.Indexes.Add(
             ticket.IndexName,
-            new TableIndexSchema(new string[] { ticket.ColumnName }, indexType, state.Btree)
+            new TableIndexSchema(ticket.Columns.Select(x => x.Name).ToArray(), indexType, state.Btree)
         );
 
         return FluxAction.Continue;
     }
 
-    private static string[] GetColumnIds(TableDescriptor table, string columnName)
+    private static string[] GetColumnIds(TableDescriptor table, ColumnIndexInfo[] columns)
     {
-        foreach (TableColumnSchema column in table.Schema.Columns!)
+        int i = 0;
+        string[] columnsIds = new string[columns.Length];
+
+        foreach (ColumnIndexInfo columnIndex in columns)
         {
-            if (column.Name == columnName)
-                return new string[] { column.Id };
+            bool hasColumn = false;
+
+            foreach (TableColumnSchema column in table.Schema.Columns!)
+            {
+                if (column.Name == columnIndex.Name)
+                {
+                    hasColumn = true;
+                    columnsIds[i] = column.Id;
+                    break;
+                }
+            }
+
+            if (!hasColumn)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Couldn't get column id for column '{columnIndex.Name}'");
         }
 
-        throw new CamusDBException(
-            CamusDBErrorCodes.InvalidInternalOperation,
-            "Couldn't get column id for column '" + columnName + "'"
-        );
+        return columnsIds;
     }
 
     /// <summary>
@@ -432,7 +464,7 @@ internal sealed class TableIndexAdder
         Stopwatch timer = Stopwatch.StartNew();
 
         // @TODO: Adquire and release locks
-        
+
         machine.When(AddIndexFluxSteps.AllocateNewIndex, AllocateNewIndex);
         machine.When(AddIndexFluxSteps.AdquireLocks, AdquireLocks);
         machine.When(AddIndexFluxSteps.LocateTuplesToFeedTheIndex, LocateTuplesToFeedTheIndex);

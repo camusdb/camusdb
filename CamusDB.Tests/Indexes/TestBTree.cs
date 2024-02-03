@@ -11,6 +11,7 @@ using CamusDB.Core.Util.Trees;
 using System.Threading.Tasks;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.CommandsExecutor.Models;
+using System;
 
 namespace CamusDB.Tests.Indexes;
 
@@ -26,7 +27,7 @@ internal sealed class TestBTree
     [Test]
     public void TestEmpty()
     {
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         Assert.AreEqual(tree.Size(), 0);
         Assert.AreEqual(tree.Height(), 0);
@@ -34,11 +35,11 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public async Task TestBasicInsert()
+    public async Task TestBasicInsertAscending()
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
@@ -47,11 +48,24 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public async Task TestMultiInsertNoSplit()
+    public async Task TestBasicInsertDescending()
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Descending);
+
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
+
+        Assert.AreEqual(tree.Size(), 1);
+        Assert.AreEqual(tree.Height(), 0);
+    }
+
+    [Test]
+    public async Task TestMultiInsertNoSplitAscending()
+    {
+        HLCTimestamp txnid = await hlc.SendOrLocalEvent();
+
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
@@ -65,11 +79,29 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public async Task TestMultiInsertSplit()
+    public async Task TestMultiInsertNoSplitDescending()
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Descending);
+
+        await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 6, 101);
+        await tree.Put(txnid, BTreeCommitState.Committed, 7, 102);
+        await tree.Put(txnid, BTreeCommitState.Committed, 8, 103);
+        await tree.Put(txnid, BTreeCommitState.Committed, 9, 104);
+
+        Assert.AreEqual(tree.Size(), 6);
+        Assert.AreEqual(tree.Height(), 0);        
+    }
+
+    [Test]
+    public async Task TestMultiInsertSplitAscending()
+    {
+        HLCTimestamp txnid = await hlc.SendOrLocalEvent();
+
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         for (int i = 0; i < 9; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -79,11 +111,25 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public async Task TestBasicGet()
+    public async Task TestMultiInsertSplitDescending()
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Descending);
+
+        for (int i = 0; i < 9; i++)
+            await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
+
+        Assert.AreEqual(tree.Size(), 9);
+        Assert.AreEqual(tree.Height(), 1);        
+    }    
+
+    [Test]
+    public async Task TestBasicGetAscending()
+    {
+        HLCTimestamp txnid = await hlc.SendOrLocalEvent();
+
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
@@ -95,11 +141,61 @@ internal sealed class TestBTree
     }
 
     [Test]
+    public async Task TestBasicGetDescending()
+    {
+        HLCTimestamp txnid = await hlc.SendOrLocalEvent();
+
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Descending);
+
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
+
+        int values = await tree.Get(TransactionType.ReadOnly, txnid, 5);
+
+        Assert.AreEqual(100, values);
+        //Assert.AreEqual(values!.Length, 8);
+        //Assert.AreEqual(values[0], 100);
+    }
+
+    [Test]
+    public async Task TestMultiInsertGetAscending()
+    {
+        HLCTimestamp txnid = await hlc.SendOrLocalEvent();
+
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
+
+        for (int i = 0; i < 9; i++)
+            await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
+
+        Assert.AreEqual(tree.Size(), 9);
+        Assert.AreEqual(tree.Height(), 1);
+
+        int values = await tree.Get(TransactionType.ReadOnly, txnid, 5);
+        Assert.AreEqual(105, values);
+    }
+
+    [Test]
+    public async Task TestMultiInsertGetDescending()
+    {
+        HLCTimestamp txnid = await hlc.SendOrLocalEvent();
+
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Descending);
+
+        for (int i = 0; i < 9; i++)
+            await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
+
+        Assert.AreEqual(tree.Size(), 9);
+        Assert.AreEqual(tree.Height(), 1);        
+
+        int values = await tree.Get(TransactionType.ReadOnly, txnid, 5);
+        Assert.AreEqual(105, values);
+    }
+
+    [Test]
     public async Task TestBasicNullGet()
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
@@ -109,11 +205,38 @@ internal sealed class TestBTree
     }
 
     [Test]
-    public async Task TestMultiInsertGet()
+    public async Task TestMultiInsertSplitGetAscending()
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
+
+        await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
+        await tree.Put(txnid, BTreeCommitState.Committed, 6, 101);
+        await tree.Put(txnid, BTreeCommitState.Committed, 7, 102);
+        await tree.Put(txnid, BTreeCommitState.Committed, 8, 103);
+        await tree.Put(txnid, BTreeCommitState.Committed, 9, 104);
+
+        int? values = await tree.Get(TransactionType.ReadOnly, txnid, 5);
+
+        Assert.NotNull(values);
+        //Assert.AreEqual(values!.Length, 8);
+        //Assert.AreEqual(values[0], 100);
+
+        values = await tree.Get(TransactionType.ReadOnly, txnid, 7);
+
+        Assert.NotNull(values);
+        //Assert.AreEqual(values!.Length, 8);
+        //Assert.AreEqual(values[0], 102);
+    }
+
+    [Test]
+    public async Task TestMultiInsertSplitGetDescending()
+    {
+        HLCTimestamp txnid = await hlc.SendOrLocalEvent();
+
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Descending);
 
         await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
@@ -142,7 +265,7 @@ internal sealed class TestBTree
 
         BTreeMutationDeltas<int, int> deltas;
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         Assert.AreEqual(1, deltas.Nodes.Count);        
@@ -177,7 +300,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
@@ -193,7 +316,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
 
@@ -209,7 +332,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
@@ -230,7 +353,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
@@ -254,7 +377,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);
@@ -293,7 +416,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         for (int i = 0; i < 8; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -316,7 +439,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         for (int i = 0; i < 16; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -342,7 +465,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         for (int i = 0; i < 32; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -380,7 +503,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         for (int i = 0; i < 256; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -414,7 +537,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         for (int i = 0; i < 524288; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);
@@ -448,7 +571,7 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTree<int, int> tree = new(new(), 8);
+        BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
         for (int i = 0; i < 524288; i++)
             await tree.Put(txnid, BTreeCommitState.Committed, i, 100 + i);

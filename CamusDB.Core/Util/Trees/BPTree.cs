@@ -27,7 +27,8 @@ public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>
     /// <param name="rootOffset"></param>
     /// <param name="maxNodeCapacity"></param>
     /// <param name="reader"></param>
-    public BPTree(ObjectIdValue rootOffset, int maxNodeCapacity, IBTreeNodeReader<TKey, TValue>? reader = null) : base(rootOffset, maxNodeCapacity, reader)
+    public BPTree(ObjectIdValue rootOffset, int maxNodeCapacity, BTreeDirection direction, IBTreeNodeReader<TKey, TValue>? reader = null)
+        : base(rootOffset, maxNodeCapacity, direction, reader)
     {
 
     }
@@ -52,7 +53,7 @@ public sealed class BPTree<TKey, TSubKey, TValue> : BTree<TKey, TValue>
             yield return value;
     }
 
-    private async IAsyncEnumerable<TValue> GetPrefixInternal(BTreeNode<TKey, TValue>? node, TransactionType txType, HLCTimestamp txnid, TSubKey key, int ht)
+    private static async IAsyncEnumerable<TValue> GetPrefixInternal(BTreeNode<TKey, TValue>? node, TransactionType txType, HLCTimestamp txnid, TSubKey key, int ht)
     {
         if (node is null)
             yield break;

@@ -30,7 +30,7 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
 
         byte[] data = await bufferpool.GetDataFromPage(offset);
         if (data.Length == 0)
-            return new(offset, BTreeUtils.GetNodeCapacity<ObjectIdValue, ObjectIdValue>(), reader);
+            return new(offset, BTreeUtils.GetNodeCapacity<ObjectIdValue, ObjectIdValue>(), BTreeDirection.Ascending, reader);
 
         int pointer = 0;
 
@@ -39,8 +39,9 @@ internal sealed class IndexUniqueOffsetReader : IndexBaseReader
             throw new CamusDBException(CamusDBErrorCodes.InvalidIndexLayout, "Unsupported b+tree version found");
 
         int maxCapacity = Serializator.ReadInt32(data, ref pointer);
+        BTreeDirection direction = (BTreeDirection)Serializator.ReadInt32(data, ref pointer);
 
-        BTree<ObjectIdValue, ObjectIdValue> index = new(offset, maxCapacity, reader)
+        BTree<ObjectIdValue, ObjectIdValue> index = new(offset, maxCapacity, direction, reader)
         {
             height = Serializator.ReadInt32(data, ref pointer),
             size = Serializator.ReadInt32(data, ref pointer)

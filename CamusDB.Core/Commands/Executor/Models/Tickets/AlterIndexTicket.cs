@@ -20,7 +20,7 @@ public readonly struct AlterIndexTicket
 
     public string IndexName { get; }
 
-    public string ColumnName { get; }
+    public ColumnIndexInfo[] Columns { get; }
 
     public AlterIndexOperation Operation { get; }    
 
@@ -29,7 +29,7 @@ public readonly struct AlterIndexTicket
         string databaseName,
         string tableName,
         string indexName,
-        string columnName,
+        ColumnIndexInfo[] columns,
         AlterIndexOperation operation
     )
     {
@@ -37,7 +37,7 @@ public readonly struct AlterIndexTicket
         DatabaseName = databaseName;
         TableName = tableName;
         IndexName = indexName;
-        ColumnName = columnName;
+        Columns = columns;
         Operation = operation;        
     }
 }

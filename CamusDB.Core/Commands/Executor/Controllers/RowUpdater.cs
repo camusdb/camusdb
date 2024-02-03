@@ -694,8 +694,8 @@ public sealed class RowUpdater
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        Console.WriteLine(
-            "Updated {0} rows, Time taken: {1}",
+        logger.LogInformation(
+            "Updated {Rows} rows, Time taken: {Time}",
             state.ModifiedRows,
             timeTaken.ToString(@"m\:ss\.fff")
         );

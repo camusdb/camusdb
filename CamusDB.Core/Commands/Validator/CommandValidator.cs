@@ -13,22 +13,27 @@ namespace CamusDB.Core.CommandsValidator;
 
 public sealed class CommandValidator
 {
+    private readonly CreateDatabaseValidator createDatabaseValidator = new();
+
+    private readonly DropDatabaseValidator dropDatabaseValidator = new();
+
+    private readonly CreateTableValidator createTableValidator = new();
+
+    private readonly InsertValidator insertValidator = new();
+
     public void Validate(CreateDatabaseTicket ticket)
     {
-        CreateDatabaseValidator validator = new();
-        validator.Validate(ticket);
+        createDatabaseValidator.Validate(ticket);
     }
 
     public void Validate(DropDatabaseTicket ticket)
     {
-        DropDatabaseValidator validator = new();
-        validator.Validate(ticket);
+        dropDatabaseValidator.Validate(ticket);
     }
 
     public void Validate(CreateTableTicket ticket)
     {
-        CreateTableValidator validator = new();
-        validator.Validate(ticket);
+        createTableValidator.Validate(ticket);
     }
 
     public void Validate(AlterTableTicket ticket)
@@ -56,9 +61,8 @@ public sealed class CommandValidator
     }
 
     public void Validate(InsertTicket ticket)
-    {
-        InsertValidator validator = new();
-        validator.Validate(ticket);
+    {        
+        insertValidator.Validate(ticket);
     }
 
     public void Validate(UpdateTicket ticket)

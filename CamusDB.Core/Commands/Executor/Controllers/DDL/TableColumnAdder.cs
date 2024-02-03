@@ -46,7 +46,7 @@ public sealed class TableColumnAdder
         if (hasColumn)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "Duplicate column '" + ticket.Column.Name + "'"
+                $"Duplicate column '{ticket.Column.Name}'"
             );
     }
 

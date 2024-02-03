@@ -43,7 +43,7 @@ internal sealed class TableDropper
                 databaseName: ticket.DatabaseName,
                 tableName: ticket.TableName,
                 indexName: index.Key,
-                columnName: "",
+                columns: Array.Empty<ColumnIndexInfo>(),
                 operation: index.Key == CamusDBConfig.PrimaryKeyInternalName ? AlterIndexOperation.DropPrimaryKey : AlterIndexOperation.DropIndex
             );
 

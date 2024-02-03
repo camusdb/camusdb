@@ -51,7 +51,7 @@ internal sealed class TableIndexDropper
             throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, "Index " + state.Ticket.IndexName + " does not exist");
 
         state.Btree = index.BTree;
-        state.IndexOffset = index.BTree.PageOffset;
+        state.IndexOffset = index.BTree.rootOffset;
 
         return Task.FromResult(FluxAction.Continue);
     }       
@@ -142,7 +142,7 @@ internal sealed class TableIndexDropper
 
         FluxMachine<DropIndexFluxSteps, DropIndexFluxState> machine = new(state);
 
-        return await AlterIndexInternal(machine, state);
+        return await DropIndexInternal(machine, state);
     }
 
     /// <summary>
@@ -151,7 +151,7 @@ internal sealed class TableIndexDropper
     /// <param name="machine"></param>
     /// <param name="state"></param>
     /// <returns></returns>
-    internal async Task<int> AlterIndexInternal(FluxMachine<DropIndexFluxSteps, DropIndexFluxState> machine, DropIndexFluxState state)
+    internal async Task<int> DropIndexInternal(FluxMachine<DropIndexFluxSteps, DropIndexFluxState> machine, DropIndexFluxState state)
     {
         DatabaseDescriptor database = state.Database;
         BufferPoolManager tablespace = state.Database.BufferPool;
@@ -173,7 +173,7 @@ internal sealed class TableIndexDropper
 
         TimeSpan timeTaken = timer.Elapsed;
 
-        Console.WriteLine(
+        logger.LogWarning(
             "Dropped index {0} from {1} at {2}, Time taken: {3}",
             ticket.IndexName,
             table.Name,
