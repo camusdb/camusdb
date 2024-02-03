@@ -30,34 +30,49 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing index name");
 
         if (ast.nodeType == NodeType.AlterTableAddIndex)
+        {
+            List<ColumnIndexInfo> indexColumns = new();
+            GetColumns(ast.extendedOne, indexColumns);
+
             return new(
                 hlcTimestamp,
                 ticket.DatabaseName,
                 tableName,
                 ast.rightAst!.yytext!,
-                GetColumns(ast.extendedOne),
+                indexColumns.ToArray(),
                 AlterIndexOperation.AddIndex
             );
+        }
 
         if (ast.nodeType == NodeType.AlterTableAddUniqueIndex)
+        {
+            List<ColumnIndexInfo> indexColumns = new();
+            GetColumns(ast.extendedOne, indexColumns);
+
             return new(
                 hlcTimestamp,
                 ticket.DatabaseName,
                 tableName,
                 ast.rightAst!.yytext!,
-                GetColumns(ast.extendedOne),
+                indexColumns.ToArray(),
                 AlterIndexOperation.AddUniqueIndex
             );
+        }
 
         if (ast.nodeType == NodeType.AlterTableAddPrimaryKey)
+        {
+            List<ColumnIndexInfo> indexColumns = new();
+            GetColumns(ast.extendedOne, indexColumns);
+
             return new(
                 hlcTimestamp,
                 ticket.DatabaseName,
                 tableName,
                 CamusDBConfig.PrimaryKeyInternalName,
-                GetColumns(ast.extendedOne),
+                indexColumns.ToArray(),
                 AlterIndexOperation.AddPrimaryKey
             );
+        }
 
         if (ast.nodeType == NodeType.AlterTableDropIndex)
             return new(
@@ -82,19 +97,39 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid alter index operation: {ast.nodeType}");
     }
 
-    private static ColumnIndexInfo[] GetColumns(NodeAst? nodeAst)
+    private static void GetColumns(NodeAst? nodeAst, List<ColumnIndexInfo> indexColumns)
     {
         if (nodeAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid alter index operation: No columns");
 
+        if (nodeAst.nodeType == NodeType.IndexIdentifierList)
+        {
+            if (nodeAst.leftAst != null)
+                GetColumns(nodeAst.leftAst, indexColumns);
+
+            if (nodeAst.rightAst != null)
+                GetColumns(nodeAst.rightAst, indexColumns);
+            
+            return;
+        }
+
         if (nodeAst.nodeType == NodeType.Identifier)
-            return new ColumnIndexInfo[] { new ColumnIndexInfo(nodeAst.yytext!, OrderType.Ascending) };
+        {
+            indexColumns.Add(new ColumnIndexInfo(nodeAst.yytext!, OrderType.Ascending));
+            return;
+        }
 
         if (nodeAst.nodeType == NodeType.IndexIdentifierAsc)
-            return new ColumnIndexInfo[] { new ColumnIndexInfo(nodeAst.leftAst!.yytext!, OrderType.Ascending) };
+        {
+            indexColumns.Add(new ColumnIndexInfo(nodeAst.leftAst!.yytext!, OrderType.Ascending));
+            return;
+        }
 
         if (nodeAst.nodeType == NodeType.IndexIdentifierDesc)
-            return new ColumnIndexInfo[] { new ColumnIndexInfo(nodeAst.leftAst!.yytext!, OrderType.Descending) };
+        {
+            indexColumns.Add(new ColumnIndexInfo(nodeAst.leftAst!.yytext!, OrderType.Descending));
+            return;
+        }
 
         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid alter index operation: {nodeAst.nodeType}");
     }

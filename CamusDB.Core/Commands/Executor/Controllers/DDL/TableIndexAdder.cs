@@ -233,6 +233,7 @@ internal sealed class TableIndexAdder
         List<BufferPageOperation> modifiedPages
     )
     {
+        int i = 0;
         ColumnValue[] columnValues = new ColumnValue[ticket.Columns.Length];
 
         foreach (ColumnIndexInfo columnIndex in ticket.Columns)
@@ -245,7 +246,7 @@ internal sealed class TableIndexAdder
                     "A null value was found for unique key field " + columnIndex.Name
                 );
 
-            columnValues[0] = uniqueKeyValue;
+            columnValues[i++] = uniqueKeyValue;
         }
 
         CompositeColumnValue compositeUniqueKeyValue = new(columnValues);
