@@ -76,7 +76,7 @@ internal sealed class QueryScanner
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.UnknownKey,
-                "Key '" + ticket.IndexName! + "' doesn't exist in table '" + table.Name + "'"
+                $"Key '{ticket.IndexName!}' doesn't exist in table '{table.Name}'"
             );
         }
         

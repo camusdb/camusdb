@@ -70,7 +70,7 @@ public sealed class QueryPlanner
                 {
                     foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
                     {
-                        if (index.Value.Columns[0] == equality.leftAst!.yytext!) // @todo just checking first column of the index
+                        if (index.Value.Columns.Length == 1 && index.Value.Columns[0] == equality.leftAst!.yytext!)
                         {
                             if (TryGetConstant(equality.rightAst!, ticket.Parameters, out ColumnValue? columnValue))
                                 return new QueryPlanStep(QueryPlanStepType.QueryFromIndex, index.Value, columnValue);
