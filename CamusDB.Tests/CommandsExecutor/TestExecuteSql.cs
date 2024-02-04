@@ -79,12 +79,15 @@ public class TestExecuteSql : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, objectId) },
-                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, 2024 - i) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0) },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, objectId) },
+                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
+                        { "year", new ColumnValue(ColumnType.Integer64, 2024 - i) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0) },
+                    }
                 }
             );
 
@@ -130,12 +133,15 @@ public class TestExecuteSql : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, objectId) },
-                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, 2024 - i) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0) },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, objectId) },
+                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
+                        { "year", new ColumnValue(ColumnType.Integer64, 2024 - i) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0) },
+                    }
                 }
             );
 

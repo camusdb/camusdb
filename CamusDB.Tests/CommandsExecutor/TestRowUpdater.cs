@@ -26,7 +26,7 @@ using CamusDB.Core.Util.Time;
 namespace CamusDB.Tests.CommandsExecutor;
 
 public class TestRowUpdater : BaseTest
-{    
+{
     private async Task<(string, CommandExecutor)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
@@ -80,12 +80,15 @@ public class TestRowUpdater : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, objectId) },
-                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, objectId) },
+                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
+                        { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    }
                 }
             );
 

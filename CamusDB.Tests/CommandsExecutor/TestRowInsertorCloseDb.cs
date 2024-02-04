@@ -86,9 +86,12 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
             tableName: "user_robots",
             values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                { "amount", new ColumnValue(ColumnType.Integer64, 100) }
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
+                    { "amount", new ColumnValue(ColumnType.Integer64, 100) }
+                }
             }
         );
 
@@ -126,11 +129,14 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "user_robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                { "amount", new ColumnValue(ColumnType.Integer64, 50) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
+                    { "amount", new ColumnValue(ColumnType.Integer64, 50) },
+                }
             }
         );
 
@@ -138,11 +144,14 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "user_robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
-                { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                { "amount", new ColumnValue(ColumnType.Integer64, 50) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
+                    { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
+                    { "amount", new ColumnValue(ColumnType.Integer64, 50) },
+                }
             }
         );
 
@@ -225,11 +234,14 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "user_robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, objectId) },
-                    { "usersId", new ColumnValue(ColumnType.Id, userIds[i % 5]) },
-                    { "amount", new ColumnValue(ColumnType.Integer64, 50) },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, objectId) },
+                        { "usersId", new ColumnValue(ColumnType.Id, userIds[i % 5]) },
+                        { "amount", new ColumnValue(ColumnType.Integer64, 50) },
+                    }
                 }
             );
 
@@ -275,11 +287,14 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "user_robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, objectId) },
-                { "usersId", new ColumnValue(ColumnType.Id, userIds[i % 5]) },
-                { "amount", new ColumnValue(ColumnType.Integer64, 50) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, objectId) },
+                    { "usersId", new ColumnValue(ColumnType.Id, userIds[i % 5]) },
+                    { "amount", new ColumnValue(ColumnType.Integer64, 50) },
+                }
             }
         );
 

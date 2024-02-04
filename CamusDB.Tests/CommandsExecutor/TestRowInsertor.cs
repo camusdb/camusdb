@@ -10,7 +10,6 @@ using NUnit.Framework;
 
 using System;
 using System.Linq;
-using System.Diagnostics;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
@@ -86,12 +85,15 @@ internal sealed class TestRowInsertor : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Integer64, 1) },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Integer64, 1) },
+                        { "name", new ColumnValue(ColumnType.String, "some name") },
+                        { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    }
                 }
             );
 
@@ -112,12 +114,15 @@ internal sealed class TestRowInsertor : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Integer64, 1) },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, "invalid int value") },
-                    { "enabled", new ColumnValue(ColumnType.Bool, 1234) },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Integer64, 1) },
+                        { "name", new ColumnValue(ColumnType.String, "some name") },
+                        { "year", new ColumnValue(ColumnType.Integer64, "invalid int value") },
+                        { "enabled", new ColumnValue(ColumnType.Bool, 1234) },
+                    }
                 }
             );
 
@@ -139,12 +144,15 @@ internal sealed class TestRowInsertor : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Integer64, 1) },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1000) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Integer64, 1) },
+                        { "name", new ColumnValue(ColumnType.String, "some name") },
+                        { "year", new ColumnValue(ColumnType.Integer64, 1000) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+                    }
                 }
             );
 
@@ -186,12 +194,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "unknown_table",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new ColumnValue(ColumnType.String, "some name") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                }
             }
         );
 
@@ -209,12 +220,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                { "unknownColumn", new ColumnValue(ColumnType.Bool, true) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new ColumnValue(ColumnType.String, "some name") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                    { "unknownColumn", new ColumnValue(ColumnType.Bool, true) },
+                }
             }
         );
 
@@ -232,12 +246,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "name", new ColumnValue(ColumnType.Null, "") },
-                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new ColumnValue(ColumnType.Null, "") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                }
             }
         );
 
@@ -255,12 +272,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new ColumnValue(ColumnType.String, "some name") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                }
             }
         );
 
@@ -277,12 +297,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new ColumnValue(ColumnType.String, "some name") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                }
             }
         );
 
@@ -292,12 +315,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
+                    { "name", new ColumnValue(ColumnType.String, "some name") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                }
             }
         );
 
@@ -314,12 +340,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new ColumnValue(ColumnType.String, "some name") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                }
             }
         );
 
@@ -327,12 +356,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
+                    { "name", new ColumnValue(ColumnType.String, "some name") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                }
             }
         );
 
@@ -353,12 +385,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new ColumnValue(ColumnType.String, "some name") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                }
             }
         );
 
@@ -396,12 +431,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Null, "") },
-                { "enabled", new ColumnValue(ColumnType.Null, "") },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new ColumnValue(ColumnType.String, "some name") },
+                    { "year", new ColumnValue(ColumnType.Null, "") },
+                    { "enabled", new ColumnValue(ColumnType.Null, "") },
+                }
             }
         );
 
@@ -438,12 +476,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "name", new ColumnValue(ColumnType.String, "some name 1") },
-                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new ColumnValue(ColumnType.String, "some name 1") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                }
             }
         );
 
@@ -451,12 +492,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
-                { "name", new ColumnValue(ColumnType.String, "some name 2") },
-                { "year", new ColumnValue(ColumnType.Integer64, 4567) },
-                { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
+                    { "name", new ColumnValue(ColumnType.String, "some name 2") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 4567) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                }
             }
         );
 
@@ -519,12 +563,15 @@ internal sealed class TestRowInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                { "name", new ColumnValue(ColumnType.String, "some name") },
-                { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "name", new ColumnValue(ColumnType.String, "some name") },
+                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
+                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                }
             }
         );
 
@@ -604,12 +651,15 @@ internal sealed class TestRowInsertor : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, objectId) },
-                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, i * 1000) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, objectId) },
+                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
+                        { "year", new ColumnValue(ColumnType.Integer64, i * 1000) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    }
                 }
             );
 
@@ -656,12 +706,15 @@ internal sealed class TestRowInsertor : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, i * 1000) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
+                        { "year", new ColumnValue(ColumnType.Integer64, i * 1000) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    }
                 }
             );
 

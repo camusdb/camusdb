@@ -76,11 +76,14 @@ internal sealed class TestRowMultiInsertor : BaseTest
             txnId: await executor.NextTxnId(),
             databaseName: dbname,
             tableName: "user_robots",
-            values: new Dictionary<string, ColumnValue>()
+            values: new()
             {
-                { "id", new ColumnValue(ColumnType.Id, "5bc30818bc6a4e7b6c441308") },
-                { "robots_id", new ColumnValue(ColumnType.Id, "5e1aac86542f77367452d9b3") },
-                { "amount", new ColumnValue(ColumnType.Integer64, 100) }
+                new Dictionary<string, ColumnValue>()
+                {
+                    { "id", new ColumnValue(ColumnType.Id, "5bc30818bc6a4e7b6c441308") },
+                    { "robots_id", new ColumnValue(ColumnType.Id, "5e1aac86542f77367452d9b3") },
+                    { "amount", new ColumnValue(ColumnType.Integer64, 100) }
+                }
             }
         );
 
@@ -100,11 +103,14 @@ internal sealed class TestRowMultiInsertor : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "user_robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                    { "robots_id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                    { "amount", new ColumnValue(ColumnType.Integer64, i * 1000) }
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "robots_id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "amount", new ColumnValue(ColumnType.Integer64, i * 1000) }
+                    }
                 }
             );
 
@@ -157,11 +163,14 @@ internal sealed class TestRowMultiInsertor : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "user_robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                    { "robots_id", new ColumnValue(ColumnType.Id, "5e1aac86542f77367452d9b3") },
-                    { "amount", new ColumnValue(ColumnType.Integer64, i * 1000) }
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "robots_id", new ColumnValue(ColumnType.Id, "5e1aac86542f77367452d9b3") },
+                        { "amount", new ColumnValue(ColumnType.Integer64, i * 1000) }
+                    }
                 }
             );
 

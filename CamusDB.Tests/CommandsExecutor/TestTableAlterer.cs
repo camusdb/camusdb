@@ -81,12 +81,15 @@ internal sealed class TestTableAlterer : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, objectId) },
-                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, objectId) },
+                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
+                        { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    }
                 }
             );
 
@@ -112,12 +115,15 @@ internal sealed class TestTableAlterer : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, objectId) },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 2000) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, objectId) },
+                        { "name", new ColumnValue(ColumnType.String, "some name") },
+                        { "year", new ColumnValue(ColumnType.Integer64, 2000) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    }
                 }
             );
 

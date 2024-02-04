@@ -8,7 +8,7 @@
 
 using NUnit.Framework;
 
-using System.Linq;
+using System;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
@@ -20,7 +20,6 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
-using System;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -80,12 +79,15 @@ public class TestRowUpdaterUnique : BaseTest
                 txnId: await executor.NextTxnId(),
                 databaseName: dbname,
                 tableName: "robots",
-                values: new Dictionary<string, ColumnValue>()
+                values: new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, objectId) },
-                    { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                    { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    new Dictionary<string, ColumnValue>()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, objectId) },
+                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
+                        { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    }
                 }
             );
 
