@@ -41,11 +41,14 @@ public sealed class InsertController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Insert request is not valid");
 
+            if (request.Values is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Insert values are not valid");
+
             InsertTicket ticket = new(
                 txnId: await executor.NextTxnId().ConfigureAwait(false),
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
-                values: request.Values ?? new Dictionary<string, ColumnValue>()
+                values: new List<Dictionary<string, ColumnValue>>() { request.Values }
             );
 
             await executor.Insert(ticket).ConfigureAwait(false);
@@ -60,7 +63,7 @@ public sealed class InsertController : CommandsController
         }
         catch (Exception e)
         {
-            logger.LogError("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new InsertResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }

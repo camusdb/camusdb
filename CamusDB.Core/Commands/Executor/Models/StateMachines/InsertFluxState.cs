@@ -26,6 +26,8 @@ public sealed class InsertFluxState
 
     public List<IDisposable> Locks { get; } = new();
 
+    public int InsertedRows { get; set; }
+
     public InsertFluxState(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket, InsertFluxIndexState indexes)
     {
         Database = database;

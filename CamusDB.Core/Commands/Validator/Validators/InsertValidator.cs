@@ -34,17 +34,19 @@ internal sealed class InsertValidator : ValidatorBase
                 "Values are required"
             );
 
-        foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.Values)
+        foreach (Dictionary<string, ColumnValue> values in ticket.Values)
         {
-            switch (columnValue.Value.Type)
+            foreach (KeyValuePair<string, ColumnValue> columnValue in values)
             {
-                case ColumnType.Id: // @todo validate alphanumeric digits
-                    if (!string.IsNullOrEmpty(columnValue.Value.StrValue) && columnValue.Value.StrValue.Length != 24)
-                        throw new CamusDBException(
-                            CamusDBErrorCodes.InvalidInput,
-                            "Invalid id value for field '" + columnValue.Key + "'"
-                        );
-                    break;                
+                switch (columnValue.Value.Type)
+                {
+                    case ColumnType.Id: // @todo validate alphanumeric digits
+                        if (!string.IsNullOrEmpty(columnValue.Value.StrValue) && columnValue.Value.StrValue.Length != 24)
+                            throw new CamusDBException(
+                                CamusDBErrorCodes.InvalidInput, $"Invalid id value for field '{columnValue.Key}'"
+                            );
+                        break;
+                }
             }
         }
     }

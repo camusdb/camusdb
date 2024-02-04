@@ -17,9 +17,7 @@ public enum InsertFluxSteps
     NotInitialized = 0,    
     AdquireLocks = 1,
     InsertRowsAndIndexes = 2,
-    UpdateUniqueIndexes = 6,
-    UpdateMultiIndexes = 7,
-    PersistIndexChanges = 8,
-    ApplyPageOperations = 9,
-    ReleaseLocks = 10
+    PersistIndexChanges = 3,
+    ApplyPageOperations = 4,
+    ReleaseLocks = 5
 }
