@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -27,6 +28,8 @@ internal sealed class SqlExecutor
 
     private readonly SQLExecutorUpdateCreator sqlExecutorUpdateCreator = new();
 
+    private readonly SQLExecutorDeletereator sqlExecutorDeleteCreator = new();
+
     private readonly SQLExecutorCreateTableCreator sqlExecutorCreateTableCreator = new();
 
     private readonly SQLExecutorDropTableCreator sqlExecutorDropTableCreator = new();
@@ -35,7 +38,7 @@ internal sealed class SqlExecutor
 
     private readonly SQLExecutorAlterIndexCreator sqlExecutorAlterIndexCreator = new();
 
-    public SqlExecutor(Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
+    public SqlExecutor(ILogger<ICamusDB> logger)
     {
 
     }
@@ -57,18 +60,7 @@ internal sealed class SqlExecutor
 
     internal async Task<DeleteTicket> CreateDeleteTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
     {
-        string tableName = ast.leftAst!.yytext!;
-
-        if (ast.rightAst is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing delete conditions");
-
-        return new(
-            txnId: await executor.NextTxnId(),
-            databaseName: ticket.DatabaseName,
-            tableName: tableName,
-            where: ast.rightAst,
-            filters: null
-        );
+        return await sqlExecutorDeleteCreator.CreateDeleteTicket(executor, ticket, ast).ConfigureAwait(false);
     }
 
     /// <summary>

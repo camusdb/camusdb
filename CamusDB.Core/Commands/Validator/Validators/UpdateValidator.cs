@@ -42,7 +42,7 @@ internal sealed class UpdateValidator : ValidatorBase
                     if (!string.IsNullOrEmpty(columnValue.Value.StrValue) && columnValue.Value.StrValue.Length != 24)
                         throw new CamusDBException(
                             CamusDBErrorCodes.InvalidInput,
-                            "Invalid id value for field '" + columnValue.Key + "'"
+                            $"Invalid id value for field '{columnValue.Key}'"
                         );
                     break;                
             }

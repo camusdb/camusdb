@@ -1,31 +1,23 @@
 ﻿
-/**
- * This file is part of CamusDB  
- *
- * For the full copyright and license information, please view the LICENSE.txt
- * file that was distributed with this source code.
- */
-
 using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
-public readonly struct InsertTicket
+public readonly struct InsertBatchTicket
 {
     public HLCTimestamp TxnId { get; }
 
     public string DatabaseName { get; }
-    
+
     public string TableName { get; }
 
-    public List<Dictionary<string, ColumnValue>> Values { get; }    
+    public List<Dictionary<string, ColumnValue>> Values { get; }
 
-    public InsertTicket(
+    public InsertBatchTicket(
         HLCTimestamp txnId,
         string databaseName,
         string tableName,
-        List<Dictionary<string, ColumnValue>> values
-    )
+        List<Dictionary<string, ColumnValue>> values)
     {
         TxnId = txnId;
         DatabaseName = databaseName;

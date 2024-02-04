@@ -18,9 +18,7 @@ public sealed class InsertFluxState
 
     public TableDescriptor Table { get; }
 
-    public InsertTicket Ticket { get; }    
-
-    public BTreeTuple RowTuple { get; set; } = new(new(), new());
+    public InsertTicket Ticket { get; }
 
     public InsertFluxIndexState Indexes { get; }
 

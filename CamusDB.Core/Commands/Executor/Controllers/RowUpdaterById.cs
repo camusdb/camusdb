@@ -7,7 +7,6 @@
  */
 
 using System.Diagnostics;
-using System.Net.Sockets;
 using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;

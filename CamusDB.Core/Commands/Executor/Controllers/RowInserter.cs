@@ -18,6 +18,11 @@ using CamusDB.Core.Util.Trees;
 
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
+using CamusDB.Core.Util.Time;
+using QUT.Gppg;
+using System.Net.Sockets;
+using CamusDB.Core.BufferPool.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -25,7 +30,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// Inserts a single row into a table
 /// </summary>
 internal sealed class RowInserter
-{    
+{
     private readonly ILogger<ICamusDB> logger;
 
     private readonly IndexSaver indexSaver = new();
@@ -53,48 +58,51 @@ internal sealed class RowInserter
     {
         List<TableColumnSchema> columns = table.Schema.Columns!;
 
-        // Step #1. Check for unknown columns
-        foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.Values)
+        foreach (Dictionary<string, ColumnValue> values in ticket.Values)
         {
-            bool hasColumn = false;
-
-            for (int i = 0; i < columns.Count; i++)
+            // Step #1. Check for unknown columns
+            foreach (KeyValuePair<string, ColumnValue> columnValue in values)
             {
-                TableColumnSchema column = columns[i];
-                if (column.Name == columnValue.Key)
+                bool hasColumn = false;
+
+                for (int i = 0; i < columns.Count; i++)
                 {
-                    hasColumn = true;
-                    break;
+                    TableColumnSchema column = columns[i];
+                    if (column.Name == columnValue.Key)
+                    {
+                        hasColumn = true;
+                        break;
+                    }
                 }
+
+                if (!hasColumn)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.UnknownColumn,
+                        $"Unknown column '{columnValue.Key}' in column list"
+                    );
             }
 
-            if (!hasColumn)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.UnknownColumn,
-                    $"Unknown column '{columnValue.Key}' in column list"
-                );
-        }
-
-        // Step #2. Check for not null violations
-        foreach (TableColumnSchema columnSchema in columns)
-        {
-            if (!columnSchema.NotNull)
-                continue;
-
-            if (!ticket.Values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
+            // Step #2. Check for not null violations
+            foreach (TableColumnSchema columnSchema in columns)
             {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.NotNullViolation,
-                    $"Column '{columnSchema.Name}' cannot be null"
-                );
-            }
+                if (!columnSchema.NotNull)
+                    continue;
 
-            if (columnValue.Type == ColumnType.Null)
-            {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.NotNullViolation,
-                    $"Column '{columnSchema.Name}' cannot be null"
-                );
+                if (!values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
+                {
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.NotNullViolation,
+                        $"Column '{columnSchema.Name}' cannot be null"
+                    );
+                }
+
+                if (columnValue.Type == ColumnType.Null)
+                {
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.NotNullViolation,
+                        $"Column '{columnSchema.Name}' cannot be null"
+                    );
+                }
             }
         }
     }
@@ -222,21 +230,84 @@ internal sealed class RowInserter
         return Task.FromResult(FluxAction.Continue);
     }
 
-    /// <summary>
-    /// Allocate a new page in the buffer pool and insert the serialized row into it
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> InsertToPageStep(InsertFluxState state)
+    private async Task<FluxAction> InsertRowsAndIndexes(InsertFluxState state)
     {
+        if (state.Ticket.Values is null)
+        {
+            Console.WriteLine("Invalid rows to update");
+            return FluxAction.Abort;
+        }
+
+        TableDescriptor table = state.Table;
+        InsertTicket ticket = state.Ticket;
         BufferPoolManager tablespace = state.Database.BufferPool;
 
-        byte[] rowBuffer = rowSerializer.Serialize(state.Table, state.Ticket.Values, state.RowTuple.SlotOne);
+        foreach (var values in ticket.Values)
+        {
+            //Dictionary<string, ColumnValue> rowValues = GetNewUpdatedRow(queryRow, ticket);
 
-        // Insert data to the page offset
-        tablespace.WriteDataToPageBatch(state.ModifiedPages, state.RowTuple.SlotTwo, 0, rowBuffer);
+            //CheckForNotNulls(table, rowValues);
 
-        return Task.FromResult(FluxAction.Continue);
+            await CheckUniqueKeys(table, ticket.TxnId, values).ConfigureAwait(false);
+
+            BTreeTuple tuple = InsertNewRowIntoDisk(tablespace, table.Rows, state, values);
+
+            await UpdateTableIndex(tablespace, ticket.TxnId, tuple, values).ConfigureAwait(false);
+
+            await UpdateUniqueIndexes(state, ticket, tuple, queryRow).ConfigureAwait(false);
+
+            await UpdateMultiIndexes(state, ticket, tuple, queryRow).ConfigureAwait(false);
+
+            logger.LogInformation(
+                "Row with rowid {SlotOne} updated to page {SlotTwo}",
+                tuple.SlotOne,
+                tuple.SlotTwo
+            );
+
+            state.ModifiedRows++;
+        }
+
+        return FluxAction.Continue;
+    }
+
+    private static async Task CheckUniqueKeys(TableDescriptor table, HLCTimestamp txnId, Dictionary<string, ColumnValue> values)
+    {
+        //await insertUniqueKeySaver.CheckUniqueKeys(state.Table, state.Ticket).ConfigureAwait(false);
+
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        {
+            if (index.Value.Type != IndexType.Unique)
+                continue;
+
+            BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex = index.Value.BTree;
+
+            await CheckUniqueKeyViolations(table, txnId, uniqueIndex, values, index.Value.Columns);
+        }
+    }
+
+    private static async Task CheckUniqueKeyViolations(
+        TableDescriptor table,
+        HLCTimestamp txnId,
+        BTree<CompositeColumnValue, BTreeTuple> uniqueIndex,
+        Dictionary<string, ColumnValue> values,
+        string[] columnNames
+    )
+    {
+        CompositeColumnValue? uniqueValue = GetColumnValue(values, columnNames);
+
+        if (uniqueValue is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"The primary key of the table '{table.Name}' is not present in the list of values."
+            );
+
+        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, txnId, uniqueValue).ConfigureAwait(false);
+
+        if (rowTuple is not null && !rowTuple.IsNull())
+            throw new CamusDBException(
+                CamusDBErrorCodes.DuplicateUniqueKeyValue,
+                $"Duplicate entry for key '{table.Name}' {uniqueValue}"
+            );
     }
 
     /// <summary>
@@ -258,27 +329,57 @@ internal sealed class RowInserter
     }
 
     /// <summary>
+    /// Allocate a new page in the buffer pool and insert the serialized row into it    
+    /// </summary>
+    /// <param name="tablespace"></param>
+    /// <param name="table"></param>
+    /// <param name="state"></param>
+    /// <param name="values"></param>
+    /// <returns></returns>
+    private BTreeTuple InsertNewRowIntoDisk(BufferPoolManager tablespace, InsertFluxState state, Dictionary<string, ColumnValue> values)
+    {
+        BTreeTuple tuple = new(
+            slotOne: tablespace.GetNextRowId(),
+            slotTwo: tablespace.GetNextFreeOffset()
+        );
+
+        byte[] rowBuffer = rowSerializer.Serialize(state.Table, values, tuple.SlotOne);
+
+        // Insert data to the page offset
+        tablespace.WriteDataToPageBatch(state.ModifiedPages, tuple.SlotTwo, 0, rowBuffer);
+
+        return tuple;
+    }
+
+    /// <summary>
     /// Every table has a B+Tree index where the data can be easily located by rowid
     /// We take the page created in the previous step and insert it into the tree
     /// </summary>
-    /// <param name="state"></param>
+    /// <param name="tablespace"></param>
+    /// <param name="txnId"></param>
+    /// <param name="tuple"></param>
+    /// <param name="rows"></param>
     /// <returns></returns>
-    private async Task<FluxAction> UpdateTableIndex(InsertFluxState state)
+    private async Task UpdateTableIndex(
+        BufferPoolManager tablespace,
+        HLCTimestamp txnId,
+        BTreeTuple tuple,
+        BTree<ObjectIdValue, ObjectIdValue> rows,
+        List<BufferPageOperation> modifiedPages
+    )
     {
         SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
-            tablespace: state.Database.BufferPool,
-            index: state.Table.Rows,
-            txnId: state.Ticket.TxnId,
+            tablespace: tablespace,
+            index: rows,
+            txnId: txnId,
             commitState: BTreeCommitState.Uncommitted,
-            key: state.RowTuple.SlotOne,
-            value: state.RowTuple.SlotTwo,
-            modifiedPages: state.ModifiedPages
+            key: tuple.SlotOne,
+            value: tuple.SlotTwo,
+            modifiedPages: modifiedPages
         );
 
         // Main table index stores rowid pointing to page offeset
         await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
-
-        return FluxAction.Continue;
     }
 
     /// <summary>
@@ -382,7 +483,7 @@ internal sealed class RowInserter
         );
 
         // Main table index stores rowid pointing to page offeset
-        await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);        
+        await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
 
         if (state.Indexes.UniqueIndexDeltas is not null)
         {
@@ -458,11 +559,8 @@ internal sealed class RowInserter
     {
         Stopwatch timer = Stopwatch.StartNew();
 
-        machine.When(InsertFluxSteps.CheckUniqueKeys, CheckUniqueKeysStep);
-        machine.When(InsertFluxSteps.AllocateInsertTuple, AllocateInsertTuple);
-        machine.When(InsertFluxSteps.InsertToPage, InsertToPageStep);
         machine.When(InsertFluxSteps.AdquireLocks, AdquireLocks);
-        machine.When(InsertFluxSteps.UpdateTableIndex, UpdateTableIndex);
+        machine.When(InsertFluxSteps.InsertRowsAndIndexes, InsertRowsAndIndexes);
         machine.When(InsertFluxSteps.UpdateUniqueIndexes, UpdateUniqueIndexes);
         machine.When(InsertFluxSteps.UpdateMultiIndexes, UpdateMultiIndexes);
         machine.When(InsertFluxSteps.PersistIndexChanges, PersistIndexChanges);
@@ -482,5 +580,5 @@ internal sealed class RowInserter
             state.RowTuple.SlotTwo,
             timeTaken.ToString(@"m\:ss\.fff")
         );
-    }    
+    }
 }

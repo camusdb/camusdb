@@ -21,6 +21,12 @@ public sealed class CommandValidator
 
     private readonly InsertValidator insertValidator = new();
 
+    private readonly AlterTableValidator alterTableValidator = new();
+
+    private readonly AlterIndexValidator alterIndexValidator = new();
+
+    private readonly CloseDatabaseValidator closeDatabaseValidator = new();
+
     public void Validate(CreateDatabaseTicket ticket)
     {
         createDatabaseValidator.Validate(ticket);
@@ -38,20 +44,17 @@ public sealed class CommandValidator
 
     public void Validate(AlterTableTicket ticket)
     {
-        AlterTableValidator validator = new();
-        validator.Validate(ticket);
+        alterTableValidator.Validate(ticket);
     }
 
     public void Validate(AlterIndexTicket ticket)
     {
-        AlterIndexValidator validator = new();
-        validator.Validate(ticket);
+        alterIndexValidator.Validate(ticket);
     }
 
     public void Validate(CloseDatabaseTicket ticket)
     {
-        CloseDatabaseValidator validator = new();
-        validator.Validate(ticket);
+        closeDatabaseValidator.Validate(ticket);
     }
 
     public void Validate(DropTableTicket ticket)

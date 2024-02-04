@@ -1,9 +1,9 @@
 
 // ==========================================================================
-//  GPPG error listing for yacc source file <SQLParser/SQLParser.Language.grammar.y - 1/14/2024 10:20:00 PM>
+//  GPPG error listing for yacc source file <SQLParser/SQLParser.Language.grammar.y - 2/3/2024 8:47:25 PM>
 // ==========================================================================
 //  Version:  1.5.2
-//  DateTime: 1/14/2024 10:20:29 PM
+//  DateTime: 2/3/2024 8:47:57 PM
 // ==========================================================================
 
 
@@ -31,17 +31,11 @@
 
 %token TDIGIT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
-%token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID
+%token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW
-%token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS
+%token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 
 %%
-// Error: There are 1 non-terminating NonTerminal Symbols
-   //  {TON}
-// Warning: Terminating TON fixes the following size-1 NonTerminal set
-   // {TON}
-// Error: NonTerminal symbol "TON" has no productions
-// -------------------------------------------------------------------
 
 list    : stat { $$.n = $1.n; }
         ;
@@ -53,7 +47,8 @@ stat    : select_stmt { $$.n = $1.n; }
         | create_table_stmt { $$.n = $1.n; }
         | drop_table_stmt { $$.n = $1.n; }
         | alter_table_stmt { $$.n = $1.n; }
-        | show_stmt { $$.n = $1.n; } 
+        | show_stmt { $$.n = $1.n; }
+        | create_index_stmt { $$.n = $1.n; }
         ;
 
 select_stmt : TSELECT select_field_list TFROM select_table { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, null, null, null); }
@@ -70,9 +65,20 @@ select_stmt : TSELECT select_field_list TFROM select_table { $$.n = new(NodeType
             | TSELECT select_field_list TFROM select_table TWHERE condition TORDER TBY order_list TLIMIT select_limit_offset TOFFSET select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, $11.n, $13.n, null); }
             ;
 
-insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES LPAREN values_list RPAREN { $$.n = new(NodeType.Insert, $3.n, $5.n, $9.n, null, null, null, null); }
-            | TINSERT TINTO any_identifier TVALUES LPAREN values_list RPAREN { $$.n = new(NodeType.Insert, $3.n, null, $6.n, null, null, null, null); }
+insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES insert_batch_list{ $$.n = new(NodeType.Insert, $3.n, $5.n, $9.n, null, null, null, null); }            
+// Error: Semantic action index is out of bounds
+// ---------------------------------------------
+            | TINSERT TINTO any_identifier TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, null, $6.n, null, null, null, null); }
+// Error: Semantic action index is out of bounds
+// ---------------------------------------------
 			;
+
+insert_batch_list : insert_batch_list TCOMMA insert_batch { $$.n = new(NodeType.InsertBatchList, $1.n, $3.n, null, null, null, null, null); }
+                  | insert_batch { $$.n = $1.n; $$.s = $1.s; }
+                  ;
+
+insert_batch : LPAREN values_list RPAREN { $$.n = $1.n; $$.s = $1.s; }
+             ;
 
 update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, null, null, null, null); }
 		    ;
@@ -105,6 +111,10 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TDROP TPRIMARY TKEY { $$.n = new(NodeType.AlterTableDropPrimaryKey, $3.n, null, null, null, null, null, null); }
 				 ;
 
+create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $7.n, null, null, null, null); }
+                  | TCREATE TUNIQUE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddUniqueIndex, $6.n, $4.n, $8.n, null, null, null, null); }
+                  ;
+
 show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null); }
           | TSHOW TTABLES { $$.n = new(NodeType.ShowTables, null, null, null, null, null, null, null); }
           | TDESCRIBE any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null); }
@@ -112,6 +122,7 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TCREATE TTABLE any_identifier { $$.n = new(NodeType.ShowCreateTable, $4.n, null, null, null, null, null, null); }
           | TSHOW TDATABASE { $$.n = new(NodeType.ShowDatabase, null, null, null, null, null, null, null); }
           | TSHOW TINDEXES TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null); }
+          | TSHOW TINDEX TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null); }
           ;
 
 identifier_index_list : identifier_index_list TCOMMA identifier_index { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null); }
@@ -158,7 +169,8 @@ default_expr : number { $$.n = $1.n; $$.s = $1.s; }
 field_type : TTYPE_OBJECT_ID { $$.n = new(NodeType.TypeObjectId, null, null, null, null, null, null, null); }
            | TTYPE_STRING { $$.n = new(NodeType.TypeString, null, null, null, null, null, null, null); }
            | TTYPE_INT64 { $$.n = new(NodeType.TypeInteger64, null, null, null, null, null, null, null); }
-           | TTYPE_FLOAT64 { $$.n = new(NodeType.TypeFloat64, null, null, null, null, null, null, null); } 
+           | TTYPE_FLOAT64 { $$.n = new(NodeType.TypeFloat64, null, null, null, null, null, null, null); }
+           | TTYPE_BOOL { $$.n = new(NodeType.TypeBool, null, null, null, null, null, null, null); } 
            ;
 
 update_list : update_list TCOMMA update_item { $$.n = new(NodeType.UpdateList, $1.n, $3.n, null, null, null, null, null); }
@@ -224,6 +236,8 @@ expr       : equals_expr { $$.n = $1.n; }
            | fcall_expr { $$.n = $1.n; }
            | projection_all { $$.n = $1.n; }
            | use_default_expr { $$.n = $1.n; }
+           | is_null_expr { $$.n = $1.n; }
+           | is_not_null_expr { $$.n = $1.n; }
            ;
 
 and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, null, null, null, null, null); }
@@ -263,7 +277,13 @@ like_expr : condition TLIKE condition { $$.n = new(NodeType.ExprLike, $1.n, $3.n
           ;
 
 ilike_expr : condition TILIKE condition { $$.n = new(NodeType.ExprILike, $1.n, $3.n, null, null, null, null, null); }
-           ;  
+           ;
+
+is_null_expr : condition TIS TNULL { $$.n = new(NodeType.ExprIsNull, $1.n, $3.n, null, null, null, null, null); }
+             ;
+
+is_not_null_expr : condition TIS TNOT TNULL { $$.n = new(NodeType.ExprIsNotNull, $1.n, $3.n, null, null, null, null, null); }
+                 ;
 
 fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, null, null, null, null, null, null); }
            | identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, $3.n, null, null, null, null, null); }

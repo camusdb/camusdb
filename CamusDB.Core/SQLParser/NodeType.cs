@@ -45,6 +45,7 @@ public enum NodeType
     UpdateItem,
     Delete,
     Insert,
+    InsertBatchList,
     SortAsc,
     SortDesc,
     CreateTable,

@@ -90,8 +90,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableIndexAlterer = new(catalogs, logger);
         tableDropper = new(catalogs, logger);
         rowInserter = new(logger);
-        RowUpdaterById rowUpdaterById1 = new(logger);
-        rowUpdaterById = rowUpdaterById1;
+        rowUpdaterById = new(logger);
         rowUpdater = new(logger);
         rowDeleterById = new(logger);
         rowDeleter = new(logger);
@@ -384,29 +383,29 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             case NodeType.Insert:
                 {
-                    InsertTicket updateTicket = await sqlExecutor.CreateInsertTicket(this, database, ticket, ast).ConfigureAwait(false);
+                    InsertTicket insertTicket = await sqlExecutor.CreateInsertTicket(this, database, ticket, ast).ConfigureAwait(false);
 
-                    TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName).ConfigureAwait(false);
+                    TableDescriptor table = await tableOpener.Open(database, insertTicket.TableName).ConfigureAwait(false);
 
-                    return await rowInserter.Insert(database, table, updateTicket).ConfigureAwait(false);
+                    return await rowInserter.Insert(database, table, insertTicket).ConfigureAwait(false);
                 }
 
             case NodeType.Update:
                 {
-                    UpdateTicket updateTicket = await sqlExecutor.CreateUpdateTicket(this, ticket, ast);
+                    UpdateTicket updateTicket = await sqlExecutor.CreateUpdateTicket(this, ticket, ast).ConfigureAwait(false);
 
-                    TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName);
+                    TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName).ConfigureAwait(false);
 
                     return await rowUpdater.Update(queryExecutor, database, table, updateTicket);
                 }
 
             case NodeType.Delete:
                 {
-                    DeleteTicket deleteTicket = await sqlExecutor.CreateDeleteTicket(this, ticket, ast);
+                    DeleteTicket deleteTicket = await sqlExecutor.CreateDeleteTicket(this, ticket, ast).ConfigureAwait(false);
 
-                    TableDescriptor table = await tableOpener.Open(database, deleteTicket.TableName);
+                    TableDescriptor table = await tableOpener.Open(database, deleteTicket.TableName).ConfigureAwait(false);
 
-                    return await rowDeleter.Delete(queryExecutor, database, table, deleteTicket);
+                    return await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
                 }
 
             default:

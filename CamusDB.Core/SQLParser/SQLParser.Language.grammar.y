@@ -56,9 +56,16 @@ select_stmt : TSELECT select_field_list TFROM select_table { $$.n = new(NodeType
             | TSELECT select_field_list TFROM select_table TWHERE condition TORDER TBY order_list TLIMIT select_limit_offset TOFFSET select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, $11.n, $13.n, null); }
             ;
 
-insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES LPAREN values_list RPAREN { $$.n = new(NodeType.Insert, $3.n, $5.n, $9.n, null, null, null, null); }
-            | TINSERT TINTO any_identifier TVALUES LPAREN values_list RPAREN { $$.n = new(NodeType.Insert, $3.n, null, $6.n, null, null, null, null); }
+insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, $5.n, $8.n, null, null, null, null); }            
+            | TINSERT TINTO any_identifier TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, null, $5.n, null, null, null, null); }
 			;
+
+insert_batch_list : insert_batch_list TCOMMA insert_batch { $$.n = new(NodeType.InsertBatchList, $1.n, $3.n, null, null, null, null, null); }
+                  | insert_batch { $$.n = $1.n; $$.s = $1.s; }
+                  ;
+
+insert_batch : LPAREN values_list RPAREN { $$.n = $2.n; $$.s = $2.s; }
+             ;
 
 update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, null, null, null, null); }
 		    ;

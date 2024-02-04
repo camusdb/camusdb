@@ -14,12 +14,9 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
  */
 public enum InsertFluxSteps
 {
-    NotInitialized = 0,
-    CheckUniqueKeys = 1,    
-    AllocateInsertTuple = 2,    
-    InsertToPage = 3,
-    AdquireLocks = 4,
-    UpdateTableIndex = 5,
+    NotInitialized = 0,    
+    AdquireLocks = 1,
+    InsertRowsAndIndexes = 2,
     UpdateUniqueIndexes = 6,
     UpdateMultiIndexes = 7,
     PersistIndexChanges = 8,

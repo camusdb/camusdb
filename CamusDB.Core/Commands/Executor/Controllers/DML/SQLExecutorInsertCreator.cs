@@ -45,41 +45,46 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         if (ast.extendedOne is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing or empty values list");
 
-        List<ColumnValue?> valuesList = new();
-        Dictionary<string, ColumnValue> rowReference = new();
+        List<List<ColumnValue?>> valuesList = new();
+        List<Dictionary<string, ColumnValue>> batchValues = new(fields.Count);
 
-        GetValuesList(table, ast.extendedOne, rowReference, ticket.Parameters, valuesList);
+        GetBatchValuesList(table, ast.extendedOne, new(), ticket.Parameters, valuesList);
 
-        if (fields.Count != valuesList.Count)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"The number of fields is not equal to the number of values.");
-
-        Dictionary<string, ColumnValue> values = new(fields.Count);
-
-        for (int i = 0; i < fields.Count; i++)
+        foreach (var x in valuesList)
         {
-            ColumnValue? columnValue = valuesList.ElementAt(i); // @todo optimize this
+            if (fields.Count != valuesList.Count)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"The number of fields is not equal to the number of values.");
 
-            if (columnValue is not null)
-                values.Add(fields[i], columnValue);
-            else
-                values.Add(fields[i], GetDefaultValue(table.Schema.Columns, fields[i]));
-        }
+            Dictionary<string, ColumnValue> values = new(fields.Count);
 
-        // Try to include any missing field with its default value if available
-        if (values.Count != table.Schema.Columns!.Count)
-        {
-            foreach (TableColumnSchema column in table.Schema.Columns!)
+            for (int i = 0; i < fields.Count; i++)
             {
-                if (!values.ContainsKey(column.Name) && column.DefaultValue is not null)
-                    values.Add(column.Name, column.DefaultValue);
+                ColumnValue? columnValue = x.ElementAt(i); // @todo optimize this
+
+                if (columnValue is not null)
+                    values.Add(fields[i], columnValue);
+                else
+                    values.Add(fields[i], GetDefaultValue(table.Schema.Columns, fields[i]));
             }
+
+            // Try to include any missing field with its default value if available
+            if (values.Count != table.Schema.Columns!.Count)
+            {
+                foreach (TableColumnSchema column in table.Schema.Columns!)
+                {
+                    if (!values.ContainsKey(column.Name) && column.DefaultValue is not null)
+                        values.Add(column.Name, column.DefaultValue);
+                }
+            }
+
+            batchValues.Add(values);
         }
 
         return new InsertTicket(
             txnId: await commandExecutor.NextTxnId().ConfigureAwait(false),
             databaseName: ticket.DatabaseName,
             tableName: tableName,
-            values: values
+            values: batchValues
         );
     }
 
@@ -95,6 +100,30 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         }
 
         return new ColumnValue(ColumnType.Null, "");
+    }
+
+    private static void GetBatchValuesList(
+        TableDescriptor table,
+        NodeAst batchListAst,
+        Dictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        List<List<ColumnValue?>> batchValuesList
+    )
+    {
+        if (batchListAst.nodeType == NodeType.InsertBatchList)
+        {
+            if (batchListAst.leftAst is not null)
+                GetBatchValuesList(table, batchListAst.leftAst, row, parameters, batchValuesList);
+
+            if (batchListAst.rightAst is not null)
+                GetBatchValuesList(table, batchListAst.rightAst, row, parameters, batchValuesList);
+
+            return;
+        }
+
+        List<ColumnValue?> valuesList = new();
+        GetValuesList(table, batchListAst, row, parameters, valuesList);
+        batchValuesList.Add(valuesList);
     }
 
     private static void GetValuesList(
