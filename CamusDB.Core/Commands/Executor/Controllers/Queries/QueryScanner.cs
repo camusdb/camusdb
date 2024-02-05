@@ -27,6 +27,8 @@ internal sealed class QueryScanner
     {
         BufferPoolManager tablespace = database.BufferPool;
 
+        using IDisposable _ = await table.Rows.ReaderLockAsync().ConfigureAwait(false);
+
         await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse(ticket.TxnState.TxnId))
         {
             ObjectIdValue dataOffset = entry.GetValue(ticket.TxnType, ticket.TxnState.TxnId);
@@ -37,7 +39,7 @@ internal sealed class QueryScanner
                 continue;
             }
 
-            byte[] data = await tablespace.GetDataFromPage(dataOffset);
+            byte[] data = await tablespace.GetDataFromPage(dataOffset).ConfigureAwait(false);
             if (data.Length == 0)
             {
                 //Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);
@@ -92,6 +94,8 @@ internal sealed class QueryScanner
         RowDeserializer rowDeserializer
     )
     {
+        using IDisposable _ = await index.ReaderLockAsync().ConfigureAwait(false);
+
         BufferPoolManager tablespace = database.BufferPool;
 
         await foreach (BTreeEntry<CompositeColumnValue, BTreeTuple> entry in index.EntriesTraverse(ticket.TxnState.TxnId))
@@ -104,7 +108,7 @@ internal sealed class QueryScanner
                 continue;
             }
 
-            byte[] data = await tablespace.GetDataFromPage(txnValue.SlotTwo);
+            byte[] data = await tablespace.GetDataFromPage(txnValue.SlotTwo).ConfigureAwait(false);
             if (data.Length == 0)
             {
                 //Console.WriteLine("Index RowId={0} has an empty page data", entry.Key);

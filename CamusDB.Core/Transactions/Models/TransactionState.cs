@@ -9,6 +9,7 @@
 using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
 
@@ -22,7 +23,7 @@ public sealed class TransactionState
 
     public List<IDisposable> Locks { get; } = new();
 
-    public List<BTreeTuple> MainTableDeltas { get; } = new();
+    public List<(BTree<ObjectIdValue, ObjectIdValue>, BTreeTuple)> MainTableDeltas { get; } = new();
 
     public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue, BTreeTuple)> UniqueIndexDeltas { get; } = new();
 

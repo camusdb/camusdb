@@ -292,19 +292,19 @@ internal sealed class RowInserter
     /// <param name="tablespace"></param>
     /// <param name="txnId"></param>
     /// <param name="tuple"></param>
-    /// <param name="rows"></param>
+    /// <param name="rowsIndex"></param>
     /// <returns></returns>
     private async Task UpdateTableIndex(
         BufferPoolManager tablespace,        
         TransactionState txnState,        
         BTreeTuple tuple,
-        BTree<ObjectIdValue, ObjectIdValue> rows,
+        BTree<ObjectIdValue, ObjectIdValue> rowsIndex,
         List<BufferPageOperation> modifiedPages
     )
     {
         SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
             tablespace: tablespace,
-            index: rows,
+            index: rowsIndex,
             txnId: txnState.TxnId,
             commitState: BTreeCommitState.Uncommitted,
             key: tuple.SlotOne,
@@ -315,7 +315,7 @@ internal sealed class RowInserter
         // Main table index stores rowid pointing to page offeset
         await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
 
-        txnState.MainTableDeltas.Add(tuple);
+        txnState.MainTableDeltas.Add((rowsIndex, tuple));
     }
 
     /// <summary>

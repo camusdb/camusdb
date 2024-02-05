@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions.Models;
+using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
 
@@ -47,9 +48,12 @@ public sealed class TransactionsManager
     public TransactionState GetState(HLCTimestamp txnId)
     {
         if (transactions.TryGetValue(txnId, out TransactionState? txState))
+        {
+            Console.WriteLine("Recovered tx {0}", txnId);
             return txState;
+        }
 
-        throw new Exception("Transaction hasn't been started");
+        throw new Exception($"Tx {txnId} hasn't been started");
     }
 
     public async Task<TransactionState> Start()
@@ -57,13 +61,14 @@ public sealed class TransactionsManager
         HLCTimestamp txnId = await hybridLogicalClock.SendOrLocalEvent().ConfigureAwait(false);
         TransactionState txState = new(txnId);
         transactions.TryAdd(txnId, txState);
+        Console.WriteLine("Created tx {0}", txnId);
         return txState;
     }
 
-    public async Task Commit(DatabaseDescriptor database, TableDescriptor table, TransactionState txnState)
+    public async Task Commit(DatabaseDescriptor database, TransactionState txnState)
     {
         // Persist all the changes to the table and indexes
-        await PersistTableAndIndexChanges(database, table, txnState).ConfigureAwait(false);
+        await PersistTableAndIndexChanges(database, txnState).ConfigureAwait(false);
 
         // Apply all the changes to the modified pages in an atomic operation
         database.BufferPool.ApplyPageOperations(txnState.ModifiedPages);
@@ -71,24 +76,26 @@ public sealed class TransactionsManager
         // Release all the locks acquired by the transaction
         txnState.ReleaseLocks();
 
-        Console.WriteLine("Commited tx {0}", txnState.TxnId);
+        Console.WriteLine("Committed tx {0}", txnState.TxnId);
     }
 
     public void Rollback(TransactionState txnState)
     {
         // Release all the locks acquired by the transaction
         txnState.ReleaseLocks();
+
+        Console.WriteLine("Rollback tx {0}", txnState.TxnId);
     }
 
-    private async Task PersistTableAndIndexChanges(DatabaseDescriptor database, TableDescriptor table, TransactionState txnState)
+    private async Task PersistTableAndIndexChanges(DatabaseDescriptor database, TransactionState txnState)
     {
         BufferPoolManager tablespace = database.BufferPool;
 
-        foreach (BTreeTuple tuple in txnState.MainTableDeltas)
+        foreach ((BTree<ObjectIdValue, ObjectIdValue>? rowsIndex, BTreeTuple tuple) in txnState.MainTableDeltas)
         {
             SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
                tablespace: tablespace,
-               index: table.Rows,
+               index: rowsIndex,
                txnId: txnState.TxnId,
                commitState: BTreeCommitState.Committed,
                key: tuple.SlotOne,

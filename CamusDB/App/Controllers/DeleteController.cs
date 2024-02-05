@@ -60,7 +60,7 @@ public sealed class DeleteController : CommandsController
             DeleteByIdResult result = await executor.DeleteById(ticket).ConfigureAwait(false);
 
             if (newTransaction)
-                await transactions.Commit(result.Database, result.Table, txnState);
+                await transactions.Commit(result.Database, txnState);
 
             return new JsonResult(new DeleteResponse("ok", result.DeletedRows));
         }

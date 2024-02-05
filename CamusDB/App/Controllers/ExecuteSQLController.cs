@@ -8,12 +8,12 @@
 
 using CamusDB.Core;
 using System.Text.Json;
+using System.Diagnostics;
 using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models;
-using System.Diagnostics;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
@@ -137,7 +137,7 @@ public sealed class ExecuteSQLController : CommandsController
                 ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
 
                 if (newTransaction)
-                    await transactions.Commit(result.Database, result.Table, txnState);
+                    await transactions.Commit(result.Database, txnState);
 
                 return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows));
             }

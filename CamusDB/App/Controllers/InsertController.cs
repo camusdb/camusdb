@@ -68,7 +68,7 @@ public sealed class InsertController : CommandsController
                 InsertResult result = await executor.Insert(ticket).ConfigureAwait(false);
 
                 if (newTransaction)
-                    await transactions.Commit(result.Database, result.Table, txnState);
+                    await transactions.Commit(result.Database, txnState);
 
                 return new JsonResult(new InsertResponse("ok", result.InsertedRows));
 
