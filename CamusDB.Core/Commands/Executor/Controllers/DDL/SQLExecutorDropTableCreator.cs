@@ -19,10 +19,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// </summary>
 internal sealed class SQLExecutorDropTableCreator : SQLExecutorBaseCreator
 {
-    internal async Task<DropTableTicket> CreateDropTableTicket(CommandExecutor commandExecutor, ExecuteSQLTicket ticket, NodeAst ast)
+    internal DropTableTicket CreateDropTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         string tableName = ast.leftAst!.yytext!;
         
-        return new(txnId: await commandExecutor.NextTxnId(), ticket.DatabaseName, tableName);
+        return new(txnState: ticket.TxnState, ticket.DatabaseName, tableName);
     }
 }

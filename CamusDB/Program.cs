@@ -10,6 +10,7 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
+using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.Time;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
@@ -33,6 +34,7 @@ builder.Services.AddSingleton<HybridLogicalClock>();
 builder.Services.AddSingleton<CommandExecutor>();
 builder.Services.AddSingleton<CommandValidator>();
 builder.Services.AddSingleton<CatalogsManager>();
+builder.Services.AddSingleton<TransactionsManager>();
 
 // Initialize min threads
 ThreadPool.SetMinThreads(1024, 512);

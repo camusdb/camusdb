@@ -14,7 +14,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
 {
-    public async Task<QueryTicket> CreateQueryTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
+    public QueryTicket CreateQueryTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         string tableName;
 
@@ -26,7 +26,7 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid table name");
 
         return new(
-            txnId: await executor.NextTxnId().ConfigureAwait(false),
+            txnState: ticket.TxnState,
             txnType: TransactionType.ReadOnly,
             databaseName: ticket.DatabaseName,
             tableName: tableName,

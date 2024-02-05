@@ -43,9 +43,9 @@ internal sealed class SqlExecutor
 
     }
 
-    public async Task<QueryTicket> CreateQueryTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
+    public QueryTicket CreateQueryTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return await sqlExecutorQueryCreator.CreateQueryTicket(executor, ticket, ast).ConfigureAwait(false);
+        return sqlExecutorQueryCreator.CreateQueryTicket(ticket, ast);
     }
 
     internal async Task<InsertTicket> CreateInsertTicket(CommandExecutor executor, DatabaseDescriptor database, ExecuteSQLTicket ticket, NodeAst ast)
@@ -53,26 +53,25 @@ internal sealed class SqlExecutor
         return await sqlExecutorInsertCreator.CreateInsertTicket(executor, database, ticket, ast).ConfigureAwait(false);
     }
 
-    internal async Task<UpdateTicket> CreateUpdateTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
+    internal UpdateTicket CreateUpdateTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return await sqlExecutorUpdateCreator.CreateUpdateTicket(executor, ticket, ast).ConfigureAwait(false);
+        return sqlExecutorUpdateCreator.CreateUpdateTicket(ticket, ast);
     }
 
-    internal async Task<DeleteTicket> CreateDeleteTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
+    internal DeleteTicket CreateDeleteTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return await sqlExecutorDeleteCreator.CreateDeleteTicket(executor, ticket, ast).ConfigureAwait(false);
+        return sqlExecutorDeleteCreator.CreateDeleteTicket(ticket, ast);
     }
 
     /// <summary>
     /// Creates a ticket to create a table from the AST representation of a SQL statement.
-    /// </summary>
-    /// <param name="commandExecutor"></param>
+    /// </summary>    
     /// <param name="ticket"></param>
     /// <param name="ast"></param>
     /// <returns></returns>
-    internal async Task<CreateTableTicket> CreateCreateTableTicket(CommandExecutor commandExecutor, ExecuteSQLTicket ticket, NodeAst ast)
+    internal CreateTableTicket CreateCreateTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return await sqlExecutorCreateTableCreator.CreateCreateTableTicket(commandExecutor, ticket, ast).ConfigureAwait(false);
+        return sqlExecutorCreateTableCreator.CreateCreateTableTicket(ticket, ast);
     }
 
     /// <summary>
@@ -81,9 +80,9 @@ internal sealed class SqlExecutor
     /// <param name="ticket"></param>
     /// <param name="ast"></param>
     /// <returns></returns>
-    internal async Task<DropTableTicket> CreateDropTableTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
+    internal DropTableTicket CreateDropTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return await sqlExecutorDropTableCreator.CreateDropTableTicket(executor, ticket, ast).ConfigureAwait(false);
+        return sqlExecutorDropTableCreator.CreateDropTableTicket(ticket, ast);
     }
 
     /// <summary>
@@ -92,9 +91,9 @@ internal sealed class SqlExecutor
     /// <param name="ticket"></param>
     /// <param name="ast"></param>
     /// <returns></returns>
-    internal AlterTableTicket CreateAlterTableTicket(HLCTimestamp hlcTimestamp, ExecuteSQLTicket ticket, NodeAst ast)
+    internal AlterTableTicket CreateAlterTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return sqlExecutorAlterTableCreator.CreateAlterTableTicket(hlcTimestamp, ticket, ast);
+        return sqlExecutorAlterTableCreator.CreateAlterTableTicket(ticket, ast);
     }
 
     /// <summary>
@@ -103,9 +102,9 @@ internal sealed class SqlExecutor
     /// <param name="ticket"></param>
     /// <param name="ast"></param>
     /// <returns></returns>
-    internal AlterIndexTicket CreateAlterIndexTicket(HLCTimestamp hlcTimestamp, ExecuteSQLTicket ticket, NodeAst ast)
+    internal AlterIndexTicket CreateAlterIndexTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
-        return sqlExecutorAlterIndexCreator.CreateAlterIndexTicket(hlcTimestamp, ticket, ast);
+        return sqlExecutorAlterIndexCreator.CreateAlterIndexTicket(ticket, ast);
     }
 
     /// <summary>

@@ -1,9 +1,9 @@
 
 // ==========================================================================
-//  GPPG error listing for yacc source file <SQLParser/SQLParser.Language.grammar.y - 2/3/2024 8:47:25 PM>
+//  GPPG error listing for yacc source file <SQLParser/SQLParser.Language.grammar.y - 2/4/2024 12:40:40 PM>
 // ==========================================================================
 //  Version:  1.5.2
-//  DateTime: 2/3/2024 8:47:57 PM
+//  DateTime: 2/4/2024 12:53:49 PM
 // ==========================================================================
 
 
@@ -31,9 +31,14 @@
 
 %token TDIGIT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
-%token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL
+%token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
+%toke  TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL
+//^^^
+// Error: Unknown %keyword in this context
+// ---------------------------------------
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
+%token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT
 
 %%
 
@@ -65,19 +70,15 @@ select_stmt : TSELECT select_field_list TFROM select_table { $$.n = new(NodeType
             | TSELECT select_field_list TFROM select_table TWHERE condition TORDER TBY order_list TLIMIT select_limit_offset TOFFSET select_limit_offset { $$.n = new(NodeType.Select, $2.n, $4.n, $6.n, $9.n, $11.n, $13.n, null); }
             ;
 
-insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES insert_batch_list{ $$.n = new(NodeType.Insert, $3.n, $5.n, $9.n, null, null, null, null); }            
-// Error: Semantic action index is out of bounds
-// ---------------------------------------------
-            | TINSERT TINTO any_identifier TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, null, $6.n, null, null, null, null); }
-// Error: Semantic action index is out of bounds
-// ---------------------------------------------
+insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, $5.n, $8.n, null, null, null, null); }            
+            | TINSERT TINTO any_identifier TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, null, $5.n, null, null, null, null); }
 			;
 
 insert_batch_list : insert_batch_list TCOMMA insert_batch { $$.n = new(NodeType.InsertBatchList, $1.n, $3.n, null, null, null, null, null); }
                   | insert_batch { $$.n = $1.n; $$.s = $1.s; }
                   ;
 
-insert_batch : LPAREN values_list RPAREN { $$.n = $1.n; $$.s = $1.s; }
+insert_batch : LPAREN values_list RPAREN { $$.n = $2.n; $$.s = $2.s; }
              ;
 
 update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, null, null, null, null); }

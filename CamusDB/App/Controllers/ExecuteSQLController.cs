@@ -14,17 +14,17 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models;
 using System.Diagnostics;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class ExecuteSQLController : CommandsController
 {
-    private readonly ILogger<ICamusDB> logger;
-
-    public ExecuteSQLController(CommandExecutor executor, ILogger<ICamusDB> logger) : base(executor)
+    public ExecuteSQLController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
-        this.logger = logger;
+        
     }
 
     [HttpPost]
@@ -44,7 +44,15 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
 
+            TransactionState txnState;
+
+            if (request.TxnIdPT > 0)
+                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            else
+                txnState = await transactions.Start().ConfigureAwait(false);
+
             ExecuteSQLTicket ticket = new(
+                txnState: txnState,
                 database: request.DatabaseName ?? "",
                 sql: request.Sql ?? "",
                 parameters: request.Parameters
@@ -61,13 +69,13 @@ public sealed class ExecuteSQLController : CommandsController
         }
         catch (CamusDBException e)
         {
-            logger.LogError("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new ExecuteSQLQueryResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            logger.LogError("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new ExecuteSQLQueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
@@ -88,7 +96,15 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
 
+            TransactionState txnState;
+
+            if (request.TxnIdPT > 0)
+                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            else
+                txnState = await transactions.Start().ConfigureAwait(false);
+
             ExecuteSQLTicket ticket = new(
+                txnState: txnState,
                 database: request.DatabaseName ?? "",
                 sql: request.Sql ?? "",
                 parameters: request.Parameters
@@ -100,12 +116,14 @@ public sealed class ExecuteSQLController : CommandsController
         }
         catch (CamusDBException e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            Console.WriteLine("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new ExecuteNonSQLQueryResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            Console.WriteLine("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new ExecuteNonSQLQueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }
@@ -125,7 +143,15 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQL-DDL request is not valid");
 
+            TransactionState txnState;
+
+            if (request.TxnIdPT > 0)
+                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            else
+                txnState = await transactions.Start().ConfigureAwait(false);
+
             ExecuteSQLTicket ticket = new(
+                txnState: txnState,
                 database: request.DatabaseName ?? "",
                 sql: request.Sql ?? "",
                 parameters: request.Parameters
@@ -137,13 +163,13 @@ public sealed class ExecuteSQLController : CommandsController
         }
         catch (CamusDBException e)
         {
-            logger.LogError("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new ExecuteDDLSQLResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            logger.LogError("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new ExecuteDDLSQLResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }

@@ -9,13 +9,15 @@
 using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class PingController : CommandsController
 {
-    public PingController(CommandExecutor executor) : base(executor)
+    public PingController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }

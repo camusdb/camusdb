@@ -12,6 +12,10 @@ namespace CamusDB.App.Models;
 
 public sealed class DeleteRequest
 {
+    public long TxnIdPT { get; set; }
+
+    public uint TxnIdCounter { get; set; }
+
     public string? DatabaseName { get; set; }
 
     public string? TableName { get; set; }    

@@ -7,13 +7,13 @@
  */
 
 using CamusDB.Core.SQLParser;
-using CamusDB.Core.Util.Time;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct DeleteTicket
 {
-    public HLCTimestamp TxnId { get; }
+    public TransactionState TxnState { get; }
 
     public string DatabaseName { get; }
 
@@ -24,14 +24,14 @@ public readonly struct DeleteTicket
     public List<QueryFilter>? Filters { get; }
 
     public DeleteTicket(
-        HLCTimestamp txnId,
+        TransactionState txnState,
         string databaseName,
         string tableName,
         NodeAst? where,
         List<QueryFilter>? filters
     )
     {
-        TxnId = txnId;
+        TxnState = txnState;
         DatabaseName = databaseName;
         TableName = tableName;
         Where = where;

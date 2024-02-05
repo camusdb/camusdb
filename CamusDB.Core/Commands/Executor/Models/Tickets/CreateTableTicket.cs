@@ -7,12 +7,13 @@
  */
 
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct CreateTableTicket
 {
-    public HLCTimestamp TxnId { get; }
+    public TransactionState TxnState { get; }
 
     public string DatabaseName { get; }
 
@@ -25,7 +26,7 @@ public readonly struct CreateTableTicket
     public bool IfNotExists { get; }
 
     public CreateTableTicket(
-        HLCTimestamp txnId,
+        TransactionState txnState,
         string databaseName,
         string tableName,
         ColumnInfo[] columns,
@@ -33,7 +34,7 @@ public readonly struct CreateTableTicket
         bool ifNotExists
     )
     {
-        TxnId = txnId;
+        TxnState = txnState;
         DatabaseName = databaseName;
         TableName = tableName;
         Columns = columns;

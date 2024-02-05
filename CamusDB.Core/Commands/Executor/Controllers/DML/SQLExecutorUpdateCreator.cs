@@ -13,7 +13,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
 {
-    internal async Task<UpdateTicket> CreateUpdateTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
+    internal UpdateTicket CreateUpdateTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         string tableName = ast.leftAst!.yytext!;
 
@@ -30,7 +30,7 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
             values[updateItem.columnName] = updateItem.value;
 
         return new(
-            txnId: await executor.NextTxnId(),
+            txnState: ticket.TxnState,
             databaseName: ticket.DatabaseName,
             tableName: tableName,
             plainValues: null,

@@ -6,13 +6,13 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Time;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct UpdateByIdTicket
 {
-    public HLCTimestamp TxnId { get; }
+    public TransactionState TxnState { get; }
 
     public string DatabaseName { get; }
 
@@ -22,9 +22,9 @@ public readonly struct UpdateByIdTicket
 
     public Dictionary<string, ColumnValue> Values { get; }
 
-    public UpdateByIdTicket(HLCTimestamp txnId, string databaseName, string tableName, string id, Dictionary<string, ColumnValue> values)
+    public UpdateByIdTicket(TransactionState txnState, string databaseName, string tableName, string id, Dictionary<string, ColumnValue> values)
     {
-        TxnId = txnId;
+        TxnState = txnState;
         DatabaseName = databaseName;
         TableName = tableName;
         Id = id;

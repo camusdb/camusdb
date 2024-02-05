@@ -21,10 +21,12 @@
 %left TMULT
 
 %token TDIGIT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
-%token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC TTRUE TFALSE
-%token TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL
+%token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
+%token TTRUE TFALSE TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
+%token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
+%token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT
 
 %%
 
@@ -40,6 +42,9 @@ stat    : select_stmt { $$.n = $1.n; }
         | alter_table_stmt { $$.n = $1.n; }
         | show_stmt { $$.n = $1.n; }
         | create_index_stmt { $$.n = $1.n; }
+        | begin_stmt { $$.n = $1.n; }
+        | commit_stmt { $$.n = $1.n; }
+        | rollback_stmt { $$.n = $1.n; } 
         ;
 
 select_stmt : TSELECT select_field_list TFROM select_table { $$.n = new(NodeType.Select, $2.n, $4.n, null, null, null, null, null); }
@@ -72,6 +77,16 @@ update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition { $$.n = 
 
 delete_stmt : TDELETE TFROM any_identifier TWHERE condition { $$.n = new(NodeType.Delete, $3.n, $5.n, null, null, null, null, null); }
 			;
+
+begin_stmt : TBEGIN { $$.n = new(NodeType.Begin, null, null, null, null, null, null, null); }
+           | TSTART TTRANSACTION { $$.n = new(NodeType.Begin, null, null, null, null, null, null, null); }
+           ;
+
+commit_stmt : TCOMMIT { $$.n = new(NodeType.Commit, null, null, null, null, null, null, null); }             
+            ;
+
+rollback_stmt : TROLLBACK { $$.n = new(NodeType.Rollback, null, null, null, null, null, null, null); }             
+              ;
 
 create_table_stmt : TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, null, null, null, null); }
                   | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, null, null, null, null, null); }

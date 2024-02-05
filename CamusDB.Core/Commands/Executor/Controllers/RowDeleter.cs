@@ -116,7 +116,7 @@ internal sealed class RowDeleter
         DeleteTicket ticket = state.Ticket;
 
         QueryTicket queryTicket = new(
-            txnId: ticket.TxnId,
+            txnState: ticket.TxnState,
             txnType: TransactionType.Write,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
@@ -130,7 +130,7 @@ internal sealed class RowDeleter
             parameters: null
         );
 
-        var cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
+        IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
         // @todo we need to take a snapshot of the data to prevent deadlocks
         // but probably need to optimize this for larger datasets
@@ -203,7 +203,7 @@ internal sealed class RowDeleter
         SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
             tablespace: state.Database.BufferPool,
             index: state.Table.Rows,
-            txnId: state.Ticket.TxnId,
+            txnId: state.Ticket.TxnState.TxnId,
             commitState: BTreeCommitState.Uncommitted,
             key: tuple.SlotOne,
             value: tuple.SlotTwo,
@@ -232,7 +232,7 @@ internal sealed class RowDeleter
             SaveIndexTicket saveUniqueIndexTicket = new(
                 tablespace: state.Database.BufferPool,
                 index: uniqueIndex,
-                txnId: ticket.TxnId,
+                txnId: ticket.TxnState.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
                 key: uniqueKeyValue,
                 value: tuple,
@@ -263,7 +263,7 @@ internal sealed class RowDeleter
             SaveIndexTicket saveUniqueIndexTicket = new(
                 tablespace: state.Database.BufferPool,
                 index: uniqueIndex,
-                txnId: ticket.TxnId,
+                txnId: ticket.TxnState.TxnId,
                 commitState: BTreeCommitState.Uncommitted,
                 key: multiKeyValue,
                 value: tuple,
@@ -290,7 +290,7 @@ internal sealed class RowDeleter
             SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
                tablespace: state.Database.BufferPool,
                index: state.Table.Rows,
-               txnId: state.Ticket.TxnId,
+               txnId: state.Ticket.TxnState.TxnId,
                commitState: BTreeCommitState.Committed,
                key: tuple.SlotOne,
                value: tuple.SlotTwo,
@@ -308,7 +308,7 @@ internal sealed class RowDeleter
                 SaveIndexTicket saveUniqueIndexTicket = new(
                     tablespace: state.Database.BufferPool,
                     index: uniqueIndex.index,
-                    txnId: state.Ticket.TxnId,
+                    txnId: state.Ticket.TxnState.TxnId,
                     commitState: BTreeCommitState.Committed,
                     key: uniqueIndex.uniqueKeyValue,
                     value: uniqueIndex.tuple,
@@ -326,7 +326,7 @@ internal sealed class RowDeleter
                 SaveIndexTicket saveMultiIndexTicket = new(
                     tablespace: state.Database.BufferPool,
                     index: multIndex.index,
-                    txnId: state.Ticket.TxnId,
+                    txnId: state.Ticket.TxnState.TxnId,
                     commitState: BTreeCommitState.Committed,
                     key: multIndex.multiKeyValue,
                     value: multIndex.tuple,

@@ -29,26 +29,32 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// </summary>
 internal sealed class DatabaseOpener
 {
+    private readonly CommandExecutor commandExecutor;
+
+    private readonly HybridLogicalClock hlc;
+
     private readonly DatabaseDescriptors databaseDescriptors;
 
     private readonly ILogger<ICamusDB> logger;
 
-    public DatabaseOpener(DatabaseDescriptors databaseDescriptors, ILogger<ICamusDB> logger)
+    public DatabaseOpener(CommandExecutor commandExecutor, HybridLogicalClock hlc, DatabaseDescriptors databaseDescriptors, ILogger<ICamusDB> logger)
     {
+        this.commandExecutor = commandExecutor;
+        this.hlc = hlc;
         this.databaseDescriptors = databaseDescriptors;
         this.logger = logger;
     }
 
-    public async ValueTask<DatabaseDescriptor> Open(CommandExecutor executor, HybridLogicalClock hybridLogicalClock, string name, bool recoveryMode = false)
+    public async ValueTask<DatabaseDescriptor> Open(string name, bool recoveryMode = false)
     {
         AsyncLazy<DatabaseDescriptor> openDatabaseLazy = databaseDescriptors.Descriptors.GetOrAdd(
                                                             name,
-                                                            (_) => new AsyncLazy<DatabaseDescriptor>(() => LoadDatabase(hybridLogicalClock, name))
+                                                            (_) => new AsyncLazy<DatabaseDescriptor>(() => LoadDatabase(name))
                                                          );
         return await openDatabaseLazy;
     }
 
-    private async Task<DatabaseDescriptor> LoadDatabase(HybridLogicalClock hybridLogicalClock, string name)
+    private async Task<DatabaseDescriptor> LoadDatabase(string name)
     {
         //if (!Directory.Exists(path))
         //    throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
@@ -62,7 +68,7 @@ internal sealed class DatabaseOpener
             name: name,
             storage: storage,
             bufferPool: bufferPool,
-            gc: new GCManager(bufferPool, hybridLogicalClock, logicalClock, tableDescriptors, logger),
+            gc: new GCManager(bufferPool, hlc, logicalClock, tableDescriptors, logger),
             tableDescriptors: tableDescriptors
         );
 

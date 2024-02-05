@@ -15,13 +15,15 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class CreateTableController : CommandsController
 {
-    public CreateTableController(CommandExecutor executor) : base(executor)
+    public CreateTableController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }
@@ -95,8 +97,15 @@ public sealed class CreateTableController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "CreateTable request is not valid");
 
+            TransactionState txnState;
+
+            if (request.TxnIdPT > 0)
+                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            else
+                txnState = await transactions.Start().ConfigureAwait(false);
+
             CreateTableTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 columns: GetColumnInfos(request.Columns),
@@ -110,12 +119,14 @@ public sealed class CreateTableController : CommandsController
         }
         catch (CamusDBException e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            Console.WriteLine("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new CreateTableResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            Console.WriteLine("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new CreateTableResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }

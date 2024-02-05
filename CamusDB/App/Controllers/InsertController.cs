@@ -10,20 +10,20 @@ using CamusDB.Core;
 using System.Text.Json;
 using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
+using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class InsertController : CommandsController
-{
-    private readonly ILogger<ICamusDB> logger;
-
-    public InsertController(CommandExecutor executor, ILogger<ICamusDB> logger) : base(executor)
+{    
+    public InsertController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
-        this.logger = logger;
+        
     }
 
     [HttpPost]
@@ -44,16 +44,23 @@ public sealed class InsertController : CommandsController
             if (request.Values is null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Insert values are not valid");
 
+            TransactionState txnState;
+
+            if (request.TxnIdPT > 0)
+                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            else
+                txnState = await transactions.Start().ConfigureAwait(false);
+
             InsertTicket ticket = new(
-                txnId: await executor.NextTxnId().ConfigureAwait(false),
+                txnState: txnState,
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 values: new List<Dictionary<string, ColumnValue>>() { request.Values }
             );
 
-            await executor.Insert(ticket).ConfigureAwait(false);
+            int insertedRows = await executor.Insert(ticket).ConfigureAwait(false);
 
-            return new JsonResult(new InsertResponse("ok", 1));
+            return new JsonResult(new InsertResponse("ok", insertedRows));
         }
         catch (CamusDBException e)
         {

@@ -7,13 +7,13 @@
  */
 
 using CamusDB.Core.SQLParser;
-using CamusDB.Core.Util.Time;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public sealed class UpdateTicket
 {
-    public HLCTimestamp TxnId { get; }
+    public TransactionState TxnState { get; }
 
     public string DatabaseName { get; }
 
@@ -30,16 +30,17 @@ public sealed class UpdateTicket
     public Dictionary<string, ColumnValue>? Parameters { get; }
 
     public UpdateTicket(
-        HLCTimestamp txnId,
+        TransactionState txnState,
         string databaseName,
         string tableName,
         Dictionary<string, ColumnValue>? plainValues,
         Dictionary<string, NodeAst>? exprValues,
         NodeAst? where,
         List<QueryFilter>? filters,
-        Dictionary<string, ColumnValue>? parameters)
+        Dictionary<string, ColumnValue>? parameters
+    )
     {
-        TxnId = txnId;
+        TxnState = txnState;
         DatabaseName = databaseName;
         TableName = tableName;
         PlainValues = plainValues;

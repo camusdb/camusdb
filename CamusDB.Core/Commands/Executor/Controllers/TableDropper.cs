@@ -39,7 +39,7 @@ internal sealed class TableDropper
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
             AlterIndexTicket alterIndexTicket = new(
-                txnId: ticket.TxnId,
+                txnState: ticket.TxnState,
                 databaseName: ticket.DatabaseName,
                 tableName: ticket.TableName,
                 indexName: index.Key,
@@ -51,18 +51,18 @@ internal sealed class TableDropper
         }
 
         DeleteTicket deleteTicket = new(
-            txnId: ticket.TxnId,
+            txnState: ticket.TxnState,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             where: null,
             filters: null
         );
 
-        await rowDeleter.Delete(queryExecutor, database, table, deleteTicket);
+        await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
 
         try
         {
-            await database.Schema.Semaphore.WaitAsync();
+            await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
 
             if (database.Schema.Tables.Remove(ticket.TableName))
                 logger.LogInformation("Removed table {TableName} from database schema", ticket.TableName);
@@ -76,7 +76,7 @@ internal sealed class TableDropper
 
         try
         {
-            await database.SystemSchemaSemaphore.WaitAsync();
+            await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
 
             Dictionary<string, DatabaseTableObject> objects = database.SystemSchema.Tables;
 

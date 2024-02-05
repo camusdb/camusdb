@@ -13,7 +13,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal sealed class SQLExecutorDeletereator : SQLExecutorBaseCreator
 {
-    internal async Task<DeleteTicket> CreateDeleteTicket(CommandExecutor executor, ExecuteSQLTicket ticket, NodeAst ast)
+    internal DeleteTicket CreateDeleteTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         string tableName = ast.leftAst!.yytext!;
 
@@ -21,7 +21,7 @@ internal sealed class SQLExecutorDeletereator : SQLExecutorBaseCreator
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing delete conditions");
 
         return new(
-            txnId: await executor.NextTxnId(),
+            txnState: ticket.TxnState,
             databaseName: ticket.DatabaseName,
             tableName: tableName,
             where: ast.rightAst,

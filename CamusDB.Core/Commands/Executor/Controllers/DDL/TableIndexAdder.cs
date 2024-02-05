@@ -146,7 +146,7 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket = state.Ticket;
 
         QueryTicket queryTicket = new(
-            txnId: ticket.TxnId,
+            txnState: ticket.TxnState,
             txnType: TransactionType.Write,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
@@ -251,18 +251,18 @@ internal sealed class TableIndexAdder
 
         CompositeColumnValue compositeUniqueKeyValue = new(columnValues);
 
-        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnId, compositeUniqueKeyValue);
+        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnState.TxnId, compositeUniqueKeyValue);
 
         if (rowTuple is not null && !rowTuple.IsNull())
             throw new CamusDBException(
                 CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                "Duplicate entry for key \"" + ticket.IndexName + "\" " + compositeUniqueKeyValue
+                $"Duplicate entry for key '{ticket.IndexName}' {compositeUniqueKeyValue}"
             );
 
         SaveIndexTicket saveUniqueIndexTicket = new(
             tablespace: tablespace,
             index: uniqueIndex,
-            txnId: ticket.TxnId,
+            txnId: ticket.TxnState.TxnId,
             commitState: BTreeCommitState.Uncommitted,
             key: compositeUniqueKeyValue,
             value: row.Tuple,
@@ -305,7 +305,7 @@ internal sealed class TableIndexAdder
         SaveIndexTicket saveUniqueIndexTicket = new(
             tablespace: tablespace,
             index: uniqueIndex,
-            txnId: ticket.TxnId,
+            txnId: ticket.TxnState.TxnId,
             commitState: BTreeCommitState.Uncommitted,
             key: compositeIndexValue,
             value: row.Tuple,
@@ -336,7 +336,7 @@ internal sealed class TableIndexAdder
             SaveIndexTicket saveUniqueIndexTicket = new(
                 tablespace: state.Database.BufferPool,
                 index: index.index,
-                txnId: state.Ticket.TxnId,
+                txnId: state.Ticket.TxnState.TxnId,
                 commitState: BTreeCommitState.Committed,
                 key: index.keyValue,
                 value: index.tuple,

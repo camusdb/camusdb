@@ -30,6 +30,8 @@
     <None Remove="Commands\Executor\Controllers\DDL\" />
     <None Remove="Commands\Executor\Controllers\Queries\" />
     <None Remove="Util\Trees\Experimental\" />
+    <None Remove="Transactions\" />
+    <None Remove="Transactions\Models\" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Util\Hashes\" />
@@ -40,6 +42,8 @@
     <Folder Include="Config\Models\" />
     <Folder Include="Statistics\" />
     <Folder Include="Statistics\Models\" />
+    <Folder Include="Transactions\" />
+    <Folder Include="Transactions\Models\" />
   </ItemGroup>
 
   <ItemGroup Label="SQLParser">

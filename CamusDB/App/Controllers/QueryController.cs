@@ -13,13 +13,15 @@ using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class QueryController : CommandsController
 {
-    public QueryController(CommandExecutor executor) : base(executor)
+    public QueryController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }
@@ -37,8 +39,15 @@ public sealed class QueryController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Query request is not valid");
 
+            TransactionState txnState;
+
+            if (request.TxnIdPT > 0)
+                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            else
+                txnState = await transactions.Start().ConfigureAwait(false);
+
             QueryTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 txnType: TransactionType.ReadOnly,
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
@@ -86,8 +95,15 @@ public sealed class QueryController : CommandsController
             if (request == null)
                 throw new Exception("QueryById request is not valid");
 
+            TransactionState txnState;
+
+            if (request.TxnIdPT > 0)
+                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            else
+                txnState = await transactions.Start().ConfigureAwait(false);
+
             QueryByIdTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 id: request.Id ?? ""
@@ -103,11 +119,13 @@ public sealed class QueryController : CommandsController
         catch (CamusDBException e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new QueryResponse("failed", e.Code, e.Message));
         }
         catch (Exception e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new QueryResponse("failed", "CA0000", e.Message));
         }
     }

@@ -27,9 +27,9 @@ internal sealed class QueryScanner
     {
         BufferPoolManager tablespace = database.BufferPool;
 
-        await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse(ticket.TxnId))
+        await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse(ticket.TxnState.TxnId))
         {
-            ObjectIdValue dataOffset = entry.GetValue(ticket.TxnType, ticket.TxnId);
+            ObjectIdValue dataOffset = entry.GetValue(ticket.TxnType, ticket.TxnState.TxnId);
 
             if (dataOffset.IsNull())
             {
@@ -94,9 +94,9 @@ internal sealed class QueryScanner
     {
         BufferPoolManager tablespace = database.BufferPool;
 
-        await foreach (BTreeEntry<CompositeColumnValue, BTreeTuple> entry in index.EntriesTraverse(ticket.TxnId))
+        await foreach (BTreeEntry<CompositeColumnValue, BTreeTuple> entry in index.EntriesTraverse(ticket.TxnState.TxnId))
         {
-            BTreeTuple? txnValue = entry.GetValue(ticket.TxnType, ticket.TxnId);
+            BTreeTuple? txnValue = entry.GetValue(ticket.TxnType, ticket.TxnState.TxnId);
 
             if (txnValue is null || txnValue.IsNull())
             {

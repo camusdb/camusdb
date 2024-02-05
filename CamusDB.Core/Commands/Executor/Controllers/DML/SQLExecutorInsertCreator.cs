@@ -50,16 +50,16 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
 
         GetBatchValuesList(table, ast.extendedOne, new(), ticket.Parameters, valuesList);
 
-        foreach (List<ColumnValue?> x in valuesList)
+        foreach (List<ColumnValue?> valuesRow in valuesList)
         {
-            if (fields.Count != x.Count)
+            if (fields.Count != valuesRow.Count)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"The number of fields is not equal to the number of values.");
 
             Dictionary<string, ColumnValue> values = new(fields.Count);
 
             for (int i = 0; i < fields.Count; i++)
             {
-                ColumnValue? columnValue = x.ElementAt(i); // @todo optimize this
+                ColumnValue? columnValue = valuesRow.ElementAt(i); // @todo optimize this
 
                 if (columnValue is not null)
                     values.Add(fields[i], columnValue);
@@ -81,7 +81,7 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         }
 
         return new InsertTicket(
-            txnId: await commandExecutor.NextTxnId().ConfigureAwait(false),
+            txnState: ticket.TxnState,
             databaseName: ticket.DatabaseName,
             tableName: tableName,
             values: batchValues

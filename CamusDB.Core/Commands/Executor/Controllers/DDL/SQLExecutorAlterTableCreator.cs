@@ -20,7 +20,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// </summary>
 internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
 {
-    internal AlterTableTicket CreateAlterTableTicket(HLCTimestamp hlcTimestamp, ExecuteSQLTicket ticket, NodeAst ast)
+    internal AlterTableTicket CreateAlterTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         string tableName = ast.leftAst!.yytext!;
 
@@ -29,7 +29,7 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
 
         if (ast.nodeType == NodeType.AlterTableAddColumn)
             return new(
-                hlcTimestamp,
+                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 AlterTableOperation.AddColumn,
@@ -37,7 +37,7 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             );
 
         return new(
-            hlcTimestamp,
+            ticket.TxnState,
             ticket.DatabaseName,
             tableName,
             AlterTableOperation.DropColumn,

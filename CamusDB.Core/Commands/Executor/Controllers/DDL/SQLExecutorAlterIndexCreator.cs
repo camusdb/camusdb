@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Time;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -19,7 +18,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// </summary>
 internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
 {
-    internal AlterIndexTicket CreateAlterIndexTicket(HLCTimestamp hlcTimestamp, ExecuteSQLTicket ticket, NodeAst ast)
+    internal AlterIndexTicket CreateAlterIndexTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         if (ast.leftAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing alter table name");
@@ -35,7 +34,7 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
             GetColumns(ast.extendedOne, indexColumns);
 
             return new(
-                hlcTimestamp,
+                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 ast.rightAst!.yytext!,
@@ -50,7 +49,7 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
             GetColumns(ast.extendedOne, indexColumns);
 
             return new(
-                hlcTimestamp,
+                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 ast.rightAst!.yytext!,
@@ -65,7 +64,7 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
             GetColumns(ast.extendedOne, indexColumns);
 
             return new(
-                hlcTimestamp,
+                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 CamusDBConfig.PrimaryKeyInternalName,
@@ -76,7 +75,7 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
 
         if (ast.nodeType == NodeType.AlterTableDropIndex)
             return new(
-                hlcTimestamp,
+                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 ast.rightAst!.yytext!,
@@ -86,7 +85,7 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
 
         if (ast.nodeType == NodeType.AlterTableDropPrimaryKey)
             return new(
-                hlcTimestamp,
+                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 CamusDBConfig.PrimaryKeyInternalName,

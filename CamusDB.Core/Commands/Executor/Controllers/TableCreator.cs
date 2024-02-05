@@ -104,7 +104,7 @@ internal sealed class TableCreator
                 case ConstraintType.PrimaryKey:
                     {
                         AlterIndexTicket indexTicket = new(
-                            txnId: ticket.TxnId,
+                            txnState: ticket.TxnState,
                             databaseName: database.Name,
                             tableName: ticket.TableName,
                             indexName: constraint.Name,
@@ -119,7 +119,7 @@ internal sealed class TableCreator
                 case ConstraintType.IndexMulti:
                     {
                         AlterIndexTicket indexTicket = new(
-                            txnId: ticket.TxnId,
+                            txnState: ticket.TxnState,
                             databaseName: database.Name,
                             tableName: ticket.TableName,
                             indexName: constraint.Name,
@@ -134,7 +134,7 @@ internal sealed class TableCreator
                 case ConstraintType.IndexUnique:
                     {
                         AlterIndexTicket indexTicket = new(
-                            txnId: ticket.TxnId,
+                            txnState: ticket.TxnState,
                             databaseName: database.Name,
                             tableName: ticket.TableName,
                             indexName: constraint.Name,

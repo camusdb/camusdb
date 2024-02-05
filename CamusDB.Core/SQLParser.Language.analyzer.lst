@@ -3,7 +3,7 @@
 //  GPLEX error listing for lex source file <SQLParser.Language.analyzer.lex>
 // ==========================================================================
 //  Version:  1.2.2
-//  DateTime: 1/14/2024 10:22:08 PM
+//  DateTime: 2/4/2024 12:54:30 PM
 // ==========================================================================
 
 
@@ -24,6 +24,7 @@ TAnd            (A|a)(N|n)(D|d)
 TOr             (O|o)(R|r)
 TOn             (O|o)(N|n)
 TIn             (I|i)(N|n)
+TIs             (I|i)(S|s)
 TAsc            (A|a)(S|s)(C|c)
 TLike           (L|l)(I|i)(K|k)(E|e)
 TILike          (I|i)(L|l)(I|i)(K|k)(E|e)
@@ -65,6 +66,13 @@ TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
 TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
 TTypeObjectId   (O|o)(B|b)(J|j)(E|e)(C|c)(T|t)(_)(I|i)(D|d)
 TTypeSObjectId  (O|o)(I|i)(D|d)
+TTypeBool       (B|b)(O|o)(O|o)(L|l)
+TTypeBoolean    (B|b)(O|o)(O|o)(L|l)(E|e)(A|a)(N|n)
+TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
+TStart          (S|s)(T|t)(A|a)(R|r)(T|t)
+TCommit         (C|c)(O|o)(M|m)(M|m)(I|i)(T|t)
+TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
+TTransaction    (T|t)(R|r)(A|a)(N|n)(S|s)(A|a)(C|c)(T|t)(I|i)(O|o)(N|n)
 LParen          \(
 RParen          \)
 LBrace          \{
@@ -126,6 +134,22 @@ TGreaterEquals  >=
 
 {TILike} { return (int)Token.TILIKE; }
 
+{TBegin} { return (int)Token.TBEGIN; }
+
+{TRollback} { return (int)Token.TROLLBACK; }
+
+{TCommit} { return (int)Token.TCOMMIT; }
+//^^^^^^^
+// Warning: This pattern always overrides "{TCommit}" 
+// ---------------------------------------------------
+
+{TCommit} { return (int)Token.TSTART; }
+//^^^^^^^
+// Warning: This pattern always overridden by "{TCommit}" 
+// -------------------------------------------------------
+
+{TTransaction} { return (int)Token.TTRANSACTION; }
+
 {TDatabase} { return (int)Token.TDATABASE; }
 
 {TSelect} { return (int)Token.TSELECT; }
@@ -159,6 +183,8 @@ TGreaterEquals  >=
 {TValues} { return (int)Token.TVALUES; }
 
 {TCreate} { return (int)Token.TCREATE; }
+
+{TIs} { return (int)Token.TIS; }
 
 {TIf} { return (int)Token.TIF; }
 
@@ -216,6 +242,10 @@ TGreaterEquals  >=
 
 {TTypeFloat64} { return (int)Token.TTYPE_FLOAT64; }
 
+{TTypeBool} { return (int)Token.TTYPE_BOOL; }
+
+{TTypeBoolean} { return (int)Token.TTYPE_BOOL; }
+
 {TAt} { return (int)Token.TAT; }
 
 {TAdd} { return (int)Token.TADD; }
@@ -234,10 +264,7 @@ TGreaterEquals  >=
 
 {TIn} { return (int)Token.TIN; }
 
-{Tor} { return (int)Token.TOR; }
-//^^
-// Error: Unknown lexical category <Tor> 
-// --------------------------------------
+{TOr} { return (int)Token.TOR; }
 
 {TEquals} { return (int)Token.TEQUALS; }
 

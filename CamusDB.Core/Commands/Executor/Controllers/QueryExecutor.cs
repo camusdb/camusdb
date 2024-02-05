@@ -143,7 +143,7 @@ internal sealed class QueryExecutor
 
         BTreeTuple? pageOffset = await index.BTree.Get(
                                             TransactionType.ReadOnly,
-                                            ticket.TxnId,
+                                            ticket.TxnState.TxnId,
                                             new CompositeColumnValue(columnValue)
                                        ).ConfigureAwait(false);
 
@@ -192,7 +192,7 @@ internal sealed class QueryExecutor
 
         using IDisposable? _ = await index.BTree.ReaderLockAsync().ConfigureAwait(false);
 
-        await foreach (BTreeTuple? pageOffset in index.BTree.GetPrefix(TransactionType.ReadOnly, ticket.TxnId, columnValue))
+        await foreach (BTreeTuple? pageOffset in index.BTree.GetPrefix(TransactionType.ReadOnly, ticket.TxnState.TxnId, columnValue))
         {
             if (pageOffset is null || pageOffset.IsNull())
             {
@@ -247,7 +247,7 @@ internal sealed class QueryExecutor
 
         using IDisposable? _ = await index.BTree.ReaderLockAsync().ConfigureAwait(false);
 
-        BTreeTuple? pageOffset = await index.BTree.Get(TransactionType.ReadOnly, ticket.TxnId, new CompositeColumnValue(columnId)).ConfigureAwait(false);
+        BTreeTuple? pageOffset = await index.BTree.Get(TransactionType.ReadOnly, ticket.TxnState.TxnId, new CompositeColumnValue(columnId)).ConfigureAwait(false);
 
         if (pageOffset is null || pageOffset.IsNull())
         {

@@ -127,7 +127,7 @@ public sealed class TableColumnDropper
         AlterColumnTicket ticket = state.Ticket;
 
         QueryTicket queryTicket = new(
-            txnId: ticket.TxnId,
+            txnState: ticket.TxnState,
             txnType: TransactionType.Write,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,

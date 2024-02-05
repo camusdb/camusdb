@@ -10,6 +10,8 @@ using CamusDB.App.Models;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
 
@@ -18,7 +20,7 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class UpdateController : CommandsController
 {
-    public UpdateController(CommandExecutor executor) : base(executor)
+    public UpdateController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }
@@ -36,8 +38,15 @@ public sealed class UpdateController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "UpdateById request is not valid");
 
+            TransactionState txnState;
+
+            if (request.TxnIdPT > 0)
+                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            else
+                txnState = await transactions.Start().ConfigureAwait(false);
+
             UpdateByIdTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 id: request.Id ?? "",
@@ -73,8 +82,15 @@ public sealed class UpdateController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Update request is not valid");
 
+            TransactionState txnState;
+
+            if (request.TxnIdPT > 0)
+                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            else
+                txnState = await transactions.Start().ConfigureAwait(false);
+
             UpdateTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",                
                 plainValues: request.Values ?? new(),

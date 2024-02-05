@@ -10,15 +10,17 @@ using CamusDB.Core;
 using System.Text.Json;
 using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
+using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class DeleteController : CommandsController
 {
-    public DeleteController(CommandExecutor executor) : base(executor)
+    public DeleteController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }
@@ -30,31 +32,42 @@ public sealed class DeleteController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             DeleteByIdRequest? request = JsonSerializer.Deserialize<DeleteByIdRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DeleteById request is not valid");
 
+            TransactionState txnState;
+
+            if (request.TxnIdPT > 0)
+                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            else
+                txnState = await transactions.Start().ConfigureAwait(false);
+
             DeleteByIdTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 id: request.Id ?? ""
             );
 
-            int deletedRows = await executor.DeleteById(ticket);
+            int deletedRows = await executor.DeleteById(ticket).ConfigureAwait(false);
+
+            transactions.Commit(txnState);
 
             return new JsonResult(new DeleteResponse("ok", deletedRows));
         }
         catch (CamusDBException e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new DeleteResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new DeleteResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }
@@ -72,8 +85,15 @@ public sealed class DeleteController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Delete request is not valid");
 
+            TransactionState txnState;
+
+            if (request.TxnIdPT > 0)
+                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            else
+                txnState = await transactions.Start().ConfigureAwait(false);
+
             DeleteTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 where: null,
@@ -86,12 +106,14 @@ public sealed class DeleteController : CommandsController
         }
         catch (CamusDBException e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new DeleteResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new DeleteResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }

@@ -22,7 +22,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 internal sealed class TableIndexDropper
 {
-    private ILogger<ICamusDB> logger;
+    private readonly ILogger<ICamusDB> logger;
 
     public TableIndexDropper(ILogger<ICamusDB> logger)
     {
@@ -34,7 +34,7 @@ internal sealed class TableIndexDropper
         if (!table.Indexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "Index " + ticket.IndexName + " does not exist in table " + table.Name
+                $"Index '{ticket.IndexName}' does not exist in table '{table.Name}'"
             );
     }    
 
@@ -48,7 +48,7 @@ internal sealed class TableIndexDropper
         TableDescriptor table = state.Table;
 
         if (!table.Indexes.TryGetValue(state.Ticket.IndexName, out TableIndexSchema? index))
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, "Index " + state.Ticket.IndexName + " does not exist");
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Index '{state.Ticket.IndexName}' does not exist");
 
         state.Btree = index.BTree;
         state.IndexOffset = index.BTree.rootOffset;
@@ -72,8 +72,8 @@ internal sealed class TableIndexDropper
         BufferPoolManager tableSpace = state.Database.BufferPool;
         //using IDisposable writerLock = await state.Btree.WriterLockAsync();
 
-        await foreach (BTreeNode<CompositeColumnValue, BTreeTuple> x in state.Btree.NodesTraverse(state.Ticket.TxnId))                    
-            await tableSpace.DeletePage(x.PageOffset);
+        await foreach (BTreeNode<CompositeColumnValue, BTreeTuple> node in state.Btree.NodesTraverse(state.Ticket.TxnState.TxnId))
+            await tableSpace.DeletePage(node.PageOffset);
 
         await Task.CompletedTask;
 
@@ -94,7 +94,7 @@ internal sealed class TableIndexDropper
 
         try
         {
-            await database.SystemSchemaSemaphore.WaitAsync();
+            await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
 
             Dictionary<string, DatabaseIndexObject> objects = database.SystemSchema.Indexes;
 
@@ -142,7 +142,7 @@ internal sealed class TableIndexDropper
 
         FluxMachine<DropIndexFluxSteps, DropIndexFluxState> machine = new(state);
 
-        return await DropIndexInternal(machine, state);
+        return await DropIndexInternal(machine, state).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -167,14 +167,14 @@ internal sealed class TableIndexDropper
         //machine.WhenAbort(ReleaseLocks);
 
         while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep());
+            await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
 
         timer.Stop();
 
         TimeSpan timeTaken = timer.Elapsed;
 
         logger.LogWarning(
-            "Dropped index {0} from {1} at {2}, Time taken: {3}",
+            "Dropped index {IndexName} from {Name} at {IndexOffset}, Time taken: {Time}",
             ticket.IndexName,
             table.Name,
             state.IndexOffset,

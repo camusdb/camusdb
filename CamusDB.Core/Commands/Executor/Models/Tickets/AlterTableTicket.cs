@@ -6,13 +6,13 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Time;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct AlterTableTicket
 {
-    public HLCTimestamp TxnId { get; }
+    public TransactionState TxnState { get; }
 
     public string DatabaseName { get; }
 
@@ -23,14 +23,14 @@ public readonly struct AlterTableTicket
     public ColumnInfo Column { get; }
 
     public AlterTableTicket(
-        HLCTimestamp txnId,
+        TransactionState txnState,
         string databaseName,
         string tableName,
         AlterTableOperation operation,
         ColumnInfo column
     )
     {
-        TxnId = txnId;
+        TxnState = txnState;
         DatabaseName = databaseName;
         TableName = tableName;
         Operation = operation;

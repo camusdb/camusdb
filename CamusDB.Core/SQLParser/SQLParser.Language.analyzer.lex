@@ -59,6 +59,11 @@ TTypeObjectId   (O|o)(B|b)(J|j)(E|e)(C|c)(T|t)(_)(I|i)(D|d)
 TTypeSObjectId  (O|o)(I|i)(D|d)
 TTypeBool       (B|b)(O|o)(O|o)(L|l)
 TTypeBoolean    (B|b)(O|o)(O|o)(L|l)(E|e)(A|a)(N|n)
+TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
+TStart          (S|s)(T|t)(A|a)(R|r)(T|t)
+TCommit         (C|c)(O|o)(M|m)(M|m)(I|i)(T|t)
+TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
+TTransaction    (T|t)(R|r)(A|a)(N|n)(S|s)(A|a)(C|c)(T|t)(I|i)(O|o)(N|n)
 LParen          \(
 RParen          \)
 LBrace          \{
@@ -119,6 +124,16 @@ TGreaterEquals  >=
 {TLike} { return (int)Token.TLIKE; }
 
 {TILike} { return (int)Token.TILIKE; }
+
+{TBegin} { return (int)Token.TBEGIN; }
+
+{TRollback} { return (int)Token.TROLLBACK; }
+
+{TCommit} { return (int)Token.TCOMMIT; }
+
+{TStart} { return (int)Token.TSTART; }
+
+{TTransaction} { return (int)Token.TTRANSACTION; }
 
 {TDatabase} { return (int)Token.TDATABASE; }
 

@@ -19,11 +19,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// </summary>
 internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
 {
-    internal async Task<CreateTableTicket> CreateCreateTableTicket(
-        CommandExecutor commandExecutor,
-        ExecuteSQLTicket ticket,
-        NodeAst ast
-    )
+    internal CreateTableTicket CreateCreateTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         if (ast.leftAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing table name");
@@ -43,7 +39,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         GetCreateTableConstraintFromFieldList(ast.rightAst, constraintInfos);
 
         return new(
-            txnId: await commandExecutor.NextTxnId(),
+            txnState: ticket.TxnState,
             databaseName: ticket.DatabaseName,
             tableName: tableName,
             columns: columnInfos.ToArray(),

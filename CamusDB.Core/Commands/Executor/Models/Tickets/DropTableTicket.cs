@@ -6,21 +6,21 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Time;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct DropTableTicket
 {
-    public HLCTimestamp TxnId { get; }
+    public TransactionState TxnState { get; }
 
     public string DatabaseName { get; }
 
     public string TableName { get; }
 
-    public DropTableTicket(HLCTimestamp txnId, string databaseName, string tableName)
+    public DropTableTicket(TransactionState txnState, string databaseName, string tableName)
     {
-        TxnId = txnId;
+        TxnState = txnState;
         DatabaseName = databaseName;
         TableName = tableName;
     }

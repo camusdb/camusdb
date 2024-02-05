@@ -34,8 +34,8 @@ internal sealed class TableColumnAlterer
     {        
         return ticket.Operation switch
         {
-            AlterTableOperation.AddColumn => await AddColumn(queryExecutor, database, table, ticket),
-            AlterTableOperation.DropColumn => await DropColumn(queryExecutor, database, table, ticket),
+            AlterTableOperation.AddColumn => await AddColumn(queryExecutor, database, table, ticket).ConfigureAwait(false),
+            AlterTableOperation.DropColumn => await DropColumn(queryExecutor, database, table, ticket).ConfigureAwait(false),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid alter table operation"),
         };
     }    
@@ -43,7 +43,7 @@ internal sealed class TableColumnAlterer
     private async Task<bool> AddColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
     {
         AlterColumnTicket alterColumnTicket = new(
-            txnId: ticket.TxnId,
+            txnState: ticket.TxnState,
             databaseName: database.Name,
             tableName: table.Name,
             column: ticket.Column,
@@ -58,7 +58,7 @@ internal sealed class TableColumnAlterer
     private async Task<bool> DropColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
     {
         AlterColumnTicket alterColumnTicket = new(
-            txnId: ticket.TxnId,
+            txnState: ticket.TxnState,
             databaseName: database.Name,
             tableName: table.Name,
             column: ticket.Column,

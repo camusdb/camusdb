@@ -7,13 +7,14 @@
  */
 
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Transactions.Models;
 using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public sealed class QueryTicket
 {
-    public HLCTimestamp TxnId { get; }
+    public TransactionState TxnState { get; }
 
     public TransactionType TxnType { get; }
 
@@ -38,7 +39,7 @@ public sealed class QueryTicket
     public Dictionary<string, ColumnValue>? Parameters { get; }
 
     public QueryTicket(
-        HLCTimestamp txnId,
+        TransactionState txnState,
         TransactionType txnType,
         string databaseName,
         string tableName,
@@ -51,7 +52,7 @@ public sealed class QueryTicket
         NodeAst? offset,
         Dictionary<string, ColumnValue>? parameters)
     {
-        TxnId = txnId;
+        TxnState = txnState;
         TxnType = txnType;
         DatabaseName = databaseName;
         TableName = tableName;

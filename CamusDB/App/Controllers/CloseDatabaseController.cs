@@ -12,17 +12,16 @@ using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class CloseDatabaseController : CommandsController
-{
-    private readonly ILogger<ICamusDB> logger;
-
-    public CloseDatabaseController(CommandExecutor executor, ILogger<ICamusDB> logger) : base(executor)
+{    
+    public CloseDatabaseController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
-        this.logger = logger;
+        
     }
 
     [HttpPost]

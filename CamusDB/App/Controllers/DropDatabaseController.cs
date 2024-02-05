@@ -12,13 +12,14 @@ using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class DropDatabaseController : CommandsController
 {
-    public DropDatabaseController(CommandExecutor executor) : base(executor)
+    public DropDatabaseController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }
