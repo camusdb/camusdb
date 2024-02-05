@@ -49,7 +49,7 @@ public sealed class HybridLogicalClock : IDisposable
     {
         try
         {
-            await semaphore.WaitAsync();
+            await semaphore.WaitAsync().ConfigureAwait(false);
 
             long lPrime = l;
 

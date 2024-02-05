@@ -14,6 +14,7 @@ using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 
 namespace CamusDB.App.Controllers;
 
@@ -37,13 +38,17 @@ public sealed class DeleteController : CommandsController
             DeleteByIdRequest? request = JsonSerializer.Deserialize<DeleteByIdRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DeleteById request is not valid");
-
+            
             TransactionState txnState;
+            bool newTransaction = false;
 
             if (request.TxnIdPT > 0)
                 txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
             else
+            {
+                newTransaction = true;
                 txnState = await transactions.Start().ConfigureAwait(false);
+            }
 
             DeleteByIdTicket ticket = new(
                 txnState: txnState,
@@ -52,11 +57,12 @@ public sealed class DeleteController : CommandsController
                 id: request.Id ?? ""
             );
 
-            int deletedRows = await executor.DeleteById(ticket).ConfigureAwait(false);
+            DeleteByIdResult result = await executor.DeleteById(ticket).ConfigureAwait(false);
 
-            transactions.Commit(txnState);
+            if (newTransaction)
+                await transactions.Commit(result.Database, result.Table, txnState);
 
-            return new JsonResult(new DeleteResponse("ok", deletedRows));
+            return new JsonResult(new DeleteResponse("ok", result.DeletedRows));
         }
         catch (CamusDBException e)
         {

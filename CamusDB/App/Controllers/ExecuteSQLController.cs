@@ -16,6 +16,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using System.Diagnostics;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 
 namespace CamusDB.App.Controllers;
 
@@ -44,28 +45,45 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
 
-            TransactionState txnState;
+            bool newTransaction = false;
+            TransactionState? txnState = null;
 
-            if (request.TxnIdPT > 0)
-                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-            else
-                txnState = await transactions.Start().ConfigureAwait(false);
+            try
+            {
+                if (request.TxnIdPT > 0)
+                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+                else
+                {
+                    newTransaction = true;
+                    txnState = await transactions.Start().ConfigureAwait(false);
+                }
 
-            ExecuteSQLTicket ticket = new(
-                txnState: txnState,
-                database: request.DatabaseName ?? "",
-                sql: request.Sql ?? "",
-                parameters: request.Parameters
-            );
+                ExecuteSQLTicket ticket = new(
+                    txnState: txnState,
+                    database: request.DatabaseName ?? "",
+                    sql: request.Sql ?? "",
+                    parameters: request.Parameters
+                );
 
-            List<Dictionary<string, ColumnValue>> rows = new();
+                List<Dictionary<string, ColumnValue>> rows = new();
 
-            await foreach (QueryResultRow row in await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false))
-                rows.Add(row.Row);
+                await foreach (QueryResultRow row in await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false))
+                    rows.Add(row.Row);
 
-            Console.WriteLine("Elapsed={0}", stopwatch.ElapsedMilliseconds);
+                //if (newTransaction)
+                //    await transactions.Commit(result.Database, result.Table, txnState);
 
-            return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
+                Console.WriteLine("Elapsed={0}", stopwatch.ElapsedMilliseconds);
+
+                return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
+            }
+            catch (Exception)
+            {
+                if (txnState is not null)
+                    transactions.Rollback(txnState);
+
+                throw;
+            }            
         }
         catch (CamusDBException e)
         {
@@ -96,23 +114,40 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
 
-            TransactionState txnState;
+            bool newTransaction = false;
+            TransactionState? txnState = null;
 
-            if (request.TxnIdPT > 0)
-                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-            else
-                txnState = await transactions.Start().ConfigureAwait(false);
+            try
+            {
+                if (request.TxnIdPT > 0)
+                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+                else
+                {
+                    newTransaction = true;
+                    txnState = await transactions.Start().ConfigureAwait(false);
+                }
 
-            ExecuteSQLTicket ticket = new(
-                txnState: txnState,
-                database: request.DatabaseName ?? "",
-                sql: request.Sql ?? "",
-                parameters: request.Parameters
-            );
+                ExecuteSQLTicket ticket = new(
+                    txnState: txnState,
+                    database: request.DatabaseName ?? "",
+                    sql: request.Sql ?? "",
+                    parameters: request.Parameters
+                );
 
-            int modifiedRows = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
+                ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
 
-            return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows));
+                if (newTransaction)
+                    await transactions.Commit(result.Database, result.Table, txnState);
+
+                return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows));
+            }
+            catch (Exception)
+            {
+                if (txnState is not null)
+                    transactions.Rollback(txnState);
+
+                throw;
+            }
         }
         catch (CamusDBException e)
         {

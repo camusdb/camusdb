@@ -15,15 +15,16 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class InsertController : CommandsController
-{    
+{
     public InsertController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
-        
+
     }
 
     [HttpPost]
@@ -44,23 +45,41 @@ public sealed class InsertController : CommandsController
             if (request.Values is null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Insert values are not valid");
 
-            TransactionState txnState;
+            bool newTransaction = false;
+            TransactionState? txnState = null;
 
-            if (request.TxnIdPT > 0)
-                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-            else
-                txnState = await transactions.Start().ConfigureAwait(false);
+            try
+            {
+                if (request.TxnIdPT > 0)
+                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+                else
+                {
+                    newTransaction = true;
+                    txnState = await transactions.Start().ConfigureAwait(false);
+                }
 
-            InsertTicket ticket = new(
-                txnState: txnState,
-                databaseName: request.DatabaseName ?? "",
-                tableName: request.TableName ?? "",
-                values: new List<Dictionary<string, ColumnValue>>() { request.Values }
-            );
+                InsertTicket ticket = new(
+                    txnState: txnState,
+                    databaseName: request.DatabaseName ?? "",
+                    tableName: request.TableName ?? "",
+                    values: new List<Dictionary<string, ColumnValue>>() { request.Values }
+                );
 
-            int insertedRows = await executor.Insert(ticket).ConfigureAwait(false);
+                InsertResult result = await executor.Insert(ticket).ConfigureAwait(false);
 
-            return new JsonResult(new InsertResponse("ok", insertedRows));
+                if (newTransaction)
+                    await transactions.Commit(result.Database, result.Table, txnState);
+
+                return new JsonResult(new InsertResponse("ok", result.InsertedRows));
+
+            }
+            catch (Exception)
+            {
+                if (txnState is not null)
+                    transactions.Rollback(txnState);
+
+                throw;
+            }
         }
         catch (CamusDBException e)
         {

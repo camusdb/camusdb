@@ -16,6 +16,7 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.Time;
 using Microsoft.Extensions.Logging;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 
 namespace CamusDB.Core.CommandsExecutor;
 
@@ -250,7 +251,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     #region DML
 
-    public async Task<int> Insert(InsertTicket ticket)
+    public async Task<InsertResult> Insert(InsertTicket ticket)
     {
         validator.Validate(ticket);
 
@@ -258,7 +259,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await rowInserter.Insert(database, table, ticket).ConfigureAwait(false);
+        return new(database, table, await rowInserter.Insert(database, table, ticket).ConfigureAwait(false));
     }
 
     public async Task<int> InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
@@ -303,7 +304,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     /// <param name="ticket"></param>
     /// <returns>The number of deleted rows</returns>
-    public async Task<int> DeleteById(DeleteByIdTicket ticket)
+    public async Task<DeleteByIdResult> DeleteById(DeleteByIdTicket ticket)
     {
         validator.Validate(ticket);
 
@@ -311,7 +312,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await rowDeleterById.DeleteById(database, table, ticket).ConfigureAwait(false);
+        return new(database, table, await rowDeleterById.DeleteById(database, table, ticket).ConfigureAwait(false));
     }
 
     /// <summary>
@@ -367,7 +368,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     /// <param name="ticket"></param>
     /// <returns>The number of inserted/modified/deleted rows</returns>
-    public async Task<int> ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
+    public async Task<ExecuteNonSQLResult> ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
     {
         validator.Validate(ticket);
 
@@ -383,7 +384,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     TableDescriptor table = await tableOpener.Open(database, insertTicket.TableName).ConfigureAwait(false);
 
-                    return await rowInserter.Insert(database, table, insertTicket).ConfigureAwait(false);
+                    return new(database, table, await rowInserter.Insert(database, table, insertTicket).ConfigureAwait(false));
                 }
 
             case NodeType.Update:
@@ -392,7 +393,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName).ConfigureAwait(false);
 
-                    return await rowUpdater.Update(queryExecutor, database, table, updateTicket);
+                    return new(database, table, await rowUpdater.Update(queryExecutor, database, table, updateTicket));
                 }
 
             case NodeType.Delete:
@@ -401,7 +402,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     TableDescriptor table = await tableOpener.Open(database, deleteTicket.TableName).ConfigureAwait(false);
 
-                    return await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
+                    return new(database, table, await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false));
                 }
 
             default:

@@ -7,8 +7,13 @@
  */
 
 using System.Collections.Concurrent;
+using CamusDB.Core.BufferPool;
+using CamusDB.Core.CommandsExecutor.Controllers;
+using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions.Models;
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.Transactions;
 
@@ -30,16 +35,13 @@ public sealed class TransactionsManager
 {
     private readonly HybridLogicalClock hybridLogicalClock;
 
+    private readonly IndexSaver indexSaver = new();
+
     private readonly ConcurrentDictionary<HLCTimestamp, TransactionState> transactions = new();
 
     public TransactionsManager(HybridLogicalClock hybridLogicalClock)
     {
         this.hybridLogicalClock = hybridLogicalClock;
-    }
-
-    public void Commit(TransactionState txState)
-    {
-        throw new NotImplementedException();
     }
 
     public TransactionState GetState(HLCTimestamp txnId)
@@ -57,5 +59,82 @@ public sealed class TransactionsManager
         transactions.TryAdd(txnId, txState);
         return txState;
     }
+
+    public async Task Commit(DatabaseDescriptor database, TableDescriptor table, TransactionState txnState)
+    {
+        // Persist all the changes to the table and indexes
+        await PersistTableAndIndexChanges(database, table, txnState).ConfigureAwait(false);
+
+        // Apply all the changes to the modified pages in an atomic operation
+        database.BufferPool.ApplyPageOperations(txnState.ModifiedPages);
+
+        // Release all the locks acquired by the transaction
+        txnState.ReleaseLocks();
+
+        Console.WriteLine("Commited tx {0}", txnState.TxnId);
+    }
+
+    public void Rollback(TransactionState txnState)
+    {
+        // Release all the locks acquired by the transaction
+        txnState.ReleaseLocks();
+    }
+
+    private async Task PersistTableAndIndexChanges(DatabaseDescriptor database, TableDescriptor table, TransactionState txnState)
+    {
+        BufferPoolManager tablespace = database.BufferPool;
+
+        foreach (BTreeTuple tuple in txnState.MainTableDeltas)
+        {
+            SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
+               tablespace: tablespace,
+               index: table.Rows,
+               txnId: txnState.TxnId,
+               commitState: BTreeCommitState.Committed,
+               key: tuple.SlotOne,
+               value: tuple.SlotTwo,
+               modifiedPages: txnState.ModifiedPages
+           );
+
+            // Main table index stores rowid pointing to page offeset
+            await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
+        }
+
+        if (txnState.UniqueIndexDeltas is not null)
+        {
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue uniqueKeyValue, BTreeTuple tuple) uniqueIndex in txnState.UniqueIndexDeltas)
+            {
+                SaveIndexTicket saveUniqueIndexTicket = new(
+                    tablespace: tablespace,
+                    index: uniqueIndex.index,
+                    txnId: txnState.TxnId,
+                    commitState: BTreeCommitState.Committed,
+                    key: uniqueIndex.uniqueKeyValue,
+                    value: uniqueIndex.tuple,
+                    modifiedPages: txnState.ModifiedPages
+                );
+
+                await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
+            }
+        }
+
+        if (txnState.MultiIndexDeltas is not null)
+        {
+            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue multiKeyValue, BTreeTuple tuple) multIndex in txnState.MultiIndexDeltas)
+            {
+                SaveIndexTicket saveMultiIndexTicket = new(
+                    tablespace: tablespace,
+                    index: multIndex.index,
+                    txnId: txnState.TxnId,
+                    commitState: BTreeCommitState.Committed,
+                    key: multIndex.multiKeyValue,
+                    value: multIndex.tuple,
+                    modifiedPages: txnState.ModifiedPages
+                );
+
+                await indexSaver.Save(saveMultiIndexTicket).ConfigureAwait(false);
+            }
+        }
+    }    
 }
 
