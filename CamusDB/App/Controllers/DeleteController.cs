@@ -38,31 +38,39 @@ public sealed class DeleteController : CommandsController
             DeleteByIdRequest? request = JsonSerializer.Deserialize<DeleteByIdRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DeleteById request is not valid");
-            
-            TransactionState txnState;
+
             bool newTransaction = false;
+            TransactionState? txnState = null;
 
-            if (request.TxnIdPT > 0)
-                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-            else
+            try
             {
-                newTransaction = true;
-                txnState = await transactions.Start().ConfigureAwait(false);
+                if (request.TxnIdPT > 0)
+                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+                else
+                {
+                    newTransaction = true;
+                    txnState = await transactions.Start().ConfigureAwait(false);
+                }
+
+                DeleteByIdTicket ticket = new(
+                    txnState: txnState,
+                    databaseName: request.DatabaseName ?? "",
+                    tableName: request.TableName ?? "",
+                    id: request.Id ?? ""
+                );
+
+                DeleteByIdResult result = await executor.DeleteById(ticket).ConfigureAwait(false);
+
+                if (newTransaction)
+                    await transactions.Commit(result.Database, txnState);
+
+                return new JsonResult(new DeleteResponse("ok", result.DeletedRows));
             }
-
-            DeleteByIdTicket ticket = new(
-                txnState: txnState,
-                databaseName: request.DatabaseName ?? "",
-                tableName: request.TableName ?? "",
-                id: request.Id ?? ""
-            );
-
-            DeleteByIdResult result = await executor.DeleteById(ticket).ConfigureAwait(false);
-
-            if (newTransaction)
-                await transactions.Commit(result.Database, txnState);
-
-            return new JsonResult(new DeleteResponse("ok", result.DeletedRows));
+            finally
+            {
+                if (txnState is not null)
+                    await transactions.RollbackIfNotComplete(txnState);
+            }
         }
         catch (CamusDBException e)
         {
@@ -91,24 +99,39 @@ public sealed class DeleteController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Delete request is not valid");
 
-            TransactionState txnState;
+            bool newTransaction = false;
+            TransactionState? txnState = null;
 
-            if (request.TxnIdPT > 0)
-                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-            else
-                txnState = await transactions.Start().ConfigureAwait(false);
+            try
+            {
+                if (request.TxnIdPT > 0)
+                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+                else
+                {
+                    newTransaction = true;
+                    txnState = await transactions.Start().ConfigureAwait(false);
+                }
 
-            DeleteTicket ticket = new(
-                txnState: txnState,
-                databaseName: request.DatabaseName ?? "",
-                tableName: request.TableName ?? "",
-                where: null,
-                filters: request.Filters ?? new()
-            );
+                DeleteTicket ticket = new(
+                    txnState: txnState,
+                    databaseName: request.DatabaseName ?? "",
+                    tableName: request.TableName ?? "",
+                    where: null,
+                    filters: request.Filters ?? new()
+                );
 
-            int deletedRows = await executor.Delete(ticket);
+                DeleteResult result = await executor.Delete(ticket);
 
-            return new JsonResult(new DeleteResponse("ok", deletedRows));
+                if (newTransaction)
+                    await transactions.Commit(result.Database, txnState);
+
+                return new JsonResult(new DeleteResponse("ok", result.DeletedRows));
+            }
+            finally
+            {
+                if (txnState is not null)
+                    await transactions.RollbackIfNotComplete(txnState);
+            }
         }
         catch (CamusDBException e)
         {

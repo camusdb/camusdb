@@ -313,7 +313,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     /// <param name="ticket"></param>
     /// <returns>The number of deleted rows</returns>
-    public async Task<int> Delete(DeleteTicket ticket)
+    public async Task<DeleteResult> Delete(DeleteTicket ticket)
     {
         validator.Validate(ticket);
 
@@ -321,7 +321,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await rowDeleter.Delete(queryExecutor, database, table, ticket).ConfigureAwait(false);
+        return new(database, table, await rowDeleter.Delete(queryExecutor, database, table, ticket).ConfigureAwait(false));
     }
 
     /// <summary>

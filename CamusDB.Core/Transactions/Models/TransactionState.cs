@@ -91,7 +91,7 @@ public sealed class TransactionState : IDisposable
     /// </summary>
     /// <param name="table"></param>    
     /// <returns></returns>
-    public async Task TryAdquireTableRowsLock(TableDescriptor table)
+    public async Task TryAdquireTableRowsReadLock(TableDescriptor table)
     {
         if (WriteLocks.ContainsKey(table) || ReadLocks.ContainsKey(table))
             return;
@@ -106,6 +106,29 @@ public sealed class TransactionState : IDisposable
             ReadLocks.Add(table, new()
             {
                 await table.Rows.ReaderLockAsync()
+            });
+        }
+        finally
+        {
+            Semaphore.Release();
+        }
+    }
+
+    public async Task TryAdquireTableIndexReadLock(TableDescriptor table, BTree<CompositeColumnValue, BTreeTuple> index)
+    {
+        if (WriteLocks.ContainsKey(table) || ReadLocks.ContainsKey(table))
+            return;
+
+        try
+        {
+            await Semaphore.WaitAsync();
+
+            if (WriteLocks.ContainsKey(table) || ReadLocks.ContainsKey(table))
+                return;
+
+            ReadLocks.Add(table, new()
+            {
+                await index.ReaderLockAsync()
             });
         }
         finally
@@ -135,5 +158,5 @@ public sealed class TransactionState : IDisposable
     public void Dispose()
     {
         Semaphore?.Dispose();
-    }
+    }    
 }
