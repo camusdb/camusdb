@@ -34,7 +34,12 @@ public sealed class TransactionState
         TxnId = txnId;
     }
 
-    public async Task TryAdquireLocks(TableDescriptor table)
+    /// <summary>
+    /// Try adquire the write locks if they haven't been adquired before
+    /// </summary>
+    /// <param name="table"></param>
+    /// <returns></returns>
+    public async Task TryAdquireWriteLocks(TableDescriptor table)
 	{
         if (Locks.ContainsKey(table))
             return;
@@ -55,6 +60,25 @@ public sealed class TransactionState
         Locks.Add(table, locks);
     }
 
+    /// <summary>
+    /// Try adquire the table rows lock
+    /// </summary>
+    /// <param name="table"></param>    
+    /// <returns></returns>
+    public async Task TryAdquireTableRowsLock(TableDescriptor table)
+    {
+        if (Locks.ContainsKey(table))
+            return;
+
+        Locks.Add(table, new()
+        {
+            await table.Rows.ReaderLockAsync()
+        });
+    }
+
+    /// <summary>
+    /// Release all adquired locks
+    /// </summary>
     public void ReleaseLocks()
     {
         foreach (KeyValuePair<TableDescriptor, List<IDisposable>> keyValue in Locks)
@@ -62,5 +86,5 @@ public sealed class TransactionState
             foreach (IDisposable disposable in keyValue.Value)
                 disposable.Dispose();
         }
-    }
+    }    
 }

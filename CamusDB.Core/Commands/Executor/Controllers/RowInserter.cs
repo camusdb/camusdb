@@ -252,7 +252,7 @@ internal sealed class RowInserter
     /// <returns></returns>
     private async Task<FluxAction> TryAdquireLocks(InsertFluxState state)
     {
-        await state.Ticket.TxnState.TryAdquireLocks(state.Table).ConfigureAwait(false);
+        await state.Ticket.TxnState.TryAdquireWriteLocks(state.Table).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }

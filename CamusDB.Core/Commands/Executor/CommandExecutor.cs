@@ -6,13 +6,11 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Flux;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.Time;
 using Microsoft.Extensions.Logging;
@@ -267,7 +265,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     /// <param name="ticket"></param>
     /// <returns></returns>
-    public async Task<int> Update(UpdateTicket ticket)
+    public async Task<UpdateResult> Update(UpdateTicket ticket)
     {
         validator.Validate(ticket);
 
@@ -275,7 +273,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await rowUpdater.Update(queryExecutor, database, table, ticket).ConfigureAwait(false);
+        return new(database, table, await rowUpdater.Update(queryExecutor, database, table, ticket).ConfigureAwait(false));
     }
 
     /// <summary>

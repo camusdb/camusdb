@@ -9,6 +9,7 @@
 using CamusDB.App.Models;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
@@ -84,27 +85,44 @@ public sealed class UpdateController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Update request is not valid");
 
-            TransactionState txnState;
+            bool newTransaction = false;
+            TransactionState? txnState = null;
 
-            if (request.TxnIdPT > 0)
-                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-            else
-                txnState = await transactions.Start().ConfigureAwait(false);
+            try
+            {
+                if (request.TxnIdPT > 0)
+                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+                else
+                {
+                    newTransaction = true;
+                    txnState = await transactions.Start().ConfigureAwait(false);
+                }
 
-            UpdateTicket ticket = new(
-                txnState: txnState,
-                databaseName: request.DatabaseName ?? "",
-                tableName: request.TableName ?? "",                
-                plainValues: request.Values ?? new(),
-                exprValues: null,
-                where: null,
-                filters: request.Filters ?? new(),
-                parameters: null
-            );
+                UpdateTicket ticket = new(
+                    txnState: txnState,
+                    databaseName: request.DatabaseName ?? "",
+                    tableName: request.TableName ?? "",                
+                    plainValues: request.Values ?? new(),
+                    exprValues: null,
+                    where: null,
+                    filters: request.Filters ?? new(),
+                    parameters: null
+                );
 
-            int updatedRows = await executor.Update(ticket);
+                UpdateResult result = await executor.Update(ticket);
 
-            return new JsonResult(new UpdateResponse("ok", updatedRows));
+                if (newTransaction)
+                    await transactions.Commit(result.Database, txnState);
+
+                return new JsonResult(new UpdateResponse("ok", result.UpdatedRows));
+            }
+            catch (Exception)
+            {
+                if (txnState is not null)
+                    transactions.Rollback(txnState);
+
+                throw;
+            }
         }
         catch (CamusDBException e)
         {

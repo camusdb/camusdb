@@ -27,7 +27,7 @@ internal sealed class QueryScanner
     {
         BufferPoolManager tablespace = database.BufferPool;
 
-        using IDisposable _ = await table.Rows.ReaderLockAsync().ConfigureAwait(false);
+        await ticket.TxnState.TryAdquireTableRowsLock(table);
 
         await foreach (BTreeEntry<ObjectIdValue, ObjectIdValue> entry in table.Rows.EntriesTraverse(ticket.TxnState.TxnId))
         {
