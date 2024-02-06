@@ -262,11 +262,6 @@ public sealed class CommandExecutor : IAsyncDisposable
         return new(database, table, await rowInserter.Insert(database, table, ticket).ConfigureAwait(false));
     }
 
-    public async Task<int> InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
-    {
-        return await rowInserter.InsertWithState(machine, state).ConfigureAwait(false);
-    }
-
     /// <summary>
     /// Updates rows specifying filters and sorts
     /// </summary>

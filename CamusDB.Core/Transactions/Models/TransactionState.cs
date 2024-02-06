@@ -21,7 +21,7 @@ public sealed class TransactionState
 
     public List<BufferPageOperation> ModifiedPages { get; } = new();
 
-    public List<IDisposable> Locks { get; } = new();
+    public Dictionary<TableDescriptor, List<IDisposable>> Locks { get; } = new();
 
     public List<(BTree<ObjectIdValue, ObjectIdValue>, BTreeTuple)> MainTableDeltas { get; } = new();
 
@@ -36,20 +36,31 @@ public sealed class TransactionState
 
     public async Task TryAdquireLocks(TableDescriptor table)
 	{
-        Locks.Add(await table.Rows.WriterLockAsync());
+        if (Locks.ContainsKey(table))
+            return;
+
+        List<IDisposable> locks = new()
+        {
+            await table.Rows.WriterLockAsync()
+        };
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
             TableIndexSchema indexSchema = index.Value;
 
             if (indexSchema.Type == IndexType.Unique || indexSchema.Type == IndexType.Multi)
-                Locks.Add(await indexSchema.BTree.WriterLockAsync());
-        }            
+                locks.Add(await indexSchema.BTree.WriterLockAsync());
+        }
+
+        Locks.Add(table, locks);
     }
 
     public void ReleaseLocks()
     {
-        foreach (IDisposable disposable in Locks)
-            disposable.Dispose();
+        foreach (KeyValuePair<TableDescriptor, List<IDisposable>> keyValue in Locks)
+        {
+            foreach (IDisposable disposable in keyValue.Value)
+                disposable.Dispose();
+        }
     }
 }

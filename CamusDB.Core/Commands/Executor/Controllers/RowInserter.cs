@@ -154,19 +154,13 @@ internal sealed class RowInserter
         FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
 
         return await InsertInternal(machine, state).ConfigureAwait(false);
-    }
+    }    
 
     /// <summary>
-    /// Schedules a new insert operation by passing the flux state directly
+    /// 
     /// </summary>
-    /// <param name="machine"></param>
     /// <param name="state"></param>
     /// <returns></returns>
-    public async Task<int> InsertWithState(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
-    {
-        return await InsertInternal(machine, state).ConfigureAwait(false);
-    }
-
     private async Task<FluxAction> InsertRowsAndIndexes(InsertFluxState state)
     {
         if (state.Ticket.Values is null)
@@ -204,6 +198,13 @@ internal sealed class RowInserter
         return FluxAction.Continue;
     }
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="table"></param>
+    /// <param name="txnId"></param>
+    /// <param name="values"></param>
+    /// <returns></returns>
     private static async Task CheckUniqueKeys(TableDescriptor table, HLCTimestamp txnId, Dictionary<string, ColumnValue> values)
     {
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
