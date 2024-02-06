@@ -39,34 +39,53 @@ public sealed class QueryController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Query request is not valid");
 
-            TransactionState txnState;
+            bool newTransaction = false;
+            TransactionState? txnState = null;
 
-            if (request.TxnIdPT > 0)
-                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-            else
-                txnState = await transactions.Start().ConfigureAwait(false);
+            try
+            {
+                if (request.TxnIdPT > 0)
+                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+                else
+                {
+                    newTransaction = true;
+                    txnState = await transactions.Start().ConfigureAwait(false);
+                }
 
-            QueryTicket ticket = new(
-                txnState: txnState,
-                txnType: TransactionType.ReadOnly,
-                databaseName: request.DatabaseName ?? "",
-                tableName: request.TableName ?? "",
-                index: null,
-                projection: null,
-                where: null,
-                filters: request.Filters,
-                orderBy: request.OrderBy,
-                limit: null,
-                offset: null,
-                parameters: null
-            );
+                QueryTicket ticket = new(
+                    txnState: txnState,
+                    txnType: TransactionType.ReadOnly,
+                    databaseName: request.DatabaseName ?? "",
+                    tableName: request.TableName ?? "",
+                    index: null,
+                    projection: null,
+                    where: null,
+                    filters: request.Filters,
+                    orderBy: request.OrderBy,
+                    limit: null,
+                    offset: null,
+                    parameters: null
+                );
 
-            List<Dictionary<string, ColumnValue>> rows = new();
+                List<Dictionary<string, ColumnValue>> rows = new();
 
-            await foreach (QueryResultRow row in await executor.Query(ticket).ConfigureAwait(false))            
-                rows.Add(row.Row);
+                (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
 
-            return new JsonResult(new QueryResponse("ok", rows.Count, rows));
+                await foreach (QueryResultRow row in cursor)
+                    rows.Add(row.Row);
+
+                if (newTransaction)
+                    await transactions.Commit(database, txnState);
+
+                return new JsonResult(new QueryResponse("ok", rows.Count, rows));
+            }
+            catch (Exception)
+            {
+                if (txnState is not null)
+                    await transactions.RollbackIfNotComplete(txnState);
+
+                throw;
+            }
         }
         catch (CamusDBException e)
         {

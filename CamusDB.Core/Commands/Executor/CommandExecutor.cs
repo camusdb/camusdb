@@ -329,7 +329,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     /// <param name="ticket"></param>
     /// <returns></returns>
-    public async Task<IAsyncEnumerable<QueryResultRow>> Query(QueryTicket ticket)
+    public async Task<(DatabaseDescriptor, IAsyncEnumerable<QueryResultRow>)> Query(QueryTicket ticket)
     {
         validator.Validate(ticket);
 
@@ -337,7 +337,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return queryExecutor.Query(database, table, ticket);
+        return (database, queryExecutor.Query(database, table, ticket));
     }
 
     /// <summary>
@@ -409,7 +409,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <param name="ticket"></param>
     /// <returns></returns>
     /// <exception cref="Exception"></exception>
-    public async Task<IAsyncEnumerable<QueryResultRow>> ExecuteSQLQuery(ExecuteSQLTicket ticket)
+    public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow>)> ExecuteSQLQuery(ExecuteSQLTicket ticket)
     {
         validator.Validate(ticket);
 
@@ -425,38 +425,38 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     TableDescriptor table = await tableOpener.Open(database, queryTicket.TableName).ConfigureAwait(false);
 
-                    return queryExecutor.Query(database, table, queryTicket);
+                    return (database, queryExecutor.Query(database, table, queryTicket));
                 }
 
             case NodeType.ShowTables:
                 {
-                    return schemaQuerier.ShowTables(database);
+                    return (database, schemaQuerier.ShowTables(database));
                 }
 
             case NodeType.ShowColumns:
                 {
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
 
-                    return schemaQuerier.ShowColumns(table);
+                    return (database, schemaQuerier.ShowColumns(table));
                 }
 
             case NodeType.ShowIndexes:
                 {
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
 
-                    return schemaQuerier.ShowIndexes(table);
+                    return (database, schemaQuerier.ShowIndexes(table));
                 }
 
             case NodeType.ShowCreateTable:
                 {
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
 
-                    return schemaQuerier.ShowCreateTable(table);
+                    return (database, schemaQuerier.ShowCreateTable(table));
                 }
 
             case NodeType.ShowDatabase:
                 {
-                    return schemaQuerier.ShowDatabase(database);
+                    return (database, schemaQuerier.ShowDatabase(database));
                 }
 
             default:

@@ -20,24 +20,17 @@ internal sealed class DeleteFluxState
 
     public DeleteTicket Ticket { get; }
 
-    public DeleteFluxIndexState Indexes { get; }
-
     public QueryExecutor QueryExecutor { get; }
-
-    public List<BufferPageOperation> ModifiedPages { get; } = new();
-
-    public List<IDisposable> Locks { get; } = new();    
-
+    
     public List<QueryResultRow> RowsToDelete { get; set; } = new();
 
     public int DeletedRows { get; set; }    
 
-    public DeleteFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteTicket ticket, QueryExecutor queryExecutor, DeleteFluxIndexState indexes)
+    public DeleteFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteTicket ticket, QueryExecutor queryExecutor)
     {
         Database = database;
         Table = table;
         Ticket = ticket;
         QueryExecutor = queryExecutor;
-        Indexes = indexes;
     }
 }

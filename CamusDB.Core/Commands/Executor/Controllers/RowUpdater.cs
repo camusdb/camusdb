@@ -560,11 +560,6 @@ public sealed class RowUpdater
     /// <returns></returns>
     internal async Task<int> UpdateInternal(FluxMachine<UpdateFluxSteps, UpdateFluxState> machine, UpdateFluxState state)
     {
-        DatabaseDescriptor database = state.Database;
-        BufferPoolManager tablespace = state.Database.BufferPool;
-        TableDescriptor table = state.Table;
-        UpdateTicket ticket = state.Ticket;
-
         Stopwatch timer = Stopwatch.StartNew();
 
         machine.When(UpdateFluxSteps.TryAdquireLocks, TryAdquireLocks);

@@ -66,10 +66,12 @@ public sealed class DeleteController : CommandsController
 
                 return new JsonResult(new DeleteResponse("ok", result.DeletedRows));
             }
-            finally
+            catch (Exception)
             {
                 if (txnState is not null)
                     await transactions.RollbackIfNotComplete(txnState);
+
+                throw;
             }
         }
         catch (CamusDBException e)

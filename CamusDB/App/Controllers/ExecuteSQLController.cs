@@ -67,21 +67,25 @@ public sealed class ExecuteSQLController : CommandsController
 
                 List<Dictionary<string, ColumnValue>> rows = new();
 
-                await foreach (QueryResultRow row in await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false))
+                (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false);
+
+                await foreach (QueryResultRow row in cursor)
                     rows.Add(row.Row);
 
-                //if (newTransaction)
-                //    await transactions.Commit(result.Database, result.Table, txnState);
+                if (newTransaction)
+                    await transactions.Commit(database, txnState);
 
                 Console.WriteLine("Elapsed={0}", stopwatch.ElapsedMilliseconds);
 
                 return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
             }
-            finally
+            catch (Exception)
             {
                 if (txnState is not null)
                     await transactions.RollbackIfNotComplete(txnState);
-            }            
+
+                throw;
+            }
         }
         catch (CamusDBException e)
         {
@@ -139,10 +143,12 @@ public sealed class ExecuteSQLController : CommandsController
 
                 return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows));
             }
-            finally
+            catch (Exception)
             {
                 if (txnState is not null)
-                    await transactions.RollbackIfNotComplete(txnState);                
+                    await transactions.RollbackIfNotComplete(txnState);
+
+                throw;
             }
         }
         catch (CamusDBException e)
@@ -199,10 +205,12 @@ public sealed class ExecuteSQLController : CommandsController
                 if (newTransaction)
                     await transactions.Commit(result.Database, txnState);
             }
-            finally
+            catch (Exception)
             {
                 if (txnState is not null)
                     await transactions.RollbackIfNotComplete(txnState);
+
+                throw;
             }
 
             return new JsonResult(new ExecuteDDLSQLResponse("ok"));

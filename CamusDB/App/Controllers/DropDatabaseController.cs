@@ -48,11 +48,13 @@ public sealed class DropDatabaseController : CommandsController
         catch (CamusDBException e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new DropDatabaseResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new DropDatabaseResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }

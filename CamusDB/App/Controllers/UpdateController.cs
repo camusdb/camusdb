@@ -116,10 +116,12 @@ public sealed class UpdateController : CommandsController
 
                 return new JsonResult(new UpdateResponse("ok", result.UpdatedRows));
             }
-            finally
+            catch (Exception)
             {
                 if (txnState is not null)
                     await transactions.RollbackIfNotComplete(txnState);
+
+                throw;
             }
         }
         catch (CamusDBException e)
