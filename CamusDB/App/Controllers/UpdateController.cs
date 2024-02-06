@@ -101,7 +101,7 @@ public sealed class UpdateController : CommandsController
                 UpdateTicket ticket = new(
                     txnState: txnState,
                     databaseName: request.DatabaseName ?? "",
-                    tableName: request.TableName ?? "",                
+                    tableName: request.TableName ?? "",
                     plainValues: request.Values ?? new(),
                     exprValues: null,
                     where: null,
@@ -116,22 +116,22 @@ public sealed class UpdateController : CommandsController
 
                 return new JsonResult(new UpdateResponse("ok", result.UpdatedRows));
             }
-            catch (Exception)
+            finally
             {
                 if (txnState is not null)
                     transactions.Rollback(txnState);
-
-                throw;
             }
         }
         catch (CamusDBException e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new UpdateResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+
             return new JsonResult(new UpdateResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
     }

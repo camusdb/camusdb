@@ -15,10 +15,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 public enum UpdateFluxSteps
 {
     NotInitialized = 0,
-    LocateTupleToUpdate = 1,
-    AdquireLocks = 2,
-    UpdateRowsAndIndexes = 3,
-    PersistIndexChanges = 4,
-    ApplyPageOperations = 5,    
-    ReleaseLocks = 6,
+    TryAdquireLocks = 1,
+    LocateTupleToUpdate = 2,
+    UpdateRowsAndIndexes = 3
 }

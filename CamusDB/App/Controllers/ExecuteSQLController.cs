@@ -77,12 +77,10 @@ public sealed class ExecuteSQLController : CommandsController
 
                 return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
             }
-            catch (Exception)
+            finally
             {
                 if (txnState is not null)
                     transactions.Rollback(txnState);
-
-                throw;
             }            
         }
         catch (CamusDBException e)
@@ -141,23 +139,21 @@ public sealed class ExecuteSQLController : CommandsController
 
                 return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows));
             }
-            catch (Exception)
+            finally
             {
                 if (txnState is not null)
-                    transactions.Rollback(txnState);
-
-                throw;
+                    transactions.Rollback(txnState);                
             }
         }
         catch (CamusDBException e)
         {
-            Console.WriteLine("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new ExecuteNonSQLQueryResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            Console.WriteLine("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new ExecuteNonSQLQueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
@@ -178,21 +174,36 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQL-DDL request is not valid");
 
-            TransactionState txnState;
+            bool newTransaction = false;
+            TransactionState? txnState = null;
 
-            if (request.TxnIdPT > 0)
-                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-            else
-                txnState = await transactions.Start().ConfigureAwait(false);
+            try
+            {
+                if (request.TxnIdPT > 0)
+                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+                else
+                {
+                    newTransaction = true;
+                    txnState = await transactions.Start().ConfigureAwait(false);
+                }
 
-            ExecuteSQLTicket ticket = new(
-                txnState: txnState,
-                database: request.DatabaseName ?? "",
-                sql: request.Sql ?? "",
-                parameters: request.Parameters
-            );
+                ExecuteSQLTicket ticket = new(
+                    txnState: txnState,
+                    database: request.DatabaseName ?? "",
+                    sql: request.Sql ?? "",
+                    parameters: request.Parameters
+                );
 
-            bool success = await executor.ExecuteDDLSQL(ticket).ConfigureAwait(false);
+                ExecuteDDLSQLResult result = await executor.ExecuteDDLSQL(ticket).ConfigureAwait(false);
+
+                if (newTransaction)
+                    await transactions.Commit(result.Database, txnState);
+            }
+            finally
+            {
+                if (txnState is not null)
+                    transactions.Rollback(txnState);
+            }
 
             return new JsonResult(new ExecuteDDLSQLResponse("ok"));
         }

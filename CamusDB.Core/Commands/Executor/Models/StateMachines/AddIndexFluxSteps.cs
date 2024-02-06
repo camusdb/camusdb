@@ -16,11 +16,8 @@ public enum AddIndexFluxSteps
 {
     NotInitialized = 0,
     AllocateNewIndex = 1,
-    LocateTuplesToFeedTheIndex = 2,
-    AdquireLocks = 3,    
-    FeedTheIndex = 4,
-    PersistIndexChanges = 5,
-    ApplyPageOperations = 6,
-    AddSystemObject = 7,
-    ReleaseLocks = 8,
+    TryAdquireLocks = 2,
+    LocateTuplesToFeedTheIndex = 3,    
+    FeedTheIndex = 4,    
+    AddSystemObject = 5,
 }

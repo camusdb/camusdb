@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -25,8 +24,6 @@ internal sealed class AddIndexFluxState
 
     public AlterIndexTicket Ticket { get; }
 
-    public AlterIndexFluxIndexState Indexes { get; }
-
     public QueryExecutor QueryExecutor { get; }
 
     public ObjectIdValue IndexOffset { get; set; }
@@ -34,28 +31,20 @@ internal sealed class AddIndexFluxState
     public BPTree<CompositeColumnValue, ColumnValue, BTreeTuple>? Btree { get; set; }
 
     public List<QueryResultRow>? RowsToFeed { get; set; }
-
-    public List<IDisposable> Locks { get; } = new();
-
-    public List<BufferPageOperation> ModifiedPages { get; } = new();        
-
-    public int ModifiedRows { get; set; }
-
-    public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue, BTreeTuple)>? IndexDeltas { get; set; }    
+    
+    public int ModifiedRows { get; set; }    
 
     public AddIndexFluxState(
         CatalogsManager catalogs,
         DatabaseDescriptor database, 
         TableDescriptor table, 
         AlterIndexTicket ticket, 
-        QueryExecutor queryExecutor, 
-        AlterIndexFluxIndexState indexes)
+        QueryExecutor queryExecutor)
     {
         Catalogs = catalogs;
         Database = database;
         Table = table;
         Ticket = ticket;
         QueryExecutor = queryExecutor;
-        Indexes = indexes;
     }
 }

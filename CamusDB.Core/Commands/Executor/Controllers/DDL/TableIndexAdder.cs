@@ -83,24 +83,7 @@ internal sealed class TableIndexAdder
             return columnValue;
 
         return null;
-    }
-
-    /// <summary>
-    /// Allocate a new index on disk
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> AllocateNewIndex(AddIndexFluxState state)
-    {
-        BufferPoolManager tablespace = state.Database.BufferPool;
-
-        ObjectIdValue indexPageOffset = tablespace.GetNextFreeOffset();
-
-        state.Btree = await indexReader.Read(tablespace, ObjectId.ToValue(indexPageOffset.ToString()));
-        state.IndexOffset = indexPageOffset;
-
-        return FluxAction.Continue;
-    }
+    }  
 
     /// <summary>
     /// Schedules a new add index operation by the specified filters
@@ -126,13 +109,29 @@ internal sealed class TableIndexAdder
             database: database,
             table: table,
             ticket: ticket,
-            queryExecutor: queryExecutor,
-            indexes: new AlterIndexFluxIndexState()
+            queryExecutor: queryExecutor
         );
 
         FluxMachine<AddIndexFluxSteps, AddIndexFluxState> machine = new(state);
 
         return await AlterIndexInternal(machine, state).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Allocate a new index on disk
+    /// </summary>
+    /// <param name="state"></param>
+    /// <returns></returns>
+    private async Task<FluxAction> AllocateNewIndex(AddIndexFluxState state)
+    {
+        BufferPoolManager tablespace = state.Database.BufferPool;
+
+        ObjectIdValue indexPageOffset = tablespace.GetNextFreeOffset();
+
+        state.Btree = await indexReader.Read(tablespace, ObjectId.ToValue(indexPageOffset.ToString()));
+        state.IndexOffset = indexPageOffset;
+
+        return FluxAction.Continue;
     }
 
     /// <summary>
@@ -177,9 +176,10 @@ internal sealed class TableIndexAdder
     /// <param name="state"></param>
     /// <returns></returns>
     /// <exception cref="NotImplementedException"></exception>
-    private async Task<FluxAction> AdquireLocks(AddIndexFluxState state)
+    private async Task<FluxAction> TryAdquireLocks(AddIndexFluxState state)
     {
-        state.Locks.Add(await state.Table.Rows.WriterLockAsync().ConfigureAwait(false));
+        await state.Ticket.TxnState.TryAdquireWriteLocks(state.Table).ConfigureAwait(false);
+
         return FluxAction.Continue;
     }
 
@@ -205,22 +205,22 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket = state.Ticket;
         BufferPoolManager tablespace = state.Database.BufferPool;
 
-        List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue, BTreeTuple)> deltas = new();
-
         foreach (QueryResultRow row in state.RowsToFeed)
         {
             CompositeColumnValue indexKeyValue;
             BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = state.Btree;
 
             if (ticket.Operation == AlterIndexOperation.AddPrimaryKey || ticket.Operation == AlterIndexOperation.AddUniqueIndex)
-                indexKeyValue = await ValidateAndInsertUniqueValue(tablespace, index, row, ticket, state.ModifiedPages);
+            {
+                indexKeyValue = await ValidateAndInsertUniqueValue(tablespace, index, row, ticket, ticket.TxnState.ModifiedPages);
+                ticket.TxnState.UniqueIndexDeltas.Add((index, indexKeyValue, row.Tuple));
+            }
             else
-                indexKeyValue = await ValidateAndInsertMultiValue(tablespace, index, row, ticket, state.ModifiedPages);
-
-            deltas.Add((index, indexKeyValue, row.Tuple));
-        }
-
-        state.IndexDeltas = deltas;
+            {
+                indexKeyValue = await ValidateAndInsertMultiValue(tablespace, index, row, ticket, ticket.TxnState.ModifiedPages);
+                ticket.TxnState.MultiIndexDeltas.Add((index, indexKeyValue, row.Tuple));
+            }
+        }        
 
         return FluxAction.Continue;
     }
@@ -315,39 +315,7 @@ internal sealed class TableIndexAdder
         await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
 
         return compositeIndexValue;
-    }
-
-    /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> PersistIndexChanges(AddIndexFluxState state)
-    {
-        if (state.IndexDeltas is null)
-        {
-            logger.LogWarning("Invalid index deltas in AlterIndex");
-
-            return FluxAction.Abort;
-        }
-
-        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue keyValue, BTreeTuple tuple) index in state.IndexDeltas)
-        {
-            SaveIndexTicket saveUniqueIndexTicket = new(
-                tablespace: state.Database.BufferPool,
-                index: index.index,
-                txnId: state.Ticket.TxnState.TxnId,
-                commitState: BTreeCommitState.Committed,
-                key: index.keyValue,
-                value: index.tuple,
-                modifiedPages: state.ModifiedPages
-            );
-
-            await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
-        }
-
-        return FluxAction.Continue;
-    }
+    }    
 
     private async Task<FluxAction> AddSystemObject(AddIndexFluxState state)
     {
@@ -424,32 +392,6 @@ internal sealed class TableIndexAdder
     }
 
     /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> ApplyPageOperations(AddIndexFluxState state)
-    {
-        if (state.ModifiedPages.Count > 0)
-            state.Database.BufferPool.ApplyPageOperations(state.ModifiedPages);
-
-        return Task.FromResult(FluxAction.Continue);
-    }
-
-    /// <summary>
-    /// Release all the locks acquired in the previous steps
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private Task<FluxAction> ReleaseLocks(AddIndexFluxState state)
-    {
-        foreach (IDisposable disposable in state.Locks)
-            disposable.Dispose();
-
-        return Task.FromResult(FluxAction.Continue);
-    }
-
-    /// <summary>
     /// Executes the flux state machine to AlterIndex records by the specified filters
     /// </summary>
     /// <param name="machine"></param>
@@ -464,18 +406,11 @@ internal sealed class TableIndexAdder
 
         Stopwatch timer = Stopwatch.StartNew();
 
-        // @TODO: Adquire and release locks
-
         machine.When(AddIndexFluxSteps.AllocateNewIndex, AllocateNewIndex);
-        machine.When(AddIndexFluxSteps.AdquireLocks, AdquireLocks);
+        machine.When(AddIndexFluxSteps.TryAdquireLocks, TryAdquireLocks);
         machine.When(AddIndexFluxSteps.LocateTuplesToFeedTheIndex, LocateTuplesToFeedTheIndex);
         machine.When(AddIndexFluxSteps.FeedTheIndex, FeedTheIndex);
-        machine.When(AddIndexFluxSteps.PersistIndexChanges, PersistIndexChanges);
-        machine.When(AddIndexFluxSteps.ApplyPageOperations, ApplyPageOperations);
-        machine.When(AddIndexFluxSteps.AddSystemObject, AddSystemObject);
-        machine.When(AddIndexFluxSteps.ReleaseLocks, ReleaseLocks);
-
-        machine.WhenAbort(ReleaseLocks);
+        machine.When(AddIndexFluxSteps.AddSystemObject, AddSystemObject);                
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());
@@ -485,7 +420,7 @@ internal sealed class TableIndexAdder
         TimeSpan timeTaken = timer.Elapsed;
 
         logger.LogInformation(
-            "Added index {0} to {1} at {2}, Time taken: {3}",
+            "Added index {IndexName} to {Name} at {IndexOffset}, Time taken: {Time}",
             ticket.IndexName,
             table.Name,
             state.IndexOffset,

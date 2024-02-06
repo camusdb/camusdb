@@ -21,7 +21,9 @@ public sealed class TransactionState
 
     public List<BufferPageOperation> ModifiedPages { get; } = new();
 
-    public Dictionary<TableDescriptor, List<IDisposable>> Locks { get; } = new();
+    public Dictionary<TableDescriptor, List<IDisposable>> ReadLocks { get; } = new();
+
+    public Dictionary<TableDescriptor, List<IDisposable>> WriteLocks { get; } = new();
 
     public List<(BTree<ObjectIdValue, ObjectIdValue>, BTreeTuple)> MainTableDeltas { get; } = new();
 
@@ -41,8 +43,16 @@ public sealed class TransactionState
     /// <returns></returns>
     public async Task TryAdquireWriteLocks(TableDescriptor table)
 	{
-        if (Locks.ContainsKey(table))
+        if (WriteLocks.ContainsKey(table))
             return;
+
+        if (ReadLocks.TryGetValue(table, out List<IDisposable>? readLocks)) // upgrade locks
+        {
+            foreach (IDisposable disposable in readLocks)
+                disposable.Dispose();
+
+            ReadLocks.Remove(table);
+        }
 
         List<IDisposable> locks = new()
         {
@@ -57,7 +67,7 @@ public sealed class TransactionState
                 locks.Add(await indexSchema.BTree.WriterLockAsync());
         }
 
-        Locks.Add(table, locks);
+        WriteLocks.Add(table, locks);
     }
 
     /// <summary>
@@ -67,10 +77,10 @@ public sealed class TransactionState
     /// <returns></returns>
     public async Task TryAdquireTableRowsLock(TableDescriptor table)
     {
-        if (Locks.ContainsKey(table))
+        if (ReadLocks.ContainsKey(table) || WriteLocks.ContainsKey(table))
             return;
 
-        Locks.Add(table, new()
+        ReadLocks.Add(table, new()
         {
             await table.Rows.ReaderLockAsync()
         });
@@ -81,7 +91,13 @@ public sealed class TransactionState
     /// </summary>
     public void ReleaseLocks()
     {
-        foreach (KeyValuePair<TableDescriptor, List<IDisposable>> keyValue in Locks)
+        foreach (KeyValuePair<TableDescriptor, List<IDisposable>> keyValue in ReadLocks)
+        {
+            foreach (IDisposable disposable in keyValue.Value)
+                disposable.Dispose();
+        }
+
+        foreach (KeyValuePair<TableDescriptor, List<IDisposable>> keyValue in WriteLocks)
         {
             foreach (IDisposable disposable in keyValue.Value)
                 disposable.Dispose();

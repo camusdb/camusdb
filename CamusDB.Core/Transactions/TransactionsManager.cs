@@ -101,7 +101,7 @@ public sealed class TransactionsManager
                key: tuple.SlotOne,
                value: tuple.SlotTwo,
                modifiedPages: txnState.ModifiedPages
-           );
+            );
 
             // Main table index stores rowid pointing to page offeset
             await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
