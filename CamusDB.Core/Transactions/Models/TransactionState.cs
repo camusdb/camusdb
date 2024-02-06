@@ -15,9 +15,13 @@ using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.Transactions.Models;
 
-public sealed class TransactionState
+public sealed class TransactionState : IDisposable
 {
-	public HLCTimestamp TxnId { get; }
+    public TransactionStatus Status { get; set; }
+
+    public HLCTimestamp TxnId { get; }
+
+    public SemaphoreSlim Semaphore { get; } = new(1, 1);
 
     public List<BufferPageOperation> ModifiedPages { get; } = new();
 
@@ -32,7 +36,7 @@ public sealed class TransactionState
     public List<(BTree<CompositeColumnValue, BTreeTuple>, CompositeColumnValue, BTreeTuple)> MultiIndexDeltas { get; } = new();
 
     public TransactionState(HLCTimestamp txnId)
-	{
+    {
         TxnId = txnId;
     }
 
@@ -42,32 +46,44 @@ public sealed class TransactionState
     /// <param name="table"></param>
     /// <returns></returns>
     public async Task TryAdquireWriteLocks(TableDescriptor table)
-	{
+    {
         if (WriteLocks.ContainsKey(table))
             return;
 
-        if (ReadLocks.TryGetValue(table, out List<IDisposable>? readLocks)) // upgrade locks
-        {
-            foreach (IDisposable disposable in readLocks)
-                disposable.Dispose();
+        try
+        {            
+            await Semaphore.WaitAsync();
 
-            ReadLocks.Remove(table);
+            if (WriteLocks.ContainsKey(table))
+                return;
+
+            if (ReadLocks.TryGetValue(table, out List<IDisposable>? readLocks)) // upgrade locks
+            {
+                foreach (IDisposable disposable in readLocks)
+                    disposable.Dispose();
+
+                ReadLocks.Remove(table);
+            }
+
+            List<IDisposable> locks = new()
+            {
+                await table.Rows.WriterLockAsync()
+            };
+
+            foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+            {
+                TableIndexSchema indexSchema = index.Value;
+
+                if (indexSchema.Type == IndexType.Unique || indexSchema.Type == IndexType.Multi)
+                    locks.Add(await indexSchema.BTree.WriterLockAsync());
+            }
+
+            WriteLocks.Add(table, locks);
         }
-
-        List<IDisposable> locks = new()
+        finally
         {
-            await table.Rows.WriterLockAsync()
-        };
-
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
-        {
-            TableIndexSchema indexSchema = index.Value;
-
-            if (indexSchema.Type == IndexType.Unique || indexSchema.Type == IndexType.Multi)
-                locks.Add(await indexSchema.BTree.WriterLockAsync());
+            Semaphore.Release();
         }
-
-        WriteLocks.Add(table, locks);
     }
 
     /// <summary>
@@ -77,13 +93,25 @@ public sealed class TransactionState
     /// <returns></returns>
     public async Task TryAdquireTableRowsLock(TableDescriptor table)
     {
-        if (ReadLocks.ContainsKey(table) || WriteLocks.ContainsKey(table))
+        if (WriteLocks.ContainsKey(table) || ReadLocks.ContainsKey(table))
             return;
 
-        ReadLocks.Add(table, new()
+        try
+        {            
+            await Semaphore.WaitAsync();
+
+            if (WriteLocks.ContainsKey(table) || ReadLocks.ContainsKey(table))
+                return;
+
+            ReadLocks.Add(table, new()
+            {
+                await table.Rows.ReaderLockAsync()
+            });
+        }
+        finally
         {
-            await table.Rows.ReaderLockAsync()
-        });
+            Semaphore.Release();
+        }
     }
 
     /// <summary>
@@ -102,5 +130,10 @@ public sealed class TransactionState
             foreach (IDisposable disposable in keyValue.Value)
                 disposable.Dispose();
         }
-    }    
+    }
+
+    public void Dispose()
+    {
+        Semaphore?.Dispose();
+    }
 }

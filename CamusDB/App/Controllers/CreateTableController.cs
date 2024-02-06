@@ -130,7 +130,7 @@ public sealed class CreateTableController : CommandsController
             finally
             {
                 if (txnState is not null)
-                    transactions.Rollback(txnState);
+                    await transactions.Rollback(txnState);
             }
         }
         catch (CamusDBException e)

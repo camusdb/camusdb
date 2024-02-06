@@ -67,24 +67,68 @@ public sealed class TransactionsManager
 
     public async Task Commit(DatabaseDescriptor database, TransactionState txnState)
     {
-        // Persist all the changes to the table and indexes
-        await PersistTableAndIndexChanges(database, txnState).ConfigureAwait(false);
+        if (txnState.Status == TransactionStatus.Completed)
+            throw new Exception("Transaction is already completed");
 
-        // Apply all the changes to the modified pages in an atomic operation
-        database.BufferPool.ApplyPageOperations(txnState.ModifiedPages);
+        try
+        {            
+            await txnState.Semaphore.WaitAsync();
 
-        // Release all the locks acquired by the transaction
-        txnState.ReleaseLocks();
+            if (txnState.Status == TransactionStatus.Completed)
+                throw new Exception("Transaction is already completed");
 
-        Console.WriteLine("Committed tx {0}", txnState.TxnId);
+            // Persist all the changes to the table and indexes
+            await PersistTableAndIndexChanges(database, txnState).ConfigureAwait(false);
+
+            // Apply all the changes to the modified pages in an atomic operation
+            database.BufferPool.ApplyPageOperations(txnState.ModifiedPages);
+
+            // Release all the locks acquired by the transaction
+            txnState.ReleaseLocks();
+
+            // Mark the transaction as complete
+            txnState.Status = TransactionStatus.Completed;
+
+            Console.WriteLine("Committed tx {0}", txnState.TxnId);
+        }
+        finally
+        {
+            txnState.Semaphore.Release();
+        }
     }
 
-    public void Rollback(TransactionState txnState)
+    public async Task RollbackIfNotComplete(TransactionState txnState)
     {
-        // Release all the locks acquired by the transaction
-        txnState.ReleaseLocks();
+        if (txnState.Status == TransactionStatus.Completed)
+            return;
 
-        Console.WriteLine("Rollback tx {0}", txnState.TxnId);
+        await Rollback(txnState);
+    }
+
+    public async Task Rollback(TransactionState txnState)
+    {
+        if (txnState.Status == TransactionStatus.Completed)
+            throw new Exception("Transaction is already completed");
+
+        try
+        {            
+            await txnState.Semaphore.WaitAsync();
+
+            if (txnState.Status == TransactionStatus.Completed)
+                throw new Exception("Transaction is already completed");
+
+            // Release all the locks acquired by the transaction
+            txnState.ReleaseLocks();
+
+            // Mark the transaction as complete
+            txnState.Status = TransactionStatus.Completed;
+
+            Console.WriteLine("Rollback tx {0}", txnState.TxnId);
+        }
+        finally
+        {
+            txnState.Semaphore.Release();
+        }
     }
 
     private async Task PersistTableAndIndexChanges(DatabaseDescriptor database, TransactionState txnState)
@@ -142,6 +186,6 @@ public sealed class TransactionsManager
                 await indexSaver.Save(saveMultiIndexTicket).ConfigureAwait(false);
             }
         }
-    }    
+    }
 }
 

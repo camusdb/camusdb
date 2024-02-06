@@ -36,13 +36,13 @@ public sealed class TransactionsController : CommandsController
         }
         catch (CamusDBException e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new StartTransactionResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new StartTransactionResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
@@ -71,13 +71,13 @@ public sealed class TransactionsController : CommandsController
         }
         catch (CamusDBException e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new CommitTransactionResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new CommitTransactionResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }
@@ -98,19 +98,19 @@ public sealed class TransactionsController : CommandsController
 
             TransactionState txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
 
-            transactions.Rollback(txnState);
+            await transactions.Rollback(txnState);
 
             return new JsonResult(new CommitTransactionResponse("ok"));
         }
         catch (CamusDBException e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new CommitTransactionResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }
         catch (Exception e)
         {
-            Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
             return new JsonResult(new CommitTransactionResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
         }

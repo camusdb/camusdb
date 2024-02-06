@@ -80,7 +80,7 @@ public sealed class ExecuteSQLController : CommandsController
             finally
             {
                 if (txnState is not null)
-                    transactions.Rollback(txnState);
+                    await transactions.RollbackIfNotComplete(txnState);
             }            
         }
         catch (CamusDBException e)
@@ -142,7 +142,7 @@ public sealed class ExecuteSQLController : CommandsController
             finally
             {
                 if (txnState is not null)
-                    transactions.Rollback(txnState);                
+                    await transactions.RollbackIfNotComplete(txnState);                
             }
         }
         catch (CamusDBException e)
@@ -202,7 +202,7 @@ public sealed class ExecuteSQLController : CommandsController
             finally
             {
                 if (txnState is not null)
-                    transactions.Rollback(txnState);
+                    await transactions.RollbackIfNotComplete(txnState);
             }
 
             return new JsonResult(new ExecuteDDLSQLResponse("ok"));

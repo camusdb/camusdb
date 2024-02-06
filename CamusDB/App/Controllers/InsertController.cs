@@ -71,14 +71,11 @@ public sealed class InsertController : CommandsController
                     await transactions.Commit(result.Database, txnState);
 
                 return new JsonResult(new InsertResponse("ok", result.InsertedRows));
-
             }
-            catch (Exception)
+            finally
             {
                 if (txnState is not null)
-                    transactions.Rollback(txnState);
-
-                throw;
+                    await transactions.RollbackIfNotComplete(txnState);
             }
         }
         catch (CamusDBException e)
