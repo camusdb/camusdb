@@ -25,6 +25,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 {
     private readonly ILogger<ICamusDB> logger;
 
+    private readonly CatalogsManager catalogs;
+
     private readonly DatabaseOpener databaseOpener;
 
     private readonly DatabaseCreator databaseCreator;
@@ -72,6 +74,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     public CommandExecutor(HybridLogicalClock hlc, CommandValidator validator, CatalogsManager catalogs, ILogger<ICamusDB> logger)
     {
         this.validator = validator;
+        this.catalogs = catalogs;
         this.logger = logger;
 
         databaseDescriptors = new();
@@ -165,6 +168,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
+        if (ticket.IfExists && !catalogs.TableExists(database, ticket.TableName))
+            return false;
+
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
         return await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket).ConfigureAwait(false);
@@ -230,10 +236,14 @@ public sealed class CommandExecutor : IAsyncDisposable
                 }
 
             case NodeType.DropTable:
+            case NodeType.DropTableIfExists:
                 {
                     DropTableTicket dropTableTicket = sqlExecutor.CreateDropTableTicket(ticket, ast);
 
                     validator.Validate(dropTableTicket);
+
+                    if (dropTableTicket.IfExists && !catalogs.TableExists(database, dropTableTicket.TableName))
+                        return new(database, false);
 
                     TableDescriptor table = await tableOpener.Open(database, dropTableTicket.TableName).ConfigureAwait(false);
 

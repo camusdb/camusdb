@@ -21,8 +21,11 @@ internal sealed class SQLExecutorDropTableCreator : SQLExecutorBaseCreator
 {
     internal DropTableTicket CreateDropTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
+        if (ast is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Invalid drop table AST");
+
         string tableName = ast.leftAst!.yytext!;
         
-        return new(txnState: ticket.TxnState, ticket.DatabaseName, tableName);
+        return new(txnState: ticket.TxnState, ticket.DatabaseName, tableName, ast.nodeType == NodeType.DropTableIfExists);
     }
 }

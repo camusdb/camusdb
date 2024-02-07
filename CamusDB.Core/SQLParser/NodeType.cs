@@ -65,6 +65,7 @@ public enum NodeType
     ConstraintUnique,
     ConstraintDefault,
     DropTable,
+    DropTableIfExists,
     AlterTableAddColumn,
     AlterTableDropColumn,
     AlterTableAddIndex,

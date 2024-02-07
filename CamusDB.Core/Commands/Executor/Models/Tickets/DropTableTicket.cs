@@ -18,11 +18,13 @@ public readonly struct DropTableTicket
 
     public string TableName { get; }
 
-    public DropTableTicket(TransactionState txnState, string databaseName, string tableName)
+    public bool IfExists { get; }
+
+    public DropTableTicket(TransactionState txnState, string databaseName, string tableName, bool ifExists)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
         TableName = tableName;
+        IfExists = ifExists;
     }
 }
-
