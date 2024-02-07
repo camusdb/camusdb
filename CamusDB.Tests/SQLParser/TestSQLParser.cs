@@ -385,7 +385,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
         Assert.AreEqual("some_table", ast.rightAst!.yytext);
-        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
     }
 
     [Test]
@@ -398,7 +398,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
         Assert.AreEqual("some_table", ast.rightAst!.yytext);
-        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);        
+        Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);        
     }
 
     [Test]
@@ -437,7 +437,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
         Assert.AreEqual("some_table", ast.rightAst!.yytext);
-        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
     }
 
     [Test]
@@ -450,8 +450,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
         Assert.AreEqual("some_table", ast.rightAst!.yytext);
-        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
-        Assert.AreEqual(NodeType.Number, ast.extendedFour!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedFour!.nodeType);
     }
 
     [Test]
@@ -464,8 +464,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
         Assert.AreEqual("some_table", ast.rightAst!.yytext);
-        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
-        Assert.AreEqual(NodeType.Number, ast.extendedFour!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedFour!.nodeType);
     }
 
     [Test]
@@ -492,8 +492,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
         Assert.AreEqual("some_table", ast.rightAst!.yytext);
-        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
-        Assert.AreEqual(NodeType.Number, ast.extendedFour!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedFour!.nodeType);
     }
 
     [Test]
@@ -506,8 +506,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
         Assert.AreEqual("some_table", ast.rightAst!.yytext);
-        Assert.AreEqual(NodeType.Number, ast.extendedThree!.nodeType);
-        Assert.AreEqual(NodeType.Number, ast.extendedFour!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedFour!.nodeType);
     }
 
     [Test]

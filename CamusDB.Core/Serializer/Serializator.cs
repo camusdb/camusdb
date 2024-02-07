@@ -149,6 +149,21 @@ public sealed class Serializator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteDouble(byte[] buffer, double number, ref int pointer)
+    {        
+        byte[] byteArray = BitConverter.GetBytes(number);
+        buffer[pointer + 0] = byteArray[0];
+        buffer[pointer + 1] = byteArray[1];
+        buffer[pointer + 2] = byteArray[2];
+        buffer[pointer + 3] = byteArray[3];
+        buffer[pointer + 4] = byteArray[4];
+        buffer[pointer + 5] = byteArray[5];
+        buffer[pointer + 6] = byteArray[6];
+        buffer[pointer + 7] = byteArray[7];
+        pointer += 8;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteObjectId(byte[] buffer, ObjectIdValue id, ref int pointer)
     {
         //CheckBufferOverflow(4);
@@ -255,10 +270,17 @@ public sealed class Serializator
         return number;
     }
 
-    private static float ReadFloat(byte[] buffer, ref int pointer)
+    public static float ReadFloat(byte[] buffer, ref int pointer)
     {
         float number = BitConverter.ToSingle(buffer, pointer);
         pointer += 4;
+        return number;
+    }
+
+    public static double ReadDouble(byte[] buffer, ref int pointer)
+    {
+        double number = BitConverter.ToDouble(buffer, pointer);
+        pointer += 8;
         return number;
     }
 

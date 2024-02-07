@@ -72,6 +72,7 @@ Eol             (\r\n?|\n)
 NotWh           [^ \t\r\n]
 Space           [ \t]
 Number          ("-"?[0-9]+)|("-"?[0][x][0-9A-Fa-f]+)
+Decimal         ("-"?)([0-9]+)(\.)([0-9]+)
 StrChs          [^\\\"\a\b\f\n\r\t\v\0]
 DotChr          [^\r\n]
 EscChr          \\{DotChr}
@@ -108,6 +109,8 @@ TGreaterEquals  >=
 /* Scanner body */
 
 {Number}		{ yylval.s = yytext; return (int)Token.TDIGIT; }
+
+{Decimal}		{ yylval.s = yytext; return (int)Token.TFLOAT; }
 
 {String}		{ yylval.s = yytext; return (int)Token.TSTRING; }
 

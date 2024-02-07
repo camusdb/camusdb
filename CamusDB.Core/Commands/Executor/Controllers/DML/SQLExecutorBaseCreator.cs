@@ -43,11 +43,17 @@ internal abstract class SQLExecutorBaseCreator
     {
         switch (expr.nodeType)
         {
-            case NodeType.Number:
+            case NodeType.Integer:
                 if (!long.TryParse(expr.yytext!, out long longValue))
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Int64: " + expr.yytext!);
 
-                return new ColumnValue(ColumnType.Integer64, longValue);                
+                return new ColumnValue(ColumnType.Integer64, longValue);
+
+            case NodeType.Float:
+                if (!double.TryParse(expr.yytext!, out double doubleValue))
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Int64: " + expr.yytext!);
+
+                return new ColumnValue(ColumnType.Float64, doubleValue);
 
             case NodeType.String:
                 return new ColumnValue(ColumnType.String, expr.yytext!.Trim('"'));

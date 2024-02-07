@@ -5,8 +5,8 @@
 //  See accompanying file GPLEXcopyright.rtf.
 //
 //  GPLEX Version:  1.2.2
-//  DateTime: 2/4/2024 12:55:07 PM
-//  GPLEX input file <SQLParser/SQLParser.Language.analyzer.lex - 2/4/2024 12:55:03 PM>
+//  DateTime: 2/6/2024 6:47:26 PM
+//  GPLEX input file <SQLParser/SQLParser.Language.analyzer.lex - 2/6/2024 6:47:10 PM>
 //  GPLEX frame file <embedded resource>
 //
 //  Option settings: verbose, parser, stack, minimize
@@ -124,8 +124,8 @@ namespace CamusDB.Core.SQLParser
         
         enum Result {accept, noMatch, contextFound};
 
-        const int maxAccept = 247;
-        const int initial = 248;
+        const int maxAccept = 248;
+        const int initial = 249;
         const int eofNum = 0;
         const int goStart = -1;
         const int INITIAL = 0;
@@ -162,9 +162,9 @@ namespace CamusDB.Core.SQLParser
         }
     };
 
-    static int[] startState = new int[] {248, 0};
+    static int[] startState = new int[] {249, 0};
 
-    static Table[] NxS = new Table[255] {
+    static Table[] NxS = new Table[257] {
 /* NxS[   0] */ new Table(0, 0, 0, null), // Shortest string ""
 /* NxS[   1] */ // Shortest string "\t"
       new Table(9, 24, -1, new short[] {1, -1, -1, -1, -1, -1, 
@@ -180,15 +180,15 @@ namespace CamusDB.Core.SQLParser
           10, 10, 10, 10}),
 /* NxS[   8] */ new Table(0, 0, -1, null), // Shortest string "/"
 /* NxS[   9] */ // Shortest string "0"
-      new Table(48, 73, -1, new short[] {10, 10, 10, 10, 10, 10, 
-          10, 10, 10, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 
+      new Table(46, 75, -1, new short[] {254, -1, 10, 10, 10, 10, 
+          10, 10, 10, 10, 10, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 
           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 
           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 
           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 
-          -1, -1, 253}),
+          -1, -1, -1, -1, 255}),
 /* NxS[  10] */ // Shortest string "1"
-      new Table(48, 10, -1, new short[] {10, 10, 10, 10, 10, 10, 
-          10, 10, 10, 10}),
+      new Table(46, 12, -1, new short[] {254, -1, 10, 10, 10, 10, 
+          10, 10, 10, 10, 10, 10}),
 /* NxS[  11] */ // Shortest string "<"
       new Table(61, 2, -1, new short[] {243, 244}),
 /* NxS[  12] */ new Table(0, 0, -1, null), // Shortest string "="
@@ -1775,54 +1775,60 @@ namespace CamusDB.Core.SQLParser
 /* NxS[ 242] */ new Table(0, 0, -1, null), // Shortest string ">="
 /* NxS[ 243] */ new Table(0, 0, -1, null), // Shortest string "<="
 /* NxS[ 244] */ new Table(0, 0, -1, null), // Shortest string "<>"
-/* NxS[ 245] */ // Shortest string "0x0"
-      new Table(48, 55, -1, new short[] {245, 245, 245, 245, 245, 245, 
-          245, 245, 245, 245, -1, -1, -1, -1, -1, -1, -1, 245, 245, 245, 245, 245, 
-          245, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 
-          -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 245, 245, 245, 245, 245, 
-          245}),
-/* NxS[ 246] */ new Table(0, 0, -1, null), // Shortest string "\"\""
-/* NxS[ 247] */ new Table(0, 0, -1, null), // Shortest string "!="
-/* NxS[ 248] */ // Shortest string ""
+/* NxS[ 245] */ // Shortest string "0.0"
+      new Table(48, 10, -1, new short[] {245, 245, 245, 245, 245, 245, 
+          245, 245, 245, 245}),
+/* NxS[ 246] */ // Shortest string "0x0"
+      new Table(48, 55, -1, new short[] {246, 246, 246, 246, 246, 246, 
+          246, 246, 246, 246, -1, -1, -1, -1, -1, -1, -1, 246, 246, 246, 246, 246, 
+          246, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 
+          -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 246, 246, 246, 246, 246, 
+          246}),
+/* NxS[ 247] */ new Table(0, 0, -1, null), // Shortest string "\"\""
+/* NxS[ 248] */ new Table(0, 0, -1, null), // Shortest string "!="
+/* NxS[ 249] */ // Shortest string ""
       new Table(9, 117, -1, new short[] {1, -1, -1, -1, -1, -1, 
           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 
-          -1, 1, 249, 250, -1, -1, -1, -1, -1, 2, 3, 4, 5, 6, 7, -1, 
+          -1, 1, 250, 251, -1, -1, -1, -1, -1, 2, 3, 4, 5, 6, 7, -1, 
           8, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, -1, -1, 11, 12, 13, 
           -1, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 22, 24, 25, 22, 26, 
           27, 28, 22, 29, 30, 31, 32, 33, 34, 22, 22, 22, -1, -1, -1, -1, 
-          22, 251, 15, 16, 17, 18, 19, 20, 21, 22, 23, 22, 24, 25, 22, 26, 
+          22, 252, 15, 16, 17, 18, 19, 20, 21, 22, 23, 22, 24, 25, 22, 26, 
           27, 28, 22, 29, 30, 31, 32, 33, 34, 22, 22, 22, 35, -1, 36}),
-/* NxS[ 249] */ // Shortest string "!"
-      new Table(61, 1, -1, new short[] {247}),
-/* NxS[ 250] */ // Shortest string "\""
-      new Table(0, 93, 250, new short[] {-1, 250, 250, 250, 250, 250, 
-          250, -1, -1, -1, -1, -1, -1, -1, 250, 250, 250, 250, 250, 250, 250, 250, 
-          250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 246, 250, 250, 250, 
-          250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 
-          250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 
-          250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 
-          250, 250, 250, 250, 250, 250, 254}),
-/* NxS[ 251] */ // Shortest string "`"
-      new Table(65, 58, -1, new short[] {252, 252, 252, 252, 252, 252, 
-          252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 
-          252, 252, 252, 252, -1, -1, -1, -1, 252, -1, 252, 252, 252, 252, 252, 252, 
-          252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 
-          252, 252, 252, 252}),
-/* NxS[ 252] */ // Shortest string "`A"
-      new Table(48, 75, -1, new short[] {252, 252, 252, 252, 252, 252, 
-          252, 252, 252, 252, -1, -1, -1, -1, -1, -1, -1, 252, 252, 252, 252, 252, 
-          252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 
-          252, 252, 252, 252, 252, -1, -1, -1, -1, 252, 240, 252, 252, 252, 252, 252, 
-          252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 
-          252, 252, 252, 252, 252}),
-/* NxS[ 253] */ // Shortest string "0x"
-      new Table(48, 55, -1, new short[] {245, 245, 245, 245, 245, 245, 
-          245, 245, 245, 245, -1, -1, -1, -1, -1, -1, -1, 245, 245, 245, 245, 245, 
-          245, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 
-          -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 245, 245, 245, 245, 245, 
-          245}),
-/* NxS[ 254] */ // Shortest string "\"\\"
-      new Table(10, 4, 250, new short[] {-1, 250, 250, -1}),
+/* NxS[ 250] */ // Shortest string "!"
+      new Table(61, 1, -1, new short[] {248}),
+/* NxS[ 251] */ // Shortest string "\""
+      new Table(0, 93, 251, new short[] {-1, 251, 251, 251, 251, 251, 
+          251, -1, -1, -1, -1, -1, -1, -1, 251, 251, 251, 251, 251, 251, 251, 251, 
+          251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 247, 251, 251, 251, 
+          251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 
+          251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 
+          251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 
+          251, 251, 251, 251, 251, 251, 256}),
+/* NxS[ 252] */ // Shortest string "`"
+      new Table(65, 58, -1, new short[] {253, 253, 253, 253, 253, 253, 
+          253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 
+          253, 253, 253, 253, -1, -1, -1, -1, 253, -1, 253, 253, 253, 253, 253, 253, 
+          253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 
+          253, 253, 253, 253}),
+/* NxS[ 253] */ // Shortest string "`A"
+      new Table(48, 75, -1, new short[] {253, 253, 253, 253, 253, 253, 
+          253, 253, 253, 253, -1, -1, -1, -1, -1, -1, -1, 253, 253, 253, 253, 253, 
+          253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 
+          253, 253, 253, 253, 253, -1, -1, -1, -1, 253, 240, 253, 253, 253, 253, 253, 
+          253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 253, 
+          253, 253, 253, 253, 253}),
+/* NxS[ 254] */ // Shortest string "0."
+      new Table(48, 10, -1, new short[] {245, 245, 245, 245, 245, 245, 
+          245, 245, 245, 245}),
+/* NxS[ 255] */ // Shortest string "0x"
+      new Table(48, 55, -1, new short[] {246, 246, 246, 246, 246, 246, 
+          246, 246, 246, 246, -1, -1, -1, -1, -1, -1, -1, 246, 246, 246, 246, 246, 
+          246, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 
+          -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 246, 246, 246, 246, 246, 
+          246}),
+/* NxS[ 256] */ // Shortest string "\"\\"
+      new Table(10, 4, 251, new short[] {-1, 251, 251, -1}),
     };
 
 int NextState() {
@@ -2276,7 +2282,7 @@ return (int)Token.TDIV;
             break;
         case 9: // Recognized '{Number}',	Shortest string "0"
         case 10: // Recognized '{Number}',	Shortest string "1"
-        case 245: // Recognized '{Number}',	Shortest string "0x0"
+        case 246: // Recognized '{Number}',	Shortest string "0x0"
 yylval.s = yytext; return (int)Token.TDIGIT;
             break;
         case 11: // Recognized '{TLess}',	Shortest string "<"
@@ -2655,10 +2661,13 @@ return (int)Token.TLESSTHANEQUALS;
         case 244: // Recognized '{TNotEquals}',	Shortest string "<>"
 return (int)Token.TNOTEQUALS;
             break;
-        case 246: // Recognized '{String}',	Shortest string "\"\""
+        case 245: // Recognized '{Decimal}',	Shortest string "0.0"
+yylval.s = yytext; return (int)Token.TFLOAT;
+            break;
+        case 247: // Recognized '{String}',	Shortest string "\"\""
 yylval.s = yytext; return (int)Token.TSTRING;
             break;
-        case 247: // Recognized '{TNotEquals2}',	Shortest string "!="
+        case 248: // Recognized '{TNotEquals2}',	Shortest string "!="
 return (int)Token.TNOTEQUALS;
             break;
         default:

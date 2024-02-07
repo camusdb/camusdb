@@ -22,7 +22,7 @@ public static class SerializatorTypeSizes
     public const int TypeEmptyString = 1;
     public const int TypeBool = 1;
     public const int TypeFloat = 2;
-    public const int TypeDouble = 4;
+    public const int TypeDouble = 8;
     public const int TypeObjectId = 12;
     public const int TypeHLCTimestamp = 12;
     public const int TypeTuple = 24;

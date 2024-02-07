@@ -59,6 +59,9 @@ internal sealed class RowSerializer
                 // type 1 byte + 4 byte int
                 ColumnType.Integer64 => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger64,
 
+                // type 1 byte + 8 byte int
+                ColumnType.Float64 => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeDouble,
+
                 // type 1 byte + 4 byte length + strLength
                 ColumnType.String => SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + GetStringLengthInBytes(columnValue.StrValue!),
 
@@ -118,6 +121,11 @@ internal sealed class RowSerializer
                 case ColumnType.String:
                     Serializator.WriteType(rowBuffer, SerializatorTypes.TypeString32, ref pointer);
                     Serializator.WriteString(rowBuffer, columnValue.StrValue!, ref pointer);
+                    break;
+
+                case ColumnType.Float64:
+                    Serializator.WriteType(rowBuffer, SerializatorTypes.TypeDouble, ref pointer);
+                    Serializator.WriteDouble(rowBuffer, columnValue.FloatValue, ref pointer);
                     break;
 
                 case ColumnType.Bool:

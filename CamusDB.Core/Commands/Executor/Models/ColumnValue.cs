@@ -20,6 +20,8 @@ public sealed class ColumnValue : IComparable<ColumnValue>
 
     public long LongValue { get; }
 
+    public double FloatValue { get; }
+
     public bool BoolValue { get; }
 
     public string? StrValue { get; }
@@ -62,6 +64,15 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         LongValue = value;
     }
 
+    public ColumnValue(ColumnType type, double value)
+    {
+        if (type != ColumnType.Float64 && type != ColumnType.Null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.Float64 to double value");
+
+        Type = type;
+        FloatValue = value;
+    }
+
     public ColumnValue(ColumnType type, string value)
     {
         if (type != ColumnType.String && type != ColumnType.Id && type != ColumnType.Null)
@@ -102,8 +113,11 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         if (Type == ColumnType.Integer64)
             return LongValue.CompareTo(other.LongValue);
 
+        if (Type == ColumnType.Float64)
+            return FloatValue.CompareTo(other.FloatValue);
+
         if (Type == ColumnType.Bool)
-            return BoolValue.CompareTo(other.BoolValue);        
+            return BoolValue.CompareTo(other.BoolValue);
 
         throw new Exception("Unknown value: " + Type);
     }
@@ -112,6 +126,9 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     {
         if (Type == ColumnType.Integer64)
             return string.Format("ColumnValue({0}:{1})", Type, LongValue);
+
+        if (Type == ColumnType.Float64)
+            return string.Format("ColumnValue({0}:{1})", Type, FloatValue);
 
         if (Type == ColumnType.Bool)
             return string.Format("ColumnValue({0}:{1})", Type, BoolValue);

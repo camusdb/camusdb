@@ -20,7 +20,7 @@
 %left TADD TMINUS
 %left TMULT
 
-%token TDIGIT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
+%token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
 %token TTRUE TFALSE TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
 %token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL
@@ -162,7 +162,8 @@ create_table_field_constraint : TNULL { $$.n = new(NodeType.ConstraintNull, null
                         | TDEFAULT LPAREN default_expr RPAREN { $$.n = new(NodeType.ConstraintDefault, $3.n, null, null, null, null, null, null); }
                         ;
 
-default_expr : number { $$.n = $1.n; $$.s = $1.s; }
+default_expr : int { $$.n = $1.n; $$.s = $1.s; }
+             | float { $$.n = $1.n; $$.s = $1.s; }
              | string { $$.n = $1.n; $$.s = $1.s; }
              | bool { $$.n = $1.n; $$.s = $1.s; }
              | null { $$.n = $1.n; $$.s = $1.s; }             
@@ -190,7 +191,7 @@ select_field_item  : expr { $$.n = $1.n; $$.s = $1.s; }
                    | expr TAS any_identifier { $$.n = new(NodeType.ExprAlias, $1.n, $3.n, null, null, null, null, null); }             
                    ;
 
-select_limit_offset : number  { $$.n = $1.n; $$.s = $1.s; }
+select_limit_offset : int  { $$.n = $1.n; $$.s = $1.s; }
                     | placeholder { $$.n = $1.n; $$.s = $1.s; }
                     ;
 
@@ -302,7 +303,8 @@ group_paren_expr : LPAREN condition RPAREN { $$.n = $2.n; $$.s = $2.s; }
                  ;
 
 simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
-			| number { $$.n = $1.n; $$.s = $1.s; }
+			| int { $$.n = $1.n; $$.s = $1.s; }
+            | float { $$.n = $1.n; $$.s = $1.s; }
             | string { $$.n = $1.n; $$.s = $1.s; }
             | bool { $$.n = $1.n; $$.s = $1.s; }
             | null { $$.n = $1.n; $$.s = $1.s; }
@@ -325,8 +327,11 @@ identifier  : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, nu
 escaped_identifier  : TESCAPED_IDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, $$.s.Trim('`')); }
                     ;
 
-number  : TDIGIT { $$.n = new(NodeType.Number, null, null, null, null, null, null, $$.s); }
+int     : TDIGIT { $$.n = new(NodeType.Integer, null, null, null, null, null, null, $$.s); }
         ;
+
+float    : TFLOAT { $$.n = new(NodeType.Float, null, null, null, null, null, null, $$.s); }
+         ;
 
 string  : TSTRING { $$.n = new(NodeType.String, null, null, null, null, null, null, $$.s); }
         ;

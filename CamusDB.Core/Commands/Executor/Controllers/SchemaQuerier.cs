@@ -84,6 +84,7 @@ internal sealed class SchemaQuerier
             ColumnType.String => new ColumnValue(ColumnType.String, column.DefaultValue.StrValue!),
             ColumnType.Bool => new ColumnValue(ColumnType.String, column.DefaultValue.BoolValue.ToString()),
             ColumnType.Integer64 => new ColumnValue(ColumnType.String, column.DefaultValue.LongValue.ToString()),
+            ColumnType.Float64 => new ColumnValue(ColumnType.String, column.DefaultValue.FloatValue.ToString()),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown default type :" + column.DefaultValue.Type),
         };
     }

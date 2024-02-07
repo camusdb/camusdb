@@ -10,7 +10,8 @@ namespace CamusDB.Core.SQLParser;
 
 public enum NodeType
 {
-    Number,
+    Integer,
+    Float,
     String,
     Bool,
     Null,

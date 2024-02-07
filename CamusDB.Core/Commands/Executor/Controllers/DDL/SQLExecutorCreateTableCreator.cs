@@ -204,6 +204,9 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         if (nodeAst.nodeType == NodeType.TypeInteger64)
             return ColumnType.Integer64;
 
+        if (nodeAst.nodeType == NodeType.TypeFloat64)
+            return ColumnType.Float64;
+
         if (nodeAst.nodeType == NodeType.TypeString)
             return ColumnType.String;
 
