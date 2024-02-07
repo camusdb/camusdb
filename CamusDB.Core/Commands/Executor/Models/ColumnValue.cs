@@ -27,7 +27,7 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     public string? StrValue { get; }
 
     [JsonConstructor]
-    public ColumnValue(ColumnType type, string? strValue, long longValue, bool boolValue)
+    public ColumnValue(ColumnType type, string? strValue, long longValue, double floatValue, bool boolValue)
     {
         Type = type;
 
@@ -41,6 +41,9 @@ public sealed class ColumnValue : IComparable<ColumnValue>
 
         if (type == ColumnType.Integer64)
             LongValue = longValue;
+
+        if (type == ColumnType.Float64)
+            FloatValue = floatValue;
 
         if (type == ColumnType.Bool)
             BoolValue = boolValue;

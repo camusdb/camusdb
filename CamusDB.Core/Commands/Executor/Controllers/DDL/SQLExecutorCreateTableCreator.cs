@@ -88,41 +88,43 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
     /// <summary>
     /// Returns the list of 
     /// </summary>
-    /// <param name="leftAst"></param>
+    /// <param name="ast"></param>
     /// <returns></returns>
-    private static void GetIndexColumnList(NodeAst? leftAst, List<ColumnIndexInfo> indexColumns)
+    private static void GetIndexColumnList(NodeAst? ast, List<ColumnIndexInfo> indexColumns)
     {
-        if (leftAst is null)
+        if (ast is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid field list in constraint");
 
-        if (leftAst.nodeType == NodeType.Identifier)
+        if (ast.nodeType == NodeType.Identifier)
         {
-            indexColumns.Add(new ColumnIndexInfo(leftAst.yytext!, OrderType.Ascending));
+            indexColumns.Add(new ColumnIndexInfo(ast.yytext!, OrderType.Ascending));
             return;
         }
 
-        if (leftAst.nodeType == NodeType.IndexIdentifierAsc)
+        if (ast.nodeType == NodeType.IndexIdentifierAsc)
         {
-            indexColumns.Add(new ColumnIndexInfo(leftAst.yytext!, OrderType.Ascending));
+            indexColumns.Add(new ColumnIndexInfo(ast.yytext!, OrderType.Ascending));
             return;
         }
 
-        if (leftAst.nodeType == NodeType.IndexIdentifierDesc)
+        if (ast.nodeType == NodeType.IndexIdentifierDesc)
         {
-            indexColumns.Add(new ColumnIndexInfo(leftAst.yytext!, OrderType.Descending));
+            indexColumns.Add(new ColumnIndexInfo(ast.yytext!, OrderType.Descending));
             return;
         }
 
-        if (leftAst.nodeType == NodeType.IndexIdentifierList)
+        if (ast.nodeType == NodeType.IndexIdentifierList)
         {
-            if (leftAst.leftAst != null)
-                GetIndexColumnList(leftAst.leftAst, indexColumns);
+            if (ast.leftAst != null)
+                GetIndexColumnList(ast.leftAst, indexColumns);
 
-            if (leftAst.rightAst != null)
-                GetIndexColumnList(leftAst.rightAst, indexColumns);
+            if (ast.rightAst != null)
+                GetIndexColumnList(ast.rightAst, indexColumns);
+
+            return;
         }
 
-        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid index column field list");
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid index column field list: " + ast.nodeType);
     }
 
     /// <summary>
