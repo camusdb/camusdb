@@ -106,7 +106,12 @@ internal sealed class TableOpener
             foreach (TableColumnSchema column in columns!)
             {
                 if (column.Id == columnIds[i])
-                    columNames[i] = column.Name ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Table system data is corrupt");
+                {
+                    if (string.IsNullOrEmpty(column.Name))
+                        throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Table system data is corrupt");
+
+                    columNames[i] = column.Name;
+                }
             }
         }
 

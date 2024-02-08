@@ -150,7 +150,7 @@ public sealed class Serializator
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteDouble(byte[] buffer, double number, ref int pointer)
-    {        
+    {
         byte[] byteArray = BitConverter.GetBytes(number);
         buffer[pointer + 0] = byteArray[0];
         buffer[pointer + 1] = byteArray[1];

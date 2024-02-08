@@ -65,11 +65,11 @@ insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALU
             | TINSERT TINTO any_identifier TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, null, $5.n, null, null, null, null); }
 			;
 
-insert_batch_list : insert_batch_list TCOMMA insert_batch { $$.n = new(NodeType.InsertBatchList, $1.n, $3.n, null, null, null, null, null); }
-                  | insert_batch { $$.n = $1.n; $$.s = $1.s; }
+insert_batch_list : insert_batch_list TCOMMA insert_values { $$.n = new(NodeType.InsertBatchList, $1.n, $3.n, null, null, null, null, null); }
+                  | insert_values { $$.n = $1.n; $$.s = $1.s; }
                   ;
 
-insert_batch : LPAREN values_list RPAREN { $$.n = $2.n; $$.s = $2.s; }
+insert_values : LPAREN values_list RPAREN { $$.n = $2.n; $$.s = $2.s; }
              ;
 
 update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, null, null, null, null); }

@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.2
-// DateTime: 2/7/2024 11:15:13 AM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 2/7/2024 11:15:09 AM>
+// DateTime: 2/7/2024 8:03:56 PM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 2/7/2024 4:00:57 PM>
 
 // options: no-lines gplex
 
@@ -69,7 +69,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
       "insert_stmt", "create_table_stmt", "drop_table_stmt", "alter_table_stmt", 
       "show_stmt", "create_index_stmt", "begin_stmt", "commit_stmt", "rollback_stmt", 
       "select_field_list", "select_table", "condition", "order_list", "select_limit_offset", 
-      "any_identifier", "insert_field_list", "insert_batch_list", "insert_batch", 
+      "any_identifier", "insert_field_list", "insert_batch_list", "insert_values", 
       "values_list", "update_list", "create_table_item_list", "create_table_constraint_list", 
       "field_type", "create_table_field_constraint", "identifier_index_list", 
       "identifier_index", "identifier", "create_table_item", "create_table_field_constraint_list", 
@@ -713,13 +713,13 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
       case 28: // insert_stmt -> TINSERT, TINTO, any_identifier, TVALUES, insert_batch_list
 { CurrentSemanticValue.n = new(NodeType.Insert, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
         break;
-      case 29: // insert_batch_list -> insert_batch_list, TCOMMA, insert_batch
+      case 29: // insert_batch_list -> insert_batch_list, TCOMMA, insert_values
 { CurrentSemanticValue.n = new(NodeType.InsertBatchList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }
         break;
-      case 30: // insert_batch_list -> insert_batch
+      case 30: // insert_batch_list -> insert_values
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
         break;
-      case 31: // insert_batch -> LPAREN, values_list, RPAREN
+      case 31: // insert_values -> LPAREN, values_list, RPAREN
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-2].s; }
         break;
       case 32: // update_stmt -> TUPDATE, any_identifier, TSET, update_list, TWHERE, condition

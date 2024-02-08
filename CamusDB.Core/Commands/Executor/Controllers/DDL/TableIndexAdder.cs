@@ -83,7 +83,7 @@ internal sealed class TableIndexAdder
             return columnValue;
 
         return null;
-    }  
+    }
 
     /// <summary>
     /// Schedules a new add index operation by the specified filters
@@ -220,7 +220,7 @@ internal sealed class TableIndexAdder
                 indexKeyValue = await ValidateAndInsertMultiValue(tablespace, index, row, ticket, ticket.TxnState.ModifiedPages);
                 ticket.TxnState.MultiIndexDeltas.Add((index, indexKeyValue, row.Tuple));
             }
-        }        
+        }
 
         return FluxAction.Continue;
     }
@@ -315,7 +315,7 @@ internal sealed class TableIndexAdder
         await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
 
         return compositeIndexValue;
-    }    
+    }
 
     private async Task<FluxAction> AddSystemObject(AddIndexFluxState state)
     {
@@ -379,7 +379,7 @@ internal sealed class TableIndexAdder
                 if (column.Name == columnIndex.Name)
                 {
                     hasColumn = true;
-                    columnsIds[i] = column.Id;
+                    columnsIds[i++] = column.Id;
                     break;
                 }
             }
@@ -410,7 +410,7 @@ internal sealed class TableIndexAdder
         machine.When(AddIndexFluxSteps.TryAdquireLocks, TryAdquireLocks);
         machine.When(AddIndexFluxSteps.LocateTuplesToFeedTheIndex, LocateTuplesToFeedTheIndex);
         machine.When(AddIndexFluxSteps.FeedTheIndex, FeedTheIndex);
-        machine.When(AddIndexFluxSteps.AddSystemObject, AddSystemObject);                
+        machine.When(AddIndexFluxSteps.AddSystemObject, AddSystemObject);
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());

@@ -74,6 +74,7 @@ Space           [ \t]
 Number          ("-"?[0-9]+)|("-"?[0][x][0-9A-Fa-f]+)
 Decimal         ("-"?)([0-9]+)(\.)([0-9]+)
 StrChs          [^\\\"\a\b\f\n\r\t\v\0]
+StrChs2          [^\\\'\a\b\f\n\r\t\v\0]
 DotChr          [^\r\n]
 EscChr          \\{DotChr}
 OctDig          [0-7]
@@ -83,6 +84,7 @@ HexEsc          \\x{HexDig}{2}
 UniEsc          \\u{HexDig}{4}
 UNIESC          \\U{HexDig}{8}
 String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\"
+StringSingle    \'({StrChs2}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\'
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
 EscIdentifier   (`)[a-zA-Z_][a-zA-Z0-9_]*(`)
 Placeholder     (@)([a-zA-Z0-9_]+)
@@ -113,6 +115,8 @@ TGreaterEquals  >=
 {Decimal}		{ yylval.s = yytext; return (int)Token.TFLOAT; }
 
 {String}		{ yylval.s = yytext; return (int)Token.TSTRING; }
+
+{StringSingle}  { yylval.s = yytext; return (int)Token.TSTRING; }
 
 {Space}+		/* skip */
 

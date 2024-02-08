@@ -119,6 +119,12 @@ internal sealed class RowInserter
         {
             string name = columnNames[i];
 
+            if (string.IsNullOrEmpty(name))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"Column name is null"
+                );
+
             if (!rowValues.TryGetValue(name, out ColumnValue? columnValue))
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,

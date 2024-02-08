@@ -17,6 +17,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
+using CamusDB.Core.SQLParser;
 
 namespace CamusDB.App.Controllers;
 
