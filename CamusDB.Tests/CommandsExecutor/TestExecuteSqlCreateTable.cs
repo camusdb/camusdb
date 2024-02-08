@@ -8,6 +8,7 @@
 
 using NUnit.Framework;
 
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
@@ -20,6 +21,9 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -31,38 +35,43 @@ public class TestExecuteSqlCreateTable : BaseTest
         //SetupDb.Remove("factory");
     }
 
-    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, CatalogsManager, TransactionsManager)> SetupDatabase()
     {
-        string dbname = System.Guid.NewGuid().ToString("n");
+        string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
+        CatalogsManager catalogs = new(logger);
+        TransactionsManager transactions = new(hlc);
+        CommandExecutor executor = new(hlc, validator, catalogs, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
             ifNotExists: false
         );
 
-        DatabaseDescriptor descriptor = await executor.CreateDatabase(databaseTicket);
+        DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, executor, catalogsManager, descriptor);
+        return (dbname, database, executor, catalogs, transactions);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteCreateTable()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket createTableTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "CREATE TABLE robots (id OID PRIMARY KEY NOT NULL, name STRING NOT NULL, year INT64 NOT NULL)",
             parameters: null
         );
 
-        Assert.IsTrue(await executor.ExecuteDDLSQL(createTableTicket));
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
+        Assert.IsTrue(ddlResult.Success);
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -84,28 +93,37 @@ public class TestExecuteSqlCreateTable : BaseTest
         Assert.True(tableSchema.Columns![2].NotNull);
 
         ExecuteSQLTicket queryTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "SELECT * FROM robots",
             parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteCreateTable2()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket createTableTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "CREATE TABLE robots (id OID PRIMARY KEY NOT NULL, name STRING DEFAULT (\"hello\"))",
             parameters: null
         );
 
-        Assert.IsTrue(await executor.ExecuteDDLSQL(createTableTicket));
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
+        Assert.IsTrue(ddlResult.Success);
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -124,28 +142,37 @@ public class TestExecuteSqlCreateTable : BaseTest
         Assert.False(tableSchema.Columns![1].NotNull);
 
         ExecuteSQLTicket queryTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "SELECT * FROM robots",
             parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteCreateTableIfNotExists()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket createTableTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "CREATE TABLE IF NOT EXISTS robots (id OID PRIMARY KEY NOT NULL, name STRING DEFAULT (\"hello\"))",
             parameters: null
         );
 
-        Assert.IsTrue(await executor.ExecuteDDLSQL(createTableTicket));
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
+        Assert.IsTrue(ddlResult.Success);
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -164,36 +191,47 @@ public class TestExecuteSqlCreateTable : BaseTest
         Assert.False(tableSchema.Columns![1].NotNull);
 
         ExecuteSQLTicket queryTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "SELECT * FROM robots",
             parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
 
         createTableTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "CREATE TABLE IF NOT EXISTS robots (id OID PRIMARY KEY NOT NULL, name STRING DEFAULT (\"hello\"))",
             parameters: null
         );
 
-        Assert.IsFalse(await executor.ExecuteDDLSQL(createTableTicket));
+        ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteCreateTableConstraints()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket createTableTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "CREATE TABLE robots (id OID NOT NULL, name STRING NOT NULL, year INT64 NOT NULL) PRIMARY KEY (id)",
             parameters: null
         );
 
-        Assert.IsTrue(await executor.ExecuteDDLSQL(createTableTicket));
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
+        Assert.IsTrue(ddlResult.Success);
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -215,22 +253,30 @@ public class TestExecuteSqlCreateTable : BaseTest
         Assert.True(tableSchema.Columns![2].NotNull);
 
         ExecuteSQLTicket queryTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "SELECT * FROM robots",
             parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteCreateTableDoublePk()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket createTableTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "CREATE TABLE robots (id OID NOT NULL PRIMARY KEY, name STRING NOT NULL, year INT64 NOT NULL) PRIMARY KEY (id)",
             parameters: null

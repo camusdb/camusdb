@@ -419,7 +419,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <param name="ticket"></param>
     /// <returns></returns>
     /// <exception cref="Exception"></exception>
-    public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow>)> ExecuteSQLQuery(ExecuteSQLTicket ticket)
+    public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQuery(ExecuteSQLTicket ticket)
     {
         validator.Validate(ticket);
 

@@ -22,18 +22,21 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 public class TestExecuteSqlInsert : BaseTest
 {
-    private async Task<(string, CommandExecutor)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
+        TransactionsManager transactions = new(hlc);
         CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
@@ -41,17 +44,19 @@ public class TestExecuteSqlInsert : BaseTest
             ifNotExists: false
         );
 
-        await executor.CreateDatabase(databaseTicket);
+        DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, executor);
+        return (dbname, database, executor, transactions);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTable()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket tableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]
@@ -77,7 +82,7 @@ public class TestExecuteSqlInsert : BaseTest
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
                 values: new()
@@ -97,15 +102,19 @@ public class TestExecuteSqlInsert : BaseTest
             objectsId.Add(objectId);
         }
 
-        return (dbname, executor, objectsId);
+        await transactions.Commit(database, txnState);
+
+        return (dbname, executor, transactions, objectsId);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTableWithDefaults()
+    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTableWithDefaults()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket tableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]
@@ -131,7 +140,7 @@ public class TestExecuteSqlInsert : BaseTest
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
                 values: new()
@@ -151,16 +160,21 @@ public class TestExecuteSqlInsert : BaseTest
             objectsId.Add(objectId);
         }
 
-        return (dbname, executor, objectsId);
+        await transactions.Commit(database, txnState);
+
+        return (dbname, executor, transactions, objectsId);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteInsertDiffFieldsAndValues()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "INSERT INTO robots (id, name, year, enabled) VALUES (GEN_ID(), \"astro boy\", 3000)",
             parameters: null
@@ -174,9 +188,12 @@ public class TestExecuteSqlInsert : BaseTest
     [NonParallelizable]
     public async Task TestExecuteInsert1()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "INSERT INTO robots (id, name, year, enabled) VALUES (GEN_ID(), \"astro boy\", 3000, false)",
             parameters: null
@@ -185,12 +202,15 @@ public class TestExecuteSqlInsert : BaseTest
         Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots",
+            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(26, result.Count);
@@ -206,9 +226,12 @@ public class TestExecuteSqlInsert : BaseTest
     [NonParallelizable]
     public async Task TestExecuteInsert2()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "INSERT INTO robots (id, name, year, enabled) VALUES (STR_ID(\"507f1f77bcf86cd799439011\"), \"astro boy\", 3000, false)",
             parameters: null
@@ -217,12 +240,15 @@ public class TestExecuteSqlInsert : BaseTest
         Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots",
+            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(26, result.Count);
@@ -241,9 +267,12 @@ public class TestExecuteSqlInsert : BaseTest
     [NonParallelizable]
     public async Task TestExecuteInsert3()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "INSERT INTO robots (id, name, year, enabled) VALUES (STR_ID(\"507f1f77bcf86cd799439011\"), \"astro boy\", 3000, false)",
             parameters: null
@@ -252,12 +281,15 @@ public class TestExecuteSqlInsert : BaseTest
         Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
+            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
@@ -273,9 +305,12 @@ public class TestExecuteSqlInsert : BaseTest
     [NonParallelizable]
     public async Task TestExecuteInsert4()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "INSERT INTO robots (id, name, year, enabled) VALUES (@id, @name, @year, @enabled)",
             parameters: new()
@@ -290,12 +325,15 @@ public class TestExecuteSqlInsert : BaseTest
         Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
+            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
@@ -312,9 +350,12 @@ public class TestExecuteSqlInsert : BaseTest
     [NonParallelizable]
     public async Task TestExecuteInsert5()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,        
             database: dbname,
             sql: "INSERT INTO robots VALUES (STR_ID(\"507f1f77bcf86cd799439011\"), \"astro boy\", 3000, false)",
             parameters: null
@@ -323,12 +364,15 @@ public class TestExecuteSqlInsert : BaseTest
         Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
+            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
@@ -344,9 +388,12 @@ public class TestExecuteSqlInsert : BaseTest
     [NonParallelizable]
     public async Task TestExecuteInsert6()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "INSERT INTO robots VALUES (STR_ID(@id), @name, @year, @enabled)",
             parameters: new()
@@ -361,12 +408,15 @@ public class TestExecuteSqlInsert : BaseTest
         Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
+            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
@@ -382,9 +432,12 @@ public class TestExecuteSqlInsert : BaseTest
     [NonParallelizable]
     public async Task TestExecuteInsert7()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTableWithDefaults();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTableWithDefaults();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "INSERT INTO robots (id, name, enabled) VALUES (STR_ID(@id), @name, @enabled)",
             parameters: new()
@@ -398,12 +451,15 @@ public class TestExecuteSqlInsert : BaseTest
         Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
+            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
@@ -420,9 +476,12 @@ public class TestExecuteSqlInsert : BaseTest
     [NonParallelizable]
     public async Task TestExecuteInsert8()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTableWithDefaults();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTableWithDefaults();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "INSERT INTO robots (id, name, year, enabled) VALUES (STR_ID(@id), @name, DEFAULT, @enabled)",
             parameters: new()
@@ -436,12 +495,15 @@ public class TestExecuteSqlInsert : BaseTest
         Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
+            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
@@ -458,9 +520,12 @@ public class TestExecuteSqlInsert : BaseTest
     [NonParallelizable]
     public async Task TestExecuteInsert9()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTableWithDefaults();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTableWithDefaults();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "INSERT INTO robots (id, name, year, enabled) VALUES (STR_ID(@id), @name, DEFAULT, @enabled), (STR_ID(@id2), @name, DEFAULT, @enabled)",
             parameters: new()
@@ -475,12 +540,15 @@ public class TestExecuteSqlInsert : BaseTest
         Assert.AreEqual(2, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
+            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
@@ -493,12 +561,15 @@ public class TestExecuteSqlInsert : BaseTest
         }
 
         queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439012\")",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439012\")",
+            parameters: null
         );
 
-        result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (database, cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
@@ -515,9 +586,12 @@ public class TestExecuteSqlInsert : BaseTest
     [NonParallelizable]
     public async Task TestExecuteInsert10()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "INSERT INTO robots VALUES (STR_ID(@id), @name, @year, @enabled), (STR_ID(@id2), @name, @year, @enabled)",
             parameters: new()
@@ -533,12 +607,15 @@ public class TestExecuteSqlInsert : BaseTest
         Assert.AreEqual(2, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439011\")",
+            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);
@@ -550,12 +627,15 @@ public class TestExecuteSqlInsert : BaseTest
         }
 
         queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439012\")",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE id = STR_ID(\"507f1f77bcf86cd799439012\")",
+            parameters: null
         );
 
-        result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (database, cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(1, result.Count);

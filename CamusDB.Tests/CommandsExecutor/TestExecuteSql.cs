@@ -21,18 +21,21 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 public class TestExecuteSql : BaseTest
 {    
-    private async Task<(string, CommandExecutor)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
+        TransactionsManager transactions = new(hlc);
         CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
@@ -40,17 +43,19 @@ public class TestExecuteSql : BaseTest
             ifNotExists: false
         );
 
-        await executor.CreateDatabase(databaseTicket);
+        DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, executor);
+        return (dbname, database, executor, transactions);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTable()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket tableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]
@@ -76,7 +81,7 @@ public class TestExecuteSql : BaseTest
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
                 values: new()
@@ -96,15 +101,19 @@ public class TestExecuteSql : BaseTest
             objectsId.Add(objectId);
         }
 
-        return (dbname, executor, objectsId);
+        await transactions.Commit(database, txnState);
+
+        return (dbname, executor, transactions, objectsId);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTableWithDefaults()
+    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTableWithDefaults()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket tableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             new ColumnInfo[]
@@ -130,7 +139,7 @@ public class TestExecuteSql : BaseTest
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
                 values: new()
@@ -150,16 +159,21 @@ public class TestExecuteSql : BaseTest
             objectsId.Add(objectId);
         }
 
-        return (dbname, executor, objectsId);
+        await transactions.Commit(database, txnState);
+
+        return (dbname, executor, transactions, objectsId);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteUpdateNoConditions()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket updateTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "UPDATE robots SET year = 1000 WHERE 1=1",
             parameters: null
@@ -168,12 +182,15 @@ public class TestExecuteSql : BaseTest
         Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(updateTicket));
 
         ExecuteSQLTicket queryTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "SELECT * FROM robots",
             parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(25, result.Count);
@@ -181,15 +198,20 @@ public class TestExecuteSql : BaseTest
         Assert.AreEqual(1000, result[0].Row["year"].LongValue);
         Assert.AreEqual(1000, result[1].Row["year"].LongValue);
         Assert.AreEqual(1000, result[24].Row["year"].LongValue);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteUpdateMatchOne()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "UPDATE robots SET year = 1000 WHERE year = 2024",
             parameters: null
@@ -198,27 +220,35 @@ public class TestExecuteSql : BaseTest
         Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
+           txnState: txnState,
            database: dbname,
            sql: "SELECT * FROM robots",
            parameters: null
        );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(25, result.Count);
 
         Assert.AreEqual(1000, result[0].Row["year"].LongValue);
         Assert.AreEqual(2023, result[1].Row["year"].LongValue);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteUpdateMatchOnePlaceholders()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "UPDATE robots SET year = @new_year WHERE year = @expected_year",
             parameters: new()
@@ -231,27 +261,35 @@ public class TestExecuteSql : BaseTest
         Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
+           txnState: txnState,
            database: dbname,
            sql: "SELECT * FROM robots",
            parameters: null
        );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(25, result.Count);
 
         Assert.AreEqual(1000, result[0].Row["year"].LongValue);
         Assert.AreEqual(2023, result[1].Row["year"].LongValue);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteUpdateNoMatches()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "UPDATE robots SET year = 1000 WHERE year = 3000",
             parameters: null
@@ -260,27 +298,35 @@ public class TestExecuteSql : BaseTest
         Assert.AreEqual(0, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots",
+            parameters: null
        );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(25, result.Count);
 
         foreach (QueryResultRow row in result)
             Assert.AreNotEqual(3000, row.Row["year"].LongValue);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteUpdateIncrement()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket ticket = new(
+            txnState: txnState,
             database: dbname,
             sql: "UPDATE robots SET year = year + 1000 WHERE true",
             parameters: null
@@ -289,27 +335,35 @@ public class TestExecuteSql : BaseTest
         Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(ticket));
 
         ExecuteSQLTicket queryTicket = new(
-           database: dbname,
-           sql: "SELECT * FROM robots",
-           parameters: null
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots",
+            parameters: null
        );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(25, result.Count);
 
         foreach (QueryResultRow row in result)
             Assert.True(row.Row["year"].LongValue >= 3000);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteDeleteNoConditions()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket deleteTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "DELETE FROM robots WHERE 1=1",
             parameters: null
@@ -318,22 +372,30 @@ public class TestExecuteSql : BaseTest
         Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(deleteTicket));
 
         ExecuteSQLTicket queryTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "SELECT * FROM robots",
             parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteDeleteMatchesAll()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket deleteTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "DELETE FROM robots WHERE year > 0",
             parameters: null
@@ -342,22 +404,30 @@ public class TestExecuteSql : BaseTest
         Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(deleteTicket));
 
         ExecuteSQLTicket queryTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "SELECT * FROM robots",
             parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteDeleteMatche1()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         ExecuteSQLTicket deleteTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "DELETE FROM robots WHERE year = 2000 OR year = 2001",
             parameters: null
@@ -366,12 +436,17 @@ public class TestExecuteSql : BaseTest
         Assert.AreEqual(2, await executor.ExecuteNonSQLQuery(deleteTicket));
 
         ExecuteSQLTicket queryTicket = new(
+            txnState: txnState,
             database: dbname,
             sql: "SELECT * FROM robots WHERE year = 2000 OR year = 2001",
             parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.ExecuteSQLQuery(queryTicket)).ToListAsync();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
+
+        await transactions.Commit(database, txnState);
     }
 }
