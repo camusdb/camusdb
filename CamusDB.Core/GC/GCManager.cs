@@ -82,6 +82,8 @@ public sealed class GCManager : IDisposable
 
     private readonly Timer indexReleaser;
 
+    private bool releasing;
+
     public GCManager(
         BufferPoolManager bufferPool,
         HybridLogicalClock hybridLogicalClock,
@@ -106,6 +108,9 @@ public sealed class GCManager : IDisposable
     /// <param name="state"></param>
     private void ReleasePages(object? state)
     {
+        if (releasing)
+            return;
+
         try
         {
             for (int i = 0; i < CamusConfig.NumberBuckets; i++)
@@ -114,6 +119,10 @@ public sealed class GCManager : IDisposable
         catch (Exception ex)
         {
             logger.LogError("ReleasePages: {Message}\n{StackTrace}", ex.Message, ex.StackTrace);
+        }
+        finally
+        {
+            releasing = false;
         }
     }
 
@@ -135,7 +144,13 @@ public sealed class GCManager : IDisposable
 
         ulong ticks = logicalClock.Increment(numPages);
         ulong threshold = Math.Max(655360, ticks - 655360); // @todo this number must be choosen based on the actual activity of the database
-        int numberToFree = (int)(CamusConfig.BufferPoolSize * CamusConfig.GCPercentToReleasePerCycle);
+
+        int numberToFree;
+
+        if (numPages >= CamusConfig.BufferPoolSize)
+            numberToFree = (int)(CamusConfig.BufferPoolSize * CamusConfig.GCPercentToReleasePerCycleMax);
+        else
+            numberToFree = (int)(CamusConfig.BufferPoolSize * CamusConfig.GCPercentToReleasePerCycleMin);
 
         foreach (KeyValuePair<ObjectIdValue, Lazy<BufferPage>> keyValuePair in pages)
         {

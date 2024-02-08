@@ -41,9 +41,16 @@ public static class CamusDBConfig
     public static float GCMaxPercentToStartPagesRelease = 0.8f;
 
     /// <summary>
-    /// The maximum percentage of pages that are released in each release period.
+    /// The maximum percentage of pages that are released in each release period
+    /// when the number of pages is less than the maximum quota in the bucket
     /// </summary>
-    public static float GCPercentToReleasePerCycle = 0.05f;
+    public static float GCPercentToReleasePerCycleMin = 0.05f;
+
+    /// <summary>
+    /// The maximum percentage of pages that are released in each release period
+    /// when the number of pages is higher than the maximum quota in the bucket
+    /// </summary>
+    public static float GCPercentToReleasePerCycleMax = 0.25f;
 
     /// <summary>
     /// The interval in seconds in which expired pages will be checked for.
