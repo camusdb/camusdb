@@ -22,18 +22,21 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 public class TestRowDeletor : BaseTest
 {
-    private async Task<(string, CommandExecutor)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
+        TransactionsManager transactions = new(hlc);
         CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
@@ -41,17 +44,19 @@ public class TestRowDeletor : BaseTest
             ifNotExists: false
         );
 
-        await executor.CreateDatabase(databaseTicket);
+        DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, executor);
+        return (dbname, database, executor, transactions);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTable()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket tableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]
@@ -77,7 +82,7 @@ public class TestRowDeletor : BaseTest
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
                 values: new()
@@ -97,15 +102,19 @@ public class TestRowDeletor : BaseTest
             objectsId.Add(objectId);
         }
 
-        return (dbname, executor, objectsId);
+        await transactions.Commit(database, txnState);
+
+        return (dbname, executor, transactions, objectsId);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, List<string> objectsId)> SetupLargeDataTable()
+    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupLargeDataTable()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket tableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots2",
             columns: new ColumnInfo[]
@@ -132,7 +141,7 @@ public class TestRowDeletor : BaseTest
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots2",
                 values: new()
@@ -152,7 +161,9 @@ public class TestRowDeletor : BaseTest
             objectsId.Add(objectId);
         }
 
-        return (dbname, executor, objectsId);
+        await transactions.Commit(database, txnState);
+
+        return (dbname, executor, transactions, objectsId);
     }
 
     /*[Test]
@@ -181,10 +192,12 @@ public class TestRowDeletor : BaseTest
     [NonParallelizable]
     public async Task TestInvalidTable()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         DeleteByIdTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "unknown_table",
             id: objectsId[0]
@@ -198,10 +211,12 @@ public class TestRowDeletor : BaseTest
     [NonParallelizable]
     public async Task TestBasicDelete()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         DeleteByIdTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             id: objectsId[0]
@@ -210,7 +225,7 @@ public class TestRowDeletor : BaseTest
         Assert.AreEqual(1, await executor.DeleteById(ticket));
 
         QueryByIdTicket queryByIdTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             id: objectsId[0]
@@ -224,10 +239,12 @@ public class TestRowDeletor : BaseTest
     [NonParallelizable]
     public async Task TestDeleteUnknownRow()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         DeleteByIdTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             id: "---"
@@ -240,12 +257,14 @@ public class TestRowDeletor : BaseTest
     [NonParallelizable]
     public async Task TestMultiDelete()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         foreach (string objectId in objectsId)
         {
             DeleteByIdTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
                 id: objectId
@@ -255,7 +274,7 @@ public class TestRowDeletor : BaseTest
         }
 
         QueryTicket queryTicket = new(
-           txnId: await executor.NextTxnId(),
+           txnState: txnState,
            txnType: TransactionType.ReadOnly,
            databaseName: dbname,
            tableName: "robots",
@@ -269,7 +288,9 @@ public class TestRowDeletor : BaseTest
            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
     }
 
@@ -277,12 +298,14 @@ public class TestRowDeletor : BaseTest
     [NonParallelizable]
     public async Task TestMultiDelete2()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupLargeDataTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupLargeDataTable();
+
+        TransactionState txnState = await transactions.Start();
 
         foreach (string objectId in objectsId)
         {
             DeleteByIdTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots2",
                 id: objectId
@@ -292,7 +315,7 @@ public class TestRowDeletor : BaseTest
         }
 
         QueryTicket queryTicket = new(
-           txnId: await executor.NextTxnId(),
+           txnState: txnState,
            txnType: TransactionType.ReadOnly,
            databaseName: dbname,
            tableName: "robots2",
@@ -306,7 +329,9 @@ public class TestRowDeletor : BaseTest
            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
     }
 
@@ -314,14 +339,16 @@ public class TestRowDeletor : BaseTest
     [NonParallelizable]
     public async Task TestMultiDeleteParallel()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         List<Task> tasks = new();
 
         foreach (string objectId in objectsId)
         {
             DeleteByIdTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
                 id: objectId
@@ -333,7 +360,7 @@ public class TestRowDeletor : BaseTest
         await Task.WhenAll(tasks);
 
         QueryTicket queryTicket = new(
-           txnId: await executor.NextTxnId(),
+           txnState: txnState,
            txnType: TransactionType.ReadOnly,
            databaseName: dbname,
            tableName: "robots",
@@ -347,7 +374,9 @@ public class TestRowDeletor : BaseTest
            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
     }
 
@@ -355,10 +384,12 @@ public class TestRowDeletor : BaseTest
     [NonParallelizable]
     public async Task TestMultiDeleteCriteria()
     {
-        (string dbname, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         DeleteTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             where: null,
@@ -371,7 +402,7 @@ public class TestRowDeletor : BaseTest
         Assert.AreEqual(1, await executor.Delete(ticket));
 
         QueryTicket queryTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
@@ -388,7 +419,9 @@ public class TestRowDeletor : BaseTest
             parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
     }
 
@@ -396,10 +429,12 @@ public class TestRowDeletor : BaseTest
     [NonParallelizable]
     public async Task TestMultiDeleteCriteria2()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         QueryTicket queryTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
@@ -416,11 +451,13 @@ public class TestRowDeletor : BaseTest
             parameters: null
        );
 
-        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         DeleteTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             where: null,
@@ -433,7 +470,7 @@ public class TestRowDeletor : BaseTest
         Assert.AreEqual(14, await executor.Delete(ticket));
 
         queryTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
@@ -450,7 +487,9 @@ public class TestRowDeletor : BaseTest
             parameters: null
         );
 
-        result = await (await executor.Query(queryTicket)).ToListAsync();
+        (_, cursor) = await executor.Query(queryTicket);
+
+        result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
     }
 
@@ -458,10 +497,12 @@ public class TestRowDeletor : BaseTest
     [NonParallelizable]
     public async Task TestMultiDeleteCriteriaNoRows()
     {
-        (string dbname, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+
+        TransactionState txnState = await transactions.Start();
 
         DeleteTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             where: null,
@@ -474,7 +515,7 @@ public class TestRowDeletor : BaseTest
         Assert.AreEqual(0, await executor.Delete(ticket));
 
         QueryTicket queryTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
@@ -488,7 +529,9 @@ public class TestRowDeletor : BaseTest
             parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         Assert.AreEqual(25, result.Count);

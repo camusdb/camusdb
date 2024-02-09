@@ -23,18 +23,21 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 internal sealed class TestRowInsertorCloseDb : BaseTest
-{    
-    private async Task<(string, CommandExecutor)> SetupDatabase()
+{
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
+        TransactionsManager transactions = new(hlc);
         CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
@@ -42,17 +45,19 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
             ifNotExists: false
         );
 
-        await executor.CreateDatabase(databaseTicket);
+        DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, executor);
+        return (dbname, database, executor, transactions);
     }
 
-    private async Task<(string, CommandExecutor)> SetupMultiIndexTable()
+    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions)> SetupMultiIndexTable()
     {
-        (string dbname, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket tableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "user_robots",
             columns: new ColumnInfo[]
@@ -71,17 +76,21 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
 
         await executor.CreateTable(tableTicket);
 
-        return (dbname, executor);
+        await transactions.Commit(database, txnState);
+
+        return (dbname, executor, transactions);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestBasicInsert()
     {
-        (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
+
+        TransactionState txnState = await transactions.Start();
 
         InsertTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "user_robots",
             values: new()
@@ -101,7 +110,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         await executor.CloseDatabase(closeTicket);
 
         QueryByIdTicket queryTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "user_robots",
             id: "507f1f77bcf86cd799439011"
@@ -123,10 +132,12 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
     [NonParallelizable]
     public async Task TestSuccessfulTwoMultiParallelInserts()
     {
-        (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
+
+        TransactionState txnState = await transactions.Start();
 
         InsertTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "user_robots",
             values: new()
@@ -141,7 +152,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         );
 
         InsertTicket ticket2 = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "user_robots",
             values: new()
@@ -165,7 +176,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         await executor.CloseDatabase(closeTicket);
 
         QueryByIdTicket queryTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "user_robots",
             id: "507f191e810c19729de860ea"
@@ -189,7 +200,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         Assert.AreEqual(row[3].Value, "true");*/
 
         QueryByIdTicket queryTicket2 = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "user_robots",
             id: "507f1f77bcf86cd799439011"
@@ -217,7 +228,9 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
     public async Task TestCheckSuccessfulMultiInsert()
     {
         int i;
-        (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
+
+        TransactionState txnState = await transactions.Start();
 
         string[] userIds = new string[5];
         for (i = 0; i < 5; i++)
@@ -231,7 +244,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
             objectIds.Add(objectId);
 
             InsertTicket insertTicket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "user_robots",
                 values: new()
@@ -259,7 +272,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         foreach (string objectId in objectIds)
         {
             QueryByIdTicket queryTicket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "user_robots",
                 id: objectId
@@ -278,13 +291,13 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         Assert.AreEqual(50, i);
     }
 
-    private static async Task InsertRow(string dbname, CommandExecutor executor, ConcurrentBag<string> objectIds, string[] userIds, int i)
+    private static async Task InsertRow(TransactionState txnState, string dbname, CommandExecutor executor, ConcurrentBag<string> objectIds, string[] userIds, int i)
     {
         string objectId = ObjectIdGenerator.Generate().ToString();
         objectIds.Add(objectId);
 
         InsertTicket insertTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "user_robots",
             values: new()
@@ -306,7 +319,9 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
     public async Task TestCheckSuccessfulMultiInsert2()
     {
         int i;
-        (string dbname, CommandExecutor executor) = await SetupMultiIndexTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
+
+        TransactionState txnState = await transactions.Start();
 
         string[] userIds = new string[5];
         for (i = 0; i < 5; i++)
@@ -316,7 +331,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         ConcurrentBag<string> objectIds = new();
 
         for (i = 0; i < 50; i++)        
-            tasks.Add(InsertRow(dbname, executor, objectIds, userIds, i));
+            tasks.Add(InsertRow(txnState, dbname, executor, objectIds, userIds, i));
                         
         await Task.WhenAll(tasks);
 
@@ -328,7 +343,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         foreach (string objectId in objectIds)
         {
             QueryByIdTicket queryTicket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "user_robots",
                 id: objectId
