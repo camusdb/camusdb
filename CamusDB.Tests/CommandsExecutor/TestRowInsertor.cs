@@ -61,14 +61,14 @@ internal sealed class TestRowInsertor : BaseTest
             tableName: "robots",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -96,18 +96,19 @@ internal sealed class TestRowInsertor : BaseTest
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Integer64, 1) },
-                        { "name", new ColumnValue(ColumnType.String, "some name") },
-                        { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                        { "id", new(ColumnType.Integer64, 1) },
+                        { "name", new(ColumnType.String, "some name") },
+                        { "year", new(ColumnType.Integer64, 1234) },
+                        { "enabled", new(ColumnType.Bool, false) },
                     }
                 }
             );
 
             await executor.Insert(ticket);
         });
+        
         Assert.AreEqual("Type Integer64 cannot be assigned to id (Id)", e!.Message);
     }
 
@@ -127,12 +128,12 @@ internal sealed class TestRowInsertor : BaseTest
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Integer64, 1) },
-                        { "name", new ColumnValue(ColumnType.String, "some name") },
-                        { "year", new ColumnValue(ColumnType.Integer64, "invalid int value") },
-                        { "enabled", new ColumnValue(ColumnType.Bool, 1234) },
+                        { "id", new(ColumnType.Integer64, 1) },
+                        { "name", new(ColumnType.String, "some name") },
+                        { "year", new(ColumnType.Integer64, "invalid int value") },
+                        { "enabled", new(ColumnType.Bool, 1234) },
                     }
                 }
             );
@@ -159,12 +160,12 @@ internal sealed class TestRowInsertor : BaseTest
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Integer64, 1) },
-                        { "name", new ColumnValue(ColumnType.String, "some name") },
-                        { "year", new ColumnValue(ColumnType.Integer64, 1000) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, "1234") },
+                        { "id", new(ColumnType.Integer64, 1) },
+                        { "name", new(ColumnType.String, "some name") },
+                        { "year", new(ColumnType.Integer64, 1000) },
+                        { "enabled", new(ColumnType.Bool, "1234") },
                     }
                 }
             );
@@ -211,12 +212,12 @@ internal sealed class TestRowInsertor : BaseTest
             tableName: "unknown_table",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                    { "id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new(ColumnType.String, "some name") },
+                    { "year", new(ColumnType.Integer64, 1234) },
+                    { "enabled", new(ColumnType.Bool, true) },
                 }
             }
         );
@@ -239,12 +240,12 @@ internal sealed class TestRowInsertor : BaseTest
             tableName: "robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "unknownColumn", new ColumnValue(ColumnType.Bool, true) },
+                    { "id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new(ColumnType.String, "some name") },
+                    { "year", new(ColumnType.Integer64, 1234) },
+                    { "unknownColumn", new(ColumnType.Bool, true) },
                 }
             }
         );
@@ -267,12 +268,12 @@ internal sealed class TestRowInsertor : BaseTest
             tableName: "robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                    { "name", new ColumnValue(ColumnType.Null, "") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    { "id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new(ColumnType.Null, "") },
+                    { "year", new(ColumnType.Integer64, 1234) },
+                    { "enabled", new(ColumnType.Bool, false) },
                 }
             }
         );
@@ -295,12 +296,12 @@ internal sealed class TestRowInsertor : BaseTest
             tableName: "robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    { "id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new(ColumnType.String, "some name") },
+                    { "year", new(ColumnType.Integer64, 1234) },
+                    { "enabled", new(ColumnType.Bool, false) },
                 }
             }
         );
@@ -322,12 +323,12 @@ internal sealed class TestRowInsertor : BaseTest
             tableName: "robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    { "id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new(ColumnType.String, "some name") },
+                    { "year", new(ColumnType.Integer64, 1234) },
+                    { "enabled", new(ColumnType.Bool, false) },
                 }
             }
         );
@@ -340,12 +341,12 @@ internal sealed class TestRowInsertor : BaseTest
             tableName: "robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                    { "id", new(ColumnType.Id, "507f191e810c19729de860ea") },
+                    { "name", new(ColumnType.String, "some name") },
+                    { "year", new(ColumnType.Integer64, 1234) },
+                    { "enabled", new(ColumnType.Bool, true) },
                 }
             }
         );
@@ -367,7 +368,7 @@ internal sealed class TestRowInsertor : BaseTest
             tableName: "robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
                     { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
                     { "name", new ColumnValue(ColumnType.String, "some name") },
@@ -383,7 +384,7 @@ internal sealed class TestRowInsertor : BaseTest
             tableName: "robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
                     { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
                     { "name", new ColumnValue(ColumnType.String, "some name") },

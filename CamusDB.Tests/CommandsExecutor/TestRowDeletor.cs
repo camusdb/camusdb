@@ -61,14 +61,14 @@ public class TestRowDeletor : BaseTest
             tableName: "robots",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -87,12 +87,12 @@ public class TestRowDeletor : BaseTest
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Id, objectId) },
-                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                        { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                        { "id", new(ColumnType.Id, objectId) },
+                        { "name", new(ColumnType.String, "some name " + i) },
+                        { "year", new(ColumnType.Integer64, 2000 + i) },
+                        { "enabled", new(ColumnType.Bool, false) },
                     }
                 }
             );

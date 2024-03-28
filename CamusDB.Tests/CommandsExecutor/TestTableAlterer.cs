@@ -14,20 +14,22 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
 using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 internal sealed class TestTableAlterer : BaseTest
 {    
-    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager, CatalogsManager)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogs = new(logger);
-
+        TransactionsManager transactions = new(hlc);
         CommandExecutor executor = new(hlc, validator, catalogs, logger);
 
         CreateDatabaseTicket databaseTicket = new(
@@ -35,41 +37,45 @@ internal sealed class TestTableAlterer : BaseTest
             ifNotExists: false
         );
 
-        DatabaseDescriptor descriptor = await executor.CreateDatabase(databaseTicket);
+        DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, executor, catalogs, descriptor);
+        return (dbname, database, executor, transactions, catalogs);
     }
 
-    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupEmptyTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs)> SetupEmptyTable()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket createTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
 
         await executor.CreateTable(createTicket);
 
-        return (dbname, executor, catalogs, database);
+        return (dbname, database, executor, transactions, catalogs);
     }
 
-    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager, CatalogsManager, List<string> objectsId)> SetupBasicTable()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupEmptyTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         List<string> objectsId = new(25);
 
@@ -78,17 +84,17 @@ internal sealed class TestTableAlterer : BaseTest
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Id, objectId) },
-                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                        { "year", new ColumnValue(ColumnType.Integer64, 2000 + i) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                        { "id", new(ColumnType.Id, objectId) },
+                        { "name", new(ColumnType.String, "some name " + i) },
+                        { "year", new(ColumnType.Integer64, 2000 + i) },
+                        { "enabled", new(ColumnType.Bool, false) },
                     }
                 }
             );
@@ -98,12 +104,14 @@ internal sealed class TestTableAlterer : BaseTest
             objectsId.Add(objectId);
         }
 
-        return (dbname, executor, catalogs, database, objectsId);
+        return (dbname, database, executor, transactions, catalogs, objectsId);
     }
 
-    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupTableRepeatedData()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager, CatalogsManager, List<string> objectsId)> SetupTableRepeatedData()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupEmptyTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         List<string> objectsId = new(25);
 
@@ -112,17 +120,17 @@ internal sealed class TestTableAlterer : BaseTest
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Id, objectId) },
-                        { "name", new ColumnValue(ColumnType.String, "some name") },
-                        { "year", new ColumnValue(ColumnType.Integer64, 2000) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                        { "id", new(ColumnType.Id, objectId) },
+                        { "name", new(ColumnType.String, "some name") },
+                        { "year", new(ColumnType.Integer64, 2000) },
+                        { "enabled", new(ColumnType.Bool, false) },
                     }
                 }
             );
@@ -132,29 +140,31 @@ internal sealed class TestTableAlterer : BaseTest
             objectsId.Add(objectId);
         }
 
-        return (dbname, executor, catalogs, database, objectsId);
+        return (dbname, database, executor, transactions, catalogs, objectsId);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestCreateTableAndDropColumn()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -181,7 +191,7 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
 
         AlterTableTicket alterTableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.DropColumn,
@@ -211,7 +221,9 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableFillAndDropColumn()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs, _) = await SetupBasicTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -233,11 +245,11 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
 
         AlterTableTicket alterTableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.DropColumn,
-            new ColumnInfo("name", ColumnType.Null)
+            new("name", ColumnType.Null)
         );
 
         await executor.AlterTable(alterTableTicket);
@@ -250,7 +262,7 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.AreEqual(3, tableSchema.Columns!.Count);
 
         QueryTicket queryTicket = new(
-           txnId: await executor.NextTxnId(),
+           txnState: txnState,
            txnType: TransactionType.ReadOnly,
            databaseName: dbname,
            tableName: "robots",
@@ -264,7 +276,12 @@ internal sealed class TestTableAlterer : BaseTest
            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        //List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        //Assert.IsNotEmpty(result);
+        
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
+        
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         foreach (QueryResultRow resultRow in result)
@@ -275,22 +292,24 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableAndAddExistingColumn()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -317,11 +336,11 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
 
         AlterTableTicket alterTableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.AddColumn,
-            new ColumnInfo("name", ColumnType.Integer64)
+            new("name", ColumnType.Integer64)
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.AlterTable(alterTableTicket));
@@ -332,22 +351,24 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableAndAddNewColumn()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -374,7 +395,7 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
 
         AlterTableTicket alterTableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.AddColumn,
@@ -398,7 +419,9 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableFillAndAddColumn()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -420,11 +443,11 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
 
         AlterTableTicket alterTableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.AddColumn,
-            new ColumnInfo("type", ColumnType.Integer64)
+            new("type", ColumnType.Integer64)
         );
 
         await executor.AlterTable(alterTableTicket);
@@ -440,21 +463,23 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![4].Type);
 
         QueryTicket queryTicket = new(
-           txnId: await executor.NextTxnId(),
-           txnType: TransactionType.ReadOnly,
-           databaseName: dbname,
-           tableName: "robots",
-           index: null,
-           projection: null,
-           where: null,
-           filters: null,
-           orderBy: null,
-           limit: null,
-           offset: null,
-           parameters: null
+            txnState: txnState,
+            txnType: TransactionType.ReadOnly,
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            projection: null,
+            where: null,
+            filters: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null
         );
 
-        List<QueryResultRow> result = await (await executor.Query(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
+        
+        List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         foreach (QueryResultRow resultRow in result)
@@ -464,12 +489,12 @@ internal sealed class TestTableAlterer : BaseTest
         }
 
         UpdateTicket updateTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
-            plainValues: new Dictionary<string, ColumnValue>()
+            plainValues: new()
             {
-                { "type", new ColumnValue(ColumnType.Integer64, 100) }
+                { "type", new(ColumnType.Integer64, 100) }
             },
             exprValues: null,
             where: null,
@@ -480,21 +505,23 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.AreEqual(25, await executor.Update(updateTicket));
 
         queryTicket = new(
-           txnId: await executor.NextTxnId(),
-           txnType: TransactionType.ReadOnly,
-           databaseName: dbname,
-           tableName: "robots",
-           index: null,
-           projection: null,
-           where: null,
-           filters: null,
-           orderBy: null,
-           limit: null,
-           offset: null,
-           parameters: null
+            txnState: txnState,
+            txnType: TransactionType.ReadOnly,
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            projection: null,
+            where: null,
+            filters: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null
         );
 
-        result = await (await executor.Query(queryTicket)).ToListAsync();
+        (DatabaseDescriptor _, cursor) = await executor.Query(queryTicket);
+        
+        result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
 
         foreach (QueryResultRow resultRow in result)
@@ -509,14 +536,16 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableAndAddIndex()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _) = await SetupEmptyTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupEmptyTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -536,14 +565,16 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableAndAddDuplicatedIndex()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupEmptyTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -557,25 +588,27 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableAndAddTwoIndexes()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupEmptyTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupEmptyTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
         Assert.True(await executor.AlterIndex(alterIndexTicket));
 
         alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "year_idx",
-            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("year", OrderType.Ascending) },
+            columns: new ColumnIndexInfo[] { new("year", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -599,14 +632,16 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableFillAndAddIndex()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _, _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs, _) = await SetupBasicTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -626,14 +661,16 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableFillRepeatedAndAddIndex()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _, _) = await SetupTableRepeatedData();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs, _) = await SetupTableRepeatedData();
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -653,14 +690,16 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableAndAddUniqueIndex()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _) = await SetupEmptyTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupEmptyTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddUniqueIndex
         );
 
@@ -680,14 +719,16 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableFillRepeatedAndAddUniqueIndex()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupTableRepeatedData();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs, _) = await SetupTableRepeatedData();
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddUniqueIndex
         );
 
@@ -699,14 +740,16 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableAndAddDropIndex()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _) = await SetupEmptyTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupEmptyTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
 
@@ -722,11 +765,11 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.AreEqual(IndexType.Multi, index!.Type);
 
         alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
-            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("name", OrderType.Ascending) },
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
             operation: AlterIndexOperation.DropIndex
         );
 
@@ -740,10 +783,12 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableAndAddDropPrimaryKey()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _) = await SetupEmptyTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupEmptyTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "~pk",
@@ -766,10 +811,12 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableAndAddDropPrimaryKeyAndAddItAgain()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager _, DatabaseDescriptor _) = await SetupEmptyTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupEmptyTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "~pk",
@@ -788,11 +835,11 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.False(table.Indexes.ContainsKey("~pk"));
 
         alterIndexTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "~pk",
-            columns: new ColumnIndexInfo[] { new ColumnIndexInfo("id", OrderType.Ascending) },
+            columns: new ColumnIndexInfo[] { new("id", OrderType.Ascending) },
             operation: AlterIndexOperation.AddPrimaryKey
         );
 

@@ -22,12 +22,13 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestExecuteSqlInsert : BaseTest
+public sealed class TestExecuteSqlInsert : BaseTest
 {
     private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager)> SetupDatabase()
     {
@@ -49,7 +50,7 @@ public class TestExecuteSqlInsert : BaseTest
         return (dbname, database, executor, transactions);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTable()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
 
@@ -61,14 +62,14 @@ public class TestExecuteSqlInsert : BaseTest
             tableName: "robots",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -87,12 +88,12 @@ public class TestExecuteSqlInsert : BaseTest
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Id, objectId) },
-                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                        { "year", new ColumnValue(ColumnType.Integer64, 2024 - i) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0) },
+                        { "id", new(ColumnType.Id, objectId) },
+                        { "name", new(ColumnType.String, "some name " + i) },
+                        { "year", new(ColumnType.Integer64, 2024 - i) },
+                        { "enabled", new(ColumnType.Bool, (i + 1) % 2 == 0) },
                     }
                 }
             );
@@ -104,10 +105,10 @@ public class TestExecuteSqlInsert : BaseTest
 
         await transactions.Commit(database, txnState);
 
-        return (dbname, executor, transactions, objectsId);
+        return (dbname, database, executor, transactions, objectsId);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTableWithDefaults()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTableWithDefaults()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
 
@@ -119,14 +120,14 @@ public class TestExecuteSqlInsert : BaseTest
             tableName: "robots",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64, defaultValue: new ColumnValue(ColumnType.Integer64, 1999)),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64, defaultValue: new(ColumnType.Integer64, 1999)),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -145,12 +146,12 @@ public class TestExecuteSqlInsert : BaseTest
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Id, objectId) },
-                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                        { "year", new ColumnValue(ColumnType.Integer64, 2024 - i) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0) },
+                        { "id", new(ColumnType.Id, objectId) },
+                        { "name", new(ColumnType.String, "some name " + i) },
+                        { "year", new(ColumnType.Integer64, 2024 - i) },
+                        { "enabled", new(ColumnType.Bool, (i + 1) % 2 == 0) },
                     }
                 }
             );
@@ -162,14 +163,14 @@ public class TestExecuteSqlInsert : BaseTest
 
         await transactions.Commit(database, txnState);
 
-        return (dbname, executor, transactions, objectsId);
+        return (dbname, database, executor, transactions, objectsId);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteInsertDiffFieldsAndValues()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -181,14 +182,14 @@ public class TestExecuteSqlInsert : BaseTest
         );
 
         CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () => await executor.ExecuteNonSQLQuery(ticket));
-        Assert.AreEqual("The number of fields is not equal to the number of values.", exception!.Message);
+        Assert.AreEqual("The number of fields is not equal to the number of values. Fields=4 != Values=3 Position=0", exception!.Message);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteInsert1()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -199,7 +200,8 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(1, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -220,13 +222,15 @@ public class TestExecuteSqlInsert : BaseTest
             if (row.Row["year"].LongValue == 3000)
                 Assert.AreEqual("astro boy", row.Row["name"].StrValue);
         }
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteInsert2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -237,7 +241,8 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(1, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -246,7 +251,7 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
 
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
@@ -261,13 +266,15 @@ public class TestExecuteSqlInsert : BaseTest
                 Assert.AreEqual("astro boy", row.Row["name"].StrValue);
             }
         }
+        
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteInsert3()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -278,7 +285,8 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(1, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -287,7 +295,7 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
 
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
@@ -299,13 +307,15 @@ public class TestExecuteSqlInsert : BaseTest
             Assert.AreEqual("507f1f77bcf86cd799439011", row.Row["id"].StrValue);
             Assert.AreEqual("astro boy", row.Row["name"].StrValue);
         }
+        
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteInsert4()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -315,14 +325,15 @@ public class TestExecuteSqlInsert : BaseTest
             sql: "INSERT INTO robots (id, name, year, enabled) VALUES (@id, @name, @year, @enabled)",
             parameters: new()
             {
-                { "@id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "@name", new ColumnValue(ColumnType.String, "astro boy") },
-                { "@year", new ColumnValue(ColumnType.Integer64, 3000) } ,
-                { "@enabled", new ColumnValue(ColumnType.Bool, false) }
+                { "@id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                { "@name", new(ColumnType.String, "astro boy") },
+                { "@year", new(ColumnType.Integer64, 3000) } ,
+                { "@enabled", new(ColumnType.Bool, false) }
             }
         );
 
-        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(1, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -331,7 +342,7 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
 
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
@@ -344,13 +355,15 @@ public class TestExecuteSqlInsert : BaseTest
             Assert.AreEqual("astro boy", row.Row["name"].StrValue);
             Assert.AreEqual(3000, row.Row["year"].LongValue);
         }
+        
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteInsert5()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -361,7 +374,8 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(1, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -370,7 +384,7 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
 
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
@@ -382,13 +396,15 @@ public class TestExecuteSqlInsert : BaseTest
             Assert.AreEqual("507f1f77bcf86cd799439011", row.Row["id"].StrValue);
             Assert.AreEqual("astro boy", row.Row["name"].StrValue);
         }
+        
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteInsert6()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -398,14 +414,15 @@ public class TestExecuteSqlInsert : BaseTest
             sql: "INSERT INTO robots VALUES (STR_ID(@id), @name, @year, @enabled)",
             parameters: new()
             {
-                { "@id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "@name", new ColumnValue(ColumnType.String, "astro boy") },
-                { "@year", new ColumnValue(ColumnType.Integer64, 2010) },
-                { "@enabled", new ColumnValue(ColumnType.Bool, false) }
+                { "@id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                { "@name", new(ColumnType.String, "astro boy") },
+                { "@year", new(ColumnType.Integer64, 2010) },
+                { "@enabled", new(ColumnType.Bool, false) }
             }
         );
 
-        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(1, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -414,7 +431,7 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
 
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
@@ -426,13 +443,15 @@ public class TestExecuteSqlInsert : BaseTest
             Assert.AreEqual("507f1f77bcf86cd799439011", row.Row["id"].StrValue);
             Assert.AreEqual("astro boy", row.Row["name"].StrValue);
         }
+        
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteInsert7()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTableWithDefaults();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTableWithDefaults();
 
         TransactionState txnState = await transactions.Start();
 
@@ -442,13 +461,14 @@ public class TestExecuteSqlInsert : BaseTest
             sql: "INSERT INTO robots (id, name, enabled) VALUES (STR_ID(@id), @name, @enabled)",
             parameters: new()
             {
-                { "@id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "@name", new ColumnValue(ColumnType.String, "astro boy") },
-                { "@enabled", new ColumnValue(ColumnType.Bool, false) }
+                { "@id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                { "@name", new(ColumnType.String, "astro boy") },
+                { "@enabled", new(ColumnType.Bool, false) }
             }
         );
 
-        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(1, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -457,7 +477,7 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
 
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
@@ -470,13 +490,15 @@ public class TestExecuteSqlInsert : BaseTest
             Assert.AreEqual("astro boy", row.Row["name"].StrValue);
             Assert.AreEqual(1999, row.Row["year"].LongValue);
         }
+        
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteInsert8()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTableWithDefaults();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTableWithDefaults();
 
         TransactionState txnState = await transactions.Start();
 
@@ -486,13 +508,14 @@ public class TestExecuteSqlInsert : BaseTest
             sql: "INSERT INTO robots (id, name, year, enabled) VALUES (STR_ID(@id), @name, DEFAULT, @enabled)",
             parameters: new()
             {
-                { "@id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "@name", new ColumnValue(ColumnType.String, "astro boy") },
-                { "@enabled", new ColumnValue(ColumnType.Bool, false) }
+                { "@id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                { "@name", new(ColumnType.String, "astro boy") },
+                { "@enabled", new(ColumnType.Bool, false) }
             }
         );
 
-        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+        ExecuteNonSQLResult executeResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(1, executeResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -501,7 +524,7 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
 
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
@@ -514,13 +537,15 @@ public class TestExecuteSqlInsert : BaseTest
             Assert.AreEqual("astro boy", row.Row["name"].StrValue);
             Assert.AreEqual(1999, row.Row["year"].LongValue);
         }
+        
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteInsert9()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTableWithDefaults();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTableWithDefaults();
 
         TransactionState txnState = await transactions.Start();
 
@@ -530,14 +555,15 @@ public class TestExecuteSqlInsert : BaseTest
             sql: "INSERT INTO robots (id, name, year, enabled) VALUES (STR_ID(@id), @name, DEFAULT, @enabled), (STR_ID(@id2), @name, DEFAULT, @enabled)",
             parameters: new()
             {
-                { "@id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "@id2", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439012") },
-                { "@name", new ColumnValue(ColumnType.String, "astro boy") },
-                { "@enabled", new ColumnValue(ColumnType.Bool, false) }
+                { "@id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                { "@id2", new(ColumnType.Id, "507f1f77bcf86cd799439012") },
+                { "@name", new(ColumnType.String, "astro boy") },
+                { "@enabled", new(ColumnType.Bool, false) }
             }
         );
 
-        Assert.AreEqual(2, await executor.ExecuteNonSQLQuery(ticket));
+        ExecuteNonSQLResult sqlResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(2, sqlResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -546,7 +572,7 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
 
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
@@ -567,7 +593,7 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        (database, cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        (_, cursor) = await executor.ExecuteSQLQuery(queryTicket);
 
         result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
@@ -580,13 +606,15 @@ public class TestExecuteSqlInsert : BaseTest
             Assert.AreEqual("astro boy", row.Row["name"].StrValue);
             Assert.AreEqual(1999, row.Row["year"].LongValue);
         }
+        
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
-    [NonParallelizable]
+    //[NonParallelizable]
     public async Task TestExecuteInsert10()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -596,15 +624,16 @@ public class TestExecuteSqlInsert : BaseTest
             sql: "INSERT INTO robots VALUES (STR_ID(@id), @name, @year, @enabled), (STR_ID(@id2), @name, @year, @enabled)",
             parameters: new()
             {
-                { "@id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                { "@id2", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439012") },
-                { "@name", new ColumnValue(ColumnType.String, "astro boy") },
-                { "@year", new ColumnValue(ColumnType.Integer64, 2010) },
-                { "@enabled", new ColumnValue(ColumnType.Bool, false) }
+                { "@id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                { "@id2", new(ColumnType.Id, "507f1f77bcf86cd799439012") },
+                { "@name", new(ColumnType.String, "astro boy") },
+                { "@year", new(ColumnType.Integer64, 2010) },
+                { "@enabled", new(ColumnType.Bool, false) }
             }
         );
 
-        Assert.AreEqual(2, await executor.ExecuteNonSQLQuery(ticket));
+        ExecuteNonSQLResult sqlResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(2, sqlResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -613,7 +642,7 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
 
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
@@ -633,7 +662,7 @@ public class TestExecuteSqlInsert : BaseTest
             parameters: null
         );
 
-        (database, cursor) = await executor.ExecuteSQLQuery(queryTicket);
+        (_, cursor) = await executor.ExecuteSQLQuery(queryTicket);
 
         result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
@@ -645,5 +674,7 @@ public class TestExecuteSqlInsert : BaseTest
             Assert.AreEqual("507f1f77bcf86cd799439012", row.Row["id"].StrValue);
             Assert.AreEqual("astro boy", row.Row["name"].StrValue);
         }
+
+        await transactions.Commit(database, txnState);
     }
 }

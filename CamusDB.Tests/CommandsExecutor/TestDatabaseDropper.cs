@@ -20,7 +20,7 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-internal class TestDatabaseDropper : BaseTest
+internal sealed class TestDatabaseDropper : BaseTest
 {    
     [Test]
     [NonParallelizable]

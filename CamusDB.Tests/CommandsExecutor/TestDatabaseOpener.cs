@@ -19,7 +19,7 @@ using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestDatabaseOpener : BaseTest
+public sealed class TestDatabaseOpener : BaseTest
 {    
     [Test]
     [NonParallelizable]

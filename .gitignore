@@ -9,5 +9,6 @@ CamusDB.Generators/obj
 CamusDB.Core\SQLParser.Language.analyzer.lst
 CamusDB.Core\sqlParser.Language.grammar.lst
 .vs/
+.idea/
 bench/node_modules/
 CamusDB/Data/

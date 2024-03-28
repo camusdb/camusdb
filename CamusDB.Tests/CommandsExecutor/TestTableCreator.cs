@@ -17,57 +17,64 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
 using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 internal sealed class TestTableCreator : BaseTest
 {    
-    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager, CatalogsManager)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
+        CatalogsManager catalogs = new(logger);
+        TransactionsManager transactions = new(hlc);
+        CommandExecutor executor = new(hlc, validator, catalogs, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
             ifNotExists: false
         );
 
-        DatabaseDescriptor descriptor = await executor.CreateDatabase(databaseTicket);
+        DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, executor, catalogsManager, descriptor);
+        return (dbname, database, executor, transactions, catalogs);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestCreateTable()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("age", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("age", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
 
-        Assert.True(await executor.CreateTable(ticket));
+        CreateTableResult result = await executor.CreateTable(ticket);
+        Assert.True(result.Success);
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "my_table");
 
@@ -93,10 +100,12 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableNoColumns()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             columns: new ColumnInfo[] { },
@@ -112,19 +121,21 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableNoDatabase()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: "",
             tableName: "my_table",
             columns: new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -137,19 +148,21 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableNoTableName()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "",
             columns: new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -162,19 +175,21 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableDuplicateColumn()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             columns: new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("id", ColumnType.String, notNull: true),
+                new("id", ColumnType.Id),
+                new("id", ColumnType.String, notNull: true),
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -187,20 +202,22 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableDuplicatePrimaryKey()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             columns: new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String),
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String),
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("name", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("name", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -213,19 +230,21 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableInvalidTableName()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
-            tableName: new string('a', 300),
+            tableName: new('a', 300),
             columns: new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String),
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String),
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -238,19 +257,21 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableInvalidTableNameCharacters()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "my_täble",
             columns: new ColumnInfo[] {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String),
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String),
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -263,27 +284,30 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableTwice()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("age", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("age", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
 
-        Assert.True(await executor.CreateTable(ticket));
+        CreateTableResult result = await executor.CreateTable(ticket);
+        Assert.True(result.Success);
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
         Assert.AreEqual("Table 'my_table' already exists", e!.Message);
@@ -293,27 +317,30 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableIfNotExists()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket ticket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("age", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("age", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: true
         );
 
-        Assert.True(await executor.CreateTable(ticket));
+        CreateTableResult result = await executor.CreateTable(ticket);
+        Assert.True(result.Success);
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "my_table");
 
@@ -334,6 +361,7 @@ internal sealed class TestTableCreator : BaseTest
         Assert.AreEqual("enabled", tableSchema.Columns![3].Name);
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
 
-        Assert.False(await executor.CreateTable(ticket));
+        result = await executor.CreateTable(ticket);
+        Assert.False(result.Success);
     }
 }

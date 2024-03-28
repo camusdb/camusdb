@@ -26,7 +26,7 @@ using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestExecuteSql : BaseTest
+public sealed class TestExecuteSql : BaseTest
 {    
     private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager)> SetupDatabase()
     {

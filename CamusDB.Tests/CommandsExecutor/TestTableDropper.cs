@@ -11,6 +11,8 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Transactions.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 
@@ -18,43 +20,46 @@ namespace CamusDB.Tests.CommandsExecutor;
 
 internal sealed class TestTableDropper : BaseTest
 {    
-    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager, CatalogsManager)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
         HybridLogicalClock hlc = new();
         CommandValidator validator = new();
-        CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
+        CatalogsManager catalogs = new(logger);
+        TransactionsManager transactions = new(hlc);
+        CommandExecutor executor = new(hlc, validator, catalogs, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
             ifNotExists: false
         );
 
-        DatabaseDescriptor descriptor = await executor.CreateDatabase(databaseTicket);
+        DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, executor, catalogsManager, descriptor);
+        return (dbname, database, executor, transactions, catalogs);
     }
 
-    private async Task<(string, CommandExecutor, CatalogsManager, DatabaseDescriptor, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalog, List<string> objectIds)> SetupBasicTable()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+
+        TransactionState txnState = await transactions.Start();
 
         CreateTableTicket createTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -68,17 +73,17 @@ internal sealed class TestTableDropper : BaseTest
             string objectId = ObjectIdGenerator.Generate().ToString();
 
             InsertTicket ticket = new(
-                txnId: await executor.NextTxnId(),
+                txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Id, objectId) },
-                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                        { "year", new ColumnValue(ColumnType.Integer64, 2000) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                        { "id", new(ColumnType.Id, objectId) },
+                        { "name", new(ColumnType.String, "some name " + i) },
+                        { "year", new(ColumnType.Integer64, 2000) },
+                        { "enabled", new(ColumnType.Bool, false) },
                     }
                 }
             );
@@ -88,19 +93,22 @@ internal sealed class TestTableDropper : BaseTest
             objectsId.Add(objectId);
         }
 
-        return (dbname, executor, catalogs, database, objectsId);
+        return (dbname, database, executor, transactions, catalogs, objectsId);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestCreateTableFillAndDrop()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs, _) = await SetupBasicTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         DropTableTicket dropTableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
-            tableName: "robots"
+            tableName: "robots",
+            ifExists: false
         );
 
         Assert.True(await executor.DropTable(dropTableTicket));
@@ -111,32 +119,35 @@ internal sealed class TestTableDropper : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableFillDropAndRecreate()
     {
-        (string dbname, CommandExecutor executor, CatalogsManager catalogs, DatabaseDescriptor database, _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs, _) = await SetupBasicTable();
+        
+        TransactionState txnState = await transactions.Start();
 
         DropTableTicket dropTableTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
-            tableName: "robots"
+            tableName: "robots",
+            ifExists: false
         );
 
         Assert.True(await executor.DropTable(dropTableTicket));
         Assert.False(catalogs.TableExists(database, "robots"));
 
         CreateTableTicket createTicket = new(
-            txnId: await executor.NextTxnId(),
+            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("type", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("status", ColumnType.Integer64),
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("type", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("status", ColumnType.Integer64),
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
