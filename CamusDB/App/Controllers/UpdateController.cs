@@ -27,52 +27,6 @@ public sealed class UpdateController : CommandsController
     }
 
     [HttpPost]
-    [Route("/update-by-id")]
-    public async Task<JsonResult> UpdateById()
-    {
-        try
-        {
-            using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
-
-            UpdateByIdRequest? request = JsonSerializer.Deserialize<UpdateByIdRequest>(body, jsonOptions);
-            if (request == null)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "UpdateById request is not valid");
-
-            TransactionState txnState;
-
-            if (request.TxnIdPT > 0)
-                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-            else
-                txnState = await transactions.Start().ConfigureAwait(false);
-
-            UpdateByIdTicket ticket = new(
-                txnState: txnState,
-                databaseName: request.DatabaseName ?? "",
-                tableName: request.TableName ?? "",
-                id: request.Id ?? "",
-                values: request.Values ?? new()
-            );
-
-            int updatedRows = await executor.UpdateById(ticket);
-
-            return new JsonResult(new UpdateResponse("ok", updatedRows));
-        }
-        catch (CamusDBException e)
-        {
-            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
-
-            return new JsonResult(new UpdateResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
-        }
-        catch (Exception e)
-        {
-            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
-
-            return new JsonResult(new UpdateResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
-        }
-    }
-
-    [HttpPost]
     [Route("/update")]
     public async Task<JsonResult> Update()
     {

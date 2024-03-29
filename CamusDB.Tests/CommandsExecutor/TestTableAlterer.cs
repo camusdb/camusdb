@@ -13,6 +13,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
@@ -195,7 +196,7 @@ internal sealed class TestTableAlterer : BaseTest
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.DropColumn,
-            new ColumnInfo("name", ColumnType.Null)
+            new("name", ColumnType.Null)
         );
 
         await executor.AlterTable(alterTableTicket);
@@ -399,7 +400,7 @@ internal sealed class TestTableAlterer : BaseTest
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.AddColumn,
-            new ColumnInfo("type", ColumnType.Integer64)
+            new("type", ColumnType.Integer64)
         );
 
         await executor.AlterTable(alterTableTicket);
@@ -502,7 +503,8 @@ internal sealed class TestTableAlterer : BaseTest
             parameters: null
         );
 
-        Assert.AreEqual(25, await executor.Update(updateTicket));
+        UpdateResult execResult = await executor.Update(updateTicket);
+        Assert.AreEqual(25, execResult.UpdatedRows);
 
         queryTicket = new(
             txnState: txnState,

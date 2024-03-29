@@ -49,11 +49,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly RowInserter rowInserter;
 
-    private readonly RowUpdaterById rowUpdaterById;
-
     private readonly RowUpdater rowUpdater;
-
-    private readonly RowDeleterById rowDeleterById;
 
     private readonly RowDeleter rowDeleter;
 
@@ -88,9 +84,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableIndexAlterer = new(catalogs, logger);
         tableDropper = new(catalogs, logger);
         rowInserter = new(logger);
-        rowUpdaterById = new(logger);
         rowUpdater = new(logger);
-        rowDeleterById = new(logger);
         rowDeleter = new(logger);
         queryExecutor = new(logger);
         sqlExecutor = new(logger);
@@ -284,38 +278,6 @@ public sealed class CommandExecutor : IAsyncDisposable
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
         return new(database, table, await rowUpdater.Update(queryExecutor, database, table, ticket).ConfigureAwait(false));
-    }
-
-    /// <summary>
-    /// Updates a set of rows specifying its id
-    /// </summary>
-    /// <param name="ticket"></param>
-    /// <returns></returns>
-    public async Task<int> UpdateById(UpdateByIdTicket ticket)
-    {
-        validator.Validate(ticket);
-
-        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
-
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
-
-        return await rowUpdaterById.UpdateById(database, table, ticket).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Deletes a row specifying its id
-    /// </summary>
-    /// <param name="ticket"></param>
-    /// <returns>The number of deleted rows</returns>
-    public async Task<DeleteByIdResult> DeleteById(DeleteByIdTicket ticket)
-    {
-        validator.Validate(ticket);
-
-        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
-
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
-
-        return new(database, table, await rowDeleterById.DeleteById(database, table, ticket).ConfigureAwait(false));
     }
 
     /// <summary>

@@ -19,6 +19,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
@@ -101,6 +102,8 @@ public sealed class TestRowUpdater : BaseTest
 
             objectsId.Add(objectId);
         }
+        
+        await transactions.Commit(database, txnState);
 
         return (dbname, executor, transactions, objectsId);
     }
@@ -134,19 +137,25 @@ public sealed class TestRowUpdater : BaseTest
         (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
-
-        UpdateByIdTicket ticket = new(
+        
+        UpdateTicket ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "unknown_table",
-            id: objectsId[0],
-            values: new()
+            plainValues: new()
             {
                 { "name", new(ColumnType.String, "updated value") }
-            }
+            },
+            exprValues: null,
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, objectsId[0]))
+            },
+            parameters: null
         );
 
-        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.UpdateById(ticket));
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Update(ticket));
         Assert.AreEqual("Table 'unknown_table' doesn't exist", e!.Message);
     }
 
@@ -158,18 +167,24 @@ public sealed class TestRowUpdater : BaseTest
 
         TransactionState txnState = await transactions.Start();
 
-        UpdateByIdTicket ticket = new(
+        UpdateTicket ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
-            id: objectsId[0],
-            values: new()
+            plainValues: new()
             {
                 { "name", new(ColumnType.Null, "") }
-            }
+            },
+            exprValues: null,
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, objectsId[0]))
+            },
+            parameters: null
         );
 
-        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.UpdateById(ticket));
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Update(ticket));
         Assert.AreEqual("Column 'name' cannot be null", e!.Message);
     }
 
@@ -180,19 +195,25 @@ public sealed class TestRowUpdater : BaseTest
         (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
-
-        UpdateByIdTicket ticket = new(
+        
+        UpdateTicket ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
-            id: objectsId[0],
-            values: new()
+            plainValues: new()
             {
                 { "name", new(ColumnType.Null, null!) }
-            }
+            },
+            exprValues: null,
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, objectsId[0]))
+            },
+            parameters: null
         );
 
-        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.UpdateById(ticket));
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Update(ticket));
         Assert.AreEqual("Column 'name' cannot be null", e!.Message);
     }
 
@@ -203,19 +224,26 @@ public sealed class TestRowUpdater : BaseTest
         (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
-
-        UpdateByIdTicket ticket = new(
+        
+        UpdateTicket ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
-            id: objectsId[0],
-            values: new()
+            plainValues: new()
             {
                 { "name", new(ColumnType.String, "updated value") }
-            }
+            },
+            exprValues: null,
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, objectsId[0]))
+            },
+            parameters: null
         );
 
-        Assert.AreEqual(1, await executor.UpdateById(ticket));
+        UpdateResult execResult = await executor.Update(ticket);
+        Assert.AreEqual(1, execResult.UpdatedRows);
 
         QueryByIdTicket queryByIdTicket = new(
             txnState: txnState,
@@ -238,19 +266,26 @@ public sealed class TestRowUpdater : BaseTest
         (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
-
-        UpdateByIdTicket ticket = new(
+        
+        UpdateTicket ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
-            id: "---",
-            values: new()
+            plainValues: new()
             {
                 { "name", new(ColumnType.String, "updated value") }
-            }
+            },
+            exprValues: null,
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, "---"))
+            },
+            parameters: null
         );
 
-        Assert.AreEqual(0, await executor.UpdateById(ticket));
+        UpdateResult execResult = await executor.Update(ticket);
+        Assert.AreEqual(0, execResult.UpdatedRows);
     }
 
     [Test]
@@ -260,19 +295,26 @@ public sealed class TestRowUpdater : BaseTest
         (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
         
         TransactionState txnState = await transactions.Start();
-
-        UpdateByIdTicket ticket = new(
+        
+        UpdateTicket ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
-            id: objectsId[0],
-            values: new()
+            plainValues: new()
             {
-                { "name", new ColumnValue(ColumnType.String, "updated value") }
-            }
+                { "name", new(ColumnType.String, "updated value") }
+            },
+            exprValues: null,
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, objectsId[0]))
+            },
+            parameters: null
         );
 
-        Assert.AreEqual(1, await executor.UpdateById(ticket));
+        UpdateResult execResult = await executor.Update(ticket);
+        Assert.AreEqual(1, execResult.UpdatedRows);
 
         QueryByIdTicket queryByIdTicket = new(
             txnState: txnState,
@@ -286,19 +328,26 @@ public sealed class TestRowUpdater : BaseTest
 
         Assert.AreEqual(objectsId[0], result[0]["id"].StrValue);
         Assert.AreEqual("updated value", result[0]["name"].StrValue);
-
+        
         ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
-            id: objectsId[0],
-            values: new()
+            plainValues: new()
             {
                 { "name", new(ColumnType.String, "updated value 2") }
-            }
+            },
+            exprValues: null,
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, objectsId[0]))
+            },
+            parameters: null
         );
 
-        Assert.AreEqual(1, await executor.UpdateById(ticket));
+        execResult = await executor.Update(ticket);
+        Assert.AreEqual(1, execResult.UpdatedRows);
 
         queryByIdTicket = new(
             txnState: txnState,
@@ -324,18 +373,25 @@ public sealed class TestRowUpdater : BaseTest
 
         foreach (string objectId in objectsId)
         {
-            UpdateByIdTicket ticket = new(
+            UpdateTicket ticket = new(
                 txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
-                id: objectId,
-                values: new()
+                plainValues: new()
                 {
                     { "name", new(ColumnType.String, "updated value") }
-                }
+                },
+                exprValues: null,
+                where: null,
+                filters: new()
+                {
+                    new("id", "=", new(ColumnType.Id, objectId))
+                },
+                parameters: null
             );
 
-            Assert.AreEqual(1, await executor.UpdateById(ticket));
+            UpdateResult execResult = await executor.Update(ticket);
+            Assert.AreEqual(1, execResult.UpdatedRows);
         }
 
         foreach (string objectId in objectsId)
@@ -367,18 +423,24 @@ public sealed class TestRowUpdater : BaseTest
 
         foreach (string objectId in objectsId)
         {
-            UpdateByIdTicket ticket = new(
+            UpdateTicket ticket = new(
                 txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
-                id: objectId,
-                values: new()
+                plainValues: new()
                 {
                     { "name", new(ColumnType.String, "updated value") }
-                }
+                },
+                exprValues: null,
+                where: null,
+                filters: new()
+                {
+                    new("id", "=", new(ColumnType.Id, objectId))
+                },
+                parameters: null
             );
 
-            tasks.Add(executor.UpdateById(ticket));
+            tasks.Add(executor.Update(ticket));
         }
 
         await Task.WhenAll(tasks);
@@ -401,7 +463,7 @@ public sealed class TestRowUpdater : BaseTest
         (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
         
         List<QueryResultRow> result = await cursor.ToListAsync();
-        Assert.IsEmpty(result);
+        Assert.IsNotEmpty(result);
 
         queryTicket = new(
             txnState: txnState,
@@ -413,7 +475,7 @@ public sealed class TestRowUpdater : BaseTest
             where: null,
             filters: new()
             {
-                new("name", "=", new ColumnValue(ColumnType.String, "updated value"))
+                new("name", "=", new(ColumnType.String, "updated value"))
             },
             limit: null,
             offset: null,
@@ -424,7 +486,7 @@ public sealed class TestRowUpdater : BaseTest
         (DatabaseDescriptor _, cursor) = await executor.Query(queryTicket);
 
         result = await cursor.ToListAsync();
-        Assert.AreEqual(14, result.Count);
+        Assert.AreEqual(25, result.Count);
 
         queryTicket = new(
             txnState: txnState,
@@ -475,7 +537,8 @@ public sealed class TestRowUpdater : BaseTest
             parameters: null
         );
 
-        Assert.AreEqual(1, await executor.Update(ticket));
+        UpdateResult updateResult = await executor.Update(ticket);
+        Assert.AreEqual(1, updateResult.UpdatedRows);
 
         QueryByIdTicket queryByIdTicket = new(
             txnState: txnState,
@@ -516,7 +579,8 @@ public sealed class TestRowUpdater : BaseTest
             parameters: null
         );
 
-        Assert.AreEqual(14, await executor.Update(ticket));
+        UpdateResult updateResult = await executor.Update(ticket);
+        Assert.AreEqual(14, updateResult.UpdatedRows);
 
         QueryTicket queryTicket = new(
             txnState: txnState,
@@ -606,6 +670,7 @@ public sealed class TestRowUpdater : BaseTest
             parameters: null
         );
 
-        Assert.AreEqual(0, await executor.Update(ticket));
+        UpdateResult updateResult = await executor.Update(ticket);
+        Assert.AreEqual(0, updateResult.UpdatedRows);
     }
 }

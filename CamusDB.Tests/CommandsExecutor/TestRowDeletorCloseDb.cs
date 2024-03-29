@@ -113,15 +113,19 @@ public class TestRowDeletorCloseDb : BaseTest
         (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
-
-        DeleteByIdTicket ticket = new(
+        
+        DeleteTicket ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
-            id: objectsId[0]
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, objectsId[0]))
+            }
         );
 
-        Assert.AreEqual(1, await executor.DeleteById(ticket));
+        Assert.AreEqual(1, await executor.Delete(ticket));
 
         QueryByIdTicket queryByIdTicket = new(
             txnState: txnState,

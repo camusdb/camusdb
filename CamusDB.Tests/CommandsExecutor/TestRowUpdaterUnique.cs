@@ -17,6 +17,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
@@ -25,7 +26,7 @@ using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestRowUpdaterUnique : BaseTest
+public sealed class TestRowUpdaterUnique : BaseTest
 {    
     private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager)> SetupDatabase()
     {
@@ -100,6 +101,8 @@ public class TestRowUpdaterUnique : BaseTest
 
             objectsId.Add(objectId);
         }
+        
+        await transactions.Commit(database, txnState);
 
         return (dbname, executor, transactions, objectsId);
     }
@@ -108,7 +111,7 @@ public class TestRowUpdaterUnique : BaseTest
     [NonParallelizable]
     public async Task TestUpdateMany()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -129,7 +132,8 @@ public class TestRowUpdaterUnique : BaseTest
             parameters: null
         );
 
-        Assert.AreEqual(14, await executor.Update(ticket));
+        UpdateResult execResult = await executor.Update(ticket);
+        Assert.AreEqual(14, execResult.UpdatedRows);
 
         /*QueryTicket queryTicket = new(
             database: dbname,

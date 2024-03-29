@@ -268,7 +268,7 @@ internal sealed class RowDeleter
     /// <param name="machine"></param>
     /// <param name="state"></param>
     /// <returns></returns>
-    public async Task<int> DeleteInternal(FluxMachine<DeleteFluxSteps, DeleteFluxState> machine, DeleteFluxState state)
+    private async Task<int> DeleteInternal(FluxMachine<DeleteFluxSteps, DeleteFluxState> machine, DeleteFluxState state)
     {
         Stopwatch timer = Stopwatch.StartNew();
 

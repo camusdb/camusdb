@@ -195,15 +195,19 @@ public class TestRowDeletor : BaseTest
         (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
-
-        DeleteByIdTicket ticket = new(
+        
+        DeleteTicket ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "unknown_table",
-            id: objectsId[0]
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, objectsId[0]))
+            }
         );
 
-        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.DeleteById(ticket));
+        CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Delete(ticket));
         Assert.AreEqual("Table 'unknown_table' doesn't exist", e!.Message);
     }
 
@@ -214,15 +218,19 @@ public class TestRowDeletor : BaseTest
         (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
-
-        DeleteByIdTicket ticket = new(
+        
+        DeleteTicket ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
-            id: objectsId[0]
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, objectsId[0]))
+            }
         );
 
-        Assert.AreEqual(1, await executor.DeleteById(ticket));
+        Assert.AreEqual(1, await executor.Delete(ticket));
 
         QueryByIdTicket queryByIdTicket = new(
             txnState: txnState,
@@ -242,15 +250,19 @@ public class TestRowDeletor : BaseTest
         (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
-
-        DeleteByIdTicket ticket = new(
+        
+        DeleteTicket ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
-            id: "---"
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, "---"))
+            }
         );
 
-        Assert.AreEqual(0, await executor.DeleteById(ticket));
+        Assert.AreEqual(0, await executor.Delete(ticket));
     }
 
     [Test]
@@ -263,14 +275,18 @@ public class TestRowDeletor : BaseTest
 
         foreach (string objectId in objectsId)
         {
-            DeleteByIdTicket ticket = new(
+            DeleteTicket ticket = new(
                 txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
-                id: objectId
+                where: null,
+                filters: new()
+                {
+                    new("id", "=", new(ColumnType.Id, objectId))
+                }
             );
 
-            Assert.AreEqual(1, await executor.DeleteById(ticket));
+            Assert.AreEqual(1, await executor.Delete(ticket));
         }
 
         QueryTicket queryTicket = new(
@@ -304,14 +320,18 @@ public class TestRowDeletor : BaseTest
 
         foreach (string objectId in objectsId)
         {
-            DeleteByIdTicket ticket = new(
+            DeleteTicket ticket = new(
                 txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots2",
-                id: objectId
+                where: null,
+                filters: new()
+                {
+                    new("id", "=", new(ColumnType.Id, objectId))
+                }
             );
 
-            Assert.AreEqual(1, await executor.DeleteById(ticket));
+            Assert.AreEqual(1, await executor.Delete(ticket));
         }
 
         QueryTicket queryTicket = new(
@@ -347,14 +367,18 @@ public class TestRowDeletor : BaseTest
 
         foreach (string objectId in objectsId)
         {
-            DeleteByIdTicket ticket = new(
+            DeleteTicket ticket = new(
                 txnState: txnState,
                 databaseName: dbname,
                 tableName: "robots",
-                id: objectId
+                where: null,
+                filters: new()
+                {
+                    new("id", "=", new(ColumnType.Id, objectId))
+                }
             );
 
-            tasks.Add(executor.DeleteById(ticket));
+            tasks.Add(executor.Delete(ticket));
         }
 
         await Task.WhenAll(tasks);

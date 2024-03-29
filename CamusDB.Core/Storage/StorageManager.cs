@@ -19,7 +19,7 @@ namespace CamusDB.Core.Storage;
 /// </summary>
 public sealed class StorageManager
 {
-    private readonly static object _lock = new();
+    private static readonly object _lock = new();
 
     private readonly RocksDb dbHandler;
 
@@ -33,9 +33,7 @@ public sealed class StorageManager
                                 .SetWalRecoveryMode(Recovery.AbsoluteConsistency) // setting recovery mode to Absolute Consistency
                                 .SetAllowConcurrentMemtableWrite(true);
 
-        RocksDb dbHandler = RocksDb.Open(options, path);
-
-        this.dbHandler = dbHandler;
+        this.dbHandler = RocksDb.Open(options, path);
     }
 
     public StorageManager(RocksDb dbHandler)
@@ -82,9 +80,7 @@ public sealed class StorageManager
             byte[] offset = pageOperation.Offset.ToBytes();
 
             if (pageOperation.Operation == BufferPageOperationType.InsertOrUpdate)
-            {
                 batch.Put(offset, pageOperation.Buffer);
-            }
             else
                 batch.Delete(offset);
         }

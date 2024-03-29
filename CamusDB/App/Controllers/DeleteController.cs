@@ -27,68 +27,6 @@ public sealed class DeleteController : CommandsController
     }
 
     [HttpPost]
-    [Route("/delete-by-id")]
-    public async Task<JsonResult> DeleteById()
-    {
-        try
-        {
-            using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
-
-            DeleteByIdRequest? request = JsonSerializer.Deserialize<DeleteByIdRequest>(body, jsonOptions);
-            if (request == null)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DeleteById request is not valid");
-
-            bool newTransaction = false;
-            TransactionState? txnState = null;
-
-            try
-            {
-                if (request.TxnIdPT > 0)
-                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-                else
-                {
-                    newTransaction = true;
-                    txnState = await transactions.Start().ConfigureAwait(false);
-                }
-
-                DeleteByIdTicket ticket = new(
-                    txnState: txnState,
-                    databaseName: request.DatabaseName ?? "",
-                    tableName: request.TableName ?? "",
-                    id: request.Id ?? ""
-                );
-
-                DeleteByIdResult result = await executor.DeleteById(ticket).ConfigureAwait(false);
-
-                if (newTransaction)
-                    await transactions.Commit(result.Database, txnState);
-
-                return new JsonResult(new DeleteResponse("ok", result.DeletedRows));
-            }
-            catch (Exception)
-            {
-                if (txnState is not null)
-                    await transactions.RollbackIfNotComplete(txnState);
-
-                throw;
-            }
-        }
-        catch (CamusDBException e)
-        {
-            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
-
-            return new JsonResult(new DeleteResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
-        }
-        catch (Exception e)
-        {
-            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
-
-            return new JsonResult(new DeleteResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
-        }
-    }
-
-    [HttpPost]
     [Route("/delete")]
     public async Task<JsonResult> Delete()
     {

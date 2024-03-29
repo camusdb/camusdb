@@ -74,18 +74,6 @@ public sealed class CommandValidator
         validator.Validate(ticket);
     }
 
-    public void Validate(UpdateByIdTicket ticket)
-    {
-        UpdateByIdValidator validator = new();
-        validator.Validate(ticket);
-    }
-
-    public void Validate(DeleteByIdTicket ticket)
-    {
-        DeleteByIdValidator validator = new();
-        validator.Validate(ticket);
-    }
-
     public void Validate(DeleteTicket ticket)
     {
         DeleteValidator validator = new();
