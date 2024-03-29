@@ -24,6 +24,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
+using System.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -49,7 +50,7 @@ internal sealed class TestRowInsertor : BaseTest
         return (dbname, database, executor, transactions);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions)> SetupBasicTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions)> SetupBasicTable()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
 
@@ -77,14 +78,14 @@ internal sealed class TestRowInsertor : BaseTest
 
         await transactions.Commit(database, txnState);
 
-        return (dbname, executor, transactions);
+        return (dbname, database, executor, transactions);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestInvalidTypeAssigned()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -116,7 +117,7 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestInvalidIntegerType()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -148,7 +149,7 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestInvalidBoolType()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -202,7 +203,7 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestInvalidTable()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -230,7 +231,7 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestInsertUnknownColum()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -258,7 +259,7 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestInsertNotNullColumWithNull()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -286,7 +287,7 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestBasicInsert()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -313,7 +314,7 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestTwoInserts()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -358,7 +359,7 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestTwoInsertsParallel()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -378,8 +379,10 @@ internal sealed class TestRowInsertor : BaseTest
             }
         );
 
+        TransactionState txnState2 = await transactions.Start();
+
         InsertTicket ticket2 = new(
-            txnState: txnState,
+            txnState: txnState2,
             databaseName: dbname,
             tableName: "robots",
             values: new()
@@ -399,13 +402,19 @@ internal sealed class TestRowInsertor : BaseTest
             executor.Insert(ticket),
             executor.Insert(ticket2)
         });
+
+        await Task.WhenAll(new Task[]
+        {
+            transactions.Commit(database, txnState),
+            transactions.Commit(database, txnState2),
+        });
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestCheckSuccessfulInsert()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -453,7 +462,7 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestCheckSuccessfulInsertWithNulls()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -500,7 +509,7 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestSuccessfulTwoParallelInserts()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -589,15 +598,17 @@ internal sealed class TestRowInsertor : BaseTest
         Assert.AreEqual(row["enabled"].BoolValue, false);
     }
 
-    private static async Task DoInsert(TransactionState txnState, string dbname, CommandExecutor executor)
+    private static async Task DoInsert(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions)
     {
+        TransactionState txnState = await transactions.Start();
+
         InsertTicket ticket = new(
             txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
                     { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
                     { "name", new ColumnValue(ColumnType.String, "some name") },
@@ -608,29 +619,31 @@ internal sealed class TestRowInsertor : BaseTest
         );
 
         await executor.Insert(ticket);
+
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestSuccessfulMultipleParallelInserts()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
-
-        TransactionState txnState = await transactions.Start();
-
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+       
         List<Task> tasks = new();
 
         for (int i = 0; i < 100; i++)
-            tasks.Add(DoInsert(txnState, dbname, executor));
+            tasks.Add(DoInsert(dbname, database, executor, transactions));
 
         await Task.WhenAll(tasks);
 
         tasks = new();
 
         for (int i = 0; i < 100; i++)
-            tasks.Add(DoInsert(txnState, dbname, executor));
+            tasks.Add(DoInsert(dbname, database, executor, transactions));
 
         await Task.WhenAll(tasks);
+
+        TransactionState txnState = await transactions.Start();
 
         QueryTicket queryTicket = new(
             txnState: txnState,
@@ -671,12 +684,12 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestCheckSuccessfulMultiInsert()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
         int i;
-        List<string> objectIds = new();
+        List<string> objectIds = new(50);
 
         for (i = 0; i < 50; i++)
         {
@@ -734,7 +747,7 @@ internal sealed class TestRowInsertor : BaseTest
     [NonParallelizable]
     public async Task TestCheckSuccessfulMultiInsertWithQuery()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -746,7 +759,7 @@ internal sealed class TestRowInsertor : BaseTest
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
                         { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
                         { "name", new ColumnValue(ColumnType.String, "some name " + i) },

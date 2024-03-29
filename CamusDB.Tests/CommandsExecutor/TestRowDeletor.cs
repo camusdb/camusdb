@@ -24,6 +24,7 @@ using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -119,14 +120,14 @@ public class TestRowDeletor : BaseTest
             tableName: "robots2",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -230,7 +231,8 @@ public class TestRowDeletor : BaseTest
             }
         );
 
-        Assert.AreEqual(1, await executor.Delete(ticket));
+        DeleteResult execResult = await executor.Delete(ticket);
+        Assert.AreEqual(1, execResult.DeletedRows);
 
         QueryByIdTicket queryByIdTicket = new(
             txnState: txnState,
@@ -262,7 +264,8 @@ public class TestRowDeletor : BaseTest
             }
         );
 
-        Assert.AreEqual(0, await executor.Delete(ticket));
+        DeleteResult execResult = await executor.Delete(ticket);
+        Assert.AreEqual(0, execResult.DeletedRows);
     }
 
     [Test]
@@ -286,7 +289,8 @@ public class TestRowDeletor : BaseTest
                 }
             );
 
-            Assert.AreEqual(1, await executor.Delete(ticket));
+            DeleteResult execResult = await executor.Delete(ticket);
+            Assert.AreEqual(1, execResult.DeletedRows);
         }
 
         QueryTicket queryTicket = new(
@@ -331,7 +335,8 @@ public class TestRowDeletor : BaseTest
                 }
             );
 
-            Assert.AreEqual(1, await executor.Delete(ticket));
+            DeleteResult execResult = await executor.Delete(ticket);
+            Assert.AreEqual(1, execResult.DeletedRows);
         }
 
         QueryTicket queryTicket = new(
@@ -423,7 +428,8 @@ public class TestRowDeletor : BaseTest
             }
         );
 
-        Assert.AreEqual(1, await executor.Delete(ticket));
+        DeleteResult execResult = await executor.Delete(ticket);
+        Assert.AreEqual(1, execResult.DeletedRows);
 
         QueryTicket queryTicket = new(
             txnState: txnState,
@@ -491,7 +497,8 @@ public class TestRowDeletor : BaseTest
             }
         );
 
-        Assert.AreEqual(14, await executor.Delete(ticket));
+        DeleteResult execResult = await executor.Delete(ticket);
+        Assert.AreEqual(14, execResult.DeletedRows);
 
         queryTicket = new(
             txnState: txnState,
@@ -536,7 +543,8 @@ public class TestRowDeletor : BaseTest
             }
         );
 
-        Assert.AreEqual(0, await executor.Delete(ticket));
+        DeleteResult execResult = await executor.Delete(ticket);
+        Assert.AreEqual(0, execResult.DeletedRows);
 
         QueryTicket queryTicket = new(
             txnState: txnState,

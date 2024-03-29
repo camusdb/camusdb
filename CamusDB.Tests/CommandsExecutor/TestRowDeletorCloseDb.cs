@@ -23,6 +23,7 @@ using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -48,7 +49,7 @@ public class TestRowDeletorCloseDb : BaseTest
         return (dbname, database, executor, transactions);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTable()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
 
@@ -60,14 +61,14 @@ public class TestRowDeletorCloseDb : BaseTest
             tableName: "robots",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -86,7 +87,7 @@ public class TestRowDeletorCloseDb : BaseTest
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
                         { "id", new ColumnValue(ColumnType.Id, objectId) },
                         { "name", new ColumnValue(ColumnType.String, "some name " + i) },
@@ -103,14 +104,14 @@ public class TestRowDeletorCloseDb : BaseTest
 
         await transactions.Commit(database, txnState);
 
-        return (dbname, executor, transactions, objectsId);
+        return (dbname, database, executor, transactions, objectsId);
     }    
 
     [Test]
     [NonParallelizable]
     public async Task TestBasicDelete()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
         
@@ -125,7 +126,8 @@ public class TestRowDeletorCloseDb : BaseTest
             }
         );
 
-        Assert.AreEqual(1, await executor.Delete(ticket));
+        DeleteResult execResult = await executor.Delete(ticket);
+        Assert.AreEqual(1, execResult.DeletedRows);
 
         QueryByIdTicket queryByIdTicket = new(
             txnState: txnState,
@@ -136,6 +138,8 @@ public class TestRowDeletorCloseDb : BaseTest
 
         List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
         Assert.IsEmpty(result);
+
+        await transactions.Commit(database, txnState);
 
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
@@ -155,7 +159,7 @@ public class TestRowDeletorCloseDb : BaseTest
     [NonParallelizable]
     public async Task TestMultiDeleteCriteria()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -170,7 +174,8 @@ public class TestRowDeletorCloseDb : BaseTest
             }
         );
 
-        Assert.AreEqual(1, await executor.Delete(ticket));
+        DeleteResult execResult = await executor.Delete(ticket);
+        Assert.AreEqual(1, execResult.DeletedRows);
 
         QueryTicket queryTicket = new(
             txnState: txnState,
@@ -194,6 +199,8 @@ public class TestRowDeletorCloseDb : BaseTest
 
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
+
+        await transactions.Commit(database, txnState);
 
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
