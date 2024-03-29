@@ -18,6 +18,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Time;
@@ -60,14 +61,14 @@ public sealed class TestExecuteSql : BaseTest
             tableName: "robots",
             columns: new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -86,12 +87,12 @@ public sealed class TestExecuteSql : BaseTest
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Id, objectId) },
-                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                        { "year", new ColumnValue(ColumnType.Integer64, 2024 - i) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0) },
+                        { "id", new(ColumnType.Id, objectId) },
+                        { "name", new(ColumnType.String, "some name " + i) },
+                        { "year", new(ColumnType.Integer64, 2024 - i) },
+                        { "enabled", new(ColumnType.Bool, (i + 1) % 2 == 0) },
                     }
                 }
             );
@@ -118,14 +119,14 @@ public sealed class TestExecuteSql : BaseTest
             tableName: "robots",
             new ColumnInfo[]
             {
-                new ColumnInfo("id", ColumnType.Id),
-                new ColumnInfo("name", ColumnType.String, notNull: true),
-                new ColumnInfo("year", ColumnType.Integer64, defaultValue: new ColumnValue(ColumnType.Integer64, 1999)),
-                new ColumnInfo("enabled", ColumnType.Bool)
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64, defaultValue: new ColumnValue(ColumnType.Integer64, 1999)),
+                new("enabled", ColumnType.Bool)
             },
             constraints: new ConstraintInfo[]
             {
-                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
             },
             ifNotExists: false
         );
@@ -144,12 +145,12 @@ public sealed class TestExecuteSql : BaseTest
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Id, objectId) },
-                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                        { "year", new ColumnValue(ColumnType.Integer64, 2024 - i) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, (i + 1) % 2 == 0) },
+                        { "id", new(ColumnType.Id, objectId) },
+                        { "name", new(ColumnType.String, "some name " + i) },
+                        { "year", new(ColumnType.Integer64, 2024 - i) },
+                        { "enabled", new(ColumnType.Bool, (i + 1) % 2 == 0) },
                     }
                 }
             );
@@ -178,8 +179,9 @@ public sealed class TestExecuteSql : BaseTest
             sql: "UPDATE robots SET year = 1000 WHERE 1=1",
             parameters: null
         );
-
-        Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(updateTicket));
+        
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(updateTicket);
+        Assert.AreEqual(25, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -216,8 +218,9 @@ public sealed class TestExecuteSql : BaseTest
             sql: "UPDATE robots SET year = 1000 WHERE year = 2024",
             parameters: null
         );
-
-        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+        
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(1, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
            txnState: txnState,
@@ -253,12 +256,13 @@ public sealed class TestExecuteSql : BaseTest
             sql: "UPDATE robots SET year = @new_year WHERE year = @expected_year",
             parameters: new()
             {
-               { "@new_year", new ColumnValue(ColumnType.Integer64, 1000) },
-               { "@expected_year", new ColumnValue(ColumnType.Integer64, 2024) }
+               { "@new_year", new(ColumnType.Integer64, 1000) },
+               { "@expected_year", new(ColumnType.Integer64, 2024) }
             }
         );
-
-        Assert.AreEqual(1, await executor.ExecuteNonSQLQuery(ticket));
+        
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(1, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
            txnState: txnState,
@@ -294,8 +298,9 @@ public sealed class TestExecuteSql : BaseTest
             sql: "UPDATE robots SET year = 1000 WHERE year = 3000",
             parameters: null
         );
-
-        Assert.AreEqual(0, await executor.ExecuteNonSQLQuery(ticket));
+        
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(0, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -331,8 +336,9 @@ public sealed class TestExecuteSql : BaseTest
             sql: "UPDATE robots SET year = year + 1000 WHERE true",
             parameters: null
         );
-
-        Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(ticket));
+        
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(ticket);
+        Assert.AreEqual(25, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -369,7 +375,8 @@ public sealed class TestExecuteSql : BaseTest
             parameters: null
         );
 
-        Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(deleteTicket));
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(deleteTicket);
+        Assert.AreEqual(25, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -400,8 +407,9 @@ public sealed class TestExecuteSql : BaseTest
             sql: "DELETE FROM robots WHERE year > 0",
             parameters: null
         );
-
-        Assert.AreEqual(25, await executor.ExecuteNonSQLQuery(deleteTicket));
+        
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(deleteTicket);
+        Assert.AreEqual(25, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,
@@ -432,8 +440,9 @@ public sealed class TestExecuteSql : BaseTest
             sql: "DELETE FROM robots WHERE year = 2000 OR year = 2001",
             parameters: null
         );
-
-        Assert.AreEqual(2, await executor.ExecuteNonSQLQuery(deleteTicket));
+        
+        ExecuteNonSQLResult execResult = await executor.ExecuteNonSQLQuery(deleteTicket);
+        Assert.AreEqual(2, execResult.ModifiedRows);
 
         ExecuteSQLTicket queryTicket = new(
             txnState: txnState,

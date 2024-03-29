@@ -85,7 +85,7 @@ internal sealed class QueryScanner
         return ScanUsingIndex(database, table, index.BTree, ticket, queryFilterer, rowDeserializer);        
     }
 
-    private async IAsyncEnumerable<QueryResultRow> ScanUsingIndex(
+    private static async IAsyncEnumerable<QueryResultRow> ScanUsingIndex(
         DatabaseDescriptor database,
         TableDescriptor table,
         BTree<CompositeColumnValue, BTreeTuple> index,

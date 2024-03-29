@@ -46,7 +46,10 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
         if (rightAst.nodeType == NodeType.IdentifierWithOpts)
         {
             if (rightAst.rightAst!.yytext!.Equals("FORCE_INDEX", StringComparison.InvariantCultureIgnoreCase))
-                return rightAst.extendedOne!.yytext!;
+            {
+                string index = rightAst.extendedOne!.yytext!;
+                return index == "pk" ? "~pk" : index;
+            }
         }
 
         return null;

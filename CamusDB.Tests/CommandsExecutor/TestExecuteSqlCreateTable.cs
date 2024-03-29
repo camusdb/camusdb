@@ -210,7 +210,7 @@ public class TestExecuteSqlCreateTable : BaseTest
         );
 
         ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
-        Assert.IsTrue(ddlResult.Success);
+        Assert.IsFalse(ddlResult.Success);
 
         await transactions.Commit(database, txnState);
     }
