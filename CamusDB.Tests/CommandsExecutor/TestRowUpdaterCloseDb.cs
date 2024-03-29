@@ -281,10 +281,10 @@ public sealed class TestRowUpdaterCloseDb : BaseTest
         Assert.AreEqual(objectsId[0], result[0]["id"].StrValue);
         Assert.AreEqual("updated value", result[0]["name"].StrValue);
 
-        CloseDatabaseTicket closeTicket = new(dbname);
-        await executor.CloseDatabase(closeTicket);
-        
         await transactions.Commit(database, txnState);
+
+        CloseDatabaseTicket closeTicket = new(dbname);
+        await executor.CloseDatabase(closeTicket);               
 
         queryByIdTicket = new(
             txnState: txnState,

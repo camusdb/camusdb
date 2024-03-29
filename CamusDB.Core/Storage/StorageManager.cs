@@ -75,6 +75,8 @@ public sealed class StorageManager
     {
         using WriteBatch batch = new();
 
+        //File.AppendAllText("c:\\tmp\\data.txt", $"{pageOperations.Count}\n");
+
         foreach (BufferPageOperation pageOperation in pageOperations)
         {
             byte[] offset = pageOperation.Offset.ToBytes();
@@ -83,6 +85,8 @@ public sealed class StorageManager
                 batch.Put(offset, pageOperation.Buffer);
             else
                 batch.Delete(offset);
+
+            //File.AppendAllText("c:\\tmp\\data.txt", $"{pageOperation.Operation}, {pageOperation.Offset}, {pageOperation.Buffer.Length}\n");
         }
 
         dbHandler.Write(batch);
