@@ -52,7 +52,7 @@ internal sealed class TableOpener
 
         AsyncLazy<TableDescriptor> openTableLazy = database.TableDescriptors.GetOrAdd(
                                                         tableSchema.Name ?? "",
-                                                        (_) => new AsyncLazy<TableDescriptor>(() => LoadTable(database, tableSchema))
+                                                        (_) => new(() => LoadTable(database, tableSchema))
                                                    );
         return await openTableLazy;
     }
@@ -82,7 +82,7 @@ internal sealed class TableOpener
 
                         tableDescriptor.Indexes.Add(
                             index.Name,
-                            new TableIndexSchema(MapColumnsIdsToNames(tableSchema.Columns, index.ColumnIds), index.Type, btree)
+                            new(MapColumnsIdsToNames(tableSchema.Columns, index.ColumnIds), index.Type, btree)
                         );
                     }
                     break;

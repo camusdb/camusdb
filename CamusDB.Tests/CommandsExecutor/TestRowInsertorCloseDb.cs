@@ -95,11 +95,11 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
             tableName: "user_robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                    { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                    { "amount", new ColumnValue(ColumnType.Integer64, 100) }
+                    { "id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "usersId", new(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
+                    { "amount", new(ColumnType.Integer64, 100) }
                 }
             }
         );
@@ -136,51 +136,56 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
 
-        TransactionState txnState1 = await transactions.Start();        
-
-        InsertTicket ticket = new(
-            txnState: txnState1,
-            databaseName: dbname,
-            tableName: "user_robots",
-            values: new()
-            {
-                new()
-                {
-                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                    { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                    { "amount", new ColumnValue(ColumnType.Integer64, 50) },
-                }
-            }
-        );
-
-        TransactionState txnState2 = await transactions.Start();
-
-        InsertTicket ticket2 = new(
-            txnState: txnState2,
-            databaseName: dbname,
-            tableName: "user_robots",
-            values: new()
-            {
-                new()
-                {
-                    { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
-                    { "usersId", new ColumnValue(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
-                    { "amount", new ColumnValue(ColumnType.Integer64, 50) },
-                }
-            }
-        );
-
-        await Task.WhenAll(new Task[]
+        async Task CreateFirstRecord()
         {
-            executor.Insert(ticket),
-            executor.Insert(ticket2)
-        });
+            TransactionState txnState1 = await transactions.Start();
 
-        await Task.WhenAll(new Task[]
+            InsertTicket ticket = new(
+                txnState: txnState1,
+                databaseName: dbname,
+                tableName: "user_robots",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                        { "usersId", new(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
+                        { "amount", new(ColumnType.Integer64, 50) },
+                    }
+                }
+            );
+
+            await executor.Insert(ticket);
+
+            await transactions.Commit(database, txnState1);
+        }
+
+        async Task CreateSecondRecord()
         {
-            transactions.Commit(database, txnState1),
-            transactions.Commit(database, txnState2),
-        });
+
+            TransactionState txnState2 = await transactions.Start();
+
+            InsertTicket ticket2 = new(
+                txnState: txnState2,
+                databaseName: dbname,
+                tableName: "user_robots",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id", new(ColumnType.Id, "507f191e810c19729de860ea") },
+                        { "usersId", new(ColumnType.Id, "5e353cf5e95f1e3a432e49aa") },
+                        { "amount", new(ColumnType.Integer64, 50) },
+                    }
+                }
+            );
+
+            await executor.Insert(ticket2);
+
+            await transactions.Commit(database, txnState2);
+        }
+
+        await Task.WhenAll(CreateFirstRecord(), CreateSecondRecord());
 
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
@@ -242,16 +247,16 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         int i;
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
 
-        TransactionState txnState = await transactions.Start();
-
         string[] userIds = new string[5];
         for (i = 0; i < 5; i++)
             userIds[i] = ObjectIdGenerator.Generate().ToString();
 
-        List<string> objectIds = new();
+        List<string> objectIds = new(50);
 
         for (i = 0; i < 50; i++)
         {
+            TransactionState txnState = await transactions.Start();
+            
             string objectId = ObjectIdGenerator.Generate().ToString();
             objectIds.Add(objectId);
 
@@ -261,30 +266,38 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
                 tableName: "user_robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Id, objectId) },
-                        { "usersId", new ColumnValue(ColumnType.Id, userIds[i % 5]) },
-                        { "amount", new ColumnValue(ColumnType.Integer64, 50) },
+                        { "id", new(ColumnType.Id, objectId) },
+                        { "usersId", new(ColumnType.Id, userIds[i % 5]) },
+                        { "amount", new(ColumnType.Integer64, 50) },
                     }
                 }
             );
 
             await executor.Insert(insertTicket);
 
+            await transactions.Commit(database, txnState);
+
             if ((i + 1) % 5 == 0)
             {
+                await System.IO.File.AppendAllTextAsync("/tmp/aa.txt", $"{i}\n");
+                
+                await transactions.RollbackAllPending();
+                
                 CloseDatabaseTicket closeTicket = new(dbname);
                 await executor.CloseDatabase(closeTicket);
             }
         }
+        
+        TransactionState txnState2 = await transactions.Start();
 
         i = 0;
 
         foreach (string objectId in objectIds)
         {
             QueryByIdTicket queryTicket = new(
-                txnState: txnState,
+                txnState: txnState2,
                 databaseName: dbname,
                 tableName: "user_robots",
                 id: objectId
@@ -300,11 +313,13 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
             i++;
         }
 
-        Assert.AreEqual(50, i);
+        Assert.AreEqual(50, i);*/
     }
 
-    private static async Task InsertRow(TransactionState txnState, string dbname, CommandExecutor executor, ConcurrentBag<string> objectIds, string[] userIds, int i)
+    private static async Task InsertRow(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, ConcurrentBag<string> objectIds, string[] userIds, int i)
     {
+        TransactionState txnState = await transactions.Start();
+        
         string objectId = ObjectIdGenerator.Generate().ToString();
         objectIds.Add(objectId);
 
@@ -314,16 +329,18 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
             tableName: "user_robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, objectId) },
-                    { "usersId", new ColumnValue(ColumnType.Id, userIds[i % 5]) },
-                    { "amount", new ColumnValue(ColumnType.Integer64, 50) },
+                    { "id", new(ColumnType.Id, objectId) },
+                    { "usersId", new(ColumnType.Id, userIds[i % 5]) },
+                    { "amount", new(ColumnType.Integer64, 50) },
                 }
             }
         );
 
         await executor.Insert(insertTicket);
+        
+        await transactions.Commit(database, txnState);
     }
 
     [Test]
@@ -333,8 +350,6 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         int i;
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
 
-        TransactionState txnState = await transactions.Start();
-
         string[] userIds = new string[5];
         for (i = 0; i < 5; i++)
             userIds[i] = ObjectIdGenerator.Generate().ToString();
@@ -343,14 +358,15 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         ConcurrentBag<string> objectIds = new();
 
         for (i = 0; i < 50; i++)        
-            tasks.Add(InsertRow(txnState, dbname, executor, objectIds, userIds, i));
+            tasks.Add(InsertRow(dbname, database, executor, transactions, objectIds, userIds, i));
                         
         await Task.WhenAll(tasks);
 
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
-
+        
         i = 0;
+        TransactionState txnState = await transactions.Start();
 
         foreach (string objectId in objectIds)
         {

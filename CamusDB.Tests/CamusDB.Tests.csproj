@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj" />
   </ItemGroup>
+  
   <ItemGroup>
     <None Remove="BufferPool\" />
     <None Remove="CommandExecutor\" />
@@ -33,6 +34,7 @@
     <None Remove="ObjectIds\" />
     <None Remove="Config\" />
   </ItemGroup>
+  
   <ItemGroup>
     <Folder Include="BufferPool\" />
     <Folder Include="Fixtures\" />

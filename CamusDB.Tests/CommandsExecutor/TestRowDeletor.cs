@@ -424,7 +424,7 @@ public class TestRowDeletor : BaseTest
             where: null,
             filters: new()
             {
-                new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
+                new("id", "=", new(ColumnType.Id, objectsId[0]))
             }
         );
 
@@ -441,7 +441,7 @@ public class TestRowDeletor : BaseTest
             where: null,
             filters: new()
             {
-                new("id", "=", new ColumnValue(ColumnType.Id, objectsId[0]))
+                new("id", "=", new(ColumnType.Id, objectsId[0]))
             },
             orderBy: null,
             limit: null,
@@ -459,7 +459,7 @@ public class TestRowDeletor : BaseTest
     [NonParallelizable]
     public async Task TestMultiDeleteCriteria2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -473,7 +473,7 @@ public class TestRowDeletor : BaseTest
             where: null,
             filters: new()
             {
-                new("year", ">", new ColumnValue(ColumnType.Integer64, 2010))
+                new("year", ">", new(ColumnType.Integer64, 2010))
             },
             orderBy: null,
             limit: null,
@@ -493,7 +493,7 @@ public class TestRowDeletor : BaseTest
             where: null,
             filters: new()
             {
-                new("year", ">", new ColumnValue(ColumnType.Integer64, 2010))
+                new("year", ">", new(ColumnType.Integer64, 2010))
             }
         );
 
@@ -510,7 +510,7 @@ public class TestRowDeletor : BaseTest
             where: null,
             filters: new()
             {
-                new("year", ">", new ColumnValue(ColumnType.Integer64, 2010))
+                new("year", ">", new(ColumnType.Integer64, 2010))
             },
             orderBy: null,
             limit: null,
@@ -528,7 +528,7 @@ public class TestRowDeletor : BaseTest
     [NonParallelizable]
     public async Task TestMultiDeleteCriteriaNoRows()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
 
         TransactionState txnState = await transactions.Start();
 
@@ -539,7 +539,7 @@ public class TestRowDeletor : BaseTest
             where: null,
             filters: new()
             {
-                new("year", "<", new ColumnValue(ColumnType.Integer64, -1))
+                new("year", "<", new(ColumnType.Integer64, -1))
             }
         );
 

@@ -49,7 +49,7 @@ internal sealed class DatabaseOpener
     {
         AsyncLazy<DatabaseDescriptor> openDatabaseLazy = databaseDescriptors.Descriptors.GetOrAdd(
                                                             name,
-                                                            (_) => new AsyncLazy<DatabaseDescriptor>(() => LoadDatabase(name))
+                                                            (_) => new(() => LoadDatabase(name))
                                                          );
         return await openDatabaseLazy;
     }
@@ -68,15 +68,11 @@ internal sealed class DatabaseOpener
             name: name,
             storage: storage,
             bufferPool: bufferPool,
-            gc: new GCManager(bufferPool, hlc, logicalClock, tableDescriptors, logger),
+            gc: new(bufferPool, hlc, logicalClock, tableDescriptors, logger),
             tableDescriptors: tableDescriptors
         );
 
-        await Task.WhenAll(new Task[]
-        {
-            LoadDatabaseSchema(databaseDescriptor),
-            LoadDatabaseSystemSpace(databaseDescriptor),
-        }).ConfigureAwait(false);
+        await Task.WhenAll(LoadDatabaseSchema(databaseDescriptor), LoadDatabaseSystemSpace(databaseDescriptor)).ConfigureAwait(false);
 
         logger.LogInformation("Database {DbName} opened", name);
 

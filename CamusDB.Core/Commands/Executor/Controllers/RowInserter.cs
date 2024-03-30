@@ -169,12 +169,6 @@ internal sealed class RowInserter
     /// <returns></returns>
     private async Task<FluxAction> InsertRowsAndIndexes(InsertFluxState state)
     {
-        if (state.Ticket.Values is null)
-        {
-            Console.WriteLine("Invalid rows to update");
-            return FluxAction.Abort;
-        }
-
         TableDescriptor table = state.Table;
         InsertTicket ticket = state.Ticket;
         BufferPoolManager tablespace = state.Database.BufferPool;

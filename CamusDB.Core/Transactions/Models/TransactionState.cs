@@ -74,7 +74,7 @@ public sealed class TransactionState : IDisposable
             {
                 TableIndexSchema indexSchema = index.Value;
 
-                if (indexSchema.Type == IndexType.Unique || indexSchema.Type == IndexType.Multi)
+                if (indexSchema.Type is IndexType.Unique or IndexType.Multi)
                     locks.Add(await indexSchema.BTree.WriterLockAsync());
             }
 

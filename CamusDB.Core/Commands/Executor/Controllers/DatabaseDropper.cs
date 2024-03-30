@@ -54,7 +54,7 @@ internal sealed class DatabaseDropper
         // The database is not deleted, but its data directory is renamed.
         // This allows saving data in case it is deleted by mistake.
 
-        string newDbPath = Path.Combine(CamusConfig.DataDirectory, "_" + name + "_" + DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss-fffffff"));
+        string newDbPath = Path.Combine(string.Concat(CamusConfig.DataDirectory, "_", name, "_", DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss-fffffff")));
 
         Directory.Move(dbPath, newDbPath);
     }

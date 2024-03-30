@@ -4,8 +4,12 @@ CamusDB.Core/bin
 CamusDb.Core/obj
 CamusDB.Tests/bin
 CamusDb.Tests/obj
+CamusDb.Tests/TestResults
 CamusDB.Generators/bin
 CamusDB.Generators/obj
+CamusDB.Sandbox/bin
+CamusDB.Sandbox/obj
+CamusDB.Sandbox/Data
 CamusDB.Core\SQLParser.Language.analyzer.lst
 CamusDB.Core\sqlParser.Language.grammar.lst
 .vs/

@@ -143,10 +143,10 @@ internal sealed class QueryExecutor
         await ticket.TxnState.TryAdquireTableIndexReadLock(table, index.BTree).ConfigureAwait(false);
 
         BTreeTuple? pageOffset = await index.BTree.Get(
-                                            TransactionType.ReadOnly,
-                                            ticket.TxnState.TxnId,
-                                            new(columnValue)
-                                       ).ConfigureAwait(false);
+                                    TransactionType.ReadOnly,
+                                    ticket.TxnState.TxnId,
+                                    new(columnValue)
+                                 ).ConfigureAwait(false);
 
         if (pageOffset is null || pageOffset.IsNull())
         {

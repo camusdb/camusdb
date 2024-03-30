@@ -9,6 +9,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CamusDB.Core", "CamusDB.Cor
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CamusDB.Tests", "CamusDB.Tests\CamusDB.Tests.csproj", "{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB.Sandbox", "CamusDB.Sandbox\CamusDB.Sandbox.csproj", "{0DD1C6A2-712E-4A21-8BE9-390ED3869320}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -27,6 +29,10 @@ Global
 		{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4881224D-F46B-4EE4-8C7C-BCF5D6BD22A2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0DD1C6A2-712E-4A21-8BE9-390ED3869320}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0DD1C6A2-712E-4A21-8BE9-390ED3869320}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0DD1C6A2-712E-4A21-8BE9-390ED3869320}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0DD1C6A2-712E-4A21-8BE9-390ED3869320}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

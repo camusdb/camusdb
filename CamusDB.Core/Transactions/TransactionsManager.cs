@@ -52,8 +52,8 @@ public sealed class TransactionsManager
             Console.WriteLine("Recovered tx {0}", txnId);
             return txState;
         }
-
-        throw new Exception($"Tx {txnId} hasn't been started");
+        
+        throw new CamusDBException(CamusDBErrorCodes.TransactionAlreadyCompleted, $"Tx {txnId} hasn't been started");
     }
 
     public async Task<TransactionState> Start()
@@ -68,14 +68,16 @@ public sealed class TransactionsManager
     public async Task Commit(DatabaseDescriptor database, TransactionState txnState)
     {
         if (txnState.Status == TransactionStatus.Completed)
-            throw new Exception("Transaction is already completed");
+            throw new CamusDBException(CamusDBErrorCodes.TransactionAlreadyCompleted, "Transaction is already completed");
+        
+        Console.WriteLine("Committing tx {0}", txnState.TxnId);
 
         try
         {            
             await txnState.Semaphore.WaitAsync();
 
             if (txnState.Status == TransactionStatus.Completed)
-                throw new Exception("Transaction is already completed");
+                throw new CamusDBException(CamusDBErrorCodes.TransactionAlreadyCompleted, "Transaction is already completed");
 
             // Persist all the changes to the table and indexes
             await PersistTableAndIndexChanges(database, txnState).ConfigureAwait(false);
@@ -108,14 +110,14 @@ public sealed class TransactionsManager
     public async Task Rollback(TransactionState txnState)
     {
         if (txnState.Status == TransactionStatus.Completed)
-            throw new Exception("Transaction is already completed");
+            throw new CamusDBException(CamusDBErrorCodes.TransactionAlreadyCompleted, "Transaction is already completed");
 
         try
         {            
             await txnState.Semaphore.WaitAsync();
 
             if (txnState.Status == TransactionStatus.Completed)
-                throw new Exception("Transaction is already completed");
+                throw new CamusDBException(CamusDBErrorCodes.TransactionAlreadyCompleted, "Transaction is already completed");
 
             // Release all the locks acquired by the transaction
             txnState.ReleaseLocks();
@@ -151,41 +153,41 @@ public sealed class TransactionsManager
             await indexSaver.Save(saveUniqueOffsetIndex).ConfigureAwait(false);
         }
 
-        if (txnState.UniqueIndexDeltas is not null)
+        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue uniqueKeyValue, BTreeTuple tuple) uniqueIndex in txnState.UniqueIndexDeltas)
         {
-            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue uniqueKeyValue, BTreeTuple tuple) uniqueIndex in txnState.UniqueIndexDeltas)
-            {
-                SaveIndexTicket saveUniqueIndexTicket = new(
-                    tablespace: tablespace,
-                    index: uniqueIndex.index,
-                    txnId: txnState.TxnId,
-                    commitState: BTreeCommitState.Committed,
-                    key: uniqueIndex.uniqueKeyValue,
-                    value: uniqueIndex.tuple,
-                    modifiedPages: txnState.ModifiedPages
-                );
+            SaveIndexTicket saveUniqueIndexTicket = new(
+                tablespace: tablespace,
+                index: uniqueIndex.index,
+                txnId: txnState.TxnId,
+                commitState: BTreeCommitState.Committed,
+                key: uniqueIndex.uniqueKeyValue,
+                value: uniqueIndex.tuple,
+                modifiedPages: txnState.ModifiedPages
+            );
 
-                await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
-            }
+            await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
         }
 
-        if (txnState.MultiIndexDeltas is not null)
+        foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue multiKeyValue, BTreeTuple tuple) multIndex in txnState.MultiIndexDeltas)
         {
-            foreach ((BTree<CompositeColumnValue, BTreeTuple> index, CompositeColumnValue multiKeyValue, BTreeTuple tuple) multIndex in txnState.MultiIndexDeltas)
-            {
-                SaveIndexTicket saveMultiIndexTicket = new(
-                    tablespace: tablespace,
-                    index: multIndex.index,
-                    txnId: txnState.TxnId,
-                    commitState: BTreeCommitState.Committed,
-                    key: multIndex.multiKeyValue,
-                    value: multIndex.tuple,
-                    modifiedPages: txnState.ModifiedPages
-                );
+            SaveIndexTicket saveMultiIndexTicket = new(
+                tablespace: tablespace,
+                index: multIndex.index,
+                txnId: txnState.TxnId,
+                commitState: BTreeCommitState.Committed,
+                key: multIndex.multiKeyValue,
+                value: multIndex.tuple,
+                modifiedPages: txnState.ModifiedPages
+            );
 
-                await indexSaver.Save(saveMultiIndexTicket).ConfigureAwait(false);
-            }
+            await indexSaver.Save(saveMultiIndexTicket).ConfigureAwait(false);
         }
+    }
+
+    public async Task RollbackAllPending()
+    {
+        foreach (KeyValuePair<HLCTimestamp, TransactionState> x in transactions)
+            await RollbackIfNotComplete(x.Value);
     }
 }
 

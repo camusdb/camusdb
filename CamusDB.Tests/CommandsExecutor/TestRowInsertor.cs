@@ -371,10 +371,10 @@ internal sealed class TestRowInsertor : BaseTest
             {
                 new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    { "id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new(ColumnType.String, "some name") },
+                    { "year", new(ColumnType.Integer64, 1234) },
+                    { "enabled", new(ColumnType.Bool, false) },
                 }
             }
         );
@@ -389,25 +389,19 @@ internal sealed class TestRowInsertor : BaseTest
             {
                 new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                    { "id", new(ColumnType.Id, "507f191e810c19729de860ea") },
+                    { "name", new(ColumnType.String, "some name") },
+                    { "year", new(ColumnType.Integer64, 1234) },
+                    { "enabled", new(ColumnType.Bool, true) },
                 }
             }
         );
 
-        await Task.WhenAll(new Task[]
-        {
-            executor.Insert(ticket),
-            executor.Insert(ticket2)
-        });
+        await executor.Insert(ticket);
+        await transactions.Commit(database, txnState);
 
-        await Task.WhenAll(new Task[]
-        {
-            transactions.Commit(database, txnState),
-            transactions.Commit(database, txnState2),
-        });
+        await executor.Insert(ticket2);
+        await transactions.Commit(database, txnState2);
     }
 
     [Test]
@@ -424,20 +418,24 @@ internal sealed class TestRowInsertor : BaseTest
             tableName: "robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    { "id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new(ColumnType.String, "some name") },
+                    { "year", new(ColumnType.Integer64, 1234) },
+                    { "enabled", new(ColumnType.Bool, false) },
                 }
             }
         );
 
         await executor.Insert(insertTicket);
+        
+        await transactions.Commit(database, txnState);
+        
+        TransactionState txnState2 = await transactions.Start();
 
         QueryByIdTicket queryTicket = new(
-            txnState: txnState,
+            txnState: txnState2,
             databaseName: dbname,
             tableName: "robots",
             id: "507f1f77bcf86cd799439011"
@@ -472,20 +470,24 @@ internal sealed class TestRowInsertor : BaseTest
             tableName: "robots",
             values: new()
             {
-                new Dictionary<string, ColumnValue>()
+                new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Null, "") },
-                    { "enabled", new ColumnValue(ColumnType.Null, "") },
+                    { "id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                    { "name", new(ColumnType.String, "some name") },
+                    { "year", new(ColumnType.Null, "") },
+                    { "enabled", new(ColumnType.Null, "") },
                 }
             }
         );
 
         await executor.Insert(insertTicket);
+        
+        await transactions.Commit(database, txnState);
+        
+        TransactionState txnState2 = await transactions.Start();
 
         QueryByIdTicket queryTicket = new(
-            txnState: txnState,
+            txnState: txnState2,
             databaseName: dbname,
             tableName: "robots",
             id: "507f1f77bcf86cd799439011"
@@ -510,46 +512,60 @@ internal sealed class TestRowInsertor : BaseTest
     public async Task TestSuccessfulTwoParallelInserts()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupBasicTable();
-
-        TransactionState txnState = await transactions.Start();
-
-        InsertTicket ticket = new(
-            txnState: txnState,
-            databaseName: dbname,
-            tableName: "robots",
-            values: new()
-            {
-                new Dictionary<string, ColumnValue>()
-                {
-                    { "id", new ColumnValue(ColumnType.Id, "507f1f77bcf86cd799439011") },
-                    { "name", new ColumnValue(ColumnType.String, "some name 1") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
-                }
-            }
-        );
-
-        InsertTicket ticket2 = new(
-            txnState: txnState,
-            databaseName: dbname,
-            tableName: "robots",
-            values: new()
-            {
-                new Dictionary<string, ColumnValue>()
-                {
-                    { "id", new ColumnValue(ColumnType.Id, "507f191e810c19729de860ea") },
-                    { "name", new ColumnValue(ColumnType.String, "some name 2") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 4567) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, true) },
-                }
-            }
-        );
-
-        await Task.WhenAll(new Task[]
+        
+        async Task CreateFirstRecord()
         {
-            executor.Insert(ticket),
-            executor.Insert(ticket2)
-        });
+            TransactionState txnState = await transactions.Start();
+
+            InsertTicket ticket = new(
+                txnState: txnState,
+                databaseName: dbname,
+                tableName: "robots",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id", new(ColumnType.Id, "507f1f77bcf86cd799439011") },
+                        { "name", new(ColumnType.String, "some name 1") },
+                        { "year", new(ColumnType.Integer64, 1234) },
+                        { "enabled", new(ColumnType.Bool, false) },
+                    }
+                }
+            );
+
+            await executor.Insert(ticket);
+
+            await transactions.Commit(database, txnState);
+        }
+
+        async Task CreateSecondRecord()
+        {
+            TransactionState txnState2 = await transactions.Start();
+            
+            InsertTicket ticket2 = new(
+                txnState: txnState2,
+                databaseName: dbname,
+                tableName: "robots",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id", new(ColumnType.Id, "507f191e810c19729de860ea") },
+                        { "name", new(ColumnType.String, "some name 2") },
+                        { "year", new(ColumnType.Integer64, 4567) },
+                        { "enabled", new(ColumnType.Bool, true) },
+                    }
+                }
+            );
+            
+            await executor.Insert(ticket2);
+
+            await transactions.Commit(database, txnState2);
+        }
+
+        await Task.WhenAll(CreateFirstRecord(), CreateSecondRecord());
+        
+        TransactionState txnState = await transactions.Start();
 
         QueryByIdTicket queryTicket = new(
             txnState: txnState,
@@ -610,10 +626,10 @@ internal sealed class TestRowInsertor : BaseTest
             {
                 new()
                 {
-                    { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                    { "name", new ColumnValue(ColumnType.String, "some name") },
-                    { "year", new ColumnValue(ColumnType.Integer64, 1234) },
-                    { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "name", new(ColumnType.String, "some name") },
+                    { "year", new(ColumnType.Integer64, 1234) },
+                    { "enabled", new(ColumnType.Bool, false) },
                 }
             }
         );
@@ -702,25 +718,29 @@ internal sealed class TestRowInsertor : BaseTest
                 tableName: "robots",
                 values: new()
                 {
-                    new Dictionary<string, ColumnValue>()
+                    new()
                     {
-                        { "id", new ColumnValue(ColumnType.Id, objectId) },
-                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                        { "year", new ColumnValue(ColumnType.Integer64, i * 1000) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                        { "id", new(ColumnType.Id, objectId) },
+                        { "name", new(ColumnType.String, "some name " + i) },
+                        { "year", new(ColumnType.Integer64, i * 1000) },
+                        { "enabled", new(ColumnType.Bool, false) },
                     }
                 }
             );
 
             await executor.Insert(insertTicket);
         }
+        
+        await transactions.Commit(database, txnState);
+        
+        TransactionState txnState2 = await transactions.Start();
 
         i = 0;
 
         foreach (string objectId in objectIds)
         {
             QueryByIdTicket queryTicket = new(
-                txnState: txnState,
+                txnState: txnState2,
                 databaseName: dbname,
                 tableName: "robots",
                 id: objectId
@@ -761,10 +781,10 @@ internal sealed class TestRowInsertor : BaseTest
                 {
                     new()
                     {
-                        { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                        { "name", new ColumnValue(ColumnType.String, "some name " + i) },
-                        { "year", new ColumnValue(ColumnType.Integer64, i * 1000) },
-                        { "enabled", new ColumnValue(ColumnType.Bool, false) },
+                        { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "name", new(ColumnType.String, "some name " + i) },
+                        { "year", new(ColumnType.Integer64, i * 1000) },
+                        { "enabled", new(ColumnType.Bool, false) },
                     }
                 }
             );

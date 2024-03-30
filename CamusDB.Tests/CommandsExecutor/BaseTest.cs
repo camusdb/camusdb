@@ -6,11 +6,11 @@ namespace CamusDB.Tests.CommandsExecutor;
 
 public abstract class BaseTest
 {
-	protected readonly ILoggerFactory loggerFactory;
+    private readonly ILoggerFactory loggerFactory;
 
     protected readonly ILogger<ICamusDB> logger;
 
-    public BaseTest()
+    protected BaseTest()
     {
         loggerFactory = LoggerFactory.Create(builder =>
         {
