@@ -19,6 +19,14 @@ namespace CamusDB.Core.Storage;
 /// </summary>
 public sealed class StorageManager : IDisposable
 {
+    private const string selectQuery = "SELECT value FROM storage WHERE key = @key";
+    
+    private const string insertQuery = "INSERT INTO storage (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value=excluded.value";
+    
+    private const string deleteQuery = "DELETE FROM storage WHERE key = @key";
+    
+    private readonly object _lock = new();
+    
     private readonly string name;
     
     private SqliteConnection? connection;
@@ -32,32 +40,37 @@ public sealed class StorageManager : IDisposable
     {
         if (connection is not null)
             return;
-        
-        string path = Path.Combine(CamusConfig.DataDirectory, name);
-        if (!Directory.Exists(path))
-            Directory.CreateDirectory(path);
 
-        string connectionString = $"Data Source={path}/database.db";
-        connection = new(connectionString);
-        
-        //Console.WriteLine(connectionString);
-        
-        connection.Open();
-        
-        const string createTableQuery = "CREATE TABLE IF NOT EXISTS storage (id INTEGER PRIMARY KEY, key VARCHAR(32), value TEXT);";
-        using SqliteCommand command1 = new(createTableQuery, connection);
-        command1.ExecuteNonQuery();
-        
-        const string createIndexQuery = "CREATE UNIQUE INDEX IF NOT EXISTS idx_storage_key ON storage(key);";
-        using SqliteCommand command2 = new(createIndexQuery, connection);
-        command2.ExecuteNonQuery();
+        lock (_lock)
+        {
+            if (connection is not null)
+                return;
+            
+            string path = Path.Combine(CamusConfig.DataDirectory, name);
+            if (!Directory.Exists(path))
+                Directory.CreateDirectory(path);
+
+            string connectionString = $"Data Source={path}/database.db";
+            connection = new(connectionString);
+
+            //Console.WriteLine(connectionString);
+
+            connection.Open();
+
+            const string createTableQuery = "CREATE TABLE IF NOT EXISTS storage (id INTEGER PRIMARY KEY, key VARCHAR(32), value TEXT);";
+            using SqliteCommand command1 = new(createTableQuery, connection);
+            command1.ExecuteNonQuery();
+
+            const string createIndexQuery = "CREATE UNIQUE INDEX IF NOT EXISTS idx_storage_key ON storage(key);";
+            using SqliteCommand command2 = new(createIndexQuery, connection);
+            command2.ExecuteNonQuery();
+        }
     }
 
     public void Put(string key, byte[] value)
     {
         TryOpenDatabase();
         
-        const string insertQuery = "INSERT INTO storage (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value=excluded.value";
         using SqliteCommand command = new(insertQuery, connection);
         
         command.Parameters.AddWithValue("@key", key);
@@ -70,7 +83,6 @@ public sealed class StorageManager : IDisposable
     {
         TryOpenDatabase();
         
-        const string selectQuery = "SELECT value FROM storage WHERE key = @key";
         using SqliteCommand command = new(selectQuery, connection);
         
         command.Parameters.AddWithValue("@key", key);
@@ -89,7 +101,6 @@ public sealed class StorageManager : IDisposable
     {
         TryOpenDatabase();
         
-        const string selectQuery = "SELECT value FROM storage WHERE key = @key";
         using SqliteCommand command = new(selectQuery, connection);
         
         command.Parameters.AddWithValue("@key", offset.ToString());
@@ -108,7 +119,6 @@ public sealed class StorageManager : IDisposable
     {
         TryOpenDatabase();
         
-        const string insertQuery = "INSERT INTO storage (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value=excluded.value";
         using SqliteCommand command = new(insertQuery, connection);
         
         command.Parameters.AddWithValue("@key", offset.ToString());
@@ -123,11 +133,9 @@ public sealed class StorageManager : IDisposable
         
         using SqliteTransaction transaction = connection!.BeginTransaction();
         
-        const string insertQuery = "INSERT INTO storage (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value=excluded.value";
         using SqliteCommand insertCommand =  new(insertQuery, connection);
         insertCommand.Transaction = transaction;
         
-        const string deleteQuery = "DELETE FROM storage WHERE key = @key";
         using SqliteCommand deleteCommand =  new(deleteQuery, connection);
         deleteCommand.Transaction = transaction;
 
@@ -155,12 +163,17 @@ public sealed class StorageManager : IDisposable
 
     internal void Delete(ObjectIdValue offset)
     {
-        //dbHandler.Remove(offset.ToBytes());
+        using SqliteCommand deleteCommand =  new(deleteQuery, connection);
+        deleteCommand.Parameters.AddWithValue("@key", offset.ToString());
+        deleteCommand.ExecuteNonQuery();
     }
 
     public void Dispose()
     {
-        connection?.Dispose();
-        connection = null;
+        lock (_lock)
+        {
+            connection?.Dispose();
+            connection = null;
+        }
     }
 }
