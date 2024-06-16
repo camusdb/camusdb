@@ -17,12 +17,7 @@ namespace CamusDB.Tests.Indexes;
 
 internal sealed class TestBTree
 {
-    private readonly HybridLogicalClock hlc;
-
-    public TestBTree()
-    {
-        hlc = new();
-    }
+    private readonly HybridLogicalClock hlc = new();
 
     [Test]
     public void TestEmpty()
@@ -263,11 +258,9 @@ internal sealed class TestBTree
     {
         HLCTimestamp txnid = await hlc.SendOrLocalEvent();
 
-        BTreeMutationDeltas<int, int> deltas;
-
         BTree<int, int> tree = new(new(), 8, BTreeDirection.Ascending);
 
-        deltas = await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
+        BTreeMutationDeltas<int, int> deltas = await tree.Put(txnid, BTreeCommitState.Committed, 4, 100);
         Assert.AreEqual(1, deltas.Nodes.Count);        
 
         deltas = await tree.Put(txnid, BTreeCommitState.Committed, 5, 100);

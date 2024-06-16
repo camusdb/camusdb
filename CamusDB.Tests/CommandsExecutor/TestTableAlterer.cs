@@ -68,6 +68,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         await executor.CreateTable(createTicket);
+        
+        await transactions.Commit(database, txnState);
 
         return (dbname, database, executor, transactions, catalogs);
     }
@@ -104,6 +106,8 @@ internal sealed class TestTableAlterer : BaseTest
 
             objectsId.Add(objectId);
         }
+        
+        await transactions.Commit(database, txnState);
 
         return (dbname, database, executor, transactions, catalogs, objectsId);
     }
@@ -140,6 +144,8 @@ internal sealed class TestTableAlterer : BaseTest
 
             objectsId.Add(objectId);
         }
+        
+        await transactions.Commit(database, txnState);
 
         return (dbname, database, executor, transactions, catalogs, objectsId);
     }
@@ -171,6 +177,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         await executor.CreateTable(ticket);
+        
+        await transactions.Commit(database, txnState);
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -190,6 +198,8 @@ internal sealed class TestTableAlterer : BaseTest
 
         Assert.AreEqual("enabled", tableSchema.Columns![3].Name);
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
+        
+        txnState = await transactions.Start();
 
         AlterTableTicket alterTableTicket = new(
             txnState: txnState,
@@ -200,6 +210,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         await executor.AlterTable(alterTableTicket);
+        
+        await transactions.Commit(database, txnState);
 
         tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -223,8 +235,6 @@ internal sealed class TestTableAlterer : BaseTest
     public async Task TestCreateTableFillAndDropColumn()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs, _) = await SetupBasicTable();
-        
-        TransactionState txnState = await transactions.Start();
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -244,6 +254,8 @@ internal sealed class TestTableAlterer : BaseTest
 
         Assert.AreEqual("enabled", tableSchema.Columns![3].Name);
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterTableTicket alterTableTicket = new(
             txnState: txnState,
@@ -254,6 +266,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         await executor.AlterTable(alterTableTicket);
+        
+        await transactions.Commit(database, txnState);
 
         tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -261,6 +275,8 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.AreEqual(1, tableSchema.Version);
 
         Assert.AreEqual(3, tableSchema.Columns!.Count);
+        
+        txnState = await transactions.Start();
 
         QueryTicket queryTicket = new(
            txnState: txnState,
@@ -316,6 +332,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         await executor.CreateTable(ticket);
+        
+        await transactions.Commit(database, txnState);
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -335,6 +353,8 @@ internal sealed class TestTableAlterer : BaseTest
 
         Assert.AreEqual("enabled", tableSchema.Columns![3].Name);
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
+        
+        txnState = await transactions.Start();
 
         AlterTableTicket alterTableTicket = new(
             txnState: txnState,
@@ -375,6 +395,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         await executor.CreateTable(ticket);
+        
+        await transactions.Commit(database, txnState);
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -394,6 +416,8 @@ internal sealed class TestTableAlterer : BaseTest
 
         Assert.AreEqual("enabled", tableSchema.Columns![3].Name);
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
+        
+        txnState = await transactions.Start();
 
         AlterTableTicket alterTableTicket = new(
             txnState: txnState,
@@ -404,6 +428,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         await executor.AlterTable(alterTableTicket);
+        
+        await transactions.Commit(database, txnState);
 
         tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -420,9 +446,7 @@ internal sealed class TestTableAlterer : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableFillAndAddColumn()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
-        
-        TransactionState txnState = await transactions.Start();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs, _) = await SetupBasicTable();
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -442,6 +466,8 @@ internal sealed class TestTableAlterer : BaseTest
 
         Assert.AreEqual("enabled", tableSchema.Columns![3].Name);
         Assert.AreEqual(ColumnType.Bool, tableSchema.Columns![3].Type);
+        
+        TransactionState txnState = await transactions.Start();
 
         AlterTableTicket alterTableTicket = new(
             txnState: txnState,
@@ -452,6 +478,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         await executor.AlterTable(alterTableTicket);
+        
+        await transactions.Commit(database, txnState);
 
         tableSchema = catalogs.GetTableSchema(database, "robots");
 
@@ -462,6 +490,8 @@ internal sealed class TestTableAlterer : BaseTest
 
         Assert.AreEqual("type", tableSchema.Columns![4].Name);
         Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![4].Type);
+        
+        txnState = await transactions.Start();
 
         QueryTicket queryTicket = new(
             txnState: txnState,
@@ -604,6 +634,10 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         Assert.True(await executor.AlterIndex(alterIndexTicket));
+        
+        await transactions.Commit(database, txnState);
+        
+        txnState = await transactions.Start();
 
         alterIndexTicket = new(
             txnState: txnState,
@@ -735,7 +769,7 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () => await executor.AlterIndex(alterIndexTicket));
-        Assert.True(exception!.Message.StartsWith("Duplicate entry for key \"name_idx\""));
+        Assert.True(exception!.Message.StartsWith("Duplicate entry for key 'name_idx'"));
     }
 
     [Test]
@@ -756,6 +790,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         Assert.True(await executor.AlterIndex(alterIndexTicket));
+        
+        txnState = await transactions.Start();
 
         OpenTableTicket openTableTicket = new(
             databaseName: dbname,
@@ -799,6 +835,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         Assert.True(await executor.AlterIndex(alterIndexTicket));
+        
+        await transactions.Commit(database, txnState);
 
         OpenTableTicket openTableTicket = new(
             databaseName: dbname,
@@ -827,6 +865,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         Assert.True(await executor.AlterIndex(alterIndexTicket));
+        
+        await transactions.Commit(database, txnState);
 
         OpenTableTicket openTableTicket = new(
             databaseName: dbname,
@@ -835,6 +875,8 @@ internal sealed class TestTableAlterer : BaseTest
 
         TableDescriptor table = await executor.OpenTable(openTableTicket);
         Assert.False(table.Indexes.ContainsKey("~pk"));
+        
+        txnState = await transactions.Start();
 
         alterIndexTicket = new(
             txnState: txnState,

@@ -69,11 +69,11 @@ public class TestObjectIds
     [Test]
     public void TestObjectIdToValue()
     {
-        int a = 1639931684;
-        int b = -1154155741;
-        int c = -743207513;
+        const int a = 1639931684;
+        const int b = -1154155741;
+        const int c = -743207513;
 
-        string val = "61bf5f24bb34fb23d3b38da7";
+        const string val = "61bf5f24bb34fb23d3b38da7";
 
         ObjectIdValue objectId = new(a, b, c);
         string objectIdStr = objectId.ToString();

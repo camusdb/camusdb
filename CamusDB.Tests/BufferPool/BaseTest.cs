@@ -10,7 +10,7 @@ public abstract class BaseTest
 
     protected readonly ILogger<ICamusDB> logger;
 
-    public BaseTest()
+    protected BaseTest()
     {
         loggerFactory = LoggerFactory.Create(builder =>
         {

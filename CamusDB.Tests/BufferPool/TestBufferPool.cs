@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using RocksDbSharp;
 using NUnit.Framework;
 
 using System;
@@ -33,20 +32,11 @@ public class TestBufferPool : BaseTest
         //File.Delete(Path.Combine(TableSpacePath, "tablespace000"));
     }
 
-    private RocksDb GetTempRocksDb()
-    {
-        DbOptions options = new DbOptions().SetCreateIfMissing(true);
-
-        return RocksDb.Open(options, TableSpacePath + "/" + Guid.NewGuid().ToString());
-    }
-
     [Test]
     [NonParallelizable]
     public void TestReadPage()
     {
-        using RocksDb storage = GetTempRocksDb();
-
-        StorageManager tablespaceStorage = new(storage);
+        StorageManager tablespaceStorage = new(Guid.NewGuid().ToString());
 
         BufferPoolManager bufferPool = new(tablespaceStorage, new(), logger);
 
@@ -71,9 +61,7 @@ public class TestBufferPool : BaseTest
     [NonParallelizable]
     public async Task TestWriteSinglePage()
     {
-        using RocksDb storage = GetTempRocksDb();
-
-        StorageManager tablespaceStorage = new(storage);
+        StorageManager tablespaceStorage = new(Guid.NewGuid().ToString());
 
         BufferPoolManager bufferPool = new(tablespaceStorage, new(), logger);
 
@@ -95,11 +83,12 @@ public class TestBufferPool : BaseTest
     [NonParallelizable]
     public async Task TestWriteDataFlushed()
     {
-        using RocksDb storage = GetTempRocksDb();
+        string name = Guid.NewGuid().ToString();
+        
+        using StorageManager tablespaceStorage = new(name);
 
         byte[] data = Encoding.Unicode.GetBytes("some data");
-
-        StorageManager tablespaceStorage = new(storage);
+        
         //await tablespaceStorage.Initialize();
 
         BufferPoolManager bufferPool = new(tablespaceStorage, new(), logger);
@@ -108,7 +97,7 @@ public class TestBufferPool : BaseTest
 
         await bufferPool.WriteDataToPage(offset, 0, data);                
 
-        StorageManager tablespaceStorage2 = new(storage);
+        StorageManager tablespaceStorage2 = new(name);
         //await tablespaceStorage2.Initialize();
 
         BufferPoolManager? bufferPool2 = new(tablespaceStorage2, new(), logger);
@@ -123,9 +112,7 @@ public class TestBufferPool : BaseTest
     [NonParallelizable]
     public async Task TestWriteAndReadSinglePage()
     {
-        using RocksDb storage = GetTempRocksDb();
-
-        StorageManager tablespaceStorage = new(storage);
+        using StorageManager tablespaceStorage = new(Guid.NewGuid().ToString());
         //await tablespaceStorage.Initialize();
 
         BufferPoolManager bufferPool = new(tablespaceStorage, new(), logger);
@@ -146,9 +133,7 @@ public class TestBufferPool : BaseTest
     [NonParallelizable]
     public async Task TestWriteAndReadDataFromPage()
     {
-        using RocksDb storage = GetTempRocksDb();
-
-        StorageManager tablespaceStorage = new(storage);
+        using StorageManager tablespaceStorage = new(Guid.NewGuid().ToString());
 
         BufferPoolManager bufferPool = new(tablespaceStorage, new(), logger);
 
@@ -168,9 +153,7 @@ public class TestBufferPool : BaseTest
     [NonParallelizable]
     public async Task TestWriteLargeData()
     {
-        using RocksDb storage = GetTempRocksDb();
-
-        StorageManager tablespaceStorage = new(storage);
+        using StorageManager tablespaceStorage = new(Guid.NewGuid().ToString());
 
         BufferPoolManager bufferPool = new(tablespaceStorage, new(), logger);
 
@@ -191,9 +174,7 @@ public class TestBufferPool : BaseTest
     [NonParallelizable]
     public async Task TestMultiplePageLargeData()
     {
-        using RocksDb storage = GetTempRocksDb();
-
-        StorageManager tablespaceStorage = new(storage);
+        using StorageManager tablespaceStorage = new(Guid.NewGuid().ToString());
 
         BufferPoolManager bufferPool = new(tablespaceStorage, new(), logger);
 

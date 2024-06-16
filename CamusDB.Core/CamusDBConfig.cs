@@ -78,8 +78,10 @@ public static class CamusDBConfig
     #endregion   
 
     #region keys
-    public readonly static byte[] SchemaKey = Encoding.Unicode.GetBytes("schema");
 
-    public readonly static byte[] SystemKey = Encoding.Unicode.GetBytes("system");    
+    public const string SchemaKey = "schema";
+
+    public const string SystemKey = "system";
+
     #endregion
 }

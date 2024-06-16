@@ -313,7 +313,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
             i++;
         }
 
-        Assert.AreEqual(50, i);*/
+        Assert.AreEqual(50, i);
     }
 
     private static async Task InsertRow(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, ConcurrentBag<string> objectIds, string[] userIds, int i)

@@ -24,7 +24,6 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Transactions.Models;
-using System.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
 

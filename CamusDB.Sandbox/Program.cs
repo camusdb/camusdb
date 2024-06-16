@@ -1,6 +1,6 @@
 ﻿// See https://aka.ms/new-console-template for more information
 
-using CamusDB.Core;
+/*using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
@@ -138,4 +138,84 @@ async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor
     await transactions.Commit(database, txnState);
 
     return (dbname, database, executor, transactions);
+}*/
+
+using System.Diagnostics;
+using FASTER.core;
+
+using var settings = new FasterKVSettings<string, long>("/tmp/xdb") { TryRecoverLatest = true };
+using var store = new FasterKV<string, long>(settings);
+
+Console.WriteLine($"Recovered store to version {store.RecoveredVersion}");
+
+var x = new SimpleFunctions<string, long>((a, b) => a + b);
+
+using var session = store.NewSession(x);
+
+/*long key = 1, value = 1, input = 10, output = 0;
+
+session.Upsert(ref key, ref value);
+
+session.Read(ref key, ref output);
+Debug.Assert(output == value);
+
+session.RMW(ref key, ref input);
+session.RMW(ref key, ref input, ref output);
+
+Debug.Assert(output == value + 20);*/
+
+long value = System.Random.Shared.NextInt64();
+
+string key = "1000";
+//long output = 0;
+
+//session.Upsert(ref key, ref value);
+
+//(Status status, long output) status = (await session.ReadAsync(ref key, ref output)).Complete();
+//Console.WriteLine("{0} {1}", status.output, output);
+
+var status = (await session.ReadAsync(key)).Complete();
+
+//if (status.Status.NotFound)
+
+Console.WriteLine("{0} {1} {2}", status.status, status.output, value);
+
+//Debug.Assert(status.output == value);
+
+/*if (status == )
+{
+    Console.WriteLine("(0) Success! {0}", output);
+}*/
+
+//await session.WaitForCommitAsync();
+
+store.Log.FlushAndEvict(true);
+
+/*session.Read(ref key, ref output);
+
+status = session.Read(ref key, ref output);
+if (status.Found)
+{
+    Console.WriteLine("(1) Success! {0}", output);
 }
+else
+{
+    if (status.IsPending)
+    {
+        session.CompletePendingWithOutputs(out var iter, true);
+        while (iter.Next())
+        {
+            if (iter.Current.Status.Found && iter.Current.Output == value)
+            {
+                Console.WriteLine("(2) Success! {0} {1}", value, iter.Current.Output);
+                break;
+            }
+            else
+                Console.WriteLine("(2) Error!");
+        }
+        iter.Dispose();
+    }
+    else
+        Console.WriteLine("(2) Error!");
+}
+*/

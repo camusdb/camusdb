@@ -6,9 +6,9 @@
  * file that was distributed with this source code.
  */
 
-using RocksDbSharp;
-using CamusDB.Core.BufferPool.Models;
+using Microsoft.Data.Sqlite;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.Core.BufferPool.Models;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.Storage;
@@ -17,90 +17,150 @@ namespace CamusDB.Core.Storage;
 /// The StorageManager is an abstraction that allows communication with the active storage engine.
 /// At this moment, only RocksDb is available, but other storage engines could be implemented in the future.
 /// </summary>
-public sealed class StorageManager
+public sealed class StorageManager : IDisposable
 {
-    private static readonly object _lock = new();
-
-    private readonly RocksDb dbHandler;
+    private readonly string name;
+    
+    private SqliteConnection? connection;
 
     public StorageManager(string name)
     {
+        this.name = name;
+    }
+
+    private void TryOpenDatabase()
+    {
+        if (connection is not null)
+            return;
+        
         string path = Path.Combine(CamusConfig.DataDirectory, name);
+        if (!Directory.Exists(path))
+            Directory.CreateDirectory(path);
 
-        DbOptions options = new DbOptions()
-                                .SetCreateIfMissing(true)
-                                .SetWalDir(path) // using WAL
-                                .SetWalRecoveryMode(Recovery.AbsoluteConsistency) // setting recovery mode to Absolute Consistency
-                                .SetAllowConcurrentMemtableWrite(true);
-
-        this.dbHandler = RocksDb.Open(options, path);
+        string connectionString = $"Data Source={path}/database.db";
+        connection = new(connectionString);
+        
+        //Console.WriteLine(connectionString);
+        
+        connection.Open();
+        
+        const string createTableQuery = "CREATE TABLE IF NOT EXISTS storage (id INTEGER PRIMARY KEY, key VARCHAR(32), value TEXT);";
+        using SqliteCommand command1 = new(createTableQuery, connection);
+        command1.ExecuteNonQuery();
+        
+        const string createIndexQuery = "CREATE UNIQUE INDEX IF NOT EXISTS idx_storage_key ON storage(key);";
+        using SqliteCommand command2 = new(createIndexQuery, connection);
+        command2.ExecuteNonQuery();
     }
 
-    public StorageManager(RocksDb dbHandler)
+    public void Put(string key, byte[] value)
     {
-        this.dbHandler = dbHandler;
+        TryOpenDatabase();
+        
+        const string insertQuery = "INSERT INTO storage (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value=excluded.value";
+        using SqliteCommand command = new(insertQuery, connection);
+        
+        command.Parameters.AddWithValue("@key", key);
+        command.Parameters.AddWithValue("@value", Convert.ToBase64String(value));
+        
+        command.ExecuteNonQuery();
     }
 
-    public void Put(byte[] key, byte[] value)
+    public byte[]? Get(string key)
     {
-        dbHandler.Put(key, value);
-    }
+        TryOpenDatabase();
+        
+        const string selectQuery = "SELECT value FROM storage WHERE key = @key";
+        using SqliteCommand command = new(selectQuery, connection);
+        
+        command.Parameters.AddWithValue("@key", key);
 
-    public byte[]? Get(byte[] key)
-    {
-        return dbHandler.Get(key);
+        using SqliteDataReader reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            string retrievedData = (string)reader["value"];
+            return Convert.FromBase64String(retrievedData);
+        }
+
+        return null;
     }
 
     public byte[] Read(ObjectIdValue offset)
     {
-        //(int, MemoryMappedViewAccessor) tablespace = await GetTablespace(offset);
-        //tablespace.Item2.ReadArray<byte>(offset - tablespace.Item1, buffer, 0, length);
+        TryOpenDatabase();
+        
+        const string selectQuery = "SELECT value FROM storage WHERE key = @key";
+        using SqliteCommand command = new(selectQuery, connection);
+        
+        command.Parameters.AddWithValue("@key", offset.ToString());
 
-        byte[]? buffer = dbHandler.Get(offset.ToBytes());
-        if (buffer is not null)
-            return buffer;
+        using SqliteDataReader reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            string retrievedData = (string)reader["value"];
+            return Convert.FromBase64String(retrievedData);
+        }
 
         return new byte[CamusConfig.PageSize];
     }
 
     public void Write(ObjectIdValue offset, byte[] buffer)
     {
-        //(int, MemoryMappedViewAccessor) tablespace = await GetTablespace(offset);
-        //tablespace.Item2.WriteArray<byte>(offset - tablespace.Item1, buffer, 0, length);
-
-        dbHandler.Put(offset.ToBytes(), buffer);
+        TryOpenDatabase();
+        
+        const string insertQuery = "INSERT INTO storage (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value=excluded.value";
+        using SqliteCommand command = new(insertQuery, connection);
+        
+        command.Parameters.AddWithValue("@key", offset.ToString());
+        command.Parameters.AddWithValue("@value", Convert.ToBase64String(buffer));
+        
+        command.ExecuteNonQuery();
     }
 
     internal void WriteBatch(List<BufferPageOperation> pageOperations)
     {
-        using WriteBatch batch = new();
-
-        //File.AppendAllText("c:\\tmp\\data.txt", $"{pageOperations.Count}\n");
-        //System.IO.File.AppendAllText("/tmp/a.txt", $"{pageOperations.Count}\n");
+        TryOpenDatabase();
+        
+        using SqliteTransaction transaction = connection!.BeginTransaction();
+        
+        const string insertQuery = "INSERT INTO storage (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value=excluded.value";
+        using SqliteCommand insertCommand =  new(insertQuery, connection);
+        insertCommand.Transaction = transaction;
+        
+        const string deleteQuery = "DELETE FROM storage WHERE key = @key";
+        using SqliteCommand deleteCommand =  new(deleteQuery, connection);
+        deleteCommand.Transaction = transaction;
 
         foreach (BufferPageOperation pageOperation in pageOperations)
         {
-            byte[] offset = pageOperation.Offset.ToBytes();
+            ObjectIdValue offset = pageOperation.Offset;
 
             if (pageOperation.Operation == BufferPageOperationType.InsertOrUpdate)
-                batch.Put(offset, pageOperation.Buffer);
+            {
+                insertCommand.Parameters.Clear();
+                insertCommand.Parameters.AddWithValue("@key", offset.ToString());
+                insertCommand.Parameters.AddWithValue("@value", Convert.ToBase64String(pageOperation.Buffer));
+                insertCommand.ExecuteNonQuery();
+            }
             else
-                batch.Delete(offset);
-
-            //File.AppendAllText("c:\\tmp\\data.txt", $"{pageOperation.Operation}, {pageOperation.Offset}, {pageOperation.Buffer.Length}\n");
-            //System.IO.File.AppendAllText("/tmp/a.txt", $"{pageOperation.Operation}, {pageOperation.Offset}, {pageOperation.Buffer.Length}\n");
+            {
+                deleteCommand.Parameters.Clear();
+                deleteCommand.Parameters.AddWithValue("@key", offset.ToString());
+                deleteCommand.ExecuteNonQuery();
+            }
         }
-
-        dbHandler.Write(batch);
+        
+        transaction.Commit();
     }
 
     internal void Delete(ObjectIdValue offset)
     {
-        dbHandler.Remove(offset.ToBytes());
+        //dbHandler.Remove(offset.ToBytes());
     }
 
-    internal void Dispose()
+    public void Dispose()
     {
-        dbHandler.Dispose();
+        connection?.Dispose();
+        connection = null;
     }
 }

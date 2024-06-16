@@ -65,6 +65,8 @@ internal sealed class TestTableDropper : BaseTest
         );
 
         await executor.CreateTable(createTicket);
+        
+        await transactions.Commit(database, txnState);
 
         List<string> objectsId = new(25);
 

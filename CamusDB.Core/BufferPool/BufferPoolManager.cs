@@ -73,8 +73,10 @@ public sealed class BufferPoolManager
         get
         {
             int sum = 0;
-            for (int i = 0; i < buckets.Length; i++)
-                sum += buckets[i].NumberPages;
+            
+            foreach (BufferPoolBucket t in buckets)
+                sum += t.NumberPages;
+
             return sum;
         }
     }
@@ -91,12 +93,12 @@ public sealed class BufferPoolManager
         this.logger = logger;
 
         for (int i = 0; i < buckets.Length; i++)
-            buckets[i] = new BufferPoolBucket();
+            buckets[i] = new();
     }
 
     private BufferPage LoadPage(ObjectIdValue offset)
     {
-        return new BufferPage(offset, new Lazy<byte[]>(() => ReadFromDisk(offset)), logicalClock.Increment());
+        return new(offset, new(() => ReadFromDisk(offset)), logicalClock.Increment());
     }
 
     private byte[] ReadFromDisk(ObjectIdValue offset)
@@ -116,7 +118,7 @@ public sealed class BufferPoolManager
         uint hashCode = (uint)offset.GetHashCode();
         BufferPoolBucket poolBucket = buckets[hashCode % CamusConfig.NumberBuckets];
 
-        Lazy<BufferPage> lazyBufferPage = poolBucket.Pages.GetOrAdd(offset, (_) => new Lazy<BufferPage>(() => LoadPage(offset)));
+        Lazy<BufferPage> lazyBufferPage = poolBucket.Pages.GetOrAdd(offset, (_) => new(() => LoadPage(offset)));
 
         BufferPage bufferPage = lazyBufferPage.Value;
         bufferPage.Accesses++;
@@ -131,7 +133,7 @@ public sealed class BufferPoolManager
     /// </summary>
     /// <param name="offset"></param>
     /// <returns></returns>
-    public async Task<(int, List<BufferPage>, List<IDisposable>)> GetPagesToRead(ObjectIdValue offset)
+    private async Task<(int, List<BufferPage>, List<IDisposable>)> GetPagesToRead(ObjectIdValue offset)
     {
         int length = 0;
         List<BufferPage> pages = new();
@@ -165,7 +167,7 @@ public sealed class BufferPoolManager
     /// </summary>
     /// <param name="offset"></param>
     /// <returns></returns>
-    public async Task<(int, List<BufferPage>, List<IDisposable>)> GetPagesToWrite(ObjectIdValue offset)
+    private async Task<(int, List<BufferPage>, List<IDisposable>)> GetPagesToWrite(ObjectIdValue offset)
     {
         int length = 0;
         List<BufferPage> pages = new();
@@ -216,15 +218,13 @@ public sealed class BufferPoolManager
     /// </summary>
     /// <param name="offset"></param>
     /// <returns></returns>
-    public byte[] GetDataFromPageDirect(int length, List<BufferPage> pages)
+    private static byte[] GetDataFromPageDirect(int length, List<BufferPage> pages)
     {
         if (length == 0)
             return Array.Empty<byte>();
 
-        ObjectIdValue offset;
         byte[] data = new byte[length];
 
-        uint checksum;
         int bufferOffset = 0;
 
         foreach (BufferPage memoryPage in pages)
@@ -241,10 +241,10 @@ public sealed class BufferPoolManager
                 );
 
             pointer = BConfig.NextPageOffset;
-            offset = Serializator.ReadObjectId(pageBuffer, ref pointer);
+            Serializator.ReadObjectId(pageBuffer, ref pointer);
 
             pointer = BConfig.ChecksumOffset;
-            checksum = Serializator.ReadUInt32(pageBuffer, ref pointer);
+            Serializator.ReadUInt32(pageBuffer, ref pointer);
 
             /*if (checksum > 0) // check checksum only if available
             {
@@ -285,7 +285,7 @@ public sealed class BufferPoolManager
     /// <param name="nextPage"></param>
     /// <param name="length"></param>
     /// <returns></returns>
-    public static int WritePageHeader(byte[] pageBuffer, uint checksum, uint lastSequence, ObjectIdValue nextPage, int length)
+    private static int WritePageHeader(byte[] pageBuffer, uint checksum, uint lastSequence, ObjectIdValue nextPage, int length)
     {
         int pointer = 0;
         Serializator.WriteInt16(pageBuffer, BConfig.PageLayoutVersion, ref pointer);  // layout version (2 byte integer)        
@@ -367,7 +367,7 @@ public sealed class BufferPoolManager
 
             // Replace buffer, this helps to get readers consistent copies
             page.Dirty = true;
-            page.Buffer = new Lazy<byte[]>(pageBuffer);
+            page.Buffer = new(pageBuffer);
 
             /*Console.WriteLine(
                 "Wrote {0} bytes to page {1}/{2} from buffer staring at {3}, remaining {4}, next page {5}",
@@ -498,11 +498,12 @@ public sealed class BufferPoolManager
 
         try
         {
+            byte[] p = Array.Empty<byte>();
             List<BufferPageOperation> pagesToDelete = new(pagesChain.Count);
 
             foreach (BufferPage memoryPage in pagesChain)
             {
-                pagesToDelete.Add(new BufferPageOperation(BufferPageOperationType.Delete, memoryPage.Offset, 0, Array.Empty<byte>()));
+                pagesToDelete.Add(new(BufferPageOperationType.Delete, memoryPage.Offset, 0, p));
 
                 uint hashCode = (uint)memoryPage.Offset.GetHashCode();
                 BufferPoolBucket poolBucket = buckets[hashCode % CamusConfig.NumberBuckets];
@@ -528,7 +529,7 @@ public sealed class BufferPoolManager
 
     public void Clear()
     {
-        for (int i = 0; i < buckets.Length; i++)
-            buckets[i].Clear();
+        foreach (BufferPoolBucket t in buckets)
+            t.Clear();
     }
 }
