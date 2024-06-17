@@ -53,17 +53,31 @@ public sealed class StorageManager : IDisposable
             string connectionString = $"Data Source={path}/database.db";
             connection = new(connectionString);
 
-            //Console.WriteLine(connectionString);
-
             connection.Open();
 
-            const string createTableQuery = "CREATE TABLE IF NOT EXISTS storage (id INTEGER PRIMARY KEY, key VARCHAR(32), value TEXT);";
+            const string createTableQuery = "CREATE TABLE IF NOT EXISTS storage (key TEXT COLLATE BINARY PRIMARY KEY, value TEXT COLLATE BINARY);";
             using SqliteCommand command1 = new(createTableQuery, connection);
             command1.ExecuteNonQuery();
-
-            const string createIndexQuery = "CREATE UNIQUE INDEX IF NOT EXISTS idx_storage_key ON storage(key);";
-            using SqliteCommand command2 = new(createIndexQuery, connection);
+            
+            const string enableWalQuery = "PRAGMA journal_mode=WAL;";
+            using SqliteCommand command2 = new(enableWalQuery, connection);
             command2.ExecuteNonQuery();
+            
+            const string enableSynchronousQuery = "PRAGMA synchronous=NORMAL;";
+            using SqliteCommand command3 = new(enableSynchronousQuery, connection);
+            command3.ExecuteNonQuery();
+            
+            const string tempStoreQuery = "PRAGMA temp_store=MEMORY;";
+            using SqliteCommand command4 = new(tempStoreQuery, connection);
+            command4.ExecuteNonQuery();
+            
+            const string checpointQuery = "PRAGMA wal_checkpoint(FULL);";
+            using SqliteCommand command6 = new(checpointQuery, connection);
+            command6.ExecuteNonQuery();
+            
+            //const string vacuumQuery = "VACUUM;";
+            //using SqliteCommand command5 = new(vacuumQuery, connection);
+            //command5.ExecuteNonQuery();
         }
     }
 
@@ -115,7 +129,7 @@ public sealed class StorageManager : IDisposable
         return new byte[CamusConfig.PageSize];
     }
 
-    public void Write(ObjectIdValue offset, byte[] buffer)
+    public void Write(ObjectIdValue offset, ReadOnlySpan<byte> buffer)
     {
         TryOpenDatabase();
         
@@ -147,7 +161,7 @@ public sealed class StorageManager : IDisposable
             {
                 insertCommand.Parameters.Clear();
                 insertCommand.Parameters.AddWithValue("@key", offset.ToString());
-                insertCommand.Parameters.AddWithValue("@value", Convert.ToBase64String(pageOperation.Buffer));
+                insertCommand.Parameters.AddWithValue("@value", Convert.ToBase64String(pageOperation.Buffer.AsSpan()));
                 insertCommand.ExecuteNonQuery();
             }
             else

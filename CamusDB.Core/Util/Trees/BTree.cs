@@ -34,9 +34,9 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
     public BTreeNode<TKey, TValue>? root;  // root of the B-tree
 
-    public int maxNodeCapacity;
+    public readonly int maxNodeCapacity;
 
-    public BTreeDirection direction;
+    public readonly BTreeDirection direction;
 
     private readonly int maxNodeCapacityHalf;
 
@@ -113,7 +113,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
     {
         if (root is null)
         {
-            //Console.WriteLine("root is null");
+            Console.WriteLine("root is null");
             return default;
         }
 
@@ -372,7 +372,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
         if (root is null) // create root
         {
-            root = new BTreeNode<TKey, TValue>(0, maxNodeCapacity)
+            root = new(0, maxNodeCapacity)
             {
                 CreatedAt = txnid
             };
@@ -410,8 +410,8 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
         loaded++;
 
-        newRoot.children[0] = new BTreeEntry<TKey, TValue>(root.children[0].Key, reader, root, maxNodeCapacity);
-        newRoot.children[1] = new BTreeEntry<TKey, TValue>(split.children[0].Key, reader, split, maxNodeCapacity);
+        newRoot.children[0] = new(root.children[0].Key, reader, root, maxNodeCapacity);
+        newRoot.children[1] = new(split.children[0].Key, reader, split, maxNodeCapacity);
 
         root = newRoot;
 
@@ -440,6 +440,8 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
             throw new ArgumentException("node cannot be null");
 
         //using IDisposable disposable = await node.WriterLockAsync();
+        
+        //Console.WriteLine("Val={0}", value);
 
         node.NumberAccesses++;
         node.LastAccess = txnid;
@@ -457,7 +459,7 @@ public class BTree<TKey, TValue> where TKey : IComparable<TKey> where TValue : I
 
                 if (Eq(key, childrenEntry.Key))
                 {
-                    // Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);                    
+                    //Console.WriteLine("SetV={0} {1} {2} {3}", key, txnid, commitState, value);                    
 
                     node.NumberWrites++;
 

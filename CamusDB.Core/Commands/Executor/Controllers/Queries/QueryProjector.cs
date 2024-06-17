@@ -27,24 +27,28 @@ internal sealed class QueryProjector
 
             foreach (NodeAst ast in ticket.Projection)
             {
-                if (ast.nodeType == NodeType.ExprAllFields)
+                switch (ast.nodeType)
                 {
-                    foreach (KeyValuePair<string, ColumnValue> keyValue in resultRow.Row)
-                        projected[keyValue.Key] = keyValue.Value;
+                    case NodeType.ExprAllFields:
+                    {
+                        foreach (KeyValuePair<string, ColumnValue> keyValue in resultRow.Row)
+                            projected[keyValue.Key] = keyValue.Value;
 
-                    continue;
+                        continue;
+                    }
+                    
+                    case NodeType.Identifier:
+                        projected[ast.yytext!] = EvalOrProjectExpr(ast, resultRow.Row, ticket.Parameters);
+                        continue;
+                    
+                    case NodeType.ExprAlias:
+                        projected[ast.rightAst!.yytext ?? ""] = EvalOrProjectExpr(ast.leftAst!, resultRow.Row, ticket.Parameters);
+                        break;
+                    
+                    default:
+                        projected[(i++).ToString()] = EvalOrProjectExpr(ast, resultRow.Row, ticket.Parameters);
+                        break;
                 }
-
-                if (ast.nodeType == NodeType.Identifier)
-                {
-                    projected[ast.yytext!] = EvalOrProjectExpr(ast, resultRow.Row, ticket.Parameters);
-                    continue;
-                }
-                
-                if (ast.nodeType == NodeType.ExprAlias)
-                    projected[ast.rightAst!.yytext ?? ""] = EvalOrProjectExpr(ast.leftAst!, resultRow.Row, ticket.Parameters);
-                else
-                    projected[(i++).ToString()] = EvalOrProjectExpr(ast, resultRow.Row, ticket.Parameters);                
             }
 
             yield return new(resultRow.Tuple, projected);

@@ -16,6 +16,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Util.Diagnostics;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
@@ -137,7 +138,7 @@ internal sealed class TableIndexDropper
             table: table,
             ticket: ticket,
             queryExecutor: queryExecutor,
-            indexes: new AlterIndexFluxIndexState()
+            indexes: new()
         );
 
         FluxMachine<DropIndexFluxSteps, DropIndexFluxState> machine = new(state);
@@ -151,14 +152,12 @@ internal sealed class TableIndexDropper
     /// <param name="machine"></param>
     /// <param name="state"></param>
     /// <returns></returns>
-    internal async Task<int> DropIndexInternal(FluxMachine<DropIndexFluxSteps, DropIndexFluxState> machine, DropIndexFluxState state)
+    private async Task<int> DropIndexInternal(FluxMachine<DropIndexFluxSteps, DropIndexFluxState> machine, DropIndexFluxState state)
     {
-        DatabaseDescriptor database = state.Database;
-        BufferPoolManager tablespace = state.Database.BufferPool;
         TableDescriptor table = state.Table;
         AlterIndexTicket ticket = state.Ticket;
 
-        Stopwatch timer = Stopwatch.StartNew();
+        ValueStopwatch timer = ValueStopwatch.StartNew();
 
         machine.When(DropIndexFluxSteps.LocateIndex, LocateIndex);        
         machine.When(DropIndexFluxSteps.DeleteIndexPages, DeleteIndexPages);        
@@ -169,9 +168,7 @@ internal sealed class TableIndexDropper
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
 
-        timer.Stop();
-
-        TimeSpan timeTaken = timer.Elapsed;
+        TimeSpan timeTaken = timer.GetElapsedTime();
 
         logger.LogWarning(
             "Dropped index {IndexName} from {Name} at {IndexOffset}, Time taken: {Time}",

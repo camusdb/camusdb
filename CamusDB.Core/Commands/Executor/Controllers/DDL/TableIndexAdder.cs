@@ -19,6 +19,7 @@ using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.BufferPool.Models;
+using CamusDB.Core.Util.Diagnostics;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
@@ -79,10 +80,7 @@ internal sealed class TableIndexAdder
     /// <returns></returns>
     private static ColumnValue? GetColumnValue(Dictionary<string, ColumnValue> columnValues, string name)
     {
-        if (columnValues.TryGetValue(name, out ColumnValue? columnValue))
-            return columnValue;
-
-        return null;
+        return columnValues.GetValueOrDefault(name);
     }
 
     /// <summary>
@@ -205,12 +203,14 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket = state.Ticket;
         BufferPoolManager tablespace = state.Database.BufferPool;
 
+        int rows = 0;
+
         foreach (QueryResultRow row in state.RowsToFeed)
         {
             CompositeColumnValue indexKeyValue;
             BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = state.Btree;
 
-            if (ticket.Operation == AlterIndexOperation.AddPrimaryKey || ticket.Operation == AlterIndexOperation.AddUniqueIndex)
+            if (ticket.Operation is AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddUniqueIndex)
             {
                 indexKeyValue = await ValidateAndInsertUniqueValue(tablespace, index, row, ticket, ticket.TxnState.ModifiedPages);
                 ticket.TxnState.UniqueIndexDeltas.Add((index, indexKeyValue, row.Tuple));
@@ -220,7 +220,11 @@ internal sealed class TableIndexAdder
                 indexKeyValue = await ValidateAndInsertMultiValue(tablespace, index, row, ticket, ticket.TxnState.ModifiedPages);
                 ticket.TxnState.MultiIndexDeltas.Add((index, indexKeyValue, row.Tuple));
             }
+
+            rows++;
         }
+        
+        Console.WriteLine("Added {0} rows to index", rows);
 
         return FluxAction.Continue;
     }
@@ -269,7 +273,7 @@ internal sealed class TableIndexAdder
             modifiedPages: modifiedPages
         );
 
-        await indexSaver.Save(saveUniqueIndexTicket);
+        await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
 
         return compositeUniqueKeyValue;
     }
@@ -298,7 +302,7 @@ internal sealed class TableIndexAdder
             columnValues[i++] = multiKeyValue;
         }
 
-        columnValues[i++] = new(ColumnType.Id, row.Tuple.SlotOne.ToString());
+        columnValues[i] = new(ColumnType.Id, row.Tuple.SlotOne.ToString());
 
         CompositeColumnValue compositeIndexValue = new(columnValues);
 
@@ -365,7 +369,7 @@ internal sealed class TableIndexAdder
         return FluxAction.Continue;
     }
 
-    private static string[] GetColumnIds(TableDescriptor table, ColumnIndexInfo[] columns)
+    private static string[] GetColumnIds(TableDescriptor table, ReadOnlySpan<ColumnIndexInfo> columns)
     {
         int i = 0;
         string[] columnsIds = new string[columns.Length];
@@ -397,14 +401,12 @@ internal sealed class TableIndexAdder
     /// <param name="machine"></param>
     /// <param name="state"></param>
     /// <returns></returns>
-    internal async Task<int> AlterIndexInternal(FluxMachine<AddIndexFluxSteps, AddIndexFluxState> machine, AddIndexFluxState state)
+    private async Task<int> AlterIndexInternal(FluxMachine<AddIndexFluxSteps, AddIndexFluxState> machine, AddIndexFluxState state)
     {
-        DatabaseDescriptor database = state.Database;
-        BufferPoolManager tablespace = state.Database.BufferPool;
         TableDescriptor table = state.Table;
         AlterIndexTicket ticket = state.Ticket;
 
-        Stopwatch timer = Stopwatch.StartNew();
+        ValueStopwatch timer = ValueStopwatch.StartNew();
 
         machine.When(AddIndexFluxSteps.AllocateNewIndex, AllocateNewIndex);
         machine.When(AddIndexFluxSteps.TryAdquireLocks, TryAdquireLocks);
@@ -415,9 +417,7 @@ internal sealed class TableIndexAdder
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());
 
-        timer.Stop();
-
-        TimeSpan timeTaken = timer.Elapsed;
+        TimeSpan timeTaken = timer.GetElapsedTime();
 
         logger.LogInformation(
             "Added index {IndexName} to {Name} at {IndexOffset}, Time taken: {Time}",

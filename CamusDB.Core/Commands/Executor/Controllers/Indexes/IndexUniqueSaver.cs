@@ -93,7 +93,7 @@ internal sealed class IndexUniqueSaver : IndexBaseSaver
 
         tablespace.WriteDataToPageBatch(modifiedPages, index.rootOffset, 0, treeBuffer);
 
-        //@todo update nodes concurrently
+        // @todo update nodes concurrently
         ObjectIdValue nullValue = new();
         BTreeTuple nullTuple = new(nullValue, nullValue);
         HLCTimestamp timestampZero = HLCTimestamp.Zero;

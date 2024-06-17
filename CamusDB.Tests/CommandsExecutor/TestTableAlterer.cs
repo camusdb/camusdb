@@ -582,6 +582,8 @@ internal sealed class TestTableAlterer : BaseTest
         );
 
         Assert.True(await executor.AlterIndex(alterIndexTicket));
+        
+        await transactions.Commit(database, txnState);
 
         OpenTableTicket openTableTicket = new(
             databaseName: dbname,
@@ -591,6 +593,20 @@ internal sealed class TestTableAlterer : BaseTest
         TableDescriptor table = await executor.OpenTable(openTableTicket);
         Assert.True(table.Indexes.TryGetValue("name_idx", out TableIndexSchema? index));
         Assert.AreEqual(IndexType.Multi, index!.Type);
+        
+        txnState = await transactions.Start();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT name FROM robots WHERE name = 'some name 7'",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+        Assert.IsEmpty(result);
     }
 
     [Test]
@@ -691,6 +707,23 @@ internal sealed class TestTableAlterer : BaseTest
         TableDescriptor table = await executor.OpenTable(openTableTicket);
         Assert.True(table.Indexes.TryGetValue("name_idx", out TableIndexSchema? index));
         Assert.AreEqual(IndexType.Multi, index!.Type);
+        
+        txnState = await transactions.Start();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT name FROM robots WHERE name = 'some name 7'",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+            Assert.AreEqual("some name 7", row.Row["name"].BoolValue);
     }
 
     [Test]

@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
+using CamusDB.Core.Util.Diagnostics;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Util.Trees;
 using Microsoft.Extensions.Logging;
@@ -205,7 +206,7 @@ internal sealed class RowDeleter
 
             BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;
 
-            CompositeColumnValue? uniqueKeyValue = GetColumnValue(row.Row, index.Columns);
+            CompositeColumnValue uniqueKeyValue = GetColumnValue(row.Row, index.Columns);
 
             SaveIndexTicket saveUniqueIndexTicket = new(
                 tablespace: state.Database.BufferPool,
@@ -270,7 +271,7 @@ internal sealed class RowDeleter
     /// <returns></returns>
     private async Task<int> DeleteInternal(FluxMachine<DeleteFluxSteps, DeleteFluxState> machine, DeleteFluxState state)
     {
-        Stopwatch timer = Stopwatch.StartNew();
+        ValueStopwatch timer = ValueStopwatch.StartNew();
 
         machine.When(DeleteFluxSteps.TryAdquireLocks, TryAdquireLocks);
         machine.When(DeleteFluxSteps.LocateTupleToDelete, LocateTupleToDelete);
@@ -279,9 +280,7 @@ internal sealed class RowDeleter
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
 
-        timer.Stop();
-
-        TimeSpan timeTaken = timer.Elapsed;
+        TimeSpan timeTaken = timer.GetElapsedTime();
 
         logger.LogInformation(
             "Deleted {Rows} rows, Time taken: {Time}",

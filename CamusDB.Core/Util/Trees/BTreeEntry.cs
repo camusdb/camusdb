@@ -22,7 +22,7 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey> wher
 
     private readonly ConcurrentDictionary<HLCTimestamp, BTreeMvccEntry<TValue>> mvccValues = new(); // snapshot of the values seen by each timestamp    
 
-    public TKey Key;
+    public readonly TKey Key;
 
     public ObjectIdValue NextPageOffset; // the address of the next page offset
 
@@ -41,9 +41,9 @@ public sealed class BTreeEntry<TKey, TValue> where TKey : IComparable<TKey> wher
         Reader = reader;
 
         if (next is not null)
-            Next = new AsyncLazy<BTreeNode<TKey, TValue>?>(() => Task.FromResult<BTreeNode<TKey, TValue>?>(next));
+            Next = new(() => Task.FromResult<BTreeNode<TKey, TValue>?>(next));
         else
-            Next = new AsyncLazy<BTreeNode<TKey, TValue>?>(() => LoadNode(maxNodeCapacity));
+            Next = new(() => LoadNode(maxNodeCapacity));
     }
 
     /// <summary>

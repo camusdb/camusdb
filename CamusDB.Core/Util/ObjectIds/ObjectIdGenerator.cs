@@ -82,7 +82,7 @@ public sealed class ObjectIdGenerator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int GetTimestampFromDateTime(DateTime dateTime)
+    private static int GetTimestampFromDateTime(DateTime dateTime)
     {
         return (int)((dateTime.ToUniversalTime() - epoch).TotalSeconds);
     }    
@@ -95,10 +95,10 @@ public sealed class ObjectIdGenerator
         int increment = Interlocked.Increment(ref __staticIncrement) & 0x00ffffff; // only use low order 3 bytes
 
         if ((__staticMachine & 0xff000000) != 0)
-            throw new ArgumentOutOfRangeException("machine", "The machine value must be between 0 and 16777215 (it must fit in 3 bytes).");
+            throw new ArgumentOutOfRangeException(nameof(machine), "The machine value must be between 0 and 16777215 (it must fit in 3 bytes).");
 
         if ((increment & 0xff000000) != 0)
-            throw new ArgumentOutOfRangeException("increment", "The increment value must be between 0 and 16777215 (it must fit in 3 bytes).");
+            throw new ArgumentOutOfRangeException(nameof(increment), "The increment value must be between 0 and 16777215 (it must fit in 3 bytes).");
 
         int _a = timestamp;
         int _b = (machine << 8) | (((int)pid >> 8) & 0xff);

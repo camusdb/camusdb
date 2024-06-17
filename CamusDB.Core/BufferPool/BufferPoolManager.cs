@@ -118,13 +118,18 @@ public sealed class BufferPoolManager
         uint hashCode = (uint)offset.GetHashCode();
         BufferPoolBucket poolBucket = buckets[hashCode % CamusConfig.NumberBuckets];
 
-        Lazy<BufferPage> lazyBufferPage = poolBucket.Pages.GetOrAdd(offset, (_) => new(() => LoadPage(offset)));
+        Lazy<BufferPage> lazyBufferPage = poolBucket.Pages.GetOrAdd(offset, LoadOrCreatePageLazy);
 
         BufferPage bufferPage = lazyBufferPage.Value;
         bufferPage.Accesses++;
         bufferPage.LastAccess = logicalClock.Increment();
 
         return bufferPage;
+    }
+
+    private Lazy<BufferPage> LoadOrCreatePageLazy(ObjectIdValue offset)
+    {
+        return new(() => LoadPage(offset));
     }
 
     /// <summary>
@@ -460,11 +465,11 @@ public sealed class BufferPoolManager
 
         Buffer.BlockCopy(data, startOffset, pageBuffer, pointer, length);
         //storage.Write(Config.PageSize * offset, pageBuffer);
-        pagesToWrite.Add(new BufferPageOperation(BufferPageOperationType.InsertOrUpdate, offset, 0, pageBuffer));
+        pagesToWrite.Add(new(BufferPageOperationType.InsertOrUpdate, offset, 0, pageBuffer));
 
         // Replace buffer, this helps to get readers consistent copies
         page.Dirty = true;
-        page.Buffer = new Lazy<byte[]>(pageBuffer);
+        page.Buffer = new(pageBuffer);
 
         /*Console.WriteLine(
             "Wrote {0} bytes to page {1}/{2} from buffer staring at {3}, remaining {4}, next page {5}",

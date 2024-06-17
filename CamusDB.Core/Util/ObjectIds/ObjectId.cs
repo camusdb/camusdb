@@ -13,7 +13,7 @@ namespace CamusDB.Core.Util.ObjectIds;
 public sealed class ObjectId
 {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static char ToHexChar(int value)
+    private static char ToHexChar(int value)
     {
         return (char)(value + (value < 10 ? '0' : 'a' - 10));
     }
@@ -59,19 +59,19 @@ public sealed class ObjectId
 
     private static bool TryParseHexChar(char c, out int value)
     {
-        if (c >= '0' && c <= '9')
+        if (c is >= '0' and <= '9')
         {
             value = c - '0';
             return true;
         }
 
-        if (c >= 'a' && c <= 'f')
+        if (c is >= 'a' and <= 'f')
         {
             value = 10 + (c - 'a');
             return true;
         }
 
-        if (c >= 'A' && c <= 'F')
+        if (c is >= 'A' and <= 'F')
         {
             value = 10 + (c - 'A');
             return true;
@@ -81,7 +81,7 @@ public sealed class ObjectId
         return false;
     }
 
-    public static bool TryParseHexString(string s, out byte[] bytes)
+    private static bool TryParseHexString(string s, out byte[] bytes)
     {
         bytes = Array.Empty<byte>();
 

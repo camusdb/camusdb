@@ -13,11 +13,11 @@ namespace CamusDB.Core.Util.Hashes;
  */
 public static class XXHash
 {
-	const uint PRIME32_1 = 2654435761U;
-	const uint PRIME32_2 = 2246822519U;
-	const uint PRIME32_3 = 3266489917U;
-	const uint PRIME32_4 = 668265263U;
-	const uint PRIME32_5 = 374761393U;
+	private const uint PRIME32_1 = 2654435761U;
+	private const uint PRIME32_2 = 2246822519U;
+	private const uint PRIME32_3 = 3266489917U;
+	private const uint PRIME32_4 = 668265263U;
+	private const uint PRIME32_5 = 374761393U;
 
 	public static uint Compute(byte[] buf, int index = 0, int len = -1, uint seed = 0)
 	{

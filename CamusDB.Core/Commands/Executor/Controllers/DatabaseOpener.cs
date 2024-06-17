@@ -47,11 +47,13 @@ internal sealed class DatabaseOpener
 
     public async ValueTask<DatabaseDescriptor> Open(string name, bool recoveryMode = false)
     {
-        AsyncLazy<DatabaseDescriptor> openDatabaseLazy = databaseDescriptors.Descriptors.GetOrAdd(
-                                                            name,
-                                                            (_) => new(() => LoadDatabase(name))
-                                                         );
+        AsyncLazy<DatabaseDescriptor> openDatabaseLazy = databaseDescriptors.Descriptors.GetOrAdd(name, LoadOrCreateDatabaseLazy);
         return await openDatabaseLazy;
+    }
+
+    private AsyncLazy<DatabaseDescriptor> LoadOrCreateDatabaseLazy(string name)
+    {
+        return new(() => LoadDatabase(name));
     }
 
     private async Task<DatabaseDescriptor> LoadDatabase(string name)

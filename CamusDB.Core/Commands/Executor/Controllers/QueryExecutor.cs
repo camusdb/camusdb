@@ -194,23 +194,25 @@ internal sealed class QueryExecutor
         //using IDisposable _ = await index.BTree.ReaderLockAsync().ConfigureAwait(false);
         
         await ticket.TxnState.TryAdquireTableIndexReadLock(table, index.BTree).ConfigureAwait(false);
+        
+        Console.WriteLine("here");
 
         await foreach (BTreeTuple? pageOffset in index.BTree.GetPrefix(TransactionType.ReadOnly, ticket.TxnState.TxnId, columnValue))
         {
             if (pageOffset is null || pageOffset.IsNull())
             {
-                //Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+                Console.WriteLine("Index Ix={0} does not exist", "null");
                 yield break;
             }
 
             byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo).ConfigureAwait(false);
             if (data.Length == 0)
             {
-                //Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
+                Console.WriteLine("Index RowId={0} has an empty page data", pageOffset.SlotOne);
                 yield break;
             }
 
-            //Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
+            Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
 
             Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, pageOffset.SlotOne, data);
 
@@ -230,6 +232,8 @@ internal sealed class QueryExecutor
                     yield return new(pageOffset, row);
             }
         }
+        
+        Console.WriteLine("here 1");
     }
 
     public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)

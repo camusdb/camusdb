@@ -24,7 +24,7 @@ public sealed class CompositeColumnValue : IComparable<CompositeColumnValue>, IP
 
     public CompositeColumnValue(ColumnValue value)
     {
-        Values = new ColumnValue[] { value };
+        Values = new[] { value };
     }
 
     public int CompareTo(CompositeColumnValue? other)
@@ -55,7 +55,7 @@ public sealed class CompositeColumnValue : IComparable<CompositeColumnValue>, IP
         string str = "";
 
         for (int i = 0; i < Values.Length; i++)
-            str += i + "=" + Values[i].ToString();
+            str += i + "=" + Values[i];
 
         return str;
     }

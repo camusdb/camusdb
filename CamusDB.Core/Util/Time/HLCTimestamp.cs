@@ -52,7 +52,7 @@ public record struct HLCTimestamp : IComparable<HLCTimestamp>
 
     public override string ToString()
     {
-        return string.Format("HLC({0}:{1})", L, C);
+        return $"HLC({L}:{C})";
     }
 
     public static HLCTimestamp operator +(HLCTimestamp a, int b) => new(a.L + b, a.C);

@@ -27,18 +27,18 @@ public sealed class QueryPlanner
         plan.AddStep(GetScanOrQueryType(table, ticket));
 
         if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
-            plan.AddStep(new QueryPlanStep(QueryPlanStepType.SortBy));
+            plan.AddStep(new(QueryPlanStepType.SortBy));
 
         if (ticket.Limit is not null || ticket.Offset is not null)
-            plan.AddStep(new QueryPlanStep(QueryPlanStepType.Limit));
+            plan.AddStep(new(QueryPlanStepType.Limit));
 
         if (ticket.Projection is not null && ticket.Projection.Count > 0)
         {
             if (HasAggregation(ticket.Projection))
-                plan.AddStep(new QueryPlanStep(QueryPlanStepType.Aggregate));
+                plan.AddStep(new(QueryPlanStepType.Aggregate));
 
             if (!IsFullProjection(ticket.Projection))
-                plan.AddStep(new QueryPlanStep(QueryPlanStepType.ReduceToProjections));
+                plan.AddStep(new(QueryPlanStepType.ReduceToProjections));
         }
 
         return plan;
@@ -53,7 +53,7 @@ public sealed class QueryPlanner
                 if (table.Indexes.TryGetValue(filter.ColumnName, out TableIndexSchema? index))
                 {
                     if (filter.Op == "=")
-                        return new QueryPlanStep(QueryPlanStepType.QueryFromIndex, index);
+                        return new(QueryPlanStepType.QueryFromIndex, index);
                 }
             }
         }
@@ -73,7 +73,7 @@ public sealed class QueryPlanner
                         if (index.Value.Columns.Length == 1 && index.Value.Columns[0] == equality.leftAst!.yytext!)
                         {
                             if (TryGetConstant(equality.rightAst!, ticket.Parameters, out ColumnValue? columnValue))
-                                return new QueryPlanStep(QueryPlanStepType.QueryFromIndex, index.Value, columnValue);
+                                return new(QueryPlanStepType.QueryFromIndex, index.Value, columnValue);
                         }
                     }
                 }
@@ -81,9 +81,9 @@ public sealed class QueryPlanner
         }
 
         if (!string.IsNullOrEmpty(ticket.IndexName))
-            return new QueryPlanStep(QueryPlanStepType.FullScanFromIndex);
+            return new(QueryPlanStepType.FullScanFromIndex);
 
-        return new QueryPlanStep(QueryPlanStepType.FullScanFromTableIndex);
+        return new(QueryPlanStepType.FullScanFromTableIndex);
     }
 
     private static bool TryGetConstant(NodeAst nodeAst, Dictionary<string, ColumnValue>? parameters, out ColumnValue? columnValue)
@@ -103,7 +103,7 @@ public sealed class QueryPlanner
         return false;
     }
 
-    private static void GetEqualities(NodeAst where, List<NodeAst> equalities)
+    private static void GetEqualities(NodeAst where, ICollection<NodeAst> equalities)
     {
         if (where.nodeType == NodeType.ExprEquals)
         {
@@ -123,18 +123,21 @@ public sealed class QueryPlanner
 
     private static bool IsFullProjection(List<NodeAst> projection)
     {
-        return projection.Count == 1 && projection[0].nodeType == NodeType.ExprAllFields;
+        return projection is [{ nodeType: NodeType.ExprAllFields }];
     }
 
     private static bool HasAggregation(List<NodeAst> projection)
     {
         foreach (NodeAst nodeAst in projection)
         {
-            if (nodeAst.nodeType == NodeType.ExprFuncCall)
-                return CheckIfSupportedAggregation(nodeAst, projection);
-
-            if (nodeAst.nodeType == NodeType.ExprAlias)
-                return CheckIfSupportedAggregation(nodeAst.leftAst!, projection);
+            switch (nodeAst.nodeType)
+            {
+                case NodeType.ExprFuncCall:
+                    return CheckIfSupportedAggregation(nodeAst, projection);
+                
+                case NodeType.ExprAlias:
+                    return CheckIfSupportedAggregation(nodeAst.leftAst!, projection);
+            }
         }
 
         return false;

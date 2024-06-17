@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Util.Diagnostics;
 using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.Trees;
 using Microsoft.Extensions.Logging;
@@ -558,9 +559,9 @@ public sealed class RowUpdater
     /// <param name="machine"></param>
     /// <param name="state"></param>
     /// <returns></returns>
-    internal async Task<int> UpdateInternal(FluxMachine<UpdateFluxSteps, UpdateFluxState> machine, UpdateFluxState state)
+    private async Task<int> UpdateInternal(FluxMachine<UpdateFluxSteps, UpdateFluxState> machine, UpdateFluxState state)
     {
-        Stopwatch timer = Stopwatch.StartNew();
+        ValueStopwatch timer = ValueStopwatch.StartNew();
 
         machine.When(UpdateFluxSteps.TryAdquireLocks, TryAdquireLocks);
         machine.When(UpdateFluxSteps.LocateTupleToUpdate, LocateTuplesToUpdate);        
@@ -568,10 +569,8 @@ public sealed class RowUpdater
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
-
-        timer.Stop();
-
-        TimeSpan timeTaken = timer.Elapsed;
+        
+        TimeSpan timeTaken = timer.GetElapsedTime();
 
         logger.LogInformation(
             "Updated {Rows} rows, Time taken: {Time}",

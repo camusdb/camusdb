@@ -31,7 +31,7 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     {
         Type = type;
 
-        if (type == ColumnType.String || type == ColumnType.Id)
+        if (type is ColumnType.String or ColumnType.Id)
         {
             if (strValue is null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.String to string value (null)");
@@ -102,43 +102,46 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         if (Type != other.Type)
             throw new ArgumentException($"Comparing incompatible ColumnValue: {Type} and {other.Type}");
 
-        if (Type == ColumnType.String || Type == ColumnType.Id)
+        switch (Type)
         {
-            if (StrValue is null)
+            case ColumnType.String or ColumnType.Id when StrValue is null:
                 return -1;
-
-            if (other.StrValue is null)
+            
+            case ColumnType.String or ColumnType.Id when other.StrValue is null:
                 return 1;
-
-            return StrValue!.CompareTo(other.StrValue);
+            
+            case ColumnType.String or ColumnType.Id:
+                //Console.WriteLine("{0} {1} {2} {3}", other.Type, Type, StrValue!, other.StrValue);
+                return string.Compare(StrValue!, other.StrValue, StringComparison.Ordinal);
+            
+            case ColumnType.Integer64:
+                return LongValue.CompareTo(other.LongValue);
+            
+            case ColumnType.Float64:
+                return FloatValue.CompareTo(other.FloatValue);
+            
+            case ColumnType.Bool:
+                return BoolValue.CompareTo(other.BoolValue);
+            
+            default:
+                throw new Exception("Unknown value: " + Type);
         }
-
-        if (Type == ColumnType.Integer64)
-            return LongValue.CompareTo(other.LongValue);
-
-        if (Type == ColumnType.Float64)
-            return FloatValue.CompareTo(other.FloatValue);
-
-        if (Type == ColumnType.Bool)
-            return BoolValue.CompareTo(other.BoolValue);
-
-        throw new Exception("Unknown value: " + Type);
     }
 
     public override string ToString()
     {
         if (Type == ColumnType.Integer64)
-            return string.Format("ColumnValue({0}:{1})", Type, LongValue);
+            return $"ColumnValue({Type}:{LongValue})";
 
         if (Type == ColumnType.Float64)
-            return string.Format("ColumnValue({0}:{1})", Type, FloatValue);
+            return $"ColumnValue({Type}:{FloatValue})";
 
         if (Type == ColumnType.Bool)
-            return string.Format("ColumnValue({0}:{1})", Type, BoolValue);
+            return $"ColumnValue({Type}:{BoolValue})";
 
         if (Type == ColumnType.String)
-            return string.Format("ColumnValue({0}:{1})", Type, StrValue);
+            return $"ColumnValue({Type}:{StrValue})";
 
-        return string.Format("ColumnValue({0}:{1})", Type, StrValue);
+        return $"ColumnValue({Type}:{StrValue})";
     }
 }

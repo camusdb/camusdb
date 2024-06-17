@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
+using CamusDB.Core.Util.Diagnostics;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
@@ -252,14 +253,9 @@ public sealed class TableColumnDropper
     /// <param name="machine"></param>
     /// <param name="state"></param>
     /// <returns></returns>
-    internal async Task<int> AlterColumnInternal(FluxMachine<AlterColumnFluxSteps, AlterColumnFluxState> machine, AlterColumnFluxState state)
+    private async Task<int> AlterColumnInternal(FluxMachine<AlterColumnFluxSteps, AlterColumnFluxState> machine, AlterColumnFluxState state)
     {
-        DatabaseDescriptor database = state.Database;
-        BufferPoolManager tablespace = state.Database.BufferPool;
-        TableDescriptor table = state.Table;
-        AlterColumnTicket ticket = state.Ticket;
-
-        Stopwatch timer = Stopwatch.StartNew();
+        ValueStopwatch timer = ValueStopwatch.StartNew();
 
         machine.When(AlterColumnFluxSteps.AlterSchema, AlterSchema);
         machine.When(AlterColumnFluxSteps.LocateTupleToAlterColumn, LocateTuplesToAlterColumn);
@@ -273,9 +269,7 @@ public sealed class TableColumnDropper
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep());
 
-        timer.Stop();
-
-        TimeSpan timeTaken = timer.Elapsed;
+        TimeSpan timeTaken = timer.GetElapsedTime();
 
         logger.LogInformation(
             "Column dropped, modified {Rows} rows, Time taken: {Time}",

@@ -6,8 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Text;
-
 namespace CamusDB.Core;
 
 public static class CamusDBConfig
@@ -19,7 +17,7 @@ public static class CamusDBConfig
 
     #region bufferpool    
 
-    public const int PageSize = 4096;
+    public const int PageSize = 3072;
 
     /// <summary>
     /// Number of buffer pool buckets

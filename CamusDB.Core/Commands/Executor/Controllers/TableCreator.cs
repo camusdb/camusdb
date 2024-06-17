@@ -95,55 +95,53 @@ internal sealed class TableCreator
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
 
-        for (int i = 0; i < ticket.Constraints.Length; i++)
+        foreach (ConstraintInfo constraint in ticket.Constraints)
         {
-            ConstraintInfo constraint = ticket.Constraints[i];
-
             switch (constraint.Type)
             {
                 case ConstraintType.PrimaryKey:
-                    {
-                        AlterIndexTicket indexTicket = new(
-                            txnState: ticket.TxnState,
-                            databaseName: database.Name,
-                            tableName: ticket.TableName,
-                            indexName: constraint.Name,
-                            columns: constraint.Columns,
-                            operation: AlterIndexOperation.AddPrimaryKey
-                        );
+                {
+                    AlterIndexTicket indexTicket = new(
+                        txnState: ticket.TxnState,
+                        databaseName: database.Name,
+                        tableName: ticket.TableName,
+                        indexName: constraint.Name,
+                        columns: constraint.Columns,
+                        operation: AlterIndexOperation.AddPrimaryKey
+                    );
 
-                        await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
-                    }
+                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
+                }
                     break;
 
                 case ConstraintType.IndexMulti:
-                    {
-                        AlterIndexTicket indexTicket = new(
-                            txnState: ticket.TxnState,
-                            databaseName: database.Name,
-                            tableName: ticket.TableName,
-                            indexName: constraint.Name,
-                            columns: constraint.Columns,
-                            operation: AlterIndexOperation.AddIndex
-                        );
+                {
+                    AlterIndexTicket indexTicket = new(
+                        txnState: ticket.TxnState,
+                        databaseName: database.Name,
+                        tableName: ticket.TableName,
+                        indexName: constraint.Name,
+                        columns: constraint.Columns,
+                        operation: AlterIndexOperation.AddIndex
+                    );
 
-                        await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
-                    }
+                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
+                }
                     break;
 
                 case ConstraintType.IndexUnique:
-                    {
-                        AlterIndexTicket indexTicket = new(
-                            txnState: ticket.TxnState,
-                            databaseName: database.Name,
-                            tableName: ticket.TableName,
-                            indexName: constraint.Name,
-                            columns: constraint.Columns,
-                            operation: AlterIndexOperation.AddUniqueIndex
-                        );
+                {
+                    AlterIndexTicket indexTicket = new(
+                        txnState: ticket.TxnState,
+                        databaseName: database.Name,
+                        tableName: ticket.TableName,
+                        indexName: constraint.Name,
+                        columns: constraint.Columns,
+                        operation: AlterIndexOperation.AddUniqueIndex
+                    );
 
-                        await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
-                    }
+                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
+                }
                     break;
 
                 default:

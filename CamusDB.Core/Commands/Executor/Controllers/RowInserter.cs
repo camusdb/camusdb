@@ -20,6 +20,7 @@ using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Transactions.Models;
 
 using System.Diagnostics;
+using CamusDB.Core.Util.Diagnostics;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -419,7 +420,7 @@ internal sealed class RowInserter
     /// <returns></returns>
     private async Task<int> InsertInternal(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)
     {
-        Stopwatch timer = Stopwatch.StartNew();
+        ValueStopwatch timer = ValueStopwatch.StartNew();
 
         machine.When(InsertFluxSteps.TryAdquireLocks, TryAdquireLocks);
         machine.When(InsertFluxSteps.InsertRowsAndIndexes, InsertRowsAndIndexes);        
@@ -427,7 +428,7 @@ internal sealed class RowInserter
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
 
-        TimeSpan timeTaken = timer.Elapsed;
+        TimeSpan timeTaken = timer.GetElapsedTime();
 
         logger.LogInformation(
              "Inserted {Rows} rows, Time taken: {Time}",

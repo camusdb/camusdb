@@ -33,7 +33,7 @@ public sealed class BTreeTuple : IComparable<BTreeTuple>
 
     public override string ToString()
     {
-        return string.Format("BTreeTuple({0}:{1})", SlotOne, SlotTwo);
+        return $"BTreeTuple({SlotOne}:{SlotTwo})";
     }
 
     public int CompareTo(BTreeTuple? other)

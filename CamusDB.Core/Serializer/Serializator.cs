@@ -30,7 +30,7 @@ public sealed class Serializator
         return Encoding.Unicode.GetBytes(jsonSerialized);
     }
 
-    public static T Unserialize<T>(byte[] buffer) where T : new()
+    public static T Unserialize<T>(ReadOnlySpan<byte> buffer) where T : new()
     {
         string str = Encoding.Unicode.GetString(buffer);
 
@@ -247,7 +247,7 @@ public sealed class Serializator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int ReadType(byte[] buffer, ref int pointer)
+    public static int ReadType(ReadOnlySpan<byte> buffer, ref int pointer)
     {
         int typeByte = buffer[pointer++];
         int type = (typeByte & 0xf0) >> 4;
@@ -257,7 +257,7 @@ public sealed class Serializator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int ReadInt8(byte[] buffer, ref int pointer)
+    public static int ReadInt8(ReadOnlySpan<byte> buffer, ref int pointer)
     {
         return buffer[pointer++];
     }
@@ -285,7 +285,7 @@ public sealed class Serializator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int ReadInt32(byte[] buffer, ref int pointer)
+    public static int ReadInt32(ReadOnlySpan<byte> buffer, ref int pointer)
     {
         int number = buffer[pointer];
         number += (buffer[pointer + 1] << 8);
@@ -304,7 +304,7 @@ public sealed class Serializator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static uint ReadUInt32(byte[] buffer, ref int pointer)
+    public static uint ReadUInt32(ReadOnlySpan<byte> buffer, ref int pointer)
     {
         uint number = buffer[pointer];
         number += (uint)(buffer[pointer + 1] << 8);
@@ -314,7 +314,7 @@ public sealed class Serializator
         return number;
     }
 
-    public static ObjectIdValue ReadObjectId(byte[] buffer, ref int pointer)
+    public static ObjectIdValue ReadObjectId(ReadOnlySpan<byte> buffer, ref int pointer)
     {
         int a = buffer[pointer++];
         a += (buffer[pointer++] << 8);
@@ -371,13 +371,13 @@ public sealed class Serializator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static bool ReadBool(byte[] buffer, ref int pointer)
+    public static bool ReadBool(ReadOnlySpan<byte> buffer, ref int pointer)
     {
         return (buffer[pointer - 1] & 0xf) == 1;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static bool ReadBoolAhead(byte[] buffer, ref int pointer)
+    public static bool ReadBoolAhead(ReadOnlySpan<byte> buffer, ref int pointer)
     {
         return (buffer[pointer++] & 0xf) == 1;
     }
