@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -8,28 +8,21 @@
 
 using System.Diagnostics;
 using CamusDB.Core.Flux;
-using CamusDB.Core.BufferPool;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Util.Diagnostics;
+using CamusDB.Core.Transactions;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 internal sealed class TableIndexAdder
 {
-    private readonly IndexSaver indexSaver = new();
-
-    private readonly IndexReader indexReader = new();
-
     private readonly ILogger<ICamusDB> logger;
 
     public TableIndexAdder(ILogger<ICamusDB> logger)
@@ -72,26 +65,11 @@ internal sealed class TableIndexAdder
         }
     }
 
-    /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="columnValues"></param>
-    /// <param name="name"></param>
-    /// <returns></returns>
     private static ColumnValue? GetColumnValue(Dictionary<string, ColumnValue> columnValues, string name)
     {
         return columnValues.GetValueOrDefault(name);
     }
 
-    /// <summary>
-    /// Schedules a new add index operation by the specified filters
-    /// </summary>
-    /// <param name="catalogs"></param>
-    /// <param name="queryExecutor"></param>
-    /// <param name="database"></param>
-    /// <param name="table"></param>
-    /// <param name="ticket"></param>
-    /// <returns></returns>
     internal async Task<int> AddIndex(
         CatalogsManager catalogs,
         QueryExecutor queryExecutor,
@@ -115,36 +93,12 @@ internal sealed class TableIndexAdder
         return await AlterIndexInternal(machine, state).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Allocate a new index on disk
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> AllocateNewIndex(AddIndexFluxState state)
-    {
-        BufferPoolManager tablespace = state.Database.BufferPool;
-
-        ObjectIdValue indexPageOffset = tablespace.GetNextFreeOffset();
-
-        state.Btree = await indexReader.Read(tablespace, ObjectId.ToValue(indexPageOffset.ToString()));
-        state.IndexOffset = indexPageOffset;
-
-        return FluxAction.Continue;
-    }
-
-    /// <summary>
-    /// We need to locate the row tuples to AlterColumn
-    /// Perform a full scan of the table to create the initial version of the index with all the available data.
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
     private async Task<FluxAction> LocateTuplesToFeedTheIndex(AddIndexFluxState state)
     {
         AlterIndexTicket ticket = state.Ticket;
 
         QueryTicket queryTicket = new(
             txnState: ticket.TxnState,
-            txnType: TransactionType.Write,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             index: null,
@@ -159,33 +113,11 @@ internal sealed class TableIndexAdder
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
-        // @todo we need to take a snapshot of the data to prevent deadlocks
-        // but probably need to optimize this for larger datasets
         state.RowsToFeed = await cursor.ToListAsync().ConfigureAwait(false);
 
-        //Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, state.RowTuple.SlotTwo);*/
-
         return FluxAction.Continue;
     }
 
-    /// <summary>
-    /// Acquire write locks on the indices to ensure consistency in writing.
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    /// <exception cref="NotImplementedException"></exception>
-    private async Task<FluxAction> TryAdquireLocks(AddIndexFluxState state)
-    {
-        await state.Ticket.TxnState.TryAdquireWriteLocks(state.Table).ConfigureAwait(false);
-
-        return FluxAction.Continue;
-    }
-
-    /// <summary>
-    /// 
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
     private async Task<FluxAction> FeedTheIndex(AddIndexFluxState state)
     {
         if (state.RowsToFeed is null)
@@ -194,155 +126,64 @@ internal sealed class TableIndexAdder
             return FluxAction.Abort;
         }
 
-        if (state.Btree is null)
-        {
-            logger.LogWarning("Invalid btree in AlterIndex");
-            return FluxAction.Abort;
-        }
-
         AlterIndexTicket ticket = state.Ticket;
-        BufferPoolManager tablespace = state.Database.BufferPool;
+        TableDescriptor table = state.Table;
+        KvTransaction tx = ticket.TxnState;
+        bool unique = ticket.Operation is AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddUniqueIndex;
 
         int rows = 0;
 
         foreach (QueryResultRow row in state.RowsToFeed)
         {
-            CompositeColumnValue indexKeyValue;
-            BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index = state.Btree;
+            int i = 0;
+            ColumnValue[] columnValues = unique
+                ? new ColumnValue[ticket.Columns.Length]
+                : new ColumnValue[ticket.Columns.Length + 1];
 
-            if (ticket.Operation is AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddUniqueIndex)
+            foreach (ColumnIndexInfo columnIndex in ticket.Columns)
             {
-                indexKeyValue = await ValidateAndInsertUniqueValue(tablespace, index, row, ticket, ticket.TxnState.ModifiedPages);
-                ticket.TxnState.UniqueIndexDeltas.Add((index, indexKeyValue, row.Tuple));
+                ColumnValue? keyValue = GetColumnValue(row.Row, columnIndex.Name);
+
+                if (keyValue is null)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInternalOperation,
+                        $"A null value was found for key field '{columnIndex.Name}'"
+                    );
+
+                columnValues[i++] = keyValue;
             }
-            else
-            {
-                indexKeyValue = await ValidateAndInsertMultiValue(tablespace, index, row, ticket, ticket.TxnState.ModifiedPages);
-                ticket.TxnState.MultiIndexDeltas.Add((index, indexKeyValue, row.Tuple));
-            }
+
+            if (!unique)
+                columnValues[i] = new(ColumnType.Id, row.RowId.ToString());
+
+            CompositeColumnValue compositeKey = new(columnValues);
+
+            await table.Store.PutIndexEntry(tx, ticket.IndexName, compositeKey, row.RowId, unique).ConfigureAwait(false);
 
             rows++;
         }
-        
-        Console.WriteLine("Added {0} rows to index", rows);
+
+        logger.LogInformation("Added {Rows} rows to index", rows);
 
         return FluxAction.Continue;
     }
 
-    private async Task<CompositeColumnValue> ValidateAndInsertUniqueValue(
-        BufferPoolManager tablespace,
-        BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex,
-        QueryResultRow row,
-        AlterIndexTicket ticket,
-        List<BufferPageOperation> modifiedPages
-    )
-    {
-        int i = 0;
-        ColumnValue[] columnValues = new ColumnValue[ticket.Columns.Length];
-
-        foreach (ColumnIndexInfo columnIndex in ticket.Columns)
-        {
-            ColumnValue? uniqueKeyValue = GetColumnValue(row.Row, columnIndex.Name);
-
-            if (uniqueKeyValue is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "A null value was found for unique key field " + columnIndex.Name
-                );
-
-            columnValues[i++] = uniqueKeyValue;
-        }
-
-        CompositeColumnValue compositeUniqueKeyValue = new(columnValues);
-
-        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.ReadOnly, ticket.TxnState.TxnId, compositeUniqueKeyValue);
-
-        if (rowTuple is not null && !rowTuple.IsNull())
-            throw new CamusDBException(
-                CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                $"Duplicate entry for key '{ticket.IndexName}' {compositeUniqueKeyValue}"
-            );
-
-        SaveIndexTicket saveUniqueIndexTicket = new(
-            tablespace: tablespace,
-            index: uniqueIndex,
-            txnId: ticket.TxnState.TxnId,
-            commitState: BTreeCommitState.Uncommitted,
-            key: compositeUniqueKeyValue,
-            value: row.Tuple,
-            modifiedPages: modifiedPages
-        );
-
-        await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
-
-        return compositeUniqueKeyValue;
-    }
-
-    private async Task<CompositeColumnValue> ValidateAndInsertMultiValue(
-        BufferPoolManager tablespace,
-        BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> uniqueIndex,
-        QueryResultRow row,
-        AlterIndexTicket ticket,
-        List<BufferPageOperation> modifiedPages
-    )
-    {
-        int i = 0;
-        ColumnValue[] columnValues = new ColumnValue[ticket.Columns.Length + 1];
-
-        foreach (ColumnIndexInfo columnIndex in ticket.Columns)
-        {
-            ColumnValue? multiKeyValue = GetColumnValue(row.Row, columnIndex.Name);
-
-            if (multiKeyValue is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    $"A null value was found for multi key field '{columnIndex.Name}'"
-                );
-
-            columnValues[i++] = multiKeyValue;
-        }
-
-        columnValues[i] = new(ColumnType.Id, row.Tuple.SlotOne.ToString());
-
-        CompositeColumnValue compositeIndexValue = new(columnValues);
-
-        SaveIndexTicket saveUniqueIndexTicket = new(
-            tablespace: tablespace,
-            index: uniqueIndex,
-            txnId: ticket.TxnState.TxnId,
-            commitState: BTreeCommitState.Uncommitted,
-            key: compositeIndexValue,
-            value: row.Tuple,
-            modifiedPages: modifiedPages
-        );
-
-        await indexSaver.Save(saveUniqueIndexTicket).ConfigureAwait(false);
-
-        return compositeIndexValue;
-    }
-
     private async Task<FluxAction> AddSystemObject(AddIndexFluxState state)
     {
-        if (state.Btree is null)
-        {
-            logger.LogWarning("Invalid btree in AlterIndex");
-            return FluxAction.Abort;
-        }
-
         AlterIndexTicket ticket = state.Ticket;
         TableDescriptor table = state.Table;
         DatabaseDescriptor database = state.Database;
-        IndexType indexType = ticket.Operation == AlterIndexOperation.AddUniqueIndex || ticket.Operation == AlterIndexOperation.AddPrimaryKey ? IndexType.Unique : IndexType.Multi;
+        IndexType indexType = ticket.Operation is AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey
+            ? IndexType.Unique
+            : IndexType.Multi;
+
+        string indexId = ObjectIdGenerator.Generate().ToString();
 
         try
         {
             await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
 
-            Dictionary<string, DatabaseIndexObject> indexes = database.SystemSchema.Indexes;
-
-            string indexId = database.BufferPool.GetNextFreeOffset().ToString();
-
-            indexes.Add(
+            database.SystemSchema.Indexes.Add(
                 indexId,
                 new DatabaseIndexObject(
                     indexId,
@@ -350,11 +191,11 @@ internal sealed class TableIndexAdder
                     table.Id,
                     GetColumnIds(table, ticket.Columns),
                     indexType,
-                    state.IndexOffset.ToString()
+                    startOffset: ""
                 )
             );
 
-            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema));
+            // Phase 5 will persist system space to Kahuna KV.
         }
         finally
         {
@@ -363,7 +204,7 @@ internal sealed class TableIndexAdder
 
         table.Indexes.Add(
             ticket.IndexName,
-            new TableIndexSchema(ticket.Columns.Select(x => x.Name).ToArray(), indexType, state.Btree)
+            new TableIndexSchema(ticket.IndexName, ticket.Columns.Select(x => x.Name).ToArray(), indexType)
         );
 
         return FluxAction.Continue;
@@ -395,12 +236,6 @@ internal sealed class TableIndexAdder
         return columnsIds;
     }
 
-    /// <summary>
-    /// Executes the flux state machine to AlterIndex records by the specified filters
-    /// </summary>
-    /// <param name="machine"></param>
-    /// <param name="state"></param>
-    /// <returns></returns>
     private async Task<int> AlterIndexInternal(FluxMachine<AddIndexFluxSteps, AddIndexFluxState> machine, AddIndexFluxState state)
     {
         TableDescriptor table = state.Table;
@@ -408,8 +243,6 @@ internal sealed class TableIndexAdder
 
         ValueStopwatch timer = ValueStopwatch.StartNew();
 
-        machine.When(AddIndexFluxSteps.AllocateNewIndex, AllocateNewIndex);
-        machine.When(AddIndexFluxSteps.TryAdquireLocks, TryAdquireLocks);
         machine.When(AddIndexFluxSteps.LocateTuplesToFeedTheIndex, LocateTuplesToFeedTheIndex);
         machine.When(AddIndexFluxSteps.FeedTheIndex, FeedTheIndex);
         machine.When(AddIndexFluxSteps.AddSystemObject, AddSystemObject);
@@ -420,10 +253,9 @@ internal sealed class TableIndexAdder
         TimeSpan timeTaken = timer.GetElapsedTime();
 
         logger.LogInformation(
-            "Added index {IndexName} to {Name} at {IndexOffset}, Time taken: {Time}",
+            "Added index {IndexName} to {Name}, Time taken: {Time}",
             ticket.IndexName,
             table.Name,
-            state.IndexOffset,
             timeTaken.ToString(@"m\:ss\.fff")
         );
 

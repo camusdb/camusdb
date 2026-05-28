@@ -27,7 +27,6 @@ internal sealed class SQLExecutorQueryCreator : SQLExecutorBaseCreator
 
         return new(
             txnState: ticket.TxnState,
-            txnType: TransactionType.ReadOnly,
             databaseName: ticket.DatabaseName,
             tableName: tableName,
             index: GetForcedIndex(ast.rightAst),

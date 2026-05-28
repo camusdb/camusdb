@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -15,9 +15,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 public enum AddIndexFluxSteps
 {
     NotInitialized = 0,
-    AllocateNewIndex = 1,
-    TryAdquireLocks = 2,
-    LocateTuplesToFeedTheIndex = 3,    
-    FeedTheIndex = 4,    
-    AddSystemObject = 5,
+    LocateTuplesToFeedTheIndex = 1,
+    FeedTheIndex = 2,
+    AddSystemObject = 3,
 }

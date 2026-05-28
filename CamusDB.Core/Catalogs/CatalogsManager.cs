@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Serializer;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -78,11 +77,7 @@ public sealed class CatalogsManager
 
             database.Schema.Tables.Add(ticket.TableName, tableSchema);
 
-            // @todo Currently, the schema is a simple JSON saved on disk. Look for ways to make this more robust.
-            byte[] encoded = Serializator.Serialize(database.Schema.Tables);
-
-            database.Storage.Put(CamusDBConfig.SchemaKey, encoded);
-
+            // Phase 5 will persist schema to Kahuna KV.
             logger.LogInformation("Added table {TableName} to schema", ticket.TableName);
 
             return tableSchema;
@@ -133,8 +128,7 @@ public sealed class CatalogsManager
 
             tableSchema.SchemaHistory!.Add(schemaHistory);
 
-            database.Storage.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
-
+            // Phase 5 will persist schema to Kahuna KV.
             logger.LogInformation("Modifed table {TableName} schema", ticket.TableName);
 
             return tableSchema;

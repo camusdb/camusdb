@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -8,7 +8,6 @@
 
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers;
-using CamusDB.Core.BufferPool.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
@@ -21,10 +20,10 @@ internal sealed class DeleteFluxState
     public DeleteTicket Ticket { get; }
 
     public QueryExecutor QueryExecutor { get; }
-    
+
     public List<QueryResultRow> RowsToDelete { get; set; } = new();
 
-    public int DeletedRows { get; set; }    
+    public int DeletedRows { get; set; }
 
     public DeleteFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteTicket ticket, QueryExecutor queryExecutor)
     {

@@ -11,7 +11,6 @@ using NUnit.Framework;
 using System.Threading.Tasks;
 
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.Util.Time;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -28,10 +27,9 @@ internal class TestDatabaseCreator : BaseTest
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
-        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
+        CommandExecutor executor = new(validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -51,10 +49,9 @@ internal class TestDatabaseCreator : BaseTest
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
-        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
+        CommandExecutor executor = new(validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,

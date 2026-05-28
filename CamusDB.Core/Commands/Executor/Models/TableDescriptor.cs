@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -7,8 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
@@ -33,27 +32,20 @@ public sealed class TableDescriptor
     public TableSchema Schema { get; }
 
     /// <summary>
-    /// Pointer to the B+Tree that stores the rows
+    /// KV-backed store for row and index data
     /// </summary>
-    public BTree<ObjectIdValue, ObjectIdValue> Rows { get; }
+    public KvTableStore Store { get; }
 
     /// <summary>
     /// List of indexes on the table
     /// </summary>
     public Dictionary<string, TableIndexSchema> Indexes { get; } = new();
 
-    /// <summary>
-    /// Constructor
-    /// </summary>
-    /// <param name="id"></param>
-    /// <param name="name"></param>
-    /// <param name="schema"></param>
-    /// <param name="rows"></param>
-    public TableDescriptor(string id, string name, TableSchema schema, BTree<ObjectIdValue, ObjectIdValue> rows)
+    public TableDescriptor(string id, string name, TableSchema schema, KvTableStore store)
     {
         Id = id;
         Name = name;
         Schema = schema;
-        Rows = rows;
+        Store = store;
     }
 }

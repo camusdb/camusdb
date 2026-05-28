@@ -6,13 +6,13 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Transactions.Models;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct InsertTicket
 {
-    public TransactionState TxnState { get; }
+    public KvTransaction TxnState { get; }
 
     public string DatabaseName { get; }
     
@@ -21,7 +21,7 @@ public readonly struct InsertTicket
     public List<Dictionary<string, ColumnValue>> Values { get; }    
 
     public InsertTicket(
-        TransactionState txnState,
+        KvTransaction txnState,
         string databaseName,
         string tableName,
         List<Dictionary<string, ColumnValue>> values

@@ -6,13 +6,13 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Transactions.Models;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct DropTableTicket
 {
-    public TransactionState TxnState { get; }
+    public KvTransaction TxnState { get; }
 
     public string DatabaseName { get; }
 
@@ -20,7 +20,7 @@ public readonly struct DropTableTicket
 
     public bool IfExists { get; }
 
-    public DropTableTicket(TransactionState txnState, string databaseName, string tableName, bool ifExists)
+    public DropTableTicket(KvTransaction txnState, string databaseName, string tableName, bool ifExists)
     {
         TxnState = txnState;
         DatabaseName = databaseName;

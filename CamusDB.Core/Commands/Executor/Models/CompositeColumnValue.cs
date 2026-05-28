@@ -6,14 +6,12 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Trees;
-
 namespace CamusDB.Core.CommandsExecutor.Models;
 
 /// <summary>
 /// Represents a group of column values acting as a composite value
 /// </summary>
-public sealed class CompositeColumnValue : IComparable<CompositeColumnValue>, IPrefixComparable<ColumnValue>
+public sealed class CompositeColumnValue : IComparable<CompositeColumnValue>
 {
     public ColumnValue[] Values { get; }
 
@@ -60,11 +58,4 @@ public sealed class CompositeColumnValue : IComparable<CompositeColumnValue>, IP
         return str;
     }
 
-    public int IsPrefixedBy(ColumnValue? other)
-    {
-        if (other is null)
-            return 1;
-
-        return other.CompareTo(Values[0]);
-    }
 }

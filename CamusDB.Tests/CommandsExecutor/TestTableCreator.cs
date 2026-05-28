@@ -20,22 +20,18 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Transactions.Models;
-using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 internal sealed class TestTableCreator : BaseTest
 {    
-    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager, CatalogsManager)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, CatalogsManager)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
-        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogs = new(logger);
-        TransactionsManager transactions = new(hlc);
-        CommandExecutor executor = new(hlc, validator, catalogs, logger);
+        CommandExecutor executor = new(validator, catalogs, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -44,16 +40,16 @@ internal sealed class TestTableCreator : BaseTest
 
         DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, database, executor, transactions, catalogs);
+        return (dbname, database, executor, catalogs);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestCreateTable()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
             txnState: txnState,
@@ -100,9 +96,9 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableNoColumns()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
             txnState: txnState,
@@ -121,9 +117,9 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableNoDatabase()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
             txnState: txnState,
@@ -148,9 +144,9 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableNoTableName()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
             txnState: txnState,
@@ -175,9 +171,9 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableDuplicateColumn()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
             txnState: txnState,
@@ -202,9 +198,9 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableDuplicatePrimaryKey()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
             txnState: txnState,
@@ -230,9 +226,9 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableInvalidTableName()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
             txnState: txnState,
@@ -257,9 +253,9 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableInvalidTableNameCharacters()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
             txnState: txnState,
@@ -284,9 +280,9 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableTwice()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
             txnState: txnState,
@@ -317,9 +313,9 @@ internal sealed class TestTableCreator : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableIfNotExists()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
             txnState: txnState,

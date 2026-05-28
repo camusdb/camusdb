@@ -20,23 +20,19 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.Util.Time;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 public class TestExecuteSqlSelect : BaseTest
 {
-    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
-        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        TransactionsManager transactions = new(hlc);
-        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
+        CommandExecutor executor = new(validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -45,14 +41,14 @@ public class TestExecuteSqlSelect : BaseTest
 
         DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, database, executor, transactions);
+        return (dbname, database, executor);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket tableTicket = new(
             txnState: txnState,
@@ -101,16 +97,16 @@ public class TestExecuteSqlSelect : BaseTest
             objectsId.Add(objectId);
         }
 
-        await transactions.Commit(database, txnState);
+        await database.Transactions.CommitAsync(txnState);
 
-        return (dbname, executor, transactions, objectsId);
+        return (dbname, database, executor, objectsId);
     }    
 
-    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTableWithNulls()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId)> SetupBasicTableWithNulls()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket tableTicket = new(
             txnState: txnState,
@@ -159,18 +155,18 @@ public class TestExecuteSqlSelect : BaseTest
             objectsId.Add(objectId);
         }
 
-        await transactions.Commit(database, txnState);
+        await database.Transactions.CommitAsync(txnState);
 
-        return (dbname, executor, transactions, objectsId);
+        return (dbname, database, executor, objectsId);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestExecuteSelectGenericWhere()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -189,9 +185,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereBool()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -210,9 +206,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereBool2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -234,9 +230,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereBool3()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -258,9 +254,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereBool4()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -282,9 +278,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnEqualsInteger()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -307,9 +303,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnEqualsInteger2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -332,9 +328,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnEqualsString()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -355,9 +351,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnEqualsString2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -378,9 +374,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnNotEqualsInteger()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -401,9 +397,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnNotEqualsInteger2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -424,9 +420,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnEqualsIntegerOr()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -447,9 +443,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnEqualsIntegerOr2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -470,9 +466,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnGreaterInteger()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -493,9 +489,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereColumnLessInteger()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -516,9 +512,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereEqualsNull()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -537,9 +533,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereEqualsNull2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -558,9 +554,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereEqualsId()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectIds) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectIds) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -582,9 +578,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereEqualsId2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectIds) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectIds) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -606,9 +602,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereLike()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -630,9 +626,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereLike2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -654,9 +650,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereLike3()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -678,9 +674,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereLike4()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -702,9 +698,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereILike()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -726,9 +722,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectWhereILike2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -750,9 +746,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectOrderBy()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -779,9 +775,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectOrderBy2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -806,9 +802,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectOrderBy3()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -833,9 +829,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectOrderBy4()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -860,9 +856,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectOrderBy5()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -887,9 +883,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectOrderBy6()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -914,9 +910,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectBoundParameters1()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -938,9 +934,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectAggregate1()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -964,9 +960,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectAggregate2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -990,9 +986,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectAggregateWithConditions()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1016,9 +1012,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectProjection1()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1048,9 +1044,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectProjection2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1081,9 +1077,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectProjection3()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1114,9 +1110,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectProjectionAlias1()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1147,9 +1143,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectLimit1()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1170,9 +1166,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectLimit2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1193,9 +1189,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectLimit3()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1216,9 +1212,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectLimit4()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1243,9 +1239,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectLimit5()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectIds) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectIds) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1268,9 +1264,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectLimit6()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1294,9 +1290,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectLimit7()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1321,9 +1317,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectForceIndex()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1342,9 +1338,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectIsNull()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1363,9 +1359,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectIsNotNull()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1386,9 +1382,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectIsNullAll()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTableWithNulls();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTableWithNulls();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
@@ -1409,9 +1405,9 @@ public class TestExecuteSqlSelect : BaseTest
     [NonParallelizable]
     public async Task TestExecuteSelectIsNotNullNone()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTableWithNulls();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTableWithNulls();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,

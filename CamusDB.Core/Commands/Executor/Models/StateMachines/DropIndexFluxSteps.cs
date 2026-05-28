@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -15,9 +15,5 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 public enum DropIndexFluxSteps
 {
     NotInitialized = 0,
-    LocateIndex = 1,
-    DeleteIndexPages = 2,    
-    PersistIndexChanges = 3,
-    ApplyPageOperations = 4,
-    RemoveSystemObject = 5,
+    RemoveSystemObject = 1,
 }

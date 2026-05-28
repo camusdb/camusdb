@@ -51,7 +51,7 @@ internal sealed class QueryProjector
                 }
             }
 
-            yield return new(resultRow.Tuple, projected);
+            yield return new(resultRow.RowId, projected);
         }
     }
 

@@ -7,13 +7,13 @@
  */
 
 using CamusDB.Core.SQLParser;
-using CamusDB.Core.Transactions.Models;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public sealed class UpdateTicket
 {
-    public TransactionState TxnState { get; }
+    public KvTransaction TxnState { get; }
 
     public string DatabaseName { get; }
 
@@ -30,7 +30,7 @@ public sealed class UpdateTicket
     public Dictionary<string, ColumnValue>? Parameters { get; }
 
     public UpdateTicket(
-        TransactionState txnState,
+        KvTransaction txnState,
         string databaseName,
         string tableName,
         Dictionary<string, ColumnValue>? plainValues,

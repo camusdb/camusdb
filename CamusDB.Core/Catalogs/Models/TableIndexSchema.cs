@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -6,13 +6,17 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Trees;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.Catalogs.Models;
 
 public sealed class TableIndexSchema
 {
+    /// <summary>
+    /// The name of the index (matches the key in TableDescriptor.Indexes).
+    /// </summary>
+    public string Name { get; }
+
     /// <summary>
     /// The list of columns that make up the index
     /// </summary>
@@ -21,23 +25,12 @@ public sealed class TableIndexSchema
     /// <summary>
     /// The type of index
     /// </summary>
-    public IndexType Type { get; }    
+    public IndexType Type { get; }
 
-    /// <summary>
-    /// Reference to the B+Tree that stores the index
-    /// </summary>
-    public BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> BTree { get; }
-
-    /// <summary>
-    /// Constructor
-    /// </summary>
-    /// <param name="columns"></param>
-    /// <param name="type"></param>
-    /// <param name="index"></param>
-    public TableIndexSchema(string[] columns, IndexType type, BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> index)
+    public TableIndexSchema(string name, string[] columns, IndexType type)
     {
+        Name = name;
         Columns = columns;
         Type = type;
-        BTree = index;
     }
 }

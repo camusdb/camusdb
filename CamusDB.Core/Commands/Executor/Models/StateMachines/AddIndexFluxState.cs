@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -9,8 +9,6 @@
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.Util.Trees;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
@@ -26,19 +24,15 @@ internal sealed class AddIndexFluxState
 
     public QueryExecutor QueryExecutor { get; }
 
-    public ObjectIdValue IndexOffset { get; set; }
-
-    public BPTree<CompositeColumnValue, ColumnValue, BTreeTuple>? Btree { get; set; }
-
     public List<QueryResultRow>? RowsToFeed { get; set; }
-    
-    public int ModifiedRows { get; set; }    
+
+    public int ModifiedRows { get; set; }
 
     public AddIndexFluxState(
         CatalogsManager catalogs,
-        DatabaseDescriptor database, 
-        TableDescriptor table, 
-        AlterIndexTicket ticket, 
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        AlterIndexTicket ticket,
         QueryExecutor queryExecutor)
     {
         Catalogs = catalogs;

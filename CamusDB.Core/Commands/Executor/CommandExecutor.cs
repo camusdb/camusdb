@@ -12,7 +12,6 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
-using CamusDB.Core.Util.Time;
 using Microsoft.Extensions.Logging;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 
@@ -63,18 +62,18 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     /// <summary>
     /// Initializes the commands executor
-    /// </summary>    
+    /// </summary>
     /// <param name="validator"></param>
     /// <param name="catalogs"></param>
     /// <param name="logger"></param>
-    public CommandExecutor(HybridLogicalClock hlc, CommandValidator validator, CatalogsManager catalogs, ILogger<ICamusDB> logger)
+    public CommandExecutor(CommandValidator validator, CatalogsManager catalogs, ILogger<ICamusDB> logger)
     {
         this.validator = validator;
         this.catalogs = catalogs;
         this.logger = logger;
 
         databaseDescriptors = new();
-        databaseOpener = new(this, hlc, databaseDescriptors, logger);
+        databaseOpener = new(this, databaseDescriptors, logger);
         databaseCloser = new(databaseDescriptors, logger);
         databaseDroper = new(databaseDescriptors, logger);
         databaseCreator = new(logger);

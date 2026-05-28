@@ -15,7 +15,6 @@ using System.Collections.Generic;
 using System.Collections.Concurrent;
 
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.Util.Time;
 using CamusDB.Core.Util.ObjectIds;
 
 using CamusDB.Core.Catalogs.Models;
@@ -24,21 +23,18 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 internal sealed class TestRowInsertorCloseDb : BaseTest
 {
-    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
-        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        TransactionsManager transactions = new(hlc);
-        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
+        CommandExecutor executor = new(validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -47,14 +43,14 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
 
         DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, database, executor, transactions);
+        return (dbname, database, executor);
     }
 
-    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions)> SetupMultiIndexTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupMultiIndexTable()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket tableTicket = new(
             txnState: txnState,
@@ -76,18 +72,18 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
 
         await executor.CreateTable(tableTicket);
 
-        await transactions.Commit(database, txnState);
+        await database.Transactions.CommitAsync(txnState);
 
-        return (dbname, database, executor, transactions);
+        return (dbname, database, executor);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestBasicInsert()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupMultiIndexTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         InsertTicket ticket = new(
             txnState: txnState,
@@ -106,7 +102,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
 
         await executor.Insert(ticket);
 
-        await transactions.Commit(database, txnState);
+        await database.Transactions.CommitAsync(txnState);
 
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
@@ -134,11 +130,11 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
     [NonParallelizable]
     public async Task TestSuccessfulTwoMultiParallelInserts()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupMultiIndexTable();
 
         async Task CreateFirstRecord()
         {
-            TransactionState txnState1 = await transactions.Start();
+            KvTransaction txnState1 = await database.Transactions.BeginAsync();
 
             InsertTicket ticket = new(
                 txnState: txnState1,
@@ -157,13 +153,13 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
 
             await executor.Insert(ticket);
 
-            await transactions.Commit(database, txnState1);
+            await database.Transactions.CommitAsync(txnState1);
         }
 
         async Task CreateSecondRecord()
         {
 
-            TransactionState txnState2 = await transactions.Start();
+            KvTransaction txnState2 = await database.Transactions.BeginAsync();
 
             InsertTicket ticket2 = new(
                 txnState: txnState2,
@@ -182,7 +178,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
 
             await executor.Insert(ticket2);
 
-            await transactions.Commit(database, txnState2);
+            await database.Transactions.CommitAsync(txnState2);
         }
 
         await Task.WhenAll(CreateFirstRecord(), CreateSecondRecord());
@@ -190,7 +186,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
 
-        TransactionState txnState3 = await transactions.Start();
+        KvTransaction txnState3 = await database.Transactions.BeginAsync();
 
         QueryByIdTicket queryTicket = new(
             txnState: txnState3,
@@ -245,7 +241,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
     public async Task TestCheckSuccessfulMultiInsert()
     {
         int i;
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupMultiIndexTable();
 
         string[] userIds = new string[5];
         for (i = 0; i < 5; i++)
@@ -255,7 +251,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
 
         for (i = 0; i < 50; i++)
         {
-            TransactionState txnState = await transactions.Start();
+            KvTransaction txnState = await database.Transactions.BeginAsync();
             
             string objectId = ObjectIdGenerator.Generate().ToString();
             objectIds.Add(objectId);
@@ -277,20 +273,20 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
 
             await executor.Insert(insertTicket);
 
-            await transactions.Commit(database, txnState);
+            await database.Transactions.CommitAsync(txnState);
 
             if ((i + 1) % 5 == 0)
             {
                 await System.IO.File.AppendAllTextAsync("/tmp/aa.txt", $"{i}\n");
                 
-                await transactions.RollbackAllPending();
+                await database.Transactions.RollbackIfNotCompletedAsync(txnState);
                 
                 CloseDatabaseTicket closeTicket = new(dbname);
                 await executor.CloseDatabase(closeTicket);
             }
         }
         
-        TransactionState txnState2 = await transactions.Start();
+        KvTransaction txnState2 = await database.Transactions.BeginAsync();
 
         i = 0;
 
@@ -316,9 +312,9 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         Assert.AreEqual(50, i);
     }
 
-    private static async Task InsertRow(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, ConcurrentBag<string> objectIds, string[] userIds, int i)
+    private static async Task InsertRow(string dbname, DatabaseDescriptor database, CommandExecutor executor, ConcurrentBag<string> objectIds, string[] userIds, int i)
     {
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
         
         string objectId = ObjectIdGenerator.Generate().ToString();
         objectIds.Add(objectId);
@@ -340,7 +336,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
 
         await executor.Insert(insertTicket);
         
-        await transactions.Commit(database, txnState);
+        await database.Transactions.CommitAsync(txnState);
     }
 
     [Test]
@@ -348,7 +344,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
     public async Task TestCheckSuccessfulMultiInsert2()
     {
         int i;
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupMultiIndexTable();
 
         string[] userIds = new string[5];
         for (i = 0; i < 5; i++)
@@ -358,7 +354,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         ConcurrentBag<string> objectIds = new();
 
         for (i = 0; i < 50; i++)        
-            tasks.Add(InsertRow(dbname, database, executor, transactions, objectIds, userIds, i));
+            tasks.Add(InsertRow(dbname, database, executor, objectIds, userIds, i));
                         
         await Task.WhenAll(tasks);
 
@@ -366,7 +362,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         await executor.CloseDatabase(closeTicket);
         
         i = 0;
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         foreach (string objectId in objectIds)
         {

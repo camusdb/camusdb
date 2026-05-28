@@ -10,7 +10,6 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Serializer;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -67,7 +66,7 @@ internal sealed class TableDropper
             if (database.Schema.Tables.Remove(ticket.TableName))
                 logger.LogInformation("Removed table {TableName} from database schema", ticket.TableName);
 
-            database.Storage.Put(CamusDBConfig.SchemaKey, Serializator.Serialize(database.Schema.Tables));
+            // Phase 5 will persist schema to Kahuna KV.
         }
         finally
         {
@@ -83,7 +82,7 @@ internal sealed class TableDropper
             if (database.SystemSchema.Tables.Remove(table.Id))
                 logger.LogInformation("Removed table {TableName} from system schema", ticket.TableName);
 
-            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema));
+            // Phase 5 will persist system space to Kahuna KV.
         }
         finally
         {

@@ -13,23 +13,19 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.Util.Time;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Transactions.Models;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 internal sealed class TestRowMultiInsertor : BaseTest
 {
-    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
-        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        TransactionsManager transactions = new(hlc);
-        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
+        CommandExecutor executor = new(validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -38,14 +34,14 @@ internal sealed class TestRowMultiInsertor : BaseTest
 
         DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, database, executor, transactions);
+        return (dbname, database, executor);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions)> SetupMultiIndexTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupMultiIndexTable()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket tableTicket = new(
             txnState: txnState,
@@ -67,9 +63,9 @@ internal sealed class TestRowMultiInsertor : BaseTest
 
         await executor.CreateTable(tableTicket);
 
-        await transactions.Commit(database, txnState);
+        await database.Transactions.CommitAsync(txnState);
 
-        return (dbname, executor, transactions);
+        return (dbname, database, executor);
     }
 
     [Test]
@@ -77,9 +73,9 @@ internal sealed class TestRowMultiInsertor : BaseTest
     [NonParallelizable]
     public async Task TestBasicInsert()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupMultiIndexTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         InsertTicket ticket = new(
             txnState: txnState,
@@ -104,9 +100,9 @@ internal sealed class TestRowMultiInsertor : BaseTest
     [NonParallelizable]
     public async Task TestCheckSuccessfulMultiInsertWithQueryIndex()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupMultiIndexTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
         
         for (int i = 0; i < 10; i++)
         {
@@ -130,7 +126,6 @@ internal sealed class TestRowMultiInsertor : BaseTest
 
         QueryTicket queryTicket = new(
             txnState: txnState,
-            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "user_robots",
             index: "robots_id_idx",
@@ -168,9 +163,9 @@ internal sealed class TestRowMultiInsertor : BaseTest
     [NonParallelizable]
     public async Task TestSameKeyMultiInsertWithQueryIndex()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions) = await SetupMultiIndexTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupMultiIndexTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         for (int i = 0; i < 10; i++)
         {
@@ -194,7 +189,6 @@ internal sealed class TestRowMultiInsertor : BaseTest
 
         QueryTicket queryTicket = new(
             txnState: txnState,
-            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "user_robots",
             index: "robots_id_idx",

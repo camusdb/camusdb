@@ -20,5 +20,4 @@ public enum AlterColumnFluxSteps
     UpdateUniqueIndexes = 3,
     UpdateMultiIndexes = 4,
     AlterColumnRow = 5,
-    ApplyPageOperations = 6,    
 }

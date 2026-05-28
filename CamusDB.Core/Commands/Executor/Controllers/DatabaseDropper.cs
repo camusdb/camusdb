@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -8,7 +8,6 @@
 
 using Nito.AsyncEx;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusConfig = CamusDB.Core.CamusDBConfig;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -27,35 +26,13 @@ internal sealed class DatabaseDropper
 
     public async Task Drop(string name)
     {
-        if (!databaseDescriptors.Descriptors.TryGetValue(name, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
+        if (databaseDescriptors.Descriptors.TryRemove(name, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
         {
-            DropInternal(name);
-            return;
+            DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
+            await databaseDescriptor.Kahuna.DisposeAsync().ConfigureAwait(false);
+            databaseDescriptor.Dispose();
         }
 
-        DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
-
-        databaseDescriptor.Storage.Dispose();
-
-        databaseDescriptors.Descriptors.TryRemove(name, out _);
-
-        DropInternal(name);
-
         logger.LogInformation("Database {Name} dropped", name);
-    }
-
-    private static void DropInternal(string name)
-    {
-        string dbPath = Path.Combine(CamusConfig.DataDirectory, name);
-
-        if (!Directory.Exists(dbPath))
-            throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
-
-        // The database is not deleted, but its data directory is renamed.
-        // This allows saving data in case it is deleted by mistake.
-
-        string newDbPath = Path.Combine(string.Concat(CamusConfig.DataDirectory, "_", name, "_", DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss-fffffff")));
-
-        Directory.Move(dbPath, newDbPath);
     }
 }

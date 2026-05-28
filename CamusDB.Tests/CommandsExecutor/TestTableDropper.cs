@@ -12,23 +12,19 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Transactions.Models;
 using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 internal sealed class TestTableDropper : BaseTest
 {    
-    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager, CatalogsManager)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor, CatalogsManager)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
-        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogs = new(logger);
-        TransactionsManager transactions = new(hlc);
-        CommandExecutor executor = new(hlc, validator, catalogs, logger);
+        CommandExecutor executor = new(validator, catalogs, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -37,14 +33,14 @@ internal sealed class TestTableDropper : BaseTest
 
         DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, database, executor, transactions, catalogs);
+        return (dbname, database, executor, catalogs);
     }
 
-    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalog, List<string> objectIds)> SetupBasicTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalog, List<string> objectIds)> SetupBasicTable()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket createTicket = new(
             txnState: txnState,
@@ -66,7 +62,7 @@ internal sealed class TestTableDropper : BaseTest
 
         await executor.CreateTable(createTicket);
         
-        await transactions.Commit(database, txnState);
+        await database.Transactions.CommitAsync(txnState);
 
         List<string> objectsId = new(25);
 
@@ -95,16 +91,16 @@ internal sealed class TestTableDropper : BaseTest
             objectsId.Add(objectId);
         }
 
-        return (dbname, database, executor, transactions, catalogs, objectsId);
+        return (dbname, database, executor, catalogs, objectsId);
     }
 
     [Test]
     [NonParallelizable]
     public async Task TestCreateTableFillAndDrop()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs, _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs, _) = await SetupBasicTable();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         DropTableTicket dropTableTicket = new(
             txnState: txnState,
@@ -121,9 +117,9 @@ internal sealed class TestTableDropper : BaseTest
     [NonParallelizable]
     public async Task TestCreateTableFillDropAndRecreate()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions, CatalogsManager catalogs, _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs, _) = await SetupBasicTable();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         DropTableTicket dropTableTicket = new(
             txnState: txnState,

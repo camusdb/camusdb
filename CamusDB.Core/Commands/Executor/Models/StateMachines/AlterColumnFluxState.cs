@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.BufferPool.Models;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -24,8 +23,6 @@ internal sealed class AlterColumnFluxState
     public AlterColumnTicket Ticket { get; }
 
     public QueryExecutor QueryExecutor { get; }
-
-    public List<BufferPageOperation> ModifiedPages { get; } = new();    
 
     public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }
 

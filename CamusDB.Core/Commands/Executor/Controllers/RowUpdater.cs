@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -7,7 +7,6 @@
  */
 
 using System.Diagnostics;
-using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
@@ -15,9 +14,10 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.Diagnostics;
-using CamusDB.Core.Util.Time;
-using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -27,10 +27,6 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// </summary>
 public sealed class RowUpdater
 {
-    private readonly IndexSaver indexSaver = new();
-
-    private readonly RowSerializer rowSerializer = new();
-
     private readonly ILogger<ICamusDB> logger;
 
     public RowUpdater(ILogger<ICamusDB> logger)
@@ -38,12 +34,6 @@ public sealed class RowUpdater
         this.logger = logger;
     }
 
-    /// <summary>
-    /// Validates that the column name exists in the current table schema
-    /// </summary>
-    /// <param name="columns"></param>
-    /// <param name="columnName"></param>
-    /// <exception cref="CamusDBException"></exception>
     private static void ValidateIfColumnExists(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, string columnName)
     {
         bool hasColumn = false;
@@ -75,14 +65,6 @@ public sealed class RowUpdater
         }
     }
 
-    /// <summary>
-    /// Validates that all columns and values in the update statement are valid
-    /// This validation is performed when the values are simple columnvalues (not expressions)
-    /// </summary>
-    /// <param name="columns"></param>
-    /// <param name="indexes"></param>
-    /// <param name="plainValues"></param>
-    /// <exception cref="CamusDBException"></exception>
     private static void ValidatePlainValues(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, Dictionary<string, ColumnValue> plainValues)
     {
         if (plainValues.Count == 0)
@@ -109,14 +91,6 @@ public sealed class RowUpdater
         }
     }
 
-    /// <summary>
-    /// Validates that all columns and values in the update statement are valid
-    /// This validation is performed when the values are SQL expressions.
-    /// </summary>
-    /// <param name="columns"></param>
-    /// <param name="indexes"></param>
-    /// <param name="exprValues"></param>
-    /// <exception cref="CamusDBException"></exception>
     private static void ValidateExprValues(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, Dictionary<string, NodeAst> exprValues)
     {
         if (exprValues.Count == 0)
@@ -133,20 +107,12 @@ public sealed class RowUpdater
             if (!exprValues.TryGetValue(columnSchema.Name, out NodeAst? columnValue))
                 continue;
 
-            // This is a superficial validation of the data. It only works if the value to be updated is exactly NULL.
-            // For example: UPDATE robots SET name = NULL.
             if (columnValue.nodeType == NodeType.Null)
                 throw new CamusDBException(CamusDBErrorCodes.NotNullViolation, $"Column '{columnSchema.Name}' cannot be null");
         }
     }
 
-    /// <summary>
-    /// Validates that all columns and values in the update statement are valid
-    /// </summary>
-    /// <param name="table"></param>
-    /// <param name="ticket"></param>
-    /// <exception cref="CamusDBException"></exception>
-    private static void Validate(TableDescriptor table, UpdateTicket ticket) // @todo optimize this
+    private static void Validate(TableDescriptor table, UpdateTicket ticket)
     {
         if (ticket.PlainValues is not null && ticket.ExprValues is not null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot specify both plan and sql expr values at the same time");
@@ -161,17 +127,8 @@ public sealed class RowUpdater
             ValidateExprValues(columns, indexes, ticket.ExprValues);
     }
 
-    /// <summary>
-    /// Schedules a new Update operation by the specified filters
-    /// </summary>
-    /// <param name="database"></param>
-    /// <param name="table"></param>
-    /// <param name="ticket"></param>
-    /// <returns></returns>
     internal async Task<int> Update(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, UpdateTicket ticket)
     {
-        // Performs a superficial validation of the ticket to ensure that everything is correct.
-        // However, the values must be validated again later against the internal state of the transaction.
         Validate(table, ticket);
 
         UpdateFluxState state = new(
@@ -186,14 +143,6 @@ public sealed class RowUpdater
         return await UpdateInternal(machine, state).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Returns the specified column values as a composite value.
-    /// </summary>
-    /// <param name="rowValues"></param>
-    /// <param name="columnNames"></param>
-    /// <param name="extraUniqueValue"></param>
-    /// <returns></returns>
-    /// <exception cref="CamusDBException"></exception>
     private static CompositeColumnValue GetColumnValue(Dictionary<string, ColumnValue> rowValues, string[] columnNames, ColumnValue? extraUniqueValue = null)
     {
         ColumnValue[] columnValues = new ColumnValue[extraUniqueValue is null ? columnNames.Length : columnNames.Length + 1];
@@ -215,20 +164,14 @@ public sealed class RowUpdater
             columnValues[^1] = extraUniqueValue;
 
         return new CompositeColumnValue(columnValues);
-    }    
+    }
 
-    /// <summary>
-    /// We need to locate the row tuples to Update
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
     private async Task<FluxAction> LocateTuplesToUpdate(UpdateFluxState state)
     {
         UpdateTicket ticket = state.Ticket;
 
         QueryTicket queryTicket = new(
             txnState: ticket.TxnState,
-            txnType: TransactionType.Write,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             index: null,
@@ -243,133 +186,11 @@ public sealed class RowUpdater
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
-        // @todo we need to take a snapshot of the data to prevent deadlocks
-        // but probably need to optimize this for larger datasets
         state.RowsToUpdate = await cursor.ToListAsync();
 
-        //Console.WriteLine("Data Pk={0} is at page offset {1}", ticket.Id, state.RowTuple.SlotTwo);*/
-
         return FluxAction.Continue;
     }
 
-    /// <summary>
-    /// Checks if a row with the same primary key is already added to table
-    /// </summary>
-    /// <param name="table"></param>
-    /// <param name="keyName"></param>
-    /// <param name="uniqueIndex"></param>
-    /// <param name="txnId"></param>
-    /// <param name="values"></param>
-    /// <param name="name"></param>
-    /// <returns></returns>
-    /// <exception cref="CamusDBException"></exception>
-    private static async Task CheckUniqueKeyViolations(
-        TableDescriptor table,
-        string keyName,
-        BTree<CompositeColumnValue, BTreeTuple> uniqueIndex,
-        HLCTimestamp txnId,
-        Dictionary<string, ColumnValue> values,
-        string[] columnNames
-    )
-    {
-        CompositeColumnValue uniqueValue = GetColumnValue(values, columnNames);
-
-        BTreeTuple? rowTuple = await uniqueIndex.Get(TransactionType.Write, txnId, uniqueValue).ConfigureAwait(false);
-
-        if (rowTuple is not null && !rowTuple.IsNull())
-            throw new CamusDBException(
-                CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                "Duplicate entry for key \"" + table.Name + "." + keyName + "\" " + uniqueValue
-            );
-    }
-
-    /// <summary>
-    /// Check for unique key violations on every unique index the table has
-    /// </summary>
-    /// <param name="table"></param>
-    /// <param name="txnId"></param>
-    /// <param name="values"></param>
-    /// <returns></returns>
-    /// <exception cref="CamusDBException"></exception>
-    private static async Task CheckUniqueKeys(TableDescriptor table, HLCTimestamp txnId, Dictionary<string, ColumnValue> values)
-    {
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
-        {
-            if (index.Value.Type != IndexType.Unique)
-                continue;
-
-            if (index.Key == "~pk")
-                continue;
-
-            BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.Value.BTree;
-
-            await CheckUniqueKeyViolations(table, index.Key, uniqueIndex, txnId, values, index.Value.Columns).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// Acquire write locks on the indices to ensure consistency in writing.
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> TryAdquireLocks(UpdateFluxState state)
-    {
-        await state.Ticket.TxnState.TryAdquireWriteLocks(state.Table).ConfigureAwait(false);
-
-        return FluxAction.Continue;
-    }
-
-    /// <summary>
-    /// Updates the row on the disk
-    /// </summary>
-    /// <param name="state"></param>
-    /// <returns></returns>
-    private async Task<FluxAction> UpdateRowsAndIndexes(UpdateFluxState state)
-    {
-        if (state.RowsToUpdate is null)
-        {
-            Console.WriteLine("Invalid rows to update");
-            return FluxAction.Abort;
-        }
-
-        TableDescriptor table = state.Table;
-        UpdateTicket ticket = state.Ticket;
-        BufferPoolManager tablespace = state.Database.BufferPool;
-
-        foreach (QueryResultRow queryRow in state.RowsToUpdate)
-        {
-            Dictionary<string, ColumnValue> rowValues = GetNewUpdatedRow(queryRow, ticket);
-
-            CheckForNotNulls(table, rowValues);
-
-            await CheckUniqueKeys(table, ticket.TxnState.TxnId, rowValues).ConfigureAwait(false);
-
-            BTreeTuple tuple = UpdateNewRowVersionDisk(tablespace, table, state, queryRow, rowValues);
-
-            await UpdateTableIndex(state, tuple).ConfigureAwait(false);
-
-            await UpdateUniqueIndexes(state, table, ticket, tuple, queryRow).ConfigureAwait(false);
-
-            await UpdateMultiIndexes(state, table, ticket, tuple, queryRow).ConfigureAwait(false);
-
-            logger.LogInformation(
-                "Row with rowid {SlotOne} updated to page {SlotTwo}",
-                tuple.SlotOne,
-                tuple.SlotTwo
-            );
-
-            state.ModifiedRows++;
-        }
-
-        return FluxAction.Continue;
-    }
-
-    /// <summary>
-    /// Validates if any NOT NULL constraint is being violated with respect to the new proposed values to be updated.
-    /// </summary>
-    /// <param name="table"></param>
-    /// <param name="rowValues"></param>
-    /// <exception cref="CamusDBException"></exception>
     private static void CheckForNotNulls(TableDescriptor table, Dictionary<string, ColumnValue> rowValues)
     {
         List<TableColumnSchema> columns = table.Schema.Columns!;
@@ -392,17 +213,9 @@ public sealed class RowUpdater
         }
     }
 
-    /// <summary>
-    /// Assigns the plain column values to a fresh copy of the original row returned in the query, 
-    /// or evaluates the SQL expressions with reference to the values in the original row and placeholders.
-    /// </summary>
-    /// <param name="row"></param>
-    /// <param name="ticket"></param>
-    /// <returns></returns>
-    /// <exception cref="CamusDBException"></exception>
     private static Dictionary<string, ColumnValue> GetNewUpdatedRow(QueryResultRow row, UpdateTicket ticket)
     {
-        Dictionary<string, ColumnValue> rowValues = new(row.Row.Count); // create a fresh copy
+        Dictionary<string, ColumnValue> rowValues = new(row.Row.Count);
 
         foreach (KeyValuePair<string, ColumnValue> keyValue in row.Row)
             rowValues[keyValue.Key] = keyValue.Value;
@@ -426,65 +239,48 @@ public sealed class RowUpdater
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid values in update ticket");
     }
 
-    /// <summary>
-    /// Serializes the new values of the row with their respective new page addresses and also 
-    /// assigns a new row offset where the new version of the row will be stored.
-    /// </summary>
-    /// <param name="tablespace"></param>
-    /// <param name="table"></param>
-    /// <param name="state"></param>
-    /// <param name="row"></param>
-    /// <param name="ticket"></param>
-    /// <returns></returns>
-    private BTreeTuple UpdateNewRowVersionDisk(
-        BufferPoolManager tablespace,
-        TableDescriptor table,
-        UpdateFluxState state,
-        QueryResultRow row,
-        Dictionary<string, ColumnValue> rowValues
-    )
+    private async Task<FluxAction> UpdateRowsAndIndexes(UpdateFluxState state)
     {
-        //Console.WriteLine("Original tuple: {0}", row.Tuple);        
+        if (state.RowsToUpdate is null)
+        {
+            logger.LogWarning("Invalid rows to update");
+            return FluxAction.Abort;
+        }
 
-        byte[] buffer = rowSerializer.Serialize(table, rowValues, row.Tuple.SlotOne);
+        TableDescriptor table = state.Table;
+        UpdateTicket ticket = state.Ticket;
+        KvTransaction tx = ticket.TxnState;
 
-        // Allocate a new page for the row
-        BTreeTuple tuple = new(
-            slotOne: row.Tuple.SlotOne,
-            slotTwo: tablespace.GetNextFreeOffset()
-        );
+        foreach (QueryResultRow queryRow in state.RowsToUpdate)
+        {
+            Dictionary<string, ColumnValue> rowValues = GetNewUpdatedRow(queryRow, ticket);
 
-        //Console.WriteLine("New tuple: {0}", tuple);
+            CheckForNotNulls(table, rowValues);
 
-        tablespace.WriteDataToPageBatch(state.Ticket.TxnState.ModifiedPages, tuple.SlotTwo, 0, buffer);
+            ObjectIdValue rowId = queryRow.RowId;
 
-        return tuple;
+            byte[] buffer = RowEncoder.Encode(table.Schema, rowValues, rowId);
+
+            await table.Store.UpdateRow(tx, rowId, buffer).ConfigureAwait(false);
+
+            await UpdateUniqueIndexes(table, tx, rowId, queryRow.Row, rowValues).ConfigureAwait(false);
+
+            await UpdateMultiIndexes(table, tx, rowId, queryRow.Row, rowValues).ConfigureAwait(false);
+
+            logger.LogInformation("Row with rowid {RowId} updated", rowId);
+
+            state.ModifiedRows++;
+        }
+
+        return FluxAction.Continue;
     }
 
-    private async Task UpdateTableIndex(UpdateFluxState state, BTreeTuple tuple)
-    {
-        SaveOffsetIndexTicket saveUniqueOffsetIndex = new(
-            tablespace: state.Database.BufferPool,
-            index: state.Table.Rows,
-            txnId: state.Ticket.TxnState.TxnId,
-            commitState: BTreeCommitState.Uncommitted,
-            key: tuple.SlotOne,
-            value: tuple.SlotTwo,
-            modifiedPages: state.Ticket.TxnState.ModifiedPages
-        );
-
-        // Main table index stores rowid pointing to page offset
-        await indexSaver.Save(saveUniqueOffsetIndex);
-
-        state.Ticket.TxnState.MainTableDeltas.Add((state.Table.Rows, tuple));
-    }
-
-    private async Task UpdateUniqueIndexes(        
-        UpdateFluxState state,
+    private static async Task UpdateUniqueIndexes(
         TableDescriptor table,
-        UpdateTicket ticket,
-        BTreeTuple tuple,
-        QueryResultRow row
+        KvTransaction tx,
+        ObjectIdValue rowId,
+        Dictionary<string, ColumnValue> oldRow,
+        Dictionary<string, ColumnValue> newRow
     )
     {
         foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
@@ -494,34 +290,20 @@ public sealed class RowUpdater
             if (index.Type != IndexType.Unique)
                 continue;
 
-            BTree<CompositeColumnValue, BTreeTuple> uniqueIndex = index.BTree;
+            CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns);
+            CompositeColumnValue newKey = GetColumnValue(newRow, index.Columns);
 
-            CompositeColumnValue uniqueKeyValue = GetColumnValue(row.Row, index.Columns);
-
-            SaveIndexTicket saveIndexTicket = new(
-                tablespace: state.Database.BufferPool,
-                index: uniqueIndex,
-                txnId: ticket.TxnState.TxnId,
-                commitState: BTreeCommitState.Uncommitted,
-                key: uniqueKeyValue,
-                value: tuple,
-                modifiedPages: state.Ticket.TxnState.ModifiedPages
-            );
-
-            //Console.WriteLine("Saving unique index {0} {1} {2}", uniqueIndex, uniqueKeyValue, tuple);
-
-            await indexSaver.Save(saveIndexTicket).ConfigureAwait(false);
-
-            state.Ticket.TxnState.UniqueIndexDeltas.Add((uniqueIndex, uniqueKeyValue, tuple));
+            await table.Store.DeleteIndexEntry(tx, index.Name, oldKey, rowId, unique: true).ConfigureAwait(false);
+            await table.Store.PutIndexEntry(tx, index.Name, newKey, rowId, unique: true).ConfigureAwait(false);
         }
     }
 
-    private async Task UpdateMultiIndexes(
-        UpdateFluxState state,
+    private static async Task UpdateMultiIndexes(
         TableDescriptor table,
-        UpdateTicket ticket,
-        BTreeTuple tuple,
-        QueryResultRow row
+        KvTransaction tx,
+        ObjectIdValue rowId,
+        Dictionary<string, ColumnValue> oldRow,
+        Dictionary<string, ColumnValue> newRow
     )
     {
         foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
@@ -531,45 +313,26 @@ public sealed class RowUpdater
             if (index.Type != IndexType.Multi)
                 continue;
 
-            BTree<CompositeColumnValue, BTreeTuple> multiIndex = index.BTree;
+            ColumnValue rowIdValue = new(ColumnType.Id, rowId.ToString());
 
-            CompositeColumnValue multiKeyValue = GetColumnValue(row.Row, index.Columns, new ColumnValue(ColumnType.Id, tuple.SlotOne.ToString()));
+            CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns, rowIdValue);
+            CompositeColumnValue newKey = GetColumnValue(newRow, index.Columns, rowIdValue);
 
-            SaveIndexTicket saveIndexTicket = new(
-                tablespace: state.Database.BufferPool,
-                index: multiIndex,
-                txnId: ticket.TxnState.TxnId,
-                commitState: BTreeCommitState.Uncommitted,
-                key: multiKeyValue,
-                value: tuple,
-                modifiedPages: state.Ticket.TxnState.ModifiedPages
-            );
-
-            //Console.WriteLine("Saving unique index {0} {1} {2}", uniqueIndex, uniqueKeyValue, tuple);
-
-            await indexSaver.Save(saveIndexTicket);
-
-            state.Ticket.TxnState.MultiIndexDeltas.Add((multiIndex, multiKeyValue, tuple));
+            await table.Store.DeleteIndexEntry(tx, index.Name, oldKey, rowId, unique: false).ConfigureAwait(false);
+            await table.Store.PutIndexEntry(tx, index.Name, newKey, rowId, unique: false).ConfigureAwait(false);
         }
-    }           
+    }
 
-    /// <summary>
-    /// Executes the flux state machine to update records by the specified filters
-    /// </summary>
-    /// <param name="machine"></param>
-    /// <param name="state"></param>
-    /// <returns></returns>
     private async Task<int> UpdateInternal(FluxMachine<UpdateFluxSteps, UpdateFluxState> machine, UpdateFluxState state)
     {
         ValueStopwatch timer = ValueStopwatch.StartNew();
 
-        machine.When(UpdateFluxSteps.TryAdquireLocks, TryAdquireLocks);
-        machine.When(UpdateFluxSteps.LocateTupleToUpdate, LocateTuplesToUpdate);        
-        machine.When(UpdateFluxSteps.UpdateRowsAndIndexes, UpdateRowsAndIndexes);        
+        machine.When(UpdateFluxSteps.LocateTupleToUpdate, LocateTuplesToUpdate);
+        machine.When(UpdateFluxSteps.UpdateRowsAndIndexes, UpdateRowsAndIndexes);
 
         while (!machine.IsAborted)
             await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
-        
+
         TimeSpan timeTaken = timer.GetElapsedTime();
 
         logger.LogInformation(

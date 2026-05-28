@@ -14,7 +14,6 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
  */
 public enum InsertFluxSteps
 {
-    NotInitialized = 0,    
-    TryAdquireLocks = 1,
-    InsertRowsAndIndexes = 2,    
+    NotInitialized = 0,
+    InsertRowsAndIndexes = 1,
 }

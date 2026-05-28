@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -7,12 +7,9 @@
  */
 
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.Serializer;
-using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -42,39 +39,29 @@ internal sealed class TableCreator
 
         TableSchema tableSchema = await catalogs.CreateTable(database, ticket);
 
-        await SetInitialTablePages(database, tableSchema);
+        RegisterTableObject(database, tableSchema);
 
         await AddConstraints(queryExecutor, tableOpener, tableIndexAlterer, database, ticket);
 
         return true;
     }
 
-    private async Task SetInitialTablePages(DatabaseDescriptor database, TableSchema tableSchema)
+    private void RegisterTableObject(DatabaseDescriptor database, TableSchema tableSchema)
     {
         try
         {
-            await database.SystemSchemaSemaphore.WaitAsync();
+            database.SystemSchemaSemaphore.Wait();
 
-            Dictionary<string, DatabaseTableObject> tables = database.SystemSchema.Tables;
-
-            BufferPoolManager tablespace = database.BufferPool;
-
-            string tableName = tableSchema.Name!;
-
-            ObjectIdValue pageOffset = tablespace.GetNextFreeOffset();
-
-            DatabaseTableObject tableObject = new(            
+            DatabaseTableObject tableObject = new(
                 type: DatabaseObjectType.Table,
                 id: tableSchema.Id ?? "",
-                name: tableName,
-                startOffset:  pageOffset.ToString()
+                name: tableSchema.Name!,
+                startOffset: ""
             );
 
-            tables.Add(tableObject.Id, tableObject);
+            database.SystemSchema.Tables.TryAdd(tableObject.Id, tableObject);
 
-            database.Storage.Put(CamusDBConfig.SystemKey, Serializator.Serialize(database.SystemSchema));
-
-            logger.LogInformation("Added table {TableName} to system, data table staring at {PageOffset}", tableName, pageOffset);
+            logger.LogInformation("Registered table {TableName} in system space", tableSchema.Name);
         }
         finally
         {

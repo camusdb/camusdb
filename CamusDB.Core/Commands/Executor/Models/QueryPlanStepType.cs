@@ -16,5 +16,6 @@ public enum QueryPlanStepType
     Aggregate,
     ReduceToProjections,
     Limit,
-    QueryFromIndex
+    QueryFromIndex,
+    RangeScanFromIndex
 }

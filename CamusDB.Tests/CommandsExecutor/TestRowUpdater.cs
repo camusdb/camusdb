@@ -22,23 +22,19 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Transactions.Models;
 using CamusDB.Core.Util.ObjectIds;
-using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 public sealed class TestRowUpdater : BaseTest
 {
-    private async Task<(string, DatabaseDescriptor, CommandExecutor, TransactionsManager)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()
     {
         string dbname = Guid.NewGuid().ToString("n");
 
-        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        TransactionsManager transactions = new(hlc);
-        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
+        CommandExecutor executor = new(validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -47,14 +43,14 @@ public sealed class TestRowUpdater : BaseTest
 
         DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
 
-        return (dbname, database, executor, transactions);
+        return (dbname, database, executor);
     }
 
-    private async Task<(string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId)> SetupBasicTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TransactionsManager transactions) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket tableTicket = new(
             txnState: txnState,
@@ -103,9 +99,9 @@ public sealed class TestRowUpdater : BaseTest
             objectsId.Add(objectId);
         }
         
-        await transactions.Commit(database, txnState);
+        await database.Transactions.CommitAsync(txnState);
 
-        return (dbname, executor, transactions, objectsId);
+        return (dbname, database, executor, objectsId);
     }
 
     /*[Test]
@@ -134,9 +130,9 @@ public sealed class TestRowUpdater : BaseTest
     [NonParallelizable]
     public async Task TestInvalidTable()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
         
         UpdateTicket ticket = new(
             txnState: txnState,
@@ -163,9 +159,9 @@ public sealed class TestRowUpdater : BaseTest
     [NonParallelizable]
     public async Task TestUpdateNotNullColumWithNull()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         UpdateTicket ticket = new(
             txnState: txnState,
@@ -192,9 +188,9 @@ public sealed class TestRowUpdater : BaseTest
     [NonParallelizable]
     public async Task TestUpdateNotNullColumWithNull2()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
         
         UpdateTicket ticket = new(
             txnState: txnState,
@@ -221,9 +217,9 @@ public sealed class TestRowUpdater : BaseTest
     [NonParallelizable]
     public async Task TestUpdateByIdSingleRow()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
         
         UpdateTicket ticket = new(
             txnState: txnState,
@@ -263,9 +259,9 @@ public sealed class TestRowUpdater : BaseTest
     [NonParallelizable]
     public async Task TestUpdateUnknownRow()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
 
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
         
         UpdateTicket ticket = new(
             txnState: txnState,
@@ -292,9 +288,9 @@ public sealed class TestRowUpdater : BaseTest
     [NonParallelizable]
     public async Task TestUpdateByIdSingleRowTwice()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
         
         UpdateTicket ticket = new(
             txnState: txnState,
@@ -367,9 +363,9 @@ public sealed class TestRowUpdater : BaseTest
     [NonParallelizable]
     public async Task TestMultiUpdate()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         foreach (string objectId in objectsId)
         {
@@ -415,9 +411,9 @@ public sealed class TestRowUpdater : BaseTest
     [NonParallelizable]
     public async Task TestMultiUpdateParallel()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         List<Task> tasks = new(objectsId.Count);
 
@@ -447,7 +443,6 @@ public sealed class TestRowUpdater : BaseTest
 
         QueryTicket queryTicket = new(
             txnState: txnState,
-            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -467,7 +462,6 @@ public sealed class TestRowUpdater : BaseTest
 
         queryTicket = new(
             txnState: txnState,
-            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -490,7 +484,6 @@ public sealed class TestRowUpdater : BaseTest
 
         queryTicket = new(
             txnState: txnState,
-            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -516,9 +509,9 @@ public sealed class TestRowUpdater : BaseTest
     [NonParallelizable]
     public async Task TestBasicUpdate()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> objectsId) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         UpdateTicket ticket = new(
             txnState: txnState,
@@ -558,9 +551,9 @@ public sealed class TestRowUpdater : BaseTest
     [NonParallelizable]
     public async Task TestUpdateMany()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         UpdateTicket ticket = new(
             txnState: txnState,
@@ -584,7 +577,6 @@ public sealed class TestRowUpdater : BaseTest
 
         QueryTicket queryTicket = new(
             txnState: txnState,
-            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -615,7 +607,6 @@ public sealed class TestRowUpdater : BaseTest
 
         queryTicket = new(
             txnState: txnState,
-            txnType: TransactionType.ReadOnly,
             databaseName: dbname,
             tableName: "robots",
             index: null,
@@ -649,9 +640,9 @@ public sealed class TestRowUpdater : BaseTest
     [NonParallelizable]
     public async Task TestUpdateNone()
     {
-        (string dbname, CommandExecutor executor, TransactionsManager transactions, List<string> _) = await SetupBasicTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
         
-        TransactionState txnState = await transactions.Start();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         UpdateTicket ticket = new(
             txnState: txnState,

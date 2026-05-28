@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -15,7 +15,6 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 public enum DeleteFluxSteps
 {
     NotInitialized = 0,
-    TryAdquireLocks = 1,
-    LocateTupleToDelete = 2,    
-    DeleteRowsAndIndexesFromDisk = 3
+    LocateTupleToDelete = 1,
+    DeleteRowsAndIndexesFromDisk = 2,
 }

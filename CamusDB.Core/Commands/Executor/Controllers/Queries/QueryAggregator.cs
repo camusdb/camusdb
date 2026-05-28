@@ -10,7 +10,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
-using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -38,7 +38,7 @@ internal sealed class QueryAggregator
             count++;
 
         yield return new QueryResultRow(
-            new BTreeTuple(new(), new()), 
+            default(ObjectIdValue),
             new() { { "0", new ColumnValue(ColumnType.Integer64, count) } 
         });
     }

@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -9,12 +9,11 @@
 using Nito.AsyncEx;
 using Microsoft.Extensions.Logging;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
-/// Closes the database descriptors of a database, allowing the server to free all memory associated with it.
+/// Closes database descriptors, stopping the associated Kahuna node and freeing memory.
 /// </summary>
 internal sealed class DatabaseCloser : IAsyncDisposable
 {
@@ -28,37 +27,22 @@ internal sealed class DatabaseCloser : IAsyncDisposable
         this.logger = logger;
     }
 
-    /// <summary>
-    /// Close the database descriptor and unloads the storage engine
-    /// </summary>
-    /// <param name="name"></param>
-    /// <returns></returns>
-    /// <exception cref="CamusDBException"></exception>
     public async Task Close(string name)
     {
-        if (!databaseDescriptors.Descriptors.TryGetValue(name, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
-        {
-            string dbPath = Path.Combine(CamusConfig.DataDirectory, name);
-
-            if (!Directory.Exists(dbPath))
-                throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, "Database doesn't exist");
-
+        if (!databaseDescriptors.Descriptors.TryRemove(name, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
             return;
-        }
 
         DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
-        
-        databaseDescriptor.Storage.Dispose();
-        databaseDescriptor.GC.Dispose();
 
-        databaseDescriptors.Descriptors.TryRemove(name, out _);
+        await databaseDescriptor.Kahuna.DisposeAsync().ConfigureAwait(false);
+        databaseDescriptor.Dispose();
 
         logger.LogInformation("Database {Name} closed", name);
     }
 
     public async ValueTask DisposeAsync()
     {
-        foreach (KeyValuePair<string, AsyncLazy<DatabaseDescriptor>> keyValuePair in databaseDescriptors.Descriptors)
-            await Close(keyValuePair.Key).ConfigureAwait(false);
+        foreach (string name in databaseDescriptors.Descriptors.Keys.ToList())
+            await Close(name).ConfigureAwait(false);
     }
 }

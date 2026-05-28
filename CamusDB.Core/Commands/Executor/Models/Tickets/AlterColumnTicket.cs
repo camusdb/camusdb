@@ -6,13 +6,13 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Transactions.Models;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct AlterColumnTicket
 {
-    public TransactionState TxnState { get; }
+    public KvTransaction TxnState { get; }
 
     public string DatabaseName { get; }
 
@@ -22,7 +22,7 @@ public readonly struct AlterColumnTicket
 
     public AlterTableOperation Operation { get; }
 
-    public AlterColumnTicket(TransactionState txnState, string databaseName, string tableName, ColumnInfo column, AlterTableOperation operation)
+    public AlterColumnTicket(KvTransaction txnState, string databaseName, string tableName, ColumnInfo column, AlterTableOperation operation)
     {
         TxnState = txnState;
         DatabaseName = databaseName;

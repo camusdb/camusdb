@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -6,12 +6,13 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Trees;
-using CamusDB.Core.BufferPool;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.Util.ObjectIds;
+using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -34,7 +35,7 @@ internal sealed class QueryExecutor
 
     private readonly QueryLimiter queryLimiter = new();
 
-    private readonly QueryScanner queryScanner = new();    
+    private readonly QueryScanner queryScanner = new();
 
     public QueryExecutor(ILogger<ICamusDB> logger)
     {
@@ -57,7 +58,11 @@ internal sealed class QueryExecutor
             switch (step.Type)
             {
                 case QueryPlanStepType.QueryFromIndex:
-                    plan.DataCursor = QueryUsingIndex(plan.Database, plan.Table, plan.Ticket, step.Index, step.ColumnValue);
+                    plan.DataCursor = QueryUsingIndex(plan.Table, plan.Ticket, step.Index, step.ColumnValue);
+                    break;
+
+                case QueryPlanStepType.RangeScanFromIndex:
+                    plan.DataCursor = QueryUsingRangeIndex(plan.Table, plan.Ticket, step.Index, step.FromBound, step.FromInclusive, step.ToBound, step.ToInclusive);
                     break;
 
                 case QueryPlanStepType.FullScanFromIndex:
@@ -108,7 +113,6 @@ internal sealed class QueryExecutor
     }
 
     private IAsyncEnumerable<QueryResultRow> QueryUsingIndex(
-        DatabaseDescriptor database,
         TableDescriptor table,
         QueryTicket ticket,
         TableIndexSchema? index,
@@ -116,127 +120,155 @@ internal sealed class QueryExecutor
     )
     {
         if (index is null)
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "Couldn't access table's unique index"
-            );
-        }
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Couldn't access table's unique index");
 
         if (columnValue is null)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "Invalid column value"
-            );
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid column value");
 
         if (index.Type == IndexType.Unique)
-            return QueryUsingUniqueIndex(database, table, ticket, index, columnValue);
+            return QueryUsingUniqueIndex(table, ticket, index, columnValue);
 
-        return QueryUsingMultiIndex(database, table, ticket, index, columnValue);
+        return QueryUsingMultiIndex(table, ticket, index, columnValue);
     }
 
-    private async IAsyncEnumerable<QueryResultRow> QueryUsingUniqueIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket, TableIndexSchema index, ColumnValue columnValue)
+    private async IAsyncEnumerable<QueryResultRow> QueryUsingUniqueIndex(
+        TableDescriptor table,
+        QueryTicket ticket,
+        TableIndexSchema index,
+        ColumnValue columnValue
+    )
     {
-        BufferPoolManager tablespace = database.BufferPool;
+        HLCTimestamp txId = ticket.TxnState.TransactionId;
 
-        //using IDisposable? _ = await index.BTree.ReaderLockAsync().ConfigureAwait(false);
-        await ticket.TxnState.TryAdquireTableIndexReadLock(table, index.BTree).ConfigureAwait(false);
-
-        BTreeTuple? pageOffset = await index.BTree.Get(
-                                    TransactionType.ReadOnly,
-                                    ticket.TxnState.TxnId,
-                                    new(columnValue)
-                                 ).ConfigureAwait(false);
-
-        if (pageOffset is null || pageOffset.IsNull())
-        {
-            //Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+        ObjectIdValue? rowId = await table.Store.LookupUnique(txId, index.Name, new CompositeColumnValue(new[] { columnValue })).ConfigureAwait(false);
+        if (rowId is null)
             yield break;
-        }
 
-        byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo);
-        if (data.Length == 0)
-        {
-            //Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
+        byte[]? data = await table.Store.GetRow(txId, rowId.Value).ConfigureAwait(false);
+        if (data is null || data.Length == 0)
             yield break;
-        }
 
-        //Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
-
-        Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, pageOffset.SlotOne, data);
+        ObjectIdValue resolvedRowId = rowId.Value;
+        Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, resolvedRowId, data);
 
         if (ticket.Filters is not null && ticket.Filters.Count > 0)
         {
             if (queryFilterer.MeetFilters(ticket.Filters, row))
-                yield return new(pageOffset, row);
+                yield return new(resolvedRowId, row);
         }
         else
         {
             if (ticket.Where is not null)
             {
                 if (queryFilterer.MeetWhere(ticket.Where, row, ticket.Parameters))
-                    yield return new(pageOffset, row);
+                    yield return new(resolvedRowId, row);
             }
             else
-                yield return new(pageOffset, row);
+                yield return new(resolvedRowId, row);
         }
     }
 
-    private async IAsyncEnumerable<QueryResultRow> QueryUsingMultiIndex(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket, TableIndexSchema index, ColumnValue columnValue)
+    private async IAsyncEnumerable<QueryResultRow> QueryUsingMultiIndex(
+        TableDescriptor table,
+        QueryTicket ticket,
+        TableIndexSchema index,
+        ColumnValue columnValue
+    )
     {
-        BufferPoolManager tablespace = database.BufferPool;
+        HLCTimestamp txId = ticket.TxnState.TransactionId;
+        ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
 
-        /*await foreach (var x in index.BTree.EntriesTraverse(ticket.TxnId))
+        await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId) in table.Store.ScanIndex(txId, index.Name, keyTypes, null, null, unique: false))
         {
-            Console.WriteLine("Entry={0} Value={1}", x.Key, x.GetValue(TransactionType.ReadOnly, ticket.TxnId));
-        }*/
+            // Filter: first component must match the queried value.
+            if (decodedKey.Values.Length == 0 || decodedKey.Values[0].CompareTo(columnValue) != 0)
+                continue;
 
-        //using IDisposable _ = await index.BTree.ReaderLockAsync().ConfigureAwait(false);
-        
-        await ticket.TxnState.TryAdquireTableIndexReadLock(table, index.BTree).ConfigureAwait(false);
-        
-        Console.WriteLine("here");
+            byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
+            if (data is null || data.Length == 0)
+                continue;
 
-        await foreach (BTreeTuple? pageOffset in index.BTree.GetPrefix(TransactionType.ReadOnly, ticket.TxnState.TxnId, columnValue))
-        {
-            if (pageOffset is null || pageOffset.IsNull())
-            {
-                Console.WriteLine("Index Ix={0} does not exist", "null");
-                yield break;
-            }
-
-            byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo).ConfigureAwait(false);
-            if (data.Length == 0)
-            {
-                Console.WriteLine("Index RowId={0} has an empty page data", pageOffset.SlotOne);
-                yield break;
-            }
-
-            Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
-
-            Dictionary<string, ColumnValue> row = rowDeserializer.Deserialize(table.Schema, pageOffset.SlotOne, data);
+            Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
 
             if (ticket.Filters is not null && ticket.Filters.Count > 0)
             {
                 if (queryFilterer.MeetFilters(ticket.Filters, row))
-                    yield return new(pageOffset, row);
+                    yield return new(rowId, row);
             }
             else
             {
                 if (ticket.Where is not null)
                 {
                     if (queryFilterer.MeetWhere(ticket.Where, row, ticket.Parameters))
-                        yield return new(pageOffset, row);
+                        yield return new(rowId, row);
                 }
                 else
-                    yield return new(pageOffset, row);
+                    yield return new(rowId, row);
             }
         }
-        
-        Console.WriteLine("here 1");
     }
 
-    public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(DatabaseDescriptor database, TableDescriptor table, QueryByIdTicket ticket)
+    private IAsyncEnumerable<QueryResultRow> QueryUsingRangeIndex(
+        TableDescriptor table,
+        QueryTicket ticket,
+        TableIndexSchema? index,
+        CompositeColumnValue? fromBound,
+        bool fromInclusive,
+        CompositeColumnValue? toBound,
+        bool toInclusive)
+    {
+        if (index is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Couldn't access table's index for range scan");
+
+        bool unique = index.Type == IndexType.Unique;
+        return QueryUsingRangeIndexInternal(table, ticket, index, fromBound, fromInclusive, toBound, toInclusive, unique);
+    }
+
+    private async IAsyncEnumerable<QueryResultRow> QueryUsingRangeIndexInternal(
+        TableDescriptor table,
+        QueryTicket ticket,
+        TableIndexSchema index,
+        CompositeColumnValue? fromBound,
+        bool fromInclusive,
+        CompositeColumnValue? toBound,
+        bool toInclusive,
+        bool unique)
+    {
+        HLCTimestamp txId = ticket.TxnState.TransactionId;
+        ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
+
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+            txId, index.Name, keyTypes, fromBound, toBound, unique, fromInclusive, toInclusive))
+        {
+            byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
+            if (data is null || data.Length == 0)
+                continue;
+
+            Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
+
+            if (ticket.Filters is not null && ticket.Filters.Count > 0)
+            {
+                if (queryFilterer.MeetFilters(ticket.Filters, row))
+                    yield return new(rowId, row);
+            }
+            else
+            {
+                if (ticket.Where is not null)
+                {
+                    if (queryFilterer.MeetWhere(ticket.Where, row, ticket.Parameters))
+                        yield return new(rowId, row);
+                }
+                else
+                    yield return new(rowId, row);
+            }
+        }
+    }
+
+    public async IAsyncEnumerable<Dictionary<string, ColumnValue>> QueryById(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        QueryByIdTicket ticket
+    )
     {
         if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
         {
@@ -246,31 +278,31 @@ internal sealed class QueryExecutor
             );
         }
 
-        //Console.WriteLine(ticket.TxnId);
-
-        BufferPoolManager tablespace = database.BufferPool;
-
+        HLCTimestamp txId = ticket.TxnState.TransactionId;
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        //using IDisposable _ = await index.BTree.ReaderLockAsync().ConfigureAwait(false);
-
-        BTreeTuple? pageOffset = await index.BTree.Get(TransactionType.ReadOnly, ticket.TxnState.TxnId, new(columnId)).ConfigureAwait(false);
-
-        if (pageOffset is null || pageOffset.IsNull())
-        {
-            //Console.WriteLine("Index Pk={0} does not exist", ticket.Id);
+        ObjectIdValue? rowId = await table.Store.LookupUnique(txId, index.Name, new CompositeColumnValue(new[] { columnId })).ConfigureAwait(false);
+        if (rowId is null)
             yield break;
+
+        byte[]? data = await table.Store.GetRow(txId, rowId.Value).ConfigureAwait(false);
+        if (data is null || data.Length == 0)
+            yield break;
+
+        yield return RowEncoder.Decode(table.Schema, rowId.Value, data);
+    }
+
+    private static ColumnType[] GetIndexColumnTypes(TableDescriptor table, TableIndexSchema index)
+    {
+        ColumnType[] types = new ColumnType[index.Columns.Length];
+
+        for (int i = 0; i < index.Columns.Length; i++)
+        {
+            string colName = index.Columns[i];
+            TableColumnSchema? col = table.Schema.Columns?.Find(c => c.Name == colName);
+            types[i] = col?.Type ?? ColumnType.String;
         }
 
-        byte[] data = await tablespace.GetDataFromPage(pageOffset.SlotTwo).ConfigureAwait(false);
-        if (data.Length == 0)
-        {
-            //Console.WriteLine("Index RowId={0} has an empty page data", ticket.Id);
-            yield break;
-        }
-
-        //Console.WriteLine("Got row id {0} from page data {1}", pageOffset.SlotOne, pageOffset.SlotTwo);
-
-        yield return rowDeserializer.Deserialize(table.Schema, pageOffset.SlotOne, data);
+        return types;
     }
 }

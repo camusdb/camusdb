@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -8,24 +8,20 @@
 
 using Nito.AsyncEx;
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.Util.Trees;
-using CamusDB.Core.BufferPool;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
-/// The goal of this controller is to define a single point for opening tables. An open table maintains a descriptor 
-/// in memory that will be subsequently used by all operations on the table and allows knowing the pages 
-/// where the indices are located as well as the history of schemas.
+/// Opens a table, returning a <see cref="TableDescriptor"/> that contains the schema
+/// and a <see cref="KvTableStore"/> backed by the database's <see cref="EmbeddedKahuna"/> node.
+/// Index metadata comes from the <see cref="SystemSchema"/>; no B+Tree pages are loaded.
 /// </summary>
 internal sealed class TableOpener
 {
-    private readonly IndexReader indexReader = new();
-
     private readonly CatalogsManager catalogs;
 
     private readonly ILogger<ICamusDB> logger;
@@ -36,13 +32,6 @@ internal sealed class TableOpener
         this.logger = logger;
     }
 
-    /// <summary>
-    /// Opens the specified table and returns a descriptor that contains the table schema and pointers to the indexes
-    /// </summary>
-    /// <param name="database"></param>
-    /// <param name="tableName"></param>
-    /// <returns></returns>
-    /// <exception cref="CamusDBException"></exception>
     public async ValueTask<TableDescriptor> Open(DatabaseDescriptor database, string tableName)
     {
         if (string.IsNullOrEmpty(tableName))
@@ -57,34 +46,27 @@ internal sealed class TableOpener
         return await openTableLazy;
     }
 
-    private async Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
+    private Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
     {
-        BufferPoolManager tablespace = database.BufferPool;
-
-        DatabaseTableObject tableObject = GetSystemObject(database, tableSchema.Id ?? "");
-        List<DatabaseIndexObject> indexObjects = GetSystemObjectIndexes(database, tableObject.Id);
+        KvTableStore store = new(database.Kahuna.Kahuna, tableSchema.Id!);
 
         TableDescriptor tableDescriptor = new(
             tableSchema.Id ?? "",
             tableSchema.Name ?? "",
             tableSchema,
-            await indexReader.ReadOffsets(tablespace, ObjectId.ToValue(tableObject.StartOffset ?? ""))
+            store
         );
 
-        foreach (DatabaseIndexObject index in indexObjects)
+        foreach (DatabaseIndexObject index in GetSystemObjectIndexes(database, tableSchema.Id ?? ""))
         {
             switch (index.Type)
             {
                 case IndexType.Unique:
                 case IndexType.Multi:
-                    {
-                        BPTree<CompositeColumnValue, ColumnValue, BTreeTuple> btree = await indexReader.Read(tablespace, ObjectId.ToValue(index.StartOffset ?? ""));
-
-                        tableDescriptor.Indexes.Add(
-                            index.Name,
-                            new(MapColumnsIdsToNames(tableSchema.Columns, index.ColumnIds), index.Type, btree)
-                        );
-                    }
+                    tableDescriptor.Indexes.Add(
+                        index.Name,
+                        new(index.Name, MapColumnsIdsToNames(tableSchema.Columns, index.ColumnIds), index.Type)
+                    );
                     break;
 
                 default:
@@ -92,14 +74,14 @@ internal sealed class TableOpener
             }
         }
 
-        logger.LogInformation("Table {TableName} opened at offset={Offset}", tableSchema.Name, tableObject.StartOffset);
+        logger.LogInformation("Table {TableName} opened", tableSchema.Name);
 
-        return tableDescriptor;
+        return Task.FromResult(tableDescriptor);
     }
 
     private static string[] MapColumnsIdsToNames(List<TableColumnSchema>? columns, string[] columnIds)
     {
-        string[] columNames = new string[columnIds.Length];
+        string[] columnNames = new string[columnIds.Length];
 
         for (int i = 0; i < columnIds.Length; i++)
         {
@@ -110,22 +92,12 @@ internal sealed class TableOpener
                     if (string.IsNullOrEmpty(column.Name))
                         throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Table system data is corrupt");
 
-                    columNames[i] = column.Name;
+                    columnNames[i] = column.Name;
                 }
             }
         }
 
-        return columNames;
-    }
-
-    private static DatabaseTableObject GetSystemObject(DatabaseDescriptor database, string tableId)
-    {
-        Dictionary<string, DatabaseTableObject> objects = database.SystemSchema.Tables;
-
-        if (!objects.TryGetValue(tableId, out DatabaseTableObject? databaseObject))
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Table system data is corrupt: " + tableId);
-
-        return databaseObject;
+        return columnNames;
     }
 
     private static List<DatabaseIndexObject> GetSystemObjectIndexes(DatabaseDescriptor database, string tableId)

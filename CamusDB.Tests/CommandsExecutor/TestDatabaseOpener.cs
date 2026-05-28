@@ -10,12 +10,10 @@ using NUnit.Framework;
 using System.Threading.Tasks;
 
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.BufferPool;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Util.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -27,10 +25,9 @@ public sealed class TestDatabaseOpener : BaseTest
     {
         string dbname = System.Guid.NewGuid().ToString("n");
 
-        HybridLogicalClock hlc = new();
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(hlc, validator, catalogsManager, logger);
+        CommandExecutor executor = new(validator, catalogsManager, logger);
 
         CreateDatabaseTicket databaseTicket = new(
             name: dbname,
@@ -43,8 +40,6 @@ public sealed class TestDatabaseOpener : BaseTest
 
         Assert.AreEqual(dbname, database.Name);
         
-        Assert.IsInstanceOf<BufferPoolManager>(database.BufferPool);
-
         Assert.IsInstanceOf<SystemSchema>(database.SystemSchema);
         Assert.IsInstanceOf<Schema>(database.Schema);
 

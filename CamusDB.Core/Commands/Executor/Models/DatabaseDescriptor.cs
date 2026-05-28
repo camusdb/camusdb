@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -7,9 +7,8 @@
  */
 
 using Nito.AsyncEx;
-using CamusDB.Core.BufferPool;
-using CamusDB.Core.GC;
-using CamusDB.Core.Storage;
+using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.Transactions;
 using System.Collections.Concurrent;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
@@ -18,40 +17,34 @@ public sealed record DatabaseDescriptor : IDisposable
 {
     public string Name { get; }
 
-    public StorageManager Storage { get; }
+    public EmbeddedKahuna Kahuna { get; }
 
-    public BufferPoolManager BufferPool { get; }
-
-    public GCManager GC { get; }
+    public KvTransactionsManager Transactions { get; }
 
     public SemaphoreSlim SystemSchemaSemaphore { get; } = new(1, 1);
 
     public Schema Schema { get; } = new();
 
-    public SystemSchema SystemSchema { get; set; } = new();    
+    public SystemSchema SystemSchema { get; set; } = new();
 
     public ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> TableDescriptors { get; }
 
     public DatabaseDescriptor(
         string name,
-        StorageManager storage,
-        BufferPoolManager bufferPool,
-        GCManager gc,
+        EmbeddedKahuna kahuna,
+        KvTransactionsManager transactions,
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors
     )
     {
         Name = name;
-        BufferPool = bufferPool;
-        Storage = storage;
-        GC = gc;
+        Kahuna = kahuna;
+        Transactions = transactions;
         TableDescriptors = tableDescriptors;
     }
 
     public void Dispose()
     {
-        Storage?.Dispose();
         Schema?.Dispose();
         SystemSchemaSemaphore?.Dispose();
-        GC?.Dispose();
     }
 }

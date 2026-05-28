@@ -8,9 +8,9 @@
 
 using System.Text;
 using CamusDB.Core.Catalogs;
-using CamusDB.Core.Util.Trees;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -31,11 +31,9 @@ internal sealed class SchemaQuerier
     {
         await Task.CompletedTask;
 
-        BTreeTuple tuple = new(new(), new());
-
         foreach (KeyValuePair<string, TableSchema> table in database.Schema.Tables)
         {
-            yield return new QueryResultRow(tuple, new()
+            yield return new QueryResultRow(default, new()
             {
                 { "tables", new ColumnValue(ColumnType.String, table.Key) }
             });
@@ -46,11 +44,9 @@ internal sealed class SchemaQuerier
     {
         await Task.CompletedTask;
 
-        BTreeTuple tuple = new(new(), new());
-
         foreach (TableColumnSchema column in table.Schema.Columns!)
         {
-            yield return new QueryResultRow(tuple, new()
+            yield return new QueryResultRow(default, new()
             {
                 { "Field", new ColumnValue(ColumnType.String, column.Name) },
                 { "Type", new ColumnValue(ColumnType.String, column.Type.ToString()) },
@@ -93,11 +89,9 @@ internal sealed class SchemaQuerier
     {
         await Task.CompletedTask;
 
-        BTreeTuple tuple = new(new(), new());
-
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
-            yield return new QueryResultRow(tuple, new()
+            yield return new QueryResultRow(default, new()
             {
                 { "Table", new ColumnValue(ColumnType.String, table.Name) },
                 { "Non_unique", new ColumnValue(ColumnType.String, index.Value.Type == IndexType.Unique ? "0" : "1") },
@@ -111,8 +105,6 @@ internal sealed class SchemaQuerier
     internal async IAsyncEnumerable<QueryResultRow> ShowCreateTable(TableDescriptor table)
     {
         await Task.CompletedTask;
-
-        BTreeTuple tuple = new(new(), new());
 
         StringBuilder createTableSql = new();
 
@@ -140,7 +132,7 @@ internal sealed class SchemaQuerier
 
         createTableSql.Append(");");
 
-        yield return new QueryResultRow(tuple, new()
+        yield return new QueryResultRow(default, new()
         {
             { "Table", new ColumnValue(ColumnType.String, table.Name) },
             { "Create Table", new ColumnValue(ColumnType.String, createTableSql.ToString()) }
@@ -151,9 +143,7 @@ internal sealed class SchemaQuerier
     {
         await Task.CompletedTask;
 
-        BTreeTuple tuple = new(new(), new());
-
-        yield return new QueryResultRow(tuple, new()
+        yield return new QueryResultRow(default, new()
         {
             { "database", new ColumnValue(ColumnType.String, database.Name) }
         });

@@ -1,22 +1,19 @@
-﻿
+
 /**
- * This file is part of CamusDB  
+ * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
  */
 
 using CamusDB.Core.SQLParser;
-using CamusDB.Core.Transactions.Models;
-using CamusDB.Core.Util.Time;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public sealed class QueryTicket
 {
-    public TransactionState TxnState { get; }
-
-    public TransactionType TxnType { get; }
+    public KvTransaction TxnState { get; }
 
     public string DatabaseName { get; }
 
@@ -39,8 +36,7 @@ public sealed class QueryTicket
     public Dictionary<string, ColumnValue>? Parameters { get; }
 
     public QueryTicket(
-        TransactionState txnState,
-        TransactionType txnType,
+        KvTransaction txnState,
         string databaseName,
         string tableName,
         string? index,
@@ -53,7 +49,6 @@ public sealed class QueryTicket
         Dictionary<string, ColumnValue>? parameters)
     {
         TxnState = txnState;
-        TxnType = txnType;
         DatabaseName = databaseName;
         TableName = tableName;
         IndexName = index;

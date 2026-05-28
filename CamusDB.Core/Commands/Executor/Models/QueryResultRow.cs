@@ -6,19 +6,19 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Trees;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
 public readonly struct QueryResultRow
 {
-    public BTreeTuple Tuple { get; }
+    public ObjectIdValue RowId { get; }
 
     public Dictionary<string, ColumnValue> Row { get; }
 
-    public QueryResultRow(BTreeTuple tuple, Dictionary<string, ColumnValue> row)
+    public QueryResultRow(ObjectIdValue rowId, Dictionary<string, ColumnValue> row)
 	{
-        Tuple = tuple;
+        RowId = rowId;
         Row = row;
 	}
 }
