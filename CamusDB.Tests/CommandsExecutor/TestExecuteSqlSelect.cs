@@ -1252,8 +1252,8 @@ public class TestExecuteSqlSelect : BaseTest
             Assert.False(row.Row.ContainsKey("name"));
             Assert.False(row.Row.ContainsKey("year"));
 
-            Assert.True(row.Row.ContainsKey("sumYear"));
-            Assert.True(row.Row["sumYear"].LongValue >= 4000);
+            Assert.True(row.Row.ContainsKey("sumyear"));
+            Assert.True(row.Row["sumyear"].LongValue >= 4000);
         }
     }
 

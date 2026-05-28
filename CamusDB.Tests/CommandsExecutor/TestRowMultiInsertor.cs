@@ -110,8 +110,12 @@ internal sealed class TestRowMultiInsertor : BaseTest
             await executor.Insert(insertTicket);
         }
 
+        await database.Transactions.CommitAsync(txnState);
+
+        KvTransaction txnState2 = await database.Transactions.BeginAsync();
+
         QueryTicket queryTicket = new(
-            txnState: txnState,
+            txnState: txnState2,
             databaseName: dbname,
             tableName: "user_robots",
             index: "robots_id_idx",
