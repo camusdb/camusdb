@@ -52,7 +52,6 @@ internal sealed class TestRowInsertor : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket tableTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]

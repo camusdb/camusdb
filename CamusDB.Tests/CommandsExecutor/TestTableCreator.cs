@@ -52,7 +52,6 @@ internal sealed class TestTableCreator : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             new ColumnInfo[]
@@ -101,7 +100,6 @@ internal sealed class TestTableCreator : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             columns: new ColumnInfo[] { },
@@ -122,7 +120,6 @@ internal sealed class TestTableCreator : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: "",
             tableName: "my_table",
             columns: new ColumnInfo[] {
@@ -149,7 +146,6 @@ internal sealed class TestTableCreator : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "",
             columns: new ColumnInfo[] {
@@ -176,7 +172,6 @@ internal sealed class TestTableCreator : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             columns: new ColumnInfo[] {
@@ -203,7 +198,6 @@ internal sealed class TestTableCreator : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             columns: new ColumnInfo[] {
@@ -231,7 +225,6 @@ internal sealed class TestTableCreator : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: new('a', 300),
             columns: new ColumnInfo[] {
@@ -258,7 +251,6 @@ internal sealed class TestTableCreator : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "my_täble",
             columns: new ColumnInfo[] {
@@ -285,7 +277,6 @@ internal sealed class TestTableCreator : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             columns: new ColumnInfo[]
@@ -318,7 +309,6 @@ internal sealed class TestTableCreator : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "my_table",
             columns: new ColumnInfo[]

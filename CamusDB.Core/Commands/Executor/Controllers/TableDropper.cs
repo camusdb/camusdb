@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -32,13 +33,13 @@ internal sealed class TableDropper
         RowDeleter rowDeleter,
         DatabaseDescriptor database,
         TableDescriptor table,
-        DropTableTicket ticket
+        DropTableTicket ticket,
+        KvTransaction tx
     )
     {
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
             AlterIndexTicket alterIndexTicket = new(
-                txnState: ticket.TxnState,
                 databaseName: ticket.DatabaseName,
                 tableName: ticket.TableName,
                 indexName: index.Key,
@@ -46,11 +47,11 @@ internal sealed class TableDropper
                 operation: index.Key == CamusDBConfig.PrimaryKeyInternalName ? AlterIndexOperation.DropPrimaryKey : AlterIndexOperation.DropIndex
             );
 
-            await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket);
+            await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx).ConfigureAwait(false);
         }
 
         DeleteTicket deleteTicket = new(
-            txnState: ticket.TxnState,
+            txnState: tx,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             where: null,
@@ -65,8 +66,6 @@ internal sealed class TableDropper
 
             if (database.Schema.Tables.Remove(ticket.TableName))
                 logger.LogInformation("Removed table {TableName} from database schema", ticket.TableName);
-
-            // Phase 5 will persist schema to Kahuna KV.
         }
         finally
         {
@@ -77,12 +76,10 @@ internal sealed class TableDropper
         {
             await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
 
-            Dictionary<string, DatabaseTableObject> objects = database.SystemSchema.Tables;
-
             if (database.SystemSchema.Tables.Remove(table.Id))
                 logger.LogInformation("Removed table {TableName} from system schema", ticket.TableName);
 
-            // Phase 5 will persist system space to Kahuna KV.
+            await catalogs.PersistMetaAsync(database, tx).ConfigureAwait(false);
         }
         finally
         {

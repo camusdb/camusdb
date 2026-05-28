@@ -6,13 +6,19 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 internal sealed class DropIndexFluxState
 {
+    public CatalogsManager Catalogs { get; }
+
+    public KvTransaction Tx { get; }
+
     public DatabaseDescriptor Database { get; }
 
     public TableDescriptor Table { get; }
@@ -26,6 +32,8 @@ internal sealed class DropIndexFluxState
     public int ModifiedRows { get; set; }
 
     public DropIndexFluxState(
+        CatalogsManager catalogs,
+        KvTransaction tx,
         DatabaseDescriptor database,
         TableDescriptor table,
         AlterIndexTicket ticket,
@@ -33,6 +41,8 @@ internal sealed class DropIndexFluxState
         AlterIndexFluxIndexState indexes
     )
     {
+        Catalogs = catalogs;
+        Tx = tx;
         Database = database;
         Table = table;
         Ticket = ticket;

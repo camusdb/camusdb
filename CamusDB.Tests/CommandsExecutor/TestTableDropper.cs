@@ -43,7 +43,6 @@ internal sealed class TestTableDropper : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket createTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             new ColumnInfo[]
@@ -103,7 +102,6 @@ internal sealed class TestTableDropper : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         DropTableTicket dropTableTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             ifExists: false
@@ -122,7 +120,6 @@ internal sealed class TestTableDropper : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         DropTableTicket dropTableTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             ifExists: false
@@ -132,7 +129,6 @@ internal sealed class TestTableDropper : BaseTest
         Assert.False(catalogs.TableExists(database, "robots"));
 
         CreateTableTicket createTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             new ColumnInfo[]

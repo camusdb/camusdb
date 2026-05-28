@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Transactions;
 using Microsoft.Extensions.Logging;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 
@@ -73,7 +74,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         this.logger = logger;
 
         databaseDescriptors = new();
-        databaseOpener = new(this, databaseDescriptors, logger);
+        databaseOpener = new(this, databaseDescriptors, catalogs, logger);
         databaseCloser = new(databaseDescriptors, logger);
         databaseDroper = new(databaseDescriptors, logger);
         databaseCreator = new(logger);
@@ -124,13 +125,38 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     #region DDL
 
+    /// <summary>
+    /// Executes a DDL action in a self-managed Kahuna transaction.
+    /// Begins a transaction, runs <paramref name="action"/>, commits on success,
+    /// or rolls back (and re-throws) on any exception.
+    /// </summary>
+    private async Task<T> ExecuteDdlInTransaction<T>(DatabaseDescriptor database, Func<KvTransaction, Task<T>> action)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        try
+        {
+            T result = await action(tx).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            return result;
+        }
+        catch
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            throw;
+        }
+    }
+
     public async Task<CreateTableResult> CreateTable(CreateTableTicket ticket)
     {
         validator.Validate(ticket);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
-        return new(database, await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, ticket).ConfigureAwait(false));
+        return await ExecuteDdlInTransaction(database, async tx =>
+        {
+            bool result = await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, ticket, tx).ConfigureAwait(false);
+            return new CreateTableResult(database, result);
+        }).ConfigureAwait(false);
     }
 
     public async Task<bool> AlterTable(AlterTableTicket ticket)
@@ -141,7 +167,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await tableColumnAlterer.Alter(queryExecutor, database, table, ticket).ConfigureAwait(false);
+        return await ExecuteDdlInTransaction(database, tx =>
+            tableColumnAlterer.Alter(queryExecutor, database, table, ticket, tx)
+        ).ConfigureAwait(false);
     }
 
     public async Task<bool> AlterIndex(AlterIndexTicket ticket)
@@ -152,7 +180,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await tableIndexAlterer.Alter(queryExecutor, database, table, ticket).ConfigureAwait(false);
+        return await ExecuteDdlInTransaction(database, tx =>
+            tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx)
+        ).ConfigureAwait(false);
     }
 
     public async Task<bool> DropTable(DropTableTicket ticket)
@@ -166,7 +196,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket).ConfigureAwait(false);
+        return await ExecuteDdlInTransaction(database, tx =>
+            tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket, tx)
+        ).ConfigureAwait(false);
     }
 
     public async Task<TableDescriptor> OpenTable(OpenTableTicket ticket)
@@ -195,22 +227,28 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.CreateTableIfNotExists:
                 {
                     CreateTableTicket createTableTicket = sqlExecutor.CreateCreateTableTicket(ticket, ast);
-
                     validator.Validate(createTableTicket);
 
-                    return new(database, await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, createTableTicket).ConfigureAwait(false));
+                    return await ExecuteDdlInTransaction(database, async tx =>
+                    {
+                        bool ok = await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, createTableTicket, tx).ConfigureAwait(false);
+                        return new ExecuteDDLSQLResult(database, ok);
+                    }).ConfigureAwait(false);
                 }
 
             case NodeType.AlterTableAddColumn:
             case NodeType.AlterTableDropColumn:
                 {
                     AlterTableTicket alterTableTicket = sqlExecutor.CreateAlterTableTicket(ticket, ast);
-
                     validator.Validate(alterTableTicket);
 
                     TableDescriptor table = await tableOpener.Open(database, alterTableTicket.TableName).ConfigureAwait(false);
 
-                    return new(database, await tableColumnAlterer.Alter(queryExecutor, database, table, alterTableTicket).ConfigureAwait(false));
+                    return await ExecuteDdlInTransaction(database, async tx =>
+                    {
+                        bool ok = await tableColumnAlterer.Alter(queryExecutor, database, table, alterTableTicket, tx).ConfigureAwait(false);
+                        return new ExecuteDDLSQLResult(database, ok);
+                    }).ConfigureAwait(false);
                 }
 
             case NodeType.AlterTableAddIndex:
@@ -220,19 +258,21 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.AlterTableDropPrimaryKey:
                 {
                     AlterIndexTicket alterIndexTicket = sqlExecutor.CreateAlterIndexTicket(ticket, ast);
-
                     validator.Validate(alterIndexTicket);
 
                     TableDescriptor table = await tableOpener.Open(database, alterIndexTicket.TableName).ConfigureAwait(false);
 
-                    return new(database, await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket).ConfigureAwait(false));
+                    return await ExecuteDdlInTransaction(database, async tx =>
+                    {
+                        bool ok = await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx).ConfigureAwait(false);
+                        return new ExecuteDDLSQLResult(database, ok);
+                    }).ConfigureAwait(false);
                 }
 
             case NodeType.DropTable:
             case NodeType.DropTableIfExists:
                 {
                     DropTableTicket dropTableTicket = sqlExecutor.CreateDropTableTicket(ticket, ast);
-
                     validator.Validate(dropTableTicket);
 
                     if (dropTableTicket.IfExists && !catalogs.TableExists(database, dropTableTicket.TableName))
@@ -240,7 +280,11 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     TableDescriptor table = await tableOpener.Open(database, dropTableTicket.TableName).ConfigureAwait(false);
 
-                    return new(database, await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, dropTableTicket).ConfigureAwait(false));
+                    return await ExecuteDdlInTransaction(database, async tx =>
+                    {
+                        bool ok = await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, dropTableTicket, tx).ConfigureAwait(false);
+                        return new ExecuteDDLSQLResult(database, ok);
+                    }).ConfigureAwait(false);
                 }
 
             default:

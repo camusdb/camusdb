@@ -26,6 +26,6 @@ internal sealed class SQLExecutorDropTableCreator : SQLExecutorBaseCreator
 
         string tableName = ast.leftAst!.yytext!;
         
-        return new(txnState: ticket.TxnState, ticket.DatabaseName, tableName, ast.nodeType == NodeType.DropTableIfExists);
+        return new(ticket.DatabaseName, tableName, ast.nodeType == NodeType.DropTableIfExists);
     }
 }

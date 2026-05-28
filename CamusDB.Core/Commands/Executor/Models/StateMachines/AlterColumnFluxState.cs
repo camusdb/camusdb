@@ -9,12 +9,15 @@
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 internal sealed class AlterColumnFluxState
 {
     public CatalogsManager Catalogs { get; }
+
+    public KvTransaction Tx { get; }
 
     public DatabaseDescriptor Database { get; }
 
@@ -30,6 +33,7 @@ internal sealed class AlterColumnFluxState
 
     public AlterColumnFluxState(
         CatalogsManager catalogs,
+        KvTransaction tx,
         DatabaseDescriptor database, 
         TableDescriptor table, 
         AlterColumnTicket ticket, 
@@ -38,6 +42,7 @@ internal sealed class AlterColumnFluxState
     )
     {
         Catalogs = catalogs;
+        Tx = tx;
         Database = database;
         Table = table;
         Ticket = ticket;

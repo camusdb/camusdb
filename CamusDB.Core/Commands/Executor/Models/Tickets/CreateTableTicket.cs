@@ -6,14 +6,10 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Transactions;
-
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct CreateTableTicket
 {
-    public KvTransaction TxnState { get; }
-
     public string DatabaseName { get; }
 
     public string TableName { get; }
@@ -25,7 +21,6 @@ public readonly struct CreateTableTicket
     public bool IfNotExists { get; }
 
     public CreateTableTicket(
-        KvTransaction txnState,
         string databaseName,
         string tableName,
         ColumnInfo[] columns,
@@ -33,7 +28,6 @@ public readonly struct CreateTableTicket
         bool ifNotExists
     )
     {
-        TxnState = txnState;
         DatabaseName = databaseName;
         TableName = tableName;
         Columns = columns;

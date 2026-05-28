@@ -7,7 +7,9 @@
  */
 
 using System.Diagnostics;
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.Flux;
+using CamusDB.Core.Transactions;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -59,7 +61,7 @@ internal sealed class TableIndexDropper
                 break;
             }
 
-            // Phase 5 will persist system space to Kahuna KV.
+            await state.Catalogs.PersistMetaAsync(database, state.Tx).ConfigureAwait(false);
         }
         finally
         {
@@ -71,11 +73,13 @@ internal sealed class TableIndexDropper
         return FluxAction.Continue;
     }
 
-    internal async Task<int> DropIndex(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
+    internal async Task<int> DropIndex(CatalogsManager catalogs, KvTransaction tx, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
     {
         Validate(table, ticket);
 
         DropIndexFluxState state = new(
+            catalogs: catalogs,
+            tx: tx,
             database: database,
             table: table,
             ticket: ticket,

@@ -6,9 +6,14 @@
  * file that was distributed with this source code.
  */
 
+using Kahuna;
+using Kahuna.Server.KeyValues;
+using Kahuna.Shared.KeyValue;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Serializer;
+using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 
@@ -34,7 +39,7 @@ public sealed class CatalogsManager
     /// <param name="ticket"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
-    public async Task<TableSchema> CreateTable(DatabaseDescriptor database, CreateTableTicket ticket)
+    public async Task<TableSchema> CreateTable(DatabaseDescriptor database, CreateTableTicket ticket, KvTransaction tx)
     {
         try
         {
@@ -77,7 +82,8 @@ public sealed class CatalogsManager
 
             database.Schema.Tables.Add(ticket.TableName, tableSchema);
 
-            // Phase 5 will persist schema to Kahuna KV.
+            await PersistMetaAsync(database, tx).ConfigureAwait(false);
+
             logger.LogInformation("Added table {TableName} to schema", ticket.TableName);
 
             return tableSchema;
@@ -95,7 +101,7 @@ public sealed class CatalogsManager
     /// <param name="ticket"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
-    public async Task<TableSchema> AlterTable(DatabaseDescriptor database, AlterColumnTicket ticket)
+    public async Task<TableSchema> AlterTable(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)
     {
         try
         {
@@ -128,7 +134,8 @@ public sealed class CatalogsManager
 
             tableSchema.SchemaHistory!.Add(schemaHistory);
 
-            // Phase 5 will persist schema to Kahuna KV.
+            await PersistMetaAsync(database, tx).ConfigureAwait(false);
+
             logger.LogInformation("Modifed table {TableName} schema", ticket.TableName);
 
             return tableSchema;
@@ -213,5 +220,108 @@ public sealed class CatalogsManager
             throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Unknown column '{columnName}'");
 
         tableSchema.Columns = tableColumns;
-    }    
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema persistence
+    // -----------------------------------------------------------------------
+
+    private static string SchemaKey(string dbName) => $"{dbName}/meta/schema";
+    private static string SystemKey(string dbName) => $"{dbName}/meta/system";
+
+    /// <summary>
+    /// Serializes <c>Schema.Tables</c> and <c>SystemSchema</c> to Kahuna KV within
+    /// the provided transaction. Must be called while holding the appropriate semaphore.
+    /// </summary>
+    public async Task PersistMetaAsync(DatabaseDescriptor database, KvTransaction tx)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        byte[] schemaBytes = Serializator.Serialize(database.Schema.Tables);
+        byte[] systemBytes = Serializator.Serialize(database.SystemSchema);
+
+        await WriteMetaKey(kahuna, tx, SchemaKey(database.Name), schemaBytes).ConfigureAwait(false);
+        await WriteMetaKey(kahuna, tx, SystemKey(database.Name), systemBytes).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Loads <c>Schema.Tables</c> and <c>SystemSchema</c> from Kahuna KV into the
+    /// in-memory descriptor. Called once at database open time.
+    /// </summary>
+    public async Task LoadMetaAsync(DatabaseDescriptor database)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+
+        try
+        {
+            IKahuna kahuna = database.Kahuna.Kahuna;
+
+            (KeyValueResponseType schemaType, ReadOnlyKeyValueEntry? schemaEntry) =
+                await kahuna.LocateAndTryGetValue(
+                    tx.TransactionId, SchemaKey(database.Name), -1,
+                    KeyValueDurability.Persistent, CancellationToken.None
+                ).ConfigureAwait(false);
+
+            if (schemaType == KeyValueResponseType.Get && schemaEntry?.Value is not null)
+            {
+                Dictionary<string, TableSchema>? tables =
+                    Serializator.Unserialize<Dictionary<string, TableSchema>>(schemaEntry.Value);
+                database.Schema.Tables = tables ?? new();
+            }
+
+            (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
+                await kahuna.LocateAndTryGetValue(
+                    tx.TransactionId, SystemKey(database.Name), -1,
+                    KeyValueDurability.Persistent, CancellationToken.None
+                ).ConfigureAwait(false);
+
+            if (systemType == KeyValueResponseType.Get && systemEntry?.Value is not null)
+            {
+                SystemSchema? system =
+                    Serializator.Unserialize<SystemSchema>(systemEntry.Value);
+                if (system is not null)
+                    database.SystemSchema = system;
+            }
+
+            logger.LogInformation(
+                "Schema loaded: {Tables} table(s), {Indexes} index object(s)",
+                database.Schema.Tables.Count,
+                database.SystemSchema.Indexes.Count
+            );
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task WriteMetaKey(IKahuna kahuna, KvTransaction tx, string key, byte[] value)
+    {
+        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability) =
+            await kahuna.LocateAndTryAcquireExclusiveLock(
+                tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+
+        if (lockType != KeyValueResponseType.Locked)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Failed to acquire meta lock on '{key}': {lockType}"
+            );
+
+        tx.TrackLock(key, lockDurability);
+
+        (KeyValueResponseType setType, _, _) = await kahuna.LocateAndTrySetKeyValue(
+            tx.TransactionId, key, value, null, -1,
+            KeyValueFlags.Set, 0,
+            KeyValueDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+
+        if (setType != KeyValueResponseType.Set)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Failed to write meta key '{key}': {setType}"
+            );
+
+        tx.TrackModified(key, KeyValueDurability.Persistent);
+    }
 }

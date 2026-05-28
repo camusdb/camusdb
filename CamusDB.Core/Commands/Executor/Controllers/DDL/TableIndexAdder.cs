@@ -72,6 +72,7 @@ internal sealed class TableIndexAdder
 
     internal async Task<int> AddIndex(
         CatalogsManager catalogs,
+        KvTransaction tx,
         QueryExecutor queryExecutor,
         DatabaseDescriptor database,
         TableDescriptor table,
@@ -82,6 +83,7 @@ internal sealed class TableIndexAdder
 
         AddIndexFluxState state = new(
             catalogs: catalogs,
+            tx: tx,
             database: database,
             table: table,
             ticket: ticket,
@@ -98,7 +100,7 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket = state.Ticket;
 
         QueryTicket queryTicket = new(
-            txnState: ticket.TxnState,
+            txnState: state.Tx,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             index: null,
@@ -128,7 +130,7 @@ internal sealed class TableIndexAdder
 
         AlterIndexTicket ticket = state.Ticket;
         TableDescriptor table = state.Table;
-        KvTransaction tx = ticket.TxnState;
+        KvTransaction tx = state.Tx;
         bool unique = ticket.Operation is AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddUniqueIndex;
 
         int rows = 0;
@@ -163,7 +165,7 @@ internal sealed class TableIndexAdder
             rows++;
         }
 
-        logger.LogInformation("Added {Rows} rows to index", rows);
+        logger.LogInformation("Added {Rows} rows to index {IndexName}", rows, ticket.IndexName);
 
         return FluxAction.Continue;
     }
@@ -195,7 +197,7 @@ internal sealed class TableIndexAdder
                 )
             );
 
-            // Phase 5 will persist system space to Kahuna KV.
+            await state.Catalogs.PersistMetaAsync(database, state.Tx).ConfigureAwait(false);
         }
         finally
         {

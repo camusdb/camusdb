@@ -59,12 +59,13 @@ public sealed class TableColumnDropper
             );
     }
 
-    internal async Task<int> DropColumn(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterColumnTicket ticket)
+    internal async Task<int> DropColumn(CatalogsManager catalogs, KvTransaction tx, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterColumnTicket ticket)
     {
         Validate(table, ticket);
 
         AlterColumnFluxState state = new(
             catalogs: catalogs,
+            tx: tx,
             database: database,
             table: table,
             ticket: ticket,
@@ -79,7 +80,7 @@ public sealed class TableColumnDropper
 
     private async Task<FluxAction> AlterSchema(AlterColumnFluxState state)
     {
-        await state.Catalogs.AlterTable(state.Database, state.Ticket);
+        await state.Catalogs.AlterTable(state.Database, state.Ticket, state.Tx);
 
         return FluxAction.Continue;
     }
@@ -89,7 +90,7 @@ public sealed class TableColumnDropper
         AlterColumnTicket ticket = state.Ticket;
 
         QueryTicket queryTicket = new(
-            txnState: ticket.TxnState,
+            txnState: state.Tx,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             index: null,
@@ -126,7 +127,7 @@ public sealed class TableColumnDropper
         }
 
         TableDescriptor table = state.Table;
-        KvTransaction tx = state.Ticket.TxnState;
+        KvTransaction tx = state.Tx;
 
         await foreach (QueryResultRow row in state.DataCursor)
         {

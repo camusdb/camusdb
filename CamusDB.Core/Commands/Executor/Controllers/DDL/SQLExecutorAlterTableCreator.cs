@@ -29,7 +29,6 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
 
         if (ast.nodeType == NodeType.AlterTableAddColumn)
             return new(
-                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 AlterTableOperation.AddColumn,
@@ -37,7 +36,6 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             );
 
         return new(
-            ticket.TxnState,
             ticket.DatabaseName,
             tableName,
             AlterTableOperation.DropColumn,

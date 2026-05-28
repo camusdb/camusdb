@@ -51,7 +51,6 @@ public sealed class TestRowUpdaterUnique : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket tableTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]

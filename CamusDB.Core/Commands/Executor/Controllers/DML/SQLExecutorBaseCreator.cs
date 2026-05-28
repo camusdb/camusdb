@@ -56,7 +56,14 @@ internal abstract class SQLExecutorBaseCreator
                 return new ColumnValue(ColumnType.Float64, doubleValue);
 
             case NodeType.String:
-                return new ColumnValue(ColumnType.String, expr.yytext!.Trim('"'));
+            {
+                string raw = expr.yytext!;
+                // Strip the outer quoting character (single or double quote).
+                string unquoted = (raw.Length >= 2 && raw[0] == raw[^1] && (raw[0] == '"' || raw[0] == '\''))
+                    ? raw[1..^1]
+                    : raw.Trim('"');
+                return new ColumnValue(ColumnType.String, unquoted);
+            }
 
             case NodeType.Bool:
                 if (!bool.TryParse(expr.yytext!, out bool boolValue))

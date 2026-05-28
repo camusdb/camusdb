@@ -432,4 +432,49 @@ public sealed class TestKvTableStoreIndex
             Assert.AreEqual(expectedRowId.ToString(), rowId.ToString());
         }
     }
+
+    /// <summary>
+    /// Verifies that index entries written in one transaction are visible to a
+    /// ScanIndex call in a subsequent (different) transaction — i.e. cross-transaction
+    /// reads via LocateAndGetByBucket work with a real HLCTimestamp.
+    /// </summary>
+    [Test]
+    public async Task ScanIndex_NonUnique_CrossTransaction_ReturnsAllEntries()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("xt1");
+        await using EmbeddedKahuna __ = node;
+
+        ColumnType[] keyTypes = [ColumnType.String];
+
+        (string category, ObjectIdValue rowId)[] entries =
+        [
+            ("alpha", new ObjectIdValue(1, 0, 0)),
+            ("beta",  new ObjectIdValue(2, 0, 0)),
+            ("gamma", new ObjectIdValue(3, 0, 0)),
+        ];
+
+        // Transaction 1 — write index entries.
+        KvTransaction tx1 = await BeginTransaction(node.Kahuna, "xt1-put");
+        foreach ((string category, ObjectIdValue rowId) in entries)
+            await store.PutIndexEntry(tx1, "idx_cat",
+                CV(new ColumnValue(ColumnType.String, category)), rowId, unique: false);
+        await CommitTransaction(node.Kahuna, tx1);
+
+        // Transaction 2 — a *different* transaction scans using its own HLC timestamp.
+        KvTransaction tx2 = await BeginTransaction(node.Kahuna, "xt1-scan");
+
+        List<(CompositeColumnValue key, ObjectIdValue rowId)> scanned = [];
+        await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in
+            store.ScanIndex(tx2.TransactionId, "idx_cat", keyTypes, null, null, unique: false))
+        {
+            scanned.Add((key, rowId));
+        }
+
+        Assert.AreEqual(3, scanned.Count,
+            "ScanIndex via a different transaction's txId must return all committed entries");
+
+        HashSet<string> ids = new(entries.Select(e => e.rowId.ToString()));
+        foreach ((_, ObjectIdValue rowId) in scanned)
+            Assert.IsTrue(ids.Contains(rowId.ToString()), $"Unexpected rowId {rowId}");
+    }
 }

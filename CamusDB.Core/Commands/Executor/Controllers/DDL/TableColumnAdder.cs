@@ -52,6 +52,7 @@ public sealed class TableColumnAdder
 
     internal async Task<int> AddColumn(
         CatalogsManager catalogs,
+        KvTransaction tx,
         QueryExecutor queryExecutor,
         DatabaseDescriptor database,
         TableDescriptor table,
@@ -62,6 +63,7 @@ public sealed class TableColumnAdder
 
         AlterColumnFluxState state = new(
             catalogs: catalogs,
+            tx: tx,
             database: database,
             table: table,
             ticket: ticket,
@@ -76,7 +78,7 @@ public sealed class TableColumnAdder
 
     private async Task<FluxAction> AlterSchema(AlterColumnFluxState state)
     {
-        await state.Catalogs.AlterTable(state.Database, state.Ticket).ConfigureAwait(false);
+        await state.Catalogs.AlterTable(state.Database, state.Ticket, state.Tx).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
@@ -86,7 +88,7 @@ public sealed class TableColumnAdder
         AlterColumnTicket ticket = state.Ticket;
 
         QueryTicket queryTicket = new(
-            txnState: ticket.TxnState,
+            txnState: state.Tx,
             databaseName: ticket.DatabaseName,
             tableName: ticket.TableName,
             index: null,
@@ -123,7 +125,7 @@ public sealed class TableColumnAdder
         }
 
         TableDescriptor table = state.Table;
-        KvTransaction tx = state.Ticket.TxnState;
+        KvTransaction tx = state.Tx;
 
         await foreach (QueryResultRow row in state.DataCursor)
         {

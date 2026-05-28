@@ -7,6 +7,7 @@
  */
 
 using Nito.AsyncEx;
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -27,12 +28,15 @@ internal sealed class DatabaseOpener
 
     private readonly DatabaseDescriptors databaseDescriptors;
 
+    private readonly CatalogsManager catalogs;
+
     private readonly ILogger<ICamusDB> logger;
 
-    public DatabaseOpener(CommandExecutor commandExecutor, DatabaseDescriptors databaseDescriptors, ILogger<ICamusDB> logger)
+    public DatabaseOpener(CommandExecutor commandExecutor, DatabaseDescriptors databaseDescriptors, CatalogsManager catalogs, ILogger<ICamusDB> logger)
     {
         this.commandExecutor = commandExecutor;
         this.databaseDescriptors = databaseDescriptors;
+        this.catalogs = catalogs;
         this.logger = logger;
     }
 
@@ -63,25 +67,10 @@ internal sealed class DatabaseOpener
             tableDescriptors: tableDescriptors
         );
 
-        InitSchema(databaseDescriptor);
-        InitSystemSpace(databaseDescriptor);
+        await catalogs.LoadMetaAsync(databaseDescriptor).ConfigureAwait(false);
 
         logger.LogInformation("Database {DbName} opened", name);
 
         return databaseDescriptor;
-    }
-
-    private void InitSchema(DatabaseDescriptor database)
-    {
-        // Phase 5 will load persisted schema from Kahuna KV.
-        database.Schema.Tables = new();
-        logger.LogInformation("Schema initialized (in-memory, 0 tables)");
-    }
-
-    private void InitSystemSpace(DatabaseDescriptor database)
-    {
-        // Phase 5 will load persisted system space from Kahuna KV.
-        database.SystemSchema = new();
-        logger.LogInformation("System space initialized (in-memory)");
     }
 }

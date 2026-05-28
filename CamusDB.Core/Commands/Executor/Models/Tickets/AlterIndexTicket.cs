@@ -6,14 +6,10 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Transactions;
-
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 public readonly struct AlterIndexTicket
 {
-    public KvTransaction TxnState { get; }
-
     public string DatabaseName { get; }
 
     public string TableName { get; }
@@ -25,7 +21,6 @@ public readonly struct AlterIndexTicket
     public AlterIndexOperation Operation { get; }    
 
     public AlterIndexTicket(
-        KvTransaction txnState,
         string databaseName,
         string tableName,
         string indexName,
@@ -33,7 +28,6 @@ public readonly struct AlterIndexTicket
         AlterIndexOperation operation
     )
     {
-        TxnState = txnState;
         DatabaseName = databaseName;
         TableName = tableName;
         IndexName = indexName;

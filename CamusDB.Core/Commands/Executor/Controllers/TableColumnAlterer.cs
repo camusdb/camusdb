@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -30,42 +31,40 @@ internal sealed class TableColumnAlterer
         tableColumnDropper = new(logger);
     }
 
-    public async Task<bool> Alter(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
+    public async Task<bool> Alter(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {        
         return ticket.Operation switch
         {
-            AlterTableOperation.AddColumn => await AddColumn(queryExecutor, database, table, ticket).ConfigureAwait(false),
-            AlterTableOperation.DropColumn => await DropColumn(queryExecutor, database, table, ticket).ConfigureAwait(false),
+            AlterTableOperation.AddColumn => await AddColumn(queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
+            AlterTableOperation.DropColumn => await DropColumn(queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid alter table operation"),
         };
     }    
 
-    private async Task<bool> AddColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
+    private async Task<bool> AddColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {
         AlterColumnTicket alterColumnTicket = new(
-            txnState: ticket.TxnState,
             databaseName: database.Name,
             tableName: table.Name,
             column: ticket.Column,
             operation: ticket.Operation
         );
 
-        await tableColumnAdder.AddColumn(catalogs, queryExecutor, database, table, alterColumnTicket).ConfigureAwait(false);
+        await tableColumnAdder.AddColumn(catalogs, tx, queryExecutor, database, table, alterColumnTicket).ConfigureAwait(false);
 
         return true;
     }
 
-    private async Task<bool> DropColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
+    private async Task<bool> DropColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {
         AlterColumnTicket alterColumnTicket = new(
-            txnState: ticket.TxnState,
             databaseName: database.Name,
             tableName: table.Name,
             column: ticket.Column,
             operation: ticket.Operation
         );
 
-        await tableColumnDropper.DropColumn(catalogs, queryExecutor, database, table, alterColumnTicket).ConfigureAwait(false);
+        await tableColumnDropper.DropColumn(catalogs, tx, queryExecutor, database, table, alterColumnTicket).ConfigureAwait(false);
 
         return true;
     }

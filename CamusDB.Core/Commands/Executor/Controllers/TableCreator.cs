@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -31,17 +32,18 @@ internal sealed class TableCreator
         TableOpener tableOpener,
         TableIndexAlterer tableIndexAlterer,
         DatabaseDescriptor database,
-        CreateTableTicket ticket
+        CreateTableTicket ticket,
+        KvTransaction tx
     )
     {
         if (ticket.IfNotExists && catalogs.TableExists(database, ticket.TableName))
             return false;
 
-        TableSchema tableSchema = await catalogs.CreateTable(database, ticket);
+        TableSchema tableSchema = await catalogs.CreateTable(database, ticket, tx).ConfigureAwait(false);
 
         RegisterTableObject(database, tableSchema);
 
-        await AddConstraints(queryExecutor, tableOpener, tableIndexAlterer, database, ticket);
+        await AddConstraints(queryExecutor, tableOpener, tableIndexAlterer, database, ticket, tx).ConfigureAwait(false);
 
         return true;
     }
@@ -74,13 +76,14 @@ internal sealed class TableCreator
         TableOpener tableOpener,
         TableIndexAlterer tableIndexAlterer,
         DatabaseDescriptor database,
-        CreateTableTicket ticket
+        CreateTableTicket ticket,
+        KvTransaction tx
     )
     {
         if (ticket.Constraints.Length == 0)
             return;
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName);
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
         foreach (ConstraintInfo constraint in ticket.Constraints)
         {
@@ -89,7 +92,6 @@ internal sealed class TableCreator
                 case ConstraintType.PrimaryKey:
                 {
                     AlterIndexTicket indexTicket = new(
-                        txnState: ticket.TxnState,
                         databaseName: database.Name,
                         tableName: ticket.TableName,
                         indexName: constraint.Name,
@@ -97,14 +99,13 @@ internal sealed class TableCreator
                         operation: AlterIndexOperation.AddPrimaryKey
                     );
 
-                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
+                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket, tx).ConfigureAwait(false);
                 }
                     break;
 
                 case ConstraintType.IndexMulti:
                 {
                     AlterIndexTicket indexTicket = new(
-                        txnState: ticket.TxnState,
                         databaseName: database.Name,
                         tableName: ticket.TableName,
                         indexName: constraint.Name,
@@ -112,14 +113,13 @@ internal sealed class TableCreator
                         operation: AlterIndexOperation.AddIndex
                     );
 
-                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
+                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket, tx).ConfigureAwait(false);
                 }
                     break;
 
                 case ConstraintType.IndexUnique:
                 {
                     AlterIndexTicket indexTicket = new(
-                        txnState: ticket.TxnState,
                         databaseName: database.Name,
                         tableName: ticket.TableName,
                         indexName: constraint.Name,
@@ -127,7 +127,7 @@ internal sealed class TableCreator
                         operation: AlterIndexOperation.AddUniqueIndex
                     );
 
-                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket);
+                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket, tx).ConfigureAwait(false);
                 }
                     break;
 

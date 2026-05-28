@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -30,30 +31,30 @@ internal sealed class TableIndexAlterer
         tableIndexDropper = new(logger);
     }
 
-    public async Task<bool> Alter(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
+    public async Task<bool> Alter(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket, KvTransaction tx)
     {
         return ticket.Operation switch
         {
             AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey 
-                => await AddIndex(catalogs, queryExecutor, database, table, ticket).ConfigureAwait(false),
+                => await AddIndex(catalogs, queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
                 
             AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey
-                => await DropIndex(catalogs, queryExecutor, database, table, ticket).ConfigureAwait(false),
+                => await DropIndex(catalogs, queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
 
             _ => 
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid alter table operation"),
         };
     }
 
-    private async Task<bool> AddIndex(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
+    private async Task<bool> AddIndex(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket, KvTransaction tx)
     {        
-        await tableIndexAdder.AddIndex(catalogs, queryExecutor, database, table, ticket).ConfigureAwait(false);
+        await tableIndexAdder.AddIndex(catalogs, tx, queryExecutor, database, table, ticket).ConfigureAwait(false);
         return true;
     }
 
-    private async Task<bool> DropIndex(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket)
+    private async Task<bool> DropIndex(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket, KvTransaction tx)
     {
-        await tableIndexDropper.DropIndex(queryExecutor, database, table, ticket).ConfigureAwait(false);
+        await tableIndexDropper.DropIndex(catalogs, tx, queryExecutor, database, table, ticket).ConfigureAwait(false);
         return true;
     }
 }

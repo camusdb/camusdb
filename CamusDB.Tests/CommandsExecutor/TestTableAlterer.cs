@@ -46,7 +46,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket createTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]
@@ -155,7 +154,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]
@@ -198,7 +196,6 @@ internal sealed class TestTableAlterer : BaseTest
         txnState = await database.Transactions.BeginAsync();
 
         AlterTableTicket alterTableTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.DropColumn,
@@ -254,7 +251,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterTableTicket alterTableTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.DropColumn,
@@ -309,7 +305,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             columns: new ColumnInfo[]
@@ -352,7 +347,6 @@ internal sealed class TestTableAlterer : BaseTest
         txnState = await database.Transactions.BeginAsync();
 
         AlterTableTicket alterTableTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.AddColumn,
@@ -372,7 +366,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         CreateTableTicket ticket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             new ColumnInfo[]
@@ -415,7 +408,6 @@ internal sealed class TestTableAlterer : BaseTest
         txnState = await database.Transactions.BeginAsync();
 
         AlterTableTicket alterTableTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.AddColumn,
@@ -465,7 +457,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterTableTicket alterTableTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             operation: AlterTableOperation.AddColumn,
@@ -566,7 +557,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
@@ -611,7 +601,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
@@ -634,7 +623,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
@@ -646,10 +634,7 @@ internal sealed class TestTableAlterer : BaseTest
         
         await database.Transactions.CommitAsync(txnState);
         
-        txnState = await database.Transactions.BeginAsync();
-
         alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "year_idx",
@@ -682,7 +667,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
@@ -730,7 +714,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
@@ -759,7 +742,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
@@ -788,7 +770,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
@@ -809,7 +790,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
@@ -831,7 +811,6 @@ internal sealed class TestTableAlterer : BaseTest
         Assert.AreEqual(IndexType.Multi, index!.Type);
 
         alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "name_idx",
@@ -854,7 +833,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "~pk",
@@ -884,7 +862,6 @@ internal sealed class TestTableAlterer : BaseTest
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
         AlterIndexTicket alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "~pk",
@@ -904,10 +881,7 @@ internal sealed class TestTableAlterer : BaseTest
         TableDescriptor table = await executor.OpenTable(openTableTicket);
         Assert.False(table.Indexes.ContainsKey("~pk"));
         
-        txnState = await database.Transactions.BeginAsync();
-
         alterIndexTicket = new(
-            txnState: txnState,
             databaseName: dbname,
             tableName: "robots",
             indexName: "~pk",

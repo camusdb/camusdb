@@ -39,7 +39,6 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         GetCreateTableConstraintFromFieldList(ast.rightAst, constraintInfos);
 
         return new(
-            txnState: ticket.TxnState,
             databaseName: ticket.DatabaseName,
             tableName: tableName,
             columns: columnInfos.ToArray(),

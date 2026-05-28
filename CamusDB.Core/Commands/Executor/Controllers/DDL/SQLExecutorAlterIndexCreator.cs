@@ -34,7 +34,6 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
             GetColumns(ast.extendedOne, indexColumns);
 
             return new(
-                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 ast.rightAst!.yytext!,
@@ -49,7 +48,6 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
             GetColumns(ast.extendedOne, indexColumns);
 
             return new(
-                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 ast.rightAst!.yytext!,
@@ -64,7 +62,6 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
             GetColumns(ast.extendedOne, indexColumns);
 
             return new(
-                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 CamusDBConfig.PrimaryKeyInternalName,
@@ -75,7 +72,6 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
 
         if (ast.nodeType == NodeType.AlterTableDropIndex)
             return new(
-                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 ast.rightAst!.yytext!,
@@ -85,7 +81,6 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
 
         if (ast.nodeType == NodeType.AlterTableDropPrimaryKey)
             return new(
-                ticket.TxnState,
                 ticket.DatabaseName,
                 tableName,
                 CamusDBConfig.PrimaryKeyInternalName,
