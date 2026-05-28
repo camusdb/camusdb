@@ -1,5 +1,5 @@
 
-cd CamuDB.Tests
+cd CamusDB.Tests
 dotnet build
-mkdir -p /home/runner/work/camusdb/camusdb/CamusDB.Tests/bin/Debug/net7.0/Data/
+mkdir -p bin/Debug/net9.0/Data/
 dotnet test

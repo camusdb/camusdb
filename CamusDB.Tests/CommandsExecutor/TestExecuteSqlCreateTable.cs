@@ -35,20 +35,8 @@ public class TestExecuteSqlCreateTable : BaseTest
 
     private async Task<(string, DatabaseDescriptor, CommandExecutor, CatalogsManager)> SetupDatabase()
     {
-        string dbname = Guid.NewGuid().ToString("n");
-
-        CommandValidator validator = new();
-        CatalogsManager catalogs = new(logger);
-        CommandExecutor executor = new(validator, catalogs, logger);
-
-        CreateDatabaseTicket databaseTicket = new(
-            name: dbname,
-            ifNotExists: false
-        );
-
-        DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
-
-        return (dbname, database, executor, catalogs);
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        return (dbname, database, executor, new CatalogsManager(logger));
     }
 
     [Test]

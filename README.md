@@ -37,7 +37,7 @@ Current Limitations
  - Supports communication via a HTTP endpoint (websockets/grpc2 will be supported as well) 
 
 ## Requirements
- - .NET 7 (SDK 7.0.100)
+ - .NET 9 (SDK 9.0.100)
 
 ## License
 

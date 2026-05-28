@@ -23,23 +23,12 @@ public sealed class TestDatabaseOpener : BaseTest
     [NonParallelizable]
     public async Task TestOpenDatabase()
     {
-        string dbname = System.Guid.NewGuid().ToString("n");
-
-        CommandValidator validator = new();
-        CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(validator, catalogsManager, logger);
-
-        CreateDatabaseTicket databaseTicket = new(
-            name: dbname,
-            ifNotExists: false
-        );
-
-        await executor.CreateDatabase(databaseTicket);
+        (string dbname, DatabaseDescriptor _, CommandExecutor executor) = await CreateDatabase();
 
         DatabaseDescriptor database = await executor.OpenDatabase(dbname);
 
         Assert.AreEqual(dbname, database.Name);
-        
+
         Assert.IsInstanceOf<SystemSchema>(database.SystemSchema);
         Assert.IsInstanceOf<Schema>(database.Schema);
 

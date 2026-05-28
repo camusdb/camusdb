@@ -28,20 +28,7 @@ public sealed class TestRowUpdaterUnique : BaseTest
 {    
     private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()
     {
-        string dbname = Guid.NewGuid().ToString("n");
-
-        CommandValidator validator = new();
-        CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(validator, catalogsManager, logger);
-
-        CreateDatabaseTicket databaseTicket = new(
-            name: dbname,
-            ifNotExists: false
-        );
-
-        DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
-
-        return (dbname, database, executor);
+        return await CreateDatabase();
     }
 
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId)> SetupBasicTable()
