@@ -2,9 +2,9 @@
 // Copyright (c) Wayne Kelly, John Gough, QUT 2005-2014
 // (see accompanying GPPGcopyright.rtf)
 
-// GPPG version 1.5.2
-// DateTime: 2/7/2024 8:03:56 PM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 2/7/2024 4:00:57 PM>
+// GPPG version 1.5.3
+// DateTime: 28/05/2026 4:52:49 PM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 28/05/2026 4:52:32 PM>
 
 // options: no-lines gplex
 
@@ -38,7 +38,7 @@ internal partial struct ValueType
         public string s;
 }
 // Abstract base class for GPLEX scanners
-[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.2")]
+[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.3")]
 internal abstract class ScanBase : AbstractScanner<ValueType,LexLocation> {
   private LexLocation __yylloc = new LexLocation();
   public override LexLocation yylloc { get { return __yylloc; } set { __yylloc = value; } }
@@ -46,7 +46,7 @@ internal abstract class ScanBase : AbstractScanner<ValueType,LexLocation> {
 }
 
 // Utility class for encapsulating token information
-[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.2")]
+[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.3")]
 internal class ScanObj {
   public int token;
   public ValueType yylval;
@@ -56,7 +56,7 @@ internal class ScanObj {
   }
 }
 
-[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.2")]
+[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.3")]
 internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 {
 #pragma warning disable 649
@@ -1161,10 +1161,10 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
         break;
       case 170: // identifier -> TIDENTIFIER
-{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, CurrentSemanticValue.s); }
+{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, CurrentSemanticValue.s.ToLowerInvariant()); }
         break;
       case 171: // escaped_identifier -> TESCAPED_IDENTIFIER
-{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, CurrentSemanticValue.s.Trim('`')); }
+{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, CurrentSemanticValue.s.Trim('`').ToLowerInvariant()); }
         break;
       case 172: // int -> TDIGIT
 { CurrentSemanticValue.n = new(NodeType.Integer, null, null, null, null, null, null, CurrentSemanticValue.s); }

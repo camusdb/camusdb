@@ -322,10 +322,10 @@ any_identifier : identifier { $$.n = $1.n; $$.s = $1.s; }
                | escaped_identifier { $$.n = $1.n; $$.s = $1.s; }
                ;
            
-identifier  : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, $$.s); }
+identifier  : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, $$.s.ToLowerInvariant()); }
             ;
 
-escaped_identifier  : TESCAPED_IDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, $$.s.Trim('`')); }
+escaped_identifier  : TESCAPED_IDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, $$.s.Trim('`').ToLowerInvariant()); }
                     ;
 
 int     : TDIGIT { $$.n = new(NodeType.Integer, null, null, null, null, null, null, $$.s); }

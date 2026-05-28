@@ -16,7 +16,9 @@ public static class SQLParserProcessor
     public static NodeAst Parse(string sql)
     {
         sqlParser sqlParser = new();
-        return sqlParser.Parse(sql);
+        NodeAst ast = sqlParser.Parse(sql);
+        IdentifierNormalizer.Normalize(ast);
+        return ast;
     }
 }
 

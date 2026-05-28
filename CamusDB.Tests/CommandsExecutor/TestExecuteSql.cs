@@ -439,4 +439,74 @@ public sealed class TestExecuteSql : BaseTest
 
         await database.Transactions.CommitAsync(txnState);
     }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectWithMixedCaseIdentifiers()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket queryTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT Name, Year FROM Robots WHERE Enabled = true",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+        Assert.AreEqual(12, result.Count);
+        Assert.IsTrue(result.All(row =>
+            row.Row.Count == 2 &&
+            row.Row.ContainsKey("name") &&
+            row.Row.ContainsKey("year")));
+
+        await database.Transactions.CommitAsync(txnState);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteCreateTableWithMixedCaseIdentifiers()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket createTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "CREATE TABLE Users (UserId OID PRIMARY KEY NOT NULL, UserName STRING NOT NULL)",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(createTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        ExecuteSQLTicket insertTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "INSERT INTO USERS (UserId, UserName) VALUES (GEN_ID(), \"alice\")",
+            parameters: null
+        );
+
+        await executor.ExecuteNonSQLQuery(insertTicket);
+
+        ExecuteSQLTicket queryTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT userName FROM users WHERE userId IS NOT NULL",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual("alice", result[0].Row["username"].StrValue);
+
+        await database.Transactions.CommitAsync(txnState);
+    }
 }

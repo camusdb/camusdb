@@ -69,6 +69,27 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseNormalizesMixedCaseIdentifiers()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT Some_Field, Another_Field FROM Some_Table WHERE UserId = 1 ORDER BY CreatedAt DESC");
+
+        Assert.AreEqual("some_field", ast.leftAst!.leftAst!.yytext);
+        Assert.AreEqual("another_field", ast.leftAst!.rightAst!.yytext);
+        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual("userid", ast.extendedOne!.leftAst!.yytext);
+        Assert.AreEqual("createdat", ast.extendedTwo!.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseNormalizesEscapedIdentifiers()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `UserName` FROM `Users`");
+
+        Assert.AreEqual("username", ast.leftAst!.yytext);
+        Assert.AreEqual("users", ast.rightAst!.yytext);
+    }
+
+    [Test]
     public void TestParseSimpleSelectWhere()
     {
         NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table WHERE xx");
@@ -546,7 +567,7 @@ public class TestSQLParser
 
         Assert.AreEqual("some_field", ast.leftAst!.yytext);
         Assert.AreEqual("some_table", ast.rightAst!.leftAst!.yytext);
-        Assert.AreEqual("FORCE_INDEX", ast.rightAst!.rightAst!.yytext);
+        Assert.AreEqual("force_index", ast.rightAst!.rightAst!.yytext);
         Assert.AreEqual("pk", ast.rightAst!.extendedOne!.yytext);
     }
 
