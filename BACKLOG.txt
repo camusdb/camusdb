@@ -2,9 +2,6 @@ Query
 - ORDER BY: remove the 2-column cap in QuerySorter (throws if ticket.OrderBy.Count > 2); refactor
   the SortedDictionary approach to support N sort columns, e.g. build a composite key string or
   use IComparer<List<ColumnValue>>.
-- Aggregations: SUM, AVG, MIN, MAX are parsed and routed through QueryAggregationType but
-  QueryAggregator.AggregateResultset() only handles COUNT. Implement the remaining four using
-  the same pattern, operating on the accumulated row list.
 - FORCE INDEX / USE INDEX: SQL syntax is not parsed. Add NodeType entries to the grammar,
   propagate the chosen index name through QueryTicket, and honour it in QueryExecutor's
   index-selection logic.

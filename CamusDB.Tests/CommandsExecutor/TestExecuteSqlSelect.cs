@@ -995,6 +995,139 @@ public class TestExecuteSqlSelect : BaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectAggregateSum()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT SUM(year) FROM robots",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["0"].Type);
+        Assert.AreEqual(50300, result[0].Row["0"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregateSumWithConditions()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT SUM(year) FROM robots WHERE year<2005",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["0"].Type);
+        Assert.AreEqual(10010, result[0].Row["0"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregateAverage()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT AVG(year) FROM robots",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(ColumnType.Float64, result[0].Row["0"].Type);
+        Assert.AreEqual(2012.0, result[0].Row["0"].FloatValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregateMinMax()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket minTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT MIN(year) FROM robots",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> minCursor) = await executor.ExecuteSQLQuery(minTicket);
+        List<QueryResultRow> minResult = await minCursor.ToListAsync();
+
+        Assert.AreEqual(1, minResult.Count);
+        Assert.AreEqual(ColumnType.Integer64, minResult[0].Row["0"].Type);
+        Assert.AreEqual(2000, minResult[0].Row["0"].LongValue);
+
+        ExecuteSQLTicket maxTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT MAX(year) FROM robots",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> maxCursor) = await executor.ExecuteSQLQuery(maxTicket);
+        List<QueryResultRow> maxResult = await maxCursor.ToListAsync();
+
+        Assert.AreEqual(1, maxResult.Count);
+        Assert.AreEqual(ColumnType.Integer64, maxResult[0].Row["0"].Type);
+        Assert.AreEqual(2024, maxResult[0].Row["0"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregateWithAlias()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT SUM(year) AS totalYear FROM robots",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["totalyear"].Type);
+        Assert.AreEqual(50300, result[0].Row["totalyear"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectProjection1()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
