@@ -238,7 +238,7 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         for (i = 0; i < 50; i++)
         {
             KvTransaction txnState = await database.Transactions.BeginAsync();
-            
+
             string objectId = ObjectIdGenerator.Generate().ToString();
             objectIds.Add(objectId);
 
@@ -263,15 +263,13 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
 
             if ((i + 1) % 5 == 0)
             {
-                await System.IO.File.AppendAllTextAsync("/tmp/aa.txt", $"{i}\n");
-                
-                await database.Transactions.RollbackIfNotCompletedAsync(txnState);
-                
                 CloseDatabaseTicket closeTicket = new(dbname);
                 await executor.CloseDatabase(closeTicket);
+
+                database = await executor.OpenDatabase(dbname);
             }
         }
-        
+
         KvTransaction txnState2 = await database.Transactions.BeginAsync();
 
         i = 0;

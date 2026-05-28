@@ -11,7 +11,6 @@ using System.IO;
 using System.Text;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
-using System.Runtime.Serialization;
 using System.Globalization;
 
 namespace QUT.GplexBuffers
@@ -24,8 +23,6 @@ namespace QUT.GplexBuffers
         public BufferException(string message) : base(message) { }
         public BufferException(string message, Exception innerException)
             : base(message, innerException) { }
-        protected BufferException(SerializationInfo info, StreamingContext context)
-            : base(info, context) { }
     }
 
     internal abstract class ScanBuff

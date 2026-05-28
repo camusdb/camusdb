@@ -13,15 +13,15 @@ using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Transactions.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
+using CamusDB.App.Services;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class DeleteController : CommandsController
 {
-    public DeleteController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    public DeleteController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }
@@ -33,24 +33,22 @@ public sealed class DeleteController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             DeleteRequest? request = JsonSerializer.Deserialize<DeleteRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Delete request is not valid");
 
+            KvTransaction? txnState = null;
             bool newTransaction = false;
-            TransactionState? txnState = null;
 
             try
             {
-                if (request.TxnIdPT > 0)
-                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-                else
-                {
-                    newTransaction = true;
-                    txnState = await transactions.Start().ConfigureAwait(false);
-                }
+                (newTransaction, txnState) = await BeginOrResumeAsync(
+                    request.DatabaseName,
+                    request.TxnIdPT,
+                    request.TxnIdCounter
+                ).ConfigureAwait(false);
 
                 DeleteTicket ticket = new(
                     txnState: txnState,
@@ -60,17 +58,19 @@ public sealed class DeleteController : CommandsController
                     filters: request.Filters ?? new()
                 );
 
-                DeleteResult result = await executor.Delete(ticket);
+                DeleteResult result = await executor.Delete(ticket).ConfigureAwait(false);
 
                 if (newTransaction)
-                    await transactions.Commit(result.Database, txnState);
+                    await transactions.CommitAsync(result.Database, txnState).ConfigureAwait(false);
 
                 return new JsonResult(new DeleteResponse("ok", result.DeletedRows));
             }
-            finally
+            catch (Exception)
             {
                 if (txnState is not null)
-                    await transactions.RollbackIfNotComplete(txnState);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+
+                throw;
             }
         }
         catch (CamusDBException e)

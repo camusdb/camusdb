@@ -67,14 +67,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <param name="validator"></param>
     /// <param name="catalogs"></param>
     /// <param name="logger"></param>
-    public CommandExecutor(CommandValidator validator, CatalogsManager catalogs, ILogger<ICamusDB> logger)
+    /// <param name="loggerFactory">Optional factory forwarded to the embedded Kahuna node so its internal logs are visible.</param>
+    public CommandExecutor(CommandValidator validator, CatalogsManager catalogs, ILogger<ICamusDB> logger, ILoggerFactory? loggerFactory = null)
     {
         this.validator = validator;
         this.catalogs = catalogs;
         this.logger = logger;
 
         databaseDescriptors = new();
-        databaseOpener = new(this, databaseDescriptors, catalogs, logger);
+        databaseOpener = new(this, databaseDescriptors, catalogs, logger, loggerFactory);
         databaseCloser = new(databaseDescriptors, logger);
         databaseDroper = new(databaseDescriptors, logger);
         databaseCreator = new(logger);

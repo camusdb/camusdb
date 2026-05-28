@@ -12,14 +12,14 @@ using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Transactions;
+using CamusDB.App.Services;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class CreateDatabaseController : CommandsController
 {
-    public CreateDatabaseController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    public CreateDatabaseController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }

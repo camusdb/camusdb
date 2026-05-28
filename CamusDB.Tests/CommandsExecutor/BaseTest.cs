@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -19,6 +20,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -79,6 +81,17 @@ public abstract class BaseTest
             catch
             {
                 // best-effort cleanup — ignore errors
+            }
+
+            try
+            {
+                string dataPath = Path.Combine(CamusConfig.DataDirectory, dbname);
+                if (Directory.Exists(dataPath))
+                    Directory.Delete(dataPath, recursive: true);
+            }
+            catch
+            {
+                // best-effort cleanup
             }
         }
 

@@ -67,10 +67,10 @@
   </ItemGroup>
   
   <ItemGroup>
-    <PackageReference Include="Kahuna.Core" Version="0.1.1" />
-    <PackageReference Include="Kommander" Version="0.9.7" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.4" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.4" />
+    <!--<PackageReference Include="Kahuna.Core" Version="0.1.5" />-->
+    <ProjectReference Include="/Users/andresgutierrez/kahuna/Kahuna.Core/Kahuna.Core.csproj" />
+    <PackageReference Include="Kommander" Version="0.9.8" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.16" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
     <PackageReference Include="System.Linq.Async" Version="6.0.1" />

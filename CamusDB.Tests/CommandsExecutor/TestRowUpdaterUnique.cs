@@ -12,6 +12,7 @@ using System;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
@@ -114,8 +115,11 @@ public sealed class TestRowUpdaterUnique : BaseTest
             parameters: null
         );
 
-        UpdateResult execResult = await executor.Update(ticket);
-        Assert.AreEqual(14, execResult.UpdatedRows);
+        // Updating multiple rows to the same value violates the unique index on 'name'.
+        CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Update(ticket));
+        Assert.AreEqual("Duplicate entry for key 'name_idx'", exception!.Message);
+
+        await database.Transactions.RollbackIfNotCompletedAsync(txnState);
 
         /*QueryTicket queryTicket = new(
             database: dbname,

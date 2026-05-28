@@ -10,16 +10,17 @@ using CamusDB.Core;
 using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Transactions.Models;
 using System.Text.Json;
+using CamusDB.App.Services;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class TransactionsController : CommandsController
 {
-    public TransactionsController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    public TransactionsController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }
@@ -30,9 +31,19 @@ public sealed class TransactionsController : CommandsController
     {
         try
         {
-            TransactionState txState = await transactions.Start();
+            using StreamReader reader = new(Request.Body);
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
-            return new JsonResult(new StartTransactionResponse("ok", txState.TxnId.L, txState.TxnId.C));
+            StartTransactionRequest? request = string.IsNullOrWhiteSpace(body)
+                ? null
+                : JsonSerializer.Deserialize<StartTransactionRequest>(body, jsonOptions);
+
+            if (string.IsNullOrEmpty(request?.DatabaseName))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required");
+
+            KvTransaction txState = await transactions.StartAsync(request.DatabaseName).ConfigureAwait(false);
+
+            return new JsonResult(new StartTransactionResponse("ok", txState.TransactionId.L, txState.TransactionId.C));
         }
         catch (CamusDBException e)
         {
@@ -55,17 +66,20 @@ public sealed class TransactionsController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             CommitTransactionRequest? request = JsonSerializer.Deserialize<CommitTransactionRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Query request is not valid");
 
-            TransactionState txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            if (string.IsNullOrEmpty(request.DatabaseName))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required");
 
-            var database = await executor.OpenDatabase(request.DatabaseName ?? "");
+            KvTransaction txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
 
-            await transactions.Commit(database, txnState);
+            DatabaseDescriptor database = await executor.OpenDatabase(request.DatabaseName).ConfigureAwait(false);
+
+            await transactions.CommitAsync(database, txnState).ConfigureAwait(false);
             
             return new JsonResult(new CommitTransactionResponse("ok"));
         }
@@ -90,15 +104,15 @@ public sealed class TransactionsController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             CommitTransactionRequest? request = JsonSerializer.Deserialize<CommitTransactionRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Query request is not valid");
 
-            TransactionState txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
+            KvTransaction txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
 
-            await transactions.Rollback(txnState);
+            await transactions.RollbackAsync(txnState).ConfigureAwait(false);
 
             return new JsonResult(new CommitTransactionResponse("ok"));
         }

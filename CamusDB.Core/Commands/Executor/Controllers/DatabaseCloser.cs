@@ -34,6 +34,7 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 
         DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
 
+        await databaseDescriptor.Kahuna.FlushAsync().ConfigureAwait(false);
         await databaseDescriptor.Kahuna.DisposeAsync().ConfigureAwait(false);
         databaseDescriptor.Dispose();
 

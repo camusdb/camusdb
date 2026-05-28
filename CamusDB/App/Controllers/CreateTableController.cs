@@ -15,7 +15,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Transactions.Models;
+using CamusDB.App.Services;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 
 namespace CamusDB.App.Controllers;
@@ -23,7 +23,7 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class CreateTableController : CommandsController
 {
-    public CreateTableController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    public CreateTableController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }
@@ -97,40 +97,17 @@ public sealed class CreateTableController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "CreateTable request is not valid");
 
-            bool newTransaction = false;
-            TransactionState? txnState = null;
+            CreateTableTicket ticket = new(
+                databaseName: request.DatabaseName ?? "",
+                tableName: request.TableName ?? "",
+                columns: GetColumnInfos(request.Columns),
+                constraints: Array.Empty<ConstraintInfo>(),
+                ifNotExists: request.IfNotExists
+            );
 
-            try
-            {
-                if (request.TxnIdPT > 0)
-                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-                else
-                {
-                    newTransaction = true;
-                    txnState = await transactions.Start().ConfigureAwait(false);
-                }
+            await executor.CreateTable(ticket).ConfigureAwait(false);
 
-                CreateTableTicket ticket = new(
-                    txnState: txnState,
-                    databaseName: request.DatabaseName ?? "",
-                    tableName: request.TableName ?? "",
-                    columns: GetColumnInfos(request.Columns),
-                    constraints: Array.Empty<ConstraintInfo>(),
-                    ifNotExists: request.IfNotExists
-                );
-
-                CreateTableResult result = await executor.CreateTable(ticket);
-
-                if (newTransaction)
-                    await transactions.Commit(result.Database, txnState);
-
-                return new JsonResult(new CreateTableResponse("ok"));
-            }
-            finally
-            {
-                if (txnState is not null)
-                    await transactions.Rollback(txnState);
-            }
+            return new JsonResult(new CreateTableResponse("ok"));
         }
         catch (CamusDBException e)
         {

@@ -101,6 +101,9 @@ public sealed class KvTransactionsManager
         if (result == KeyValueResponseType.Committed)
         {
             tx.Status = KvTransactionStatus.Committed;
+            // Kahuna persists committed KV state asynchronously; flush so row data
+            // survives process restarts (schema-only recovery was seen without this).
+            await kahuna.FlushPersistenceAsync().ConfigureAwait(false);
             return;
         }
 

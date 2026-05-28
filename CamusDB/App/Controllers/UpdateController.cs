@@ -12,7 +12,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Transactions.Models;
+using CamusDB.App.Services;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
 
@@ -21,7 +21,7 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class UpdateController : CommandsController
 {
-    public UpdateController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    public UpdateController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }
@@ -33,24 +33,22 @@ public sealed class UpdateController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             UpdateRequest? request = JsonSerializer.Deserialize<UpdateRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Update request is not valid");
 
+            KvTransaction? txnState = null;
             bool newTransaction = false;
-            TransactionState? txnState = null;
 
             try
             {
-                if (request.TxnIdPT > 0)
-                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-                else
-                {
-                    newTransaction = true;
-                    txnState = await transactions.Start().ConfigureAwait(false);
-                }
+                (newTransaction, txnState) = await BeginOrResumeAsync(
+                    request.DatabaseName,
+                    request.TxnIdPT,
+                    request.TxnIdCounter
+                ).ConfigureAwait(false);
 
                 UpdateTicket ticket = new(
                     txnState: txnState,
@@ -63,17 +61,17 @@ public sealed class UpdateController : CommandsController
                     parameters: null
                 );
 
-                UpdateResult result = await executor.Update(ticket);
+                UpdateResult result = await executor.Update(ticket).ConfigureAwait(false);
 
                 if (newTransaction)
-                    await transactions.Commit(result.Database, txnState);
+                    await transactions.CommitAsync(result.Database, txnState).ConfigureAwait(false);
 
                 return new JsonResult(new UpdateResponse("ok", result.UpdatedRows));
             }
             catch (Exception)
             {
                 if (txnState is not null)
-                    await transactions.RollbackIfNotComplete(txnState);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
 
                 throw;
             }

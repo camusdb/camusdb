@@ -15,16 +15,15 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Transactions.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
-using CamusDB.Core.SQLParser;
+using CamusDB.App.Services;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class ExecuteSQLController : CommandsController
 {
-    public ExecuteSQLController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    public ExecuteSQLController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
         
     }
@@ -46,18 +45,16 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
 
+            KvTransaction? txnState = null;
             bool newTransaction = false;
-            TransactionState? txnState = null;
 
             try
             {
-                if (request.TxnIdPT > 0)
-                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-                else
-                {
-                    newTransaction = true;
-                    txnState = await transactions.Start().ConfigureAwait(false);
-                }
+                (newTransaction, txnState) = await BeginOrResumeAsync(
+                    request.DatabaseName,
+                    request.TxnIdPT,
+                    request.TxnIdCounter
+                ).ConfigureAwait(false);
 
                 ExecuteSQLTicket ticket = new(
                     txnState: txnState,
@@ -74,7 +71,7 @@ public sealed class ExecuteSQLController : CommandsController
                     rows.Add(row.Row);
 
                 if (newTransaction)
-                    await transactions.Commit(database, txnState);
+                    await transactions.CommitAsync(database, txnState).ConfigureAwait(false);
 
                 Console.WriteLine("Elapsed={0}", stopwatch.ElapsedMilliseconds);
 
@@ -83,7 +80,7 @@ public sealed class ExecuteSQLController : CommandsController
             catch (Exception)
             {
                 if (txnState is not null)
-                    await transactions.RollbackIfNotComplete(txnState);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
 
                 throw;
             }
@@ -117,18 +114,16 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
 
+            KvTransaction? txnState = null;
             bool newTransaction = false;
-            TransactionState? txnState = null;
 
             try
             {
-                if (request.TxnIdPT > 0)
-                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-                else
-                {
-                    newTransaction = true;
-                    txnState = await transactions.Start().ConfigureAwait(false);
-                }
+                (newTransaction, txnState) = await BeginOrResumeAsync(
+                    request.DatabaseName,
+                    request.TxnIdPT,
+                    request.TxnIdCounter
+                ).ConfigureAwait(false);
 
                 ExecuteSQLTicket ticket = new(
                     txnState: txnState,
@@ -140,14 +135,14 @@ public sealed class ExecuteSQLController : CommandsController
                 ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
 
                 if (newTransaction)
-                    await transactions.Commit(result.Database, txnState);
+                    await transactions.CommitAsync(result.Database, txnState).ConfigureAwait(false);
 
                 return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows));
             }
             catch (Exception)
             {
                 if (txnState is not null)
-                    await transactions.RollbackIfNotComplete(txnState);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
 
                 throw;
             }
@@ -181,18 +176,16 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQL-DDL request is not valid");
 
+            KvTransaction? txnState = null;
             bool newTransaction = false;
-            TransactionState? txnState = null;
 
             try
             {
-                if (request.TxnIdPT > 0)
-                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-                else
-                {
-                    newTransaction = true;
-                    txnState = await transactions.Start().ConfigureAwait(false);
-                }
+                (newTransaction, txnState) = await BeginOrResumeAsync(
+                    request.DatabaseName,
+                    request.TxnIdPT,
+                    request.TxnIdCounter
+                ).ConfigureAwait(false);
 
                 ExecuteSQLTicket ticket = new(
                     txnState: txnState,
@@ -204,17 +197,17 @@ public sealed class ExecuteSQLController : CommandsController
                 ExecuteDDLSQLResult result = await executor.ExecuteDDLSQL(ticket).ConfigureAwait(false);
 
                 if (newTransaction)
-                    await transactions.Commit(result.Database, txnState);
+                    await transactions.CommitAsync(result.Database, txnState).ConfigureAwait(false);
+
+                return new JsonResult(new ExecuteDDLSQLResponse("ok"));
             }
             catch (Exception)
             {
                 if (txnState is not null)
-                    await transactions.RollbackIfNotComplete(txnState);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
 
                 throw;
             }
-
-            return new JsonResult(new ExecuteDDLSQLResponse("ok"));
         }
         catch (CamusDBException e)
         {

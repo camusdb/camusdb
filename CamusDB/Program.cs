@@ -10,8 +10,7 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
-using CamusDB.Core.Transactions;
-using CamusDB.Core.Util.Time;
+using CamusDB.App.Services;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
@@ -30,11 +29,10 @@ builder.Logging.AddConsole();
 // Add services to the container.
 builder.Services.AddRazorPages();
 
-builder.Services.AddSingleton<HybridLogicalClock>();
 builder.Services.AddSingleton<CommandExecutor>();
 builder.Services.AddSingleton<CommandValidator>();
 builder.Services.AddSingleton<CatalogsManager>();
-builder.Services.AddSingleton<TransactionsManager>();
+builder.Services.AddSingleton<HttpTransactionCoordinator>();
 
 // Initialize min threads
 ThreadPool.SetMinThreads(1024, 512);
@@ -47,6 +45,10 @@ CamusStartup camus = new(
 );
 
 await camus.Initialize(await File.ReadAllTextAsync("Config/config.yml"));
+
+CommandExecutor commandExecutor = app.Services.GetRequiredService<CommandExecutor>();
+app.Lifetime.ApplicationStopping.Register(() =>
+    commandExecutor.DisposeAsync().AsTask().GetAwaiter().GetResult());
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())

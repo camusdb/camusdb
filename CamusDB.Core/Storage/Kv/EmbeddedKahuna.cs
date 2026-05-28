@@ -63,6 +63,13 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     }
 
     /// <summary>
+    /// Constructs the embedded engine backed by SQLite at <paramref name="dataPath"/>.
+    /// Suitable for single-process embedded use and tests that require persistence across close/reopen.
+    /// </summary>
+    public static EmbeddedKahuna CreateSqlite(string dataPath, ILoggerFactory? loggerFactory = null)
+        => new(SqliteOptions(dataPath), loggerFactory);
+
+    /// <summary>
     /// Starts the Raft cluster and waits for the initial partition to elect a leader.
     /// Must be called once before any KV operations.
     /// </summary>
@@ -75,6 +82,12 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// </summary>
     public Task<string> WaitForLeaderAsync(string key, CancellationToken cancellationToken = default)
         => node.WaitForLeaderForKeyAsync(key, cancellationToken);
+
+    /// <summary>
+    /// Flushes all pending dirty writes queued during WAL restore to the persistence backend.
+    /// Must be called after <see cref="WaitForLeaderAsync"/> and before reading persisted data.
+    /// </summary>
+    public Task FlushAsync() => node.FlushAsync();
 
     public ValueTask DisposeAsync() => node.DisposeAsync();
 
@@ -95,6 +108,18 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         StoragePath = System.IO.Path.Combine(dataPath, "kv"),
         WalStorage = "sqlite",
         WalPath = System.IO.Path.Combine(dataPath, "wal"),
+        InitialPartitions = 1
+    };
+
+    private static EmbeddedKahunaOptions SqliteOptions(string dataPath) => new()
+    {
+        NodeName = "camusdb-embedded",
+        Storage = "sqlite",
+        StoragePath = System.IO.Path.Combine(dataPath, "kv"),
+        StorageRevision = "v1",
+        WalStorage = "sqlite",
+        WalPath = System.IO.Path.Combine(dataPath, "wal"),
+        WalRevision = "v1",
         InitialPartitions = 1
     };
 }

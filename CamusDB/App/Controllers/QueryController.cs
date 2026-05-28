@@ -14,14 +14,14 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Transactions.Models;
+using CamusDB.App.Services;
 
 namespace CamusDB.App.Controllers;
 
 [ApiController]
 public sealed class QueryController : CommandsController
 {
-    public QueryController(CommandExecutor executor, TransactionsManager transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    public QueryController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
 
     }
@@ -33,28 +33,25 @@ public sealed class QueryController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             QueryRequest? request = JsonSerializer.Deserialize<QueryRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Query request is not valid");
 
+            KvTransaction? txnState = null;
             bool newTransaction = false;
-            TransactionState? txnState = null;
 
             try
             {
-                if (request.TxnIdPT > 0)
-                    txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-                else
-                {
-                    newTransaction = true;
-                    txnState = await transactions.Start().ConfigureAwait(false);
-                }
+                (newTransaction, txnState) = await BeginOrResumeAsync(
+                    request.DatabaseName,
+                    request.TxnIdPT,
+                    request.TxnIdCounter
+                ).ConfigureAwait(false);
 
                 QueryTicket ticket = new(
                     txnState: txnState,
-                    txnType: TransactionType.ReadOnly,
                     databaseName: request.DatabaseName ?? "",
                     tableName: request.TableName ?? "",
                     index: null,
@@ -75,14 +72,14 @@ public sealed class QueryController : CommandsController
                     rows.Add(row.Row);
 
                 if (newTransaction)
-                    await transactions.Commit(database, txnState);
+                    await transactions.CommitAsync(database, txnState).ConfigureAwait(false);
 
                 return new JsonResult(new QueryResponse("ok", rows.Count, rows));
             }
             catch (Exception)
             {
                 if (txnState is not null)
-                    await transactions.RollbackIfNotComplete(txnState);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
 
                 throw;
             }
@@ -108,18 +105,17 @@ public sealed class QueryController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
             QueryByIdRequest? request = JsonSerializer.Deserialize<QueryByIdRequest>(body, jsonOptions);
             if (request == null)
                 throw new Exception("QueryById request is not valid");
 
-            TransactionState txnState;
-
-            if (request.TxnIdPT > 0)
-                txnState = transactions.GetState(new(request.TxnIdPT, request.TxnIdCounter));
-            else
-                txnState = await transactions.Start().ConfigureAwait(false);
+            (bool _, KvTransaction txnState) = await BeginOrResumeAsync(
+                request.DatabaseName,
+                request.TxnIdPT,
+                request.TxnIdCounter
+            ).ConfigureAwait(false);
 
             QueryByIdTicket ticket = new(
                 txnState: txnState,
@@ -149,4 +145,3 @@ public sealed class QueryController : CommandsController
         }
     }
 }
-

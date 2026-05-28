@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -207,7 +206,7 @@ internal abstract class SQLExecutorBaseCreator
                             return new ColumnValue(ColumnType.Id, myId);
 
                         case "str_id":
-                            List<ColumnValue> argumentList = new();
+                            List<ColumnValue> argumentList = [];
 
                             GetArgumentList(expr.rightAst!, row, parameters, argumentList);
 
