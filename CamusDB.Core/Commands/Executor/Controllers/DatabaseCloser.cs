@@ -34,8 +34,14 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 
         DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
 
-        await databaseDescriptor.Kahuna.FlushAsync().ConfigureAwait(false);
-        await databaseDescriptor.Kahuna.DisposeAsync().ConfigureAwait(false);
+        // Only stop the Kahuna node when this descriptor owns it (standalone per-database instance).
+        // The process-level cluster node is disposed by DI at shutdown, not per-database close.
+        if (databaseDescriptor.OwnsKahuna)
+        {
+            await databaseDescriptor.Kahuna.FlushAsync().ConfigureAwait(false);
+            await databaseDescriptor.Kahuna.DisposeAsync().ConfigureAwait(false);
+        }
+
         databaseDescriptor.Dispose();
 
         logger.LogInformation("Database {Name} closed", name);

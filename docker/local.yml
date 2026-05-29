@@ -1,0 +1,77 @@
+name: camusdb
+
+services:
+  camus1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        CAMUS_RAFT_NODENAME: camus1
+        CAMUS_RAFT_HOST: 172.31.0.2
+        CAMUS_RAFT_PORT: 7070
+        CAMUS_HTTP_PORT: 5095
+        CAMUS_INITIAL_CLUSTER: 172.31.0.3:7072 172.31.0.4:7074
+        CAMUS_INITIAL_CLUSTER_PARTITIONS: 3
+    container_name: camus1
+    ports:
+      - "5095:5095"
+      - "7070:7070"
+    volumes:
+      - camus1-data:/data
+    networks:
+      custom_net:
+        ipv4_address: 172.31.0.2
+
+  camus2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        CAMUS_RAFT_NODENAME: camus2
+        CAMUS_RAFT_HOST: 172.31.0.3
+        CAMUS_RAFT_PORT: 7072
+        CAMUS_HTTP_PORT: 5095
+        CAMUS_INITIAL_CLUSTER: 172.31.0.2:7070 172.31.0.4:7074
+        CAMUS_INITIAL_CLUSTER_PARTITIONS: 3
+    container_name: camus2
+    ports:
+      - "5096:5095"
+      - "7072:7072"
+    volumes:
+      - camus2-data:/data
+    networks:
+      custom_net:
+        ipv4_address: 172.31.0.3
+
+  camus3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        CAMUS_RAFT_NODENAME: camus3
+        CAMUS_RAFT_HOST: 172.31.0.4
+        CAMUS_RAFT_PORT: 7074
+        CAMUS_HTTP_PORT: 5095
+        CAMUS_INITIAL_CLUSTER: 172.31.0.2:7070 172.31.0.3:7072
+        CAMUS_INITIAL_CLUSTER_PARTITIONS: 3
+    container_name: camus3
+    ports:
+      - "5097:5095"
+      - "7074:7074"
+    volumes:
+      - camus3-data:/data
+    networks:
+      custom_net:
+        ipv4_address: 172.31.0.4
+
+volumes:
+  camus1-data:
+  camus2-data:
+  camus3-data:
+
+networks:
+  custom_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/16

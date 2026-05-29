@@ -13,4 +13,18 @@ public class ConfigDefinition
     public string DataDir { get; set; } = "";
 
     public int BufferPoolSize { get; set; } = -1;
+
+    public string Mode { get; set; } = "standalone";
+
+    public string NodeName { get; set; } = "";
+
+    public string RaftHost { get; set; } = "localhost";
+
+    public int RaftPort { get; set; } = 7070;
+
+    public int InitialPartitions { get; set; } = 1;
+
+    public List<string> Peers { get; set; } = [];
+
+    public bool IsClusterMode => Mode == "cluster" || Peers.Count > 0;
 }

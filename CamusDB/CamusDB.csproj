@@ -32,6 +32,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="CommandLineParser" Version="2.9.1" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.67.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Content Include="Config\config.yml" CopyToPublishDirectory="PreserveNewest"></Content>
   </ItemGroup>
   

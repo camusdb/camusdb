@@ -29,7 +29,10 @@ internal sealed class DatabaseDropper
         if (databaseDescriptors.Descriptors.TryRemove(name, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
         {
             DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
-            await databaseDescriptor.Kahuna.DisposeAsync().ConfigureAwait(false);
+
+            if (databaseDescriptor.OwnsKahuna)
+                await databaseDescriptor.Kahuna.DisposeAsync().ConfigureAwait(false);
+
             databaseDescriptor.Dispose();
         }
 

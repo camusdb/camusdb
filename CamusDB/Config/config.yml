@@ -1,1 +1,12 @@
-﻿data_dir: /tmp/camusdb/
+data_dir: /tmp/camusdb/
+
+# Cluster mode example (uncomment and fill in)
+# mode: cluster
+# node_name: camus-node-1
+# raft_host: 192.168.1.10
+# raft_port: 7070
+# initial_partitions: 3
+# peers:
+#   - 192.168.1.10:7070
+#   - 192.168.1.11:7070
+#   - 192.168.1.12:7070

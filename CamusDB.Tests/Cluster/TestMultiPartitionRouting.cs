@@ -1,0 +1,894 @@
+
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
+using System;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+
+using NUnit.Framework;
+using Microsoft.Extensions.Logging;
+
+using Kahuna;
+using Kommander;
+
+using CamusDB.Core;
+using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsValidator;
+using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Models.Results;
+using CamusDB.Core.SQLParser;
+using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Util.ObjectIds;
+using CamusConfig = CamusDB.Core.CamusDBConfig;
+
+namespace CamusDB.Tests.Cluster;
+
+/// <summary>
+/// Verifies that CamusDB operations work correctly when the embedded Kahuna node
+/// runs with InitialPartitions = 3. Uses the in-process fake Raft transport
+/// (EmbeddedRaftCommunication) — no real gRPC needed.
+/// </summary>
+[TestFixture]
+[NonParallelizable]
+public sealed class TestMultiPartitionRouting
+{
+    private const int Partitions = 3;
+
+    private static readonly ILoggerFactory sharedLoggerFactory = LoggerFactory.Create(builder =>
+        builder.AddFilter("Camus", LogLevel.Warning).AddConsole());
+
+    private static readonly ILogger<ICamusDB> logger =
+        sharedLoggerFactory.CreateLogger<ICamusDB>();
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Boots an in-memory Kahuna node with <see cref="Partitions"/> partitions
+    /// and waits for all partition leaders to be elected.
+    /// </summary>
+    private static async Task<EmbeddedKahuna> CreateClusterNodeAsync()
+    {
+        EmbeddedKahuna node = new(new EmbeddedKahunaOptions
+        {
+            NodeName = "test-cluster",
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = Partitions
+        });
+
+        await node.StartAsync(CancellationToken.None);
+
+        // Wait for every partition to have an elected leader before the tests run.
+        for (int p = 1; p <= Partitions; p++)
+            await node.WaitForLeaderAsync($"warmup/p{p}", CancellationToken.None);
+
+        return node;
+    }
+
+    /// <summary>
+    /// Creates a CommandExecutor that uses <paramref name="clusterNode"/> as its
+    /// shared process-level Kahuna store (cluster mode).
+    /// </summary>
+    private static (string dbname, CommandExecutor executor) CreateExecutor(EmbeddedKahuna clusterNode)
+    {
+        string dbname = Guid.NewGuid().ToString("n");
+        CommandValidator validator = new();
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(validator, catalogsManager, logger,
+            loggerFactory: sharedLoggerFactory, clusterNode: clusterNode);
+        return (dbname, executor);
+    }
+
+    private static async Task CleanupAsync(string dbname, CommandExecutor executor)
+    {
+        try { await executor.CloseDatabase(new CloseDatabaseTicket(dbname)); } catch { }
+        try
+        {
+            string dataPath = Path.Combine(CamusConfig.DataDirectory, dbname);
+            if (Directory.Exists(dataPath))
+                Directory.Delete(dataPath, recursive: true);
+        }
+        catch { }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 — Partition routing invariant
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// All row write keys for the same table must route to the same Raft partition.
+    /// GetPartitionKey uses InversePrefixedStaticHash(key, '/') which strips the last
+    /// path segment: "{tableId}/r/{rowId}" → hashes "{tableId}/r" regardless of rowId.
+    /// This ensures all rows land on the same partition so full-table scans work.
+    /// </summary>
+    [Test]
+    public async Task RowKeys_AllRouteToSamePartition()
+    {
+        await using EmbeddedKahuna node = await CreateClusterNodeAsync();
+
+        string tableId = ObjectIdGenerator.Generate().ToString();
+
+        ObjectIdValue[] rowIds =
+        [
+            new ObjectIdValue(1, 1, 1),
+            new ObjectIdValue(2, 2, 2),
+            new ObjectIdValue(3, 3, 3),
+            new ObjectIdValue(99, 99, 99)
+        ];
+
+        // All row write keys hash via InversePrefixedStaticHash → SimpleHash("{tableId}/r").
+        string firstKey = $"{tableId}/r/{rowIds[0]}";
+        int expectedPartition = node.Raft.GetPartitionKey(firstKey);
+
+        Assert.GreaterOrEqual(expectedPartition, 1);
+        Assert.LessOrEqual(expectedPartition, Partitions);
+
+        foreach (ObjectIdValue rowId in rowIds.Skip(1))
+        {
+            string rowKey = $"{tableId}/r/{rowId}";
+            int keyPartition = node.Raft.GetPartitionKey(rowKey);
+
+            Assert.AreEqual(expectedPartition, keyPartition,
+                $"Row key '{rowKey}' routes to partition {keyPartition} " +
+                $"but expected {expectedPartition} — all rows must share one partition");
+        }
+    }
+
+    /// <summary>
+    /// All index write keys for the same index must route to the same Raft partition.
+    /// "{tableId}/i/{indexId}/{encodedKey}" → hashes "{tableId}/i/{indexId}" regardless of
+    /// the encoded key suffix, keeping all entries of one index co-located.
+    /// </summary>
+    [Test]
+    public async Task IndexKeys_AllRouteToSamePartition()
+    {
+        await using EmbeddedKahuna node = await CreateClusterNodeAsync();
+
+        string tableId = ObjectIdGenerator.Generate().ToString();
+        string indexId = ObjectIdGenerator.Generate().ToString();
+
+        string[] indexKeys =
+        [
+            $"{tableId}/i/{indexId}/aaaa",
+            $"{tableId}/i/{indexId}/zzzz",
+            $"{tableId}/i/{indexId}/0000",
+            $"{tableId}/i/{indexId}/ffffeeeebbbb000000000000"
+        ];
+
+        int expectedPartition = node.Raft.GetPartitionKey(indexKeys[0]);
+
+        Assert.GreaterOrEqual(expectedPartition, 1);
+        Assert.LessOrEqual(expectedPartition, Partitions);
+
+        foreach (string key in indexKeys.Skip(1))
+        {
+            int keyPartition = node.Raft.GetPartitionKey(key);
+            Assert.AreEqual(expectedPartition, keyPartition,
+                $"Index key '{key}' routes to partition {keyPartition} " +
+                $"but expected {expectedPartition} — all index entries must share one partition");
+        }
+    }
+
+    /// <summary>
+    /// Schema/catalog keys for a database and row keys for its tables must each resolve
+    /// to a stable partition after DDL. Catalog keys use "{dbName}/meta/*"; row keys use
+    /// "{tableId}/r/*" — they may land on different partitions, but each family must be
+    /// internally consistent so LoadMetaAsync and full-table scans work together.
+    /// </summary>
+    [Test]
+    public async Task SchemaAndRowKeys_RouteConsistentlyAfterDdl()
+    {
+        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
+        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+
+        try
+        {
+            DatabaseDescriptor database = await executor.CreateDatabase(
+                new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+            KvTransaction txn = await database.Transactions.BeginAsync();
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: "robots",
+                columns:
+                [
+                    new ColumnInfo("id", ColumnType.Id),
+                    new ColumnInfo("name", ColumnType.String, notNull: true)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+            await database.Transactions.CommitAsync(txn);
+
+            string tableId = database.Schema.Tables["robots"].Id;
+            string schemaKey = $"{dbname}/meta/schema";
+            string systemKey = $"{dbname}/meta/system";
+            string rowKey = $"{tableId}/r/{ObjectIdGenerator.Generate()}";
+
+            int schemaPartition = clusterNode.Raft.GetPartitionKey(schemaKey);
+            int systemPartition = clusterNode.Raft.GetPartitionKey(systemKey);
+            int rowPartition = clusterNode.Raft.GetPartitionKey(rowKey);
+
+            Assert.AreEqual(schemaPartition, clusterNode.Raft.GetPartitionKey(schemaKey),
+                "Schema key must always route to the same partition");
+            Assert.AreEqual(systemPartition, clusterNode.Raft.GetPartitionKey(systemKey),
+                "System key must always route to the same partition");
+            Assert.AreEqual(rowPartition, clusterNode.Raft.GetPartitionKey(rowKey),
+                "Row bucket key must always route to the same partition");
+
+            foreach (int p in new[] { schemaPartition, systemPartition, rowPartition })
+            {
+                Assert.GreaterOrEqual(p, 1);
+                Assert.LessOrEqual(p, Partitions);
+            }
+
+            // All row ids for this table share one partition (table scan invariant).
+            string rowKey2 = $"{tableId}/r/{ObjectIdGenerator.Generate()}";
+            Assert.AreEqual(rowPartition, clusterNode.Raft.GetPartitionKey(rowKey2));
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
+    /// <summary>
+    /// Legacy routing-only check kept for clarity: bare schema key string hashing.
+    /// </summary>
+    [Test]
+    public async Task SchemaKey_RoutesConsistently()
+    {
+        await using EmbeddedKahuna node = await CreateClusterNodeAsync();
+
+        string dbName = Guid.NewGuid().ToString("n");
+        string schemaKey = $"{dbName}/meta/schema";
+
+        int p1 = node.Raft.GetPartitionKey(schemaKey);
+        int p2 = node.Raft.GetPartitionKey(schemaKey);
+
+        Assert.AreEqual(p1, p2, "Same key must always route to the same partition");
+        Assert.GreaterOrEqual(p1, 1, "Partition id must be >= 1");
+        Assert.LessOrEqual(p1, Partitions, $"Partition id must be <= {Partitions}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 — Insert + full-table scan
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Insert 10 rows into a table, then do a full-table scan and verify all 10 come back.
+    /// This exercises the row-write path and the LocateAndGetByBucket scan path across
+    /// a 3-partition node.
+    /// </summary>
+    [Test]
+    public async Task TenRowInsert_FullTableScan_ReturnsAllRows()
+    {
+        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
+        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+
+        try
+        {
+            CreateDatabaseTicket dbTicket = new(name: dbname, ifNotExists: false);
+            DatabaseDescriptor database = await executor.CreateDatabase(dbTicket);
+
+            KvTransaction txnState = await database.Transactions.BeginAsync();
+
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: "robots",
+                columns:
+                [
+                    new ColumnInfo("id",   ColumnType.Id),
+                    new ColumnInfo("name", ColumnType.String, notNull: true),
+                    new ColumnInfo("year", ColumnType.Integer64)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+
+            await database.Transactions.CommitAsync(txnState);
+
+            // Insert 10 rows.
+            txnState = await database.Transactions.BeginAsync();
+
+            for (int i = 0; i < 10; i++)
+            {
+                await executor.Insert(new InsertTicket(
+                    txnState: txnState,
+                    databaseName: dbname,
+                    tableName: "robots",
+                    values:
+                    [
+                        new Dictionary<string, ColumnValue>
+                        {
+                            { "id",   new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                            { "name", new ColumnValue(ColumnType.String, $"robot-{i}") },
+                            { "year", new ColumnValue(ColumnType.Integer64, 2020 + i) }
+                        }
+                    ]
+                ));
+            }
+
+            await database.Transactions.CommitAsync(txnState);
+
+            // Full-table scan.
+            txnState = await database.Transactions.BeginAsync();
+
+            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(new QueryTicket(
+                txnState: txnState,
+                databaseName: dbname,
+                tableName: "robots",
+                index: null,
+                projection: null,
+                where: null,
+                filters: null,
+                orderBy: null,
+                limit: null,
+                offset: null,
+                parameters: null
+            ));
+
+            List<QueryResultRow> rows = await cursor.ToListAsync();
+
+            Assert.AreEqual(10, rows.Count, "Full-table scan must return all 10 inserted rows");
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3 — Cross-partition 2PC
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Two tables with different tableIds may hash to different partitions.
+    /// A single transaction that inserts into both exercises the 2PC path.
+    /// Both tables must contain their rows after commit.
+    /// </summary>
+    [Test]
+    public async Task TwoTableInsert_SingleTransaction_BothTablesHaveRows()
+    {
+        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
+        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+
+        try
+        {
+            CreateDatabaseTicket dbTicket = new(name: dbname, ifNotExists: false);
+            DatabaseDescriptor database = await executor.CreateDatabase(dbTicket);
+
+            // Create two tables.
+            foreach (string tableName in new[] { "table_a", "table_b" })
+            {
+                KvTransaction createTxn = await database.Transactions.BeginAsync();
+
+                await executor.CreateTable(new CreateTableTicket(
+                    databaseName: dbname,
+                    tableName: tableName,
+                    columns:
+                    [
+                        new ColumnInfo("id",  ColumnType.Id),
+                        new ColumnInfo("val", ColumnType.Integer64)
+                    ],
+                    constraints:
+                    [
+                        new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                            [new ColumnIndexInfo("id", OrderType.Ascending)])
+                    ],
+                    ifNotExists: false
+                ));
+
+                await database.Transactions.CommitAsync(createTxn);
+            }
+
+            // Insert into both tables in ONE transaction.
+            KvTransaction txn = await database.Transactions.BeginAsync();
+
+            for (int i = 0; i < 5; i++)
+            {
+                foreach (string tableName in new[] { "table_a", "table_b" })
+                {
+                    await executor.Insert(new InsertTicket(
+                        txnState: txn,
+                        databaseName: dbname,
+                        tableName: tableName,
+                        values:
+                        [
+                            new Dictionary<string, ColumnValue>
+                            {
+                                { "id",  new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                                { "val", new ColumnValue(ColumnType.Integer64, (long)i) }
+                            }
+                        ]
+                    ));
+                }
+            }
+
+            await database.Transactions.CommitAsync(txn);
+
+            // Verify both tables have 5 rows each.
+            foreach (string tableName in new[] { "table_a", "table_b" })
+            {
+                KvTransaction queryTxn = await database.Transactions.BeginAsync();
+
+                (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(new QueryTicket(
+                    txnState: queryTxn,
+                    databaseName: dbname,
+                    tableName: tableName,
+                    index: null,
+                    projection: null,
+                    where: null,
+                    filters: null,
+                    orderBy: null,
+                    limit: null,
+                    offset: null,
+                    parameters: null
+                ));
+
+                List<QueryResultRow> rows = await cursor.ToListAsync();
+
+                Assert.AreEqual(5, rows.Count,
+                    $"Table '{tableName}' must have 5 rows after cross-partition 2PC commit");
+            }
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4 — Schema persistence across close/reopen (cluster shared node)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Closing and reopening a database must reload schema from KV on the shared node.
+    /// </summary>
+    [Test]
+    public async Task MetaSchema_PersistsAfterCloseAndReopen()
+    {
+        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
+        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+
+        try
+        {
+            DatabaseDescriptor database = await executor.CreateDatabase(
+                new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+            KvTransaction txn = await database.Transactions.BeginAsync();
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: "robots",
+                columns:
+                [
+                    new ColumnInfo("id", ColumnType.Id),
+                    new ColumnInfo("name", ColumnType.String, notNull: true)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+            await database.Transactions.CommitAsync(txn);
+
+            Assert.IsTrue(database.Schema.Tables.ContainsKey("robots"));
+
+            await executor.CloseDatabase(new CloseDatabaseTicket(dbname));
+
+            DatabaseDescriptor reopened = await executor.OpenDatabase(dbname);
+            Assert.IsTrue(reopened.Schema.Tables.ContainsKey("robots"),
+                "Schema must survive close/reopen on the shared cluster node");
+            Assert.AreEqual(2, reopened.Schema.Tables["robots"].Columns!.Count,
+                "Table must retain id and name columns after reopen");
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5 — Regression: mirror TestRowUpdater / TestRowMultiInsertor / TestExecuteSqlSelect
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Mirrors <c>TestRowUpdater.TestUpdateMany</c> — bulk update + filtered full-table scan.
+    /// </summary>
+    [Test]
+    public async Task Regression_RowUpdater_UpdateMany_FullScanComplete()
+    {
+        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
+        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+
+        try
+        {
+            DatabaseDescriptor database = await SetupRobotsTableWith25Rows(dbname, executor);
+
+            KvTransaction txn = await database.Transactions.BeginAsync();
+
+            UpdateResult updateResult = await executor.Update(new UpdateTicket(
+                txnState: txn,
+                databaseName: dbname,
+                tableName: "robots",
+                plainValues: new() { { "name", new ColumnValue(ColumnType.String, "updated value") } },
+                exprValues: null,
+                where: null,
+                filters: [new QueryFilter("year", ">", new ColumnValue(ColumnType.Integer64, 2010))],
+                parameters: null
+            ));
+            Assert.AreEqual(14, updateResult.UpdatedRows);
+
+            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(new QueryTicket(
+                txnState: txn,
+                databaseName: dbname,
+                tableName: "robots",
+                index: null,
+                projection: null,
+                where: null,
+                filters: [new QueryFilter("year", ">", new ColumnValue(ColumnType.Integer64, 2010))],
+                orderBy: null,
+                limit: null,
+                offset: null,
+                parameters: null
+            ));
+
+            List<QueryResultRow> rows = await cursor.ToListAsync();
+            Assert.AreEqual(14, rows.Count);
+            foreach (QueryResultRow row in rows)
+                Assert.AreEqual("updated value", row.Row["name"].StrValue);
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
+    /// <summary>
+    /// Mirrors <c>TestRowMultiInsertor.TestCheckSuccessfulMultiInsertWithQueryIndex</c>.
+    /// </summary>
+    [Test]
+    public async Task Regression_RowMultiInsertor_IndexScan_ReturnsAllRows()
+    {
+        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
+        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+
+        try
+        {
+            DatabaseDescriptor database = await executor.CreateDatabase(
+                new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+            KvTransaction setup = await database.Transactions.BeginAsync();
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: "user_robots",
+                columns:
+                [
+                    new ColumnInfo("id", ColumnType.Id),
+                    new ColumnInfo("robots_id", ColumnType.Id, notNull: true),
+                    new ColumnInfo("amount", ColumnType.Integer64)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)]),
+                    new ConstraintInfo(ConstraintType.IndexMulti, "robots_id_idx",
+                        [new ColumnIndexInfo("robots_id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+            await database.Transactions.CommitAsync(setup);
+
+            KvTransaction insertTxn = await database.Transactions.BeginAsync();
+            for (int i = 0; i < 10; i++)
+            {
+                await executor.Insert(new InsertTicket(
+                    txnState: insertTxn,
+                    databaseName: dbname,
+                    tableName: "user_robots",
+                    values:
+                    [
+                        new Dictionary<string, ColumnValue>
+                        {
+                            { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                            { "robots_id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                            { "amount", new ColumnValue(ColumnType.Integer64, i * 1000L) }
+                        }
+                    ]
+                ));
+            }
+            await database.Transactions.CommitAsync(insertTxn);
+
+            KvTransaction queryTxn = await database.Transactions.BeginAsync();
+            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(new QueryTicket(
+                txnState: queryTxn,
+                databaseName: dbname,
+                tableName: "user_robots",
+                index: "robots_id_idx",
+                projection: null,
+                where: null,
+                filters: null,
+                orderBy: null,
+                limit: null,
+                offset: null,
+                parameters: null
+            ));
+
+            List<QueryResultRow> rows = await cursor.ToListAsync();
+            Assert.AreEqual(10, rows.Count);
+            for (int i = 0; i < 10; i++)
+                Assert.AreEqual(i * 1000L, rows[i].Row["amount"].LongValue);
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
+    /// <summary>
+    /// Mirrors <c>TestExecuteSqlSelect.TestExecuteSelectOrderBy</c> — SQL full-table scan.
+    /// </summary>
+    [Test]
+    public async Task Regression_ExecuteSqlSelect_OrderBy_ReturnsAllRows()
+    {
+        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
+        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+
+        try
+        {
+            DatabaseDescriptor database = await SetupRobotsTableWith25Rows(dbname, executor);
+
+            KvTransaction txn = await database.Transactions.BeginAsync();
+            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
+                new ExecuteSQLTicket(
+                    txnState: txn,
+                    database: dbname,
+                    sql: "SELECT * FROM robots ORDER BY year",
+                    parameters: null
+                ));
+
+            List<QueryResultRow> rows = await cursor.ToListAsync();
+            Assert.AreEqual(25, rows.Count);
+            Assert.AreEqual(2000L, rows[0].Row["year"].LongValue);
+            Assert.AreEqual(2001L, rows[1].Row["year"].LongValue);
+            Assert.AreEqual(2024L, rows[24].Row["year"].LongValue);
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6 — Representative existing-test scenarios with 3 partitions
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Mirrors the core scenarios from TestRowUpdater, TestRowMultiInsertor, and
+    /// TestExecuteSqlSelect to verify they still pass with a 3-partition node.
+    /// </summary>
+    [Test]
+    public async Task ExistingOperations_WithThreePartitions_AllPass()
+    {
+        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
+        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+
+        try
+        {
+            CreateDatabaseTicket dbTicket = new(name: dbname, ifNotExists: false);
+            DatabaseDescriptor database = await executor.CreateDatabase(dbTicket);
+
+            KvTransaction setup = await database.Transactions.BeginAsync();
+
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: "robots",
+                columns:
+                [
+                    new ColumnInfo("id",      ColumnType.Id),
+                    new ColumnInfo("name",    ColumnType.String, notNull: true),
+                    new ColumnInfo("year",    ColumnType.Integer64),
+                    new ColumnInfo("enabled", ColumnType.Bool)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)]),
+                    new ConstraintInfo(ConstraintType.IndexMulti, "name_idx",
+                        [new ColumnIndexInfo("name", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+
+            await database.Transactions.CommitAsync(setup);
+
+            // --- insert 5 rows ---
+            KvTransaction insertTxn = await database.Transactions.BeginAsync();
+            List<string> ids = [];
+
+            for (int i = 0; i < 5; i++)
+            {
+                string id = ObjectIdGenerator.Generate().ToString();
+                ids.Add(id);
+
+                await executor.Insert(new InsertTicket(
+                    txnState: insertTxn,
+                    databaseName: dbname,
+                    tableName: "robots",
+                    values:
+                    [
+                        new Dictionary<string, ColumnValue>
+                        {
+                            { "id",      new ColumnValue(ColumnType.Id, id) },
+                            { "name",    new ColumnValue(ColumnType.String, $"robot-{i}") },
+                            { "year",    new ColumnValue(ColumnType.Integer64, 2020L + i) },
+                            { "enabled", new ColumnValue(ColumnType.Bool, true) }
+                        }
+                    ]
+                ));
+            }
+
+            await database.Transactions.CommitAsync(insertTxn);
+
+            // --- full-table scan returns 5 ---
+            KvTransaction scanTxn = await database.Transactions.BeginAsync();
+
+            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(new QueryTicket(
+                txnState: scanTxn,
+                databaseName: dbname,
+                tableName: "robots",
+                index: null, projection: null, where: null, filters: null,
+                orderBy: null, limit: null, offset: null, parameters: null
+            ));
+
+            List<QueryResultRow> rows = await cursor.ToListAsync();
+            Assert.AreEqual(5, rows.Count, "Full-table scan must return 5 rows");
+
+            // --- update one row ---
+            KvTransaction updateTxn = await database.Transactions.BeginAsync();
+
+            await executor.Update(new UpdateTicket(
+                txnState: updateTxn,
+                databaseName: dbname,
+                tableName: "robots",
+                plainValues: new() { { "enabled", new ColumnValue(ColumnType.Bool, false) } },
+                exprValues: null,
+                where: null,
+                filters: [new QueryFilter("id", "=", new ColumnValue(ColumnType.Id, ids[0]))],
+                parameters: null
+            ));
+
+            await database.Transactions.CommitAsync(updateTxn);
+
+            // --- delete one row ---
+            KvTransaction deleteTxn = await database.Transactions.BeginAsync();
+
+            await executor.Delete(new DeleteTicket(
+                txnState: deleteTxn,
+                databaseName: dbname,
+                tableName: "robots",
+                where: null,
+                filters: [new QueryFilter("id", "=", new ColumnValue(ColumnType.Id, ids[4]))]
+            ));
+
+            await database.Transactions.CommitAsync(deleteTxn);
+
+            // --- final scan: expect 4 rows ---
+            KvTransaction finalTxn = await database.Transactions.BeginAsync();
+
+            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor2) = await executor.Query(new QueryTicket(
+                txnState: finalTxn,
+                databaseName: dbname,
+                tableName: "robots",
+                index: null, projection: null, where: null, filters: null,
+                orderBy: null, limit: null, offset: null, parameters: null
+            ));
+
+            List<QueryResultRow> finalRows = await cursor2.ToListAsync();
+            Assert.AreEqual(4, finalRows.Count, "After deleting one row, scan must return 4");
+
+            // --- verify updated row has enabled=false ---
+            QueryResultRow? updated = finalRows
+                .Cast<QueryResultRow?>()
+                .FirstOrDefault(r => r!.Value.Row.TryGetValue("id", out ColumnValue? cv) && cv?.StrValue == ids[0]);
+
+            Assert.IsTrue(updated.HasValue, "Updated row must still exist");
+            Assert.AreEqual(false, updated!.Value.Row["enabled"].BoolValue, "enabled must be false after update");
+
+            // --- index scan via name_idx ---
+            KvTransaction idxTxn = await database.Transactions.BeginAsync();
+
+            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> idxCursor) = await executor.Query(new QueryTicket(
+                txnState: idxTxn,
+                databaseName: dbname,
+                tableName: "robots",
+                index: "name_idx",
+                projection: null, where: null, filters: null,
+                orderBy: null, limit: null, offset: null, parameters: null
+            ));
+
+            List<QueryResultRow> idxRows = await idxCursor.ToListAsync();
+            Assert.AreEqual(4, idxRows.Count, "Index scan must also return 4 rows");
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
+    /// <summary>
+    /// Creates the robots table and inserts 25 rows (same shape as TestRowUpdater.SetupBasicTable).
+    /// </summary>
+    private static async Task<DatabaseDescriptor> SetupRobotsTableWith25Rows(
+        string dbname, CommandExecutor executor)
+    {
+        DatabaseDescriptor database = await executor.CreateDatabase(
+            new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "robots",
+            columns:
+            [
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("name", ColumnType.String, notNull: true),
+                new ColumnInfo("year", ColumnType.Integer64),
+                new ColumnInfo("enabled", ColumnType.Bool)
+            ],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        ));
+
+        for (int i = 0; i < 25; i++)
+        {
+            await executor.Insert(new InsertTicket(
+                txnState: txn,
+                databaseName: dbname,
+                tableName: "robots",
+                values:
+                [
+                    new Dictionary<string, ColumnValue>
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "name", new ColumnValue(ColumnType.String, $"some name {i}") },
+                        { "year", new ColumnValue(ColumnType.Integer64, 2000L + i) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, false) }
+                    }
+                ]
+            ));
+        }
+
+        await database.Transactions.CommitAsync(txn);
+        return database;
+    }
+}

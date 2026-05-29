@@ -24,6 +24,7 @@ internal partial class sqlScanner
 	{
 		base.yyerror(format, args);
 
-        YYError = string.Format(format, args);		
+        string message = args.Length > 0 ? string.Format(format, args) : format;
+        YYError = $"(line {yyline}, col {yycol + 1}) {message}";
 	}
 }

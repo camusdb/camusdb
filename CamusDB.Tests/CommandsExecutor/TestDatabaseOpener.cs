@@ -7,6 +7,7 @@
  */
 
 using NUnit.Framework;
+using System.Threading;
 using System.Threading.Tasks;
 
 using CamusDB.Core.Catalogs;
@@ -14,6 +15,8 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Storage.Kv;
+using Kahuna;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -33,5 +36,51 @@ public sealed class TestDatabaseOpener : BaseTest
         Assert.IsInstanceOf<Schema>(database.Schema);
 
         Assert.AreEqual(database.TableDescriptors.Count, 0);
+    }
+
+    /// <summary>
+    /// Closing one database must not dispose the shared cluster Kahuna node;
+    /// other databases on the same node must remain usable.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task ClusterMode_CloseOneDatabase_OtherDatabaseStillWorks()
+    {
+        await using EmbeddedKahuna clusterNode = new(new EmbeddedKahunaOptions
+        {
+            NodeName = "test-cluster-opener",
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 3
+        });
+
+        await clusterNode.StartAsync(CancellationToken.None);
+        await clusterNode.WaitForLeaderAsync("warmup", CancellationToken.None);
+
+        CommandValidator validator = new();
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(validator, catalogsManager, logger, clusterNode: clusterNode);
+
+        string db1 = System.Guid.NewGuid().ToString("n");
+        string db2 = System.Guid.NewGuid().ToString("n");
+
+        try
+        {
+            await executor.CreateDatabase(new CreateDatabaseTicket(db1, ifNotExists: false));
+            DatabaseDescriptor second = await executor.CreateDatabase(new CreateDatabaseTicket(db2, ifNotExists: false));
+
+            Assert.AreSame(clusterNode, second.Kahuna);
+            Assert.IsFalse(second.OwnsKahuna);
+
+            await executor.CloseDatabase(new CloseDatabaseTicket(db1));
+
+            // Shared node must still serve the remaining database.
+            DatabaseDescriptor reopened = await executor.OpenDatabase(db2);
+            Assert.AreSame(clusterNode, reopened.Kahuna);
+        }
+        finally
+        {
+            try { await executor.CloseDatabase(new CloseDatabaseTicket(db2)); } catch { }
+        }
     }
 }

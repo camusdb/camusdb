@@ -1,0 +1,41 @@
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build-env
+
+RUN rm -fr /src && mkdir -p /src
+COPY CamusDB.Core /src/CamusDB.Core/
+COPY CamusDB /src/CamusDB/
+
+RUN cd /src/CamusDB/ && dotnet publish --no-self-contained --configuration Release -p:RunAnalyzers=false -o /app
+
+FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
+WORKDIR /app
+
+EXPOSE 5095
+EXPOSE 7070
+
+COPY --from=build-env /app .
+COPY docker/config.cluster.yml /app/Config/config.yml
+
+ARG CAMUS_RAFT_NODENAME
+ARG CAMUS_RAFT_HOST
+ARG CAMUS_RAFT_PORT
+ARG CAMUS_HTTP_PORT
+ARG CAMUS_INITIAL_CLUSTER
+ARG CAMUS_INITIAL_CLUSTER_PARTITIONS
+
+ENV DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS=1
+ENV CAMUS_RAFT_NODENAME="$CAMUS_RAFT_NODENAME"
+ENV CAMUS_RAFT_HOST="$CAMUS_RAFT_HOST"
+ENV CAMUS_RAFT_PORT="$CAMUS_RAFT_PORT"
+ENV CAMUS_HTTP_PORT="$CAMUS_HTTP_PORT"
+ENV CAMUS_INITIAL_CLUSTER="$CAMUS_INITIAL_CLUSTER"
+ENV CAMUS_INITIAL_CLUSTER_PARTITIONS="$CAMUS_INITIAL_CLUSTER_PARTITIONS"
+
+RUN mkdir -p /data
+
+ENTRYPOINT ["sh", "-c", "ASPNETCORE_URLS=http://+:${CAMUS_HTTP_PORT:-5095} dotnet CamusDB.dll \
+  --mode=cluster \
+  --raft-nodename=${CAMUS_RAFT_NODENAME} \
+  --raft-host=${CAMUS_RAFT_HOST} \
+  --raft-port=${CAMUS_RAFT_PORT:-7070} \
+  --initial-cluster-partitions=${CAMUS_INITIAL_CLUSTER_PARTITIONS:-3} \
+  --initial-cluster ${CAMUS_INITIAL_CLUSTER}"]

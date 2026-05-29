@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using Microsoft.Extensions.Logging;
 using CamusDB.Core.CommandsExecutor.Models.Results;
@@ -68,14 +69,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <param name="catalogs"></param>
     /// <param name="logger"></param>
     /// <param name="loggerFactory">Optional factory forwarded to the embedded Kahuna node so its internal logs are visible.</param>
-    public CommandExecutor(CommandValidator validator, CatalogsManager catalogs, ILogger<ICamusDB> logger, ILoggerFactory? loggerFactory = null)
+    /// <param name="clusterNode">Process-level Kahuna node shared across all databases in cluster mode; null in standalone mode.</param>
+    public CommandExecutor(CommandValidator validator, CatalogsManager catalogs, ILogger<ICamusDB> logger, ILoggerFactory? loggerFactory = null, EmbeddedKahuna? clusterNode = null)
     {
         this.validator = validator;
         this.catalogs = catalogs;
         this.logger = logger;
 
         databaseDescriptors = new();
-        databaseOpener = new(this, databaseDescriptors, catalogs, logger, loggerFactory);
+        databaseOpener = new(this, databaseDescriptors, catalogs, logger, clusterNode, loggerFactory);
         databaseCloser = new(databaseDescriptors, logger);
         databaseDroper = new(databaseDescriptors, logger);
         databaseCreator = new(logger);

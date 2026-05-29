@@ -8,6 +8,11 @@
 
 using Kahuna;
 using Kommander;
+using Kommander.Communication;
+using Kommander.Communication.Grpc;
+using Kommander.Discovery;
+using Kahuna.Server.Communication.Internode;
+using Kahuna.Server.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.Storage.Kv;
@@ -43,6 +48,40 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         node = new EmbeddedKahunaNode(options, loggerFactory);
+    }
+
+    /// <summary>
+    /// Constructs the embedded engine with externally supplied communication implementations.
+    /// Use for cluster mode where real gRPC transports replace in-process fakes.
+    /// </summary>
+    public EmbeddedKahuna(
+        EmbeddedKahunaOptions options,
+        IInterNodeCommunication interNode,
+        ICommunication raftComm,
+        IDiscovery discovery,
+        ILoggerFactory? loggerFactory = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        node = new EmbeddedKahunaNode(options, interNode, raftComm, discovery, loggerFactory);
+    }
+
+    /// <summary>
+    /// Creates a cluster-mode engine backed by SQLite, wired with real gRPC communications.
+    /// </summary>
+    public static EmbeddedKahuna CreateCluster(
+        EmbeddedKahunaOptions options,
+        IEnumerable<string> peers,
+        ILoggerFactory? loggerFactory = null)
+    {
+        List<RaftNode> peerNodes = [.. peers.Select(p => new RaftNode(p))];
+
+        return new EmbeddedKahuna(
+            options,
+            new GrpcInterNodeCommunication(new KahunaConfiguration()),
+            new GrpcCommunication(),
+            new StaticDiscovery(peerNodes),
+            loggerFactory
+        );
     }
 
     /// <summary>

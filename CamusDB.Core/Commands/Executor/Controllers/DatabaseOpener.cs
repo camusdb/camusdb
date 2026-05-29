@@ -18,8 +18,10 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
-/// Opens a database, creating an <see cref="EmbeddedKahuna"/> node (SQLite-backed) and wiring
-/// the <see cref="KvTransactionsManager"/> into the returned <see cref="DatabaseDescriptor"/>.
+/// Opens a database and wires the <see cref="KvTransactionsManager"/> into the returned
+/// <see cref="DatabaseDescriptor"/>.
+/// In standalone mode, creates a per-database SQLite-backed <see cref="EmbeddedKahuna"/> node.
+/// In cluster mode, reuses the process-level <see cref="EmbeddedKahuna"/> injected at construction.
 /// Schema and row data are persisted to the Kahuna KV store and restored on reopen via WAL replay.
 /// </summary>
 internal sealed class DatabaseOpener
@@ -34,12 +36,21 @@ internal sealed class DatabaseOpener
 
     private readonly ILoggerFactory? loggerFactory;
 
-    public DatabaseOpener(CommandExecutor commandExecutor, DatabaseDescriptors databaseDescriptors, CatalogsManager catalogs, ILogger<ICamusDB> logger, ILoggerFactory? loggerFactory = null)
+    private readonly EmbeddedKahuna? clusterNode;
+
+    public DatabaseOpener(
+        CommandExecutor commandExecutor,
+        DatabaseDescriptors databaseDescriptors,
+        CatalogsManager catalogs,
+        ILogger<ICamusDB> logger,
+        EmbeddedKahuna? clusterNode = null,
+        ILoggerFactory? loggerFactory = null)
     {
         this.commandExecutor = commandExecutor;
         this.databaseDescriptors = databaseDescriptors;
         this.catalogs = catalogs;
         this.logger = logger;
+        this.clusterNode = clusterNode;
         this.loggerFactory = loggerFactory;
     }
 
@@ -60,13 +71,19 @@ internal sealed class DatabaseOpener
         Directory.CreateDirectory(Path.Combine(dataPath, "kv"));
         Directory.CreateDirectory(Path.Combine(dataPath, "wal"));
 
-        EmbeddedKahuna node = EmbeddedKahuna.CreateSqlite(dataPath, loggerFactory);
-        await node.StartAsync(CancellationToken.None).ConfigureAwait(false);
-        await node.WaitForLeaderAsync($"{name}/warmup", CancellationToken.None).ConfigureAwait(false);
+        EmbeddedKahuna node = clusterNode ?? EmbeddedKahuna.CreateSqlite(dataPath, loggerFactory);
 
-        // WAL replay queues dirty writes to the background writer. Flush them now so
-        // SQLite is fully populated before LoadMetaAsync reads schema keys from storage.
-        await node.FlushAsync().ConfigureAwait(false);
+        // Only start/wait if we own the node (standalone per-database instance).
+        // The cluster node is started once at process startup in Program.cs.
+        if (clusterNode is null)
+        {
+            await node.StartAsync(CancellationToken.None).ConfigureAwait(false);
+            await node.WaitForLeaderAsync($"{name}/warmup", CancellationToken.None).ConfigureAwait(false);
+
+            // WAL replay queues dirty writes to the background writer. Flush them now so
+            // SQLite is fully populated before LoadMetaAsync reads schema keys from storage.
+            await node.FlushAsync().ConfigureAwait(false);
+        }
 
         KvTransactionsManager transactions = new(node.Kahuna);
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new();
@@ -75,7 +92,8 @@ internal sealed class DatabaseOpener
             name: name,
             kahuna: node,
             transactions: transactions,
-            tableDescriptors: tableDescriptors
+            tableDescriptors: tableDescriptors,
+            ownsKahuna: clusterNode is null
         );
 
         await catalogs.LoadMetaAsync(databaseDescriptor).ConfigureAwait(false);

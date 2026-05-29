@@ -97,12 +97,22 @@ public sealed class KvTableStore
         HLCTimestamp txId,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        KeyValueGetByBucketResult result = await kahuna.LocateAndGetByBucket(
-            txId,
-            rowBucketPrefix,
-            KeyValueDurability.Persistent,
-            cancellationToken
-        ).ConfigureAwait(false);
+        KeyValueGetByBucketResult result;
+        int retries = 0;
+
+        do
+        {
+            result = await kahuna.LocateAndGetByBucket(
+                txId,
+                rowBucketPrefix,
+                KeyValueDurability.Persistent,
+                cancellationToken
+            ).ConfigureAwait(false);
+
+            if (result.Type == KeyValueResponseType.MustRetry)
+                await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+        }
+        while (result.Type == KeyValueResponseType.MustRetry && ++retries < 32);
 
         if (result.Type != KeyValueResponseType.Get)
             yield break;
@@ -209,12 +219,22 @@ public sealed class KvTableStore
         string bucketPrefix = BuildIndexBucketPrefix(indexId);
         string keyPrefix    = bucketPrefix + "/";
 
-        KeyValueGetByBucketResult result = await kahuna.LocateAndGetByBucket(
-            txId,
-            bucketPrefix,
-            KeyValueDurability.Persistent,
-            cancellationToken
-        ).ConfigureAwait(false);
+        KeyValueGetByBucketResult result;
+        int retries = 0;
+
+        do
+        {
+            result = await kahuna.LocateAndGetByBucket(
+                txId,
+                bucketPrefix,
+                KeyValueDurability.Persistent,
+                cancellationToken
+            ).ConfigureAwait(false);
+
+            if (result.Type == KeyValueResponseType.MustRetry)
+                await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+        }
+        while (result.Type == KeyValueResponseType.MustRetry && ++retries < 32);
 
         if (result.Type != KeyValueResponseType.Get)
             yield break;
