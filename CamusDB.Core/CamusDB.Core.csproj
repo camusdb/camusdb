@@ -67,8 +67,7 @@
   </ItemGroup>
   
   <ItemGroup>
-    <PackageReference Include="Kahuna.Core" Version="0.1.8" />
-    <PackageReference Include="Kommander" Version="0.10.5" />
+    <ProjectReference Include="..\..\kahuna\Kahuna.Core\Kahuna.Core.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.16" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />

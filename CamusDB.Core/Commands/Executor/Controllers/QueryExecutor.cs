@@ -35,11 +35,12 @@ internal sealed class QueryExecutor
 
     private readonly QueryLimiter queryLimiter = new();
 
-    private readonly QueryScanner queryScanner = new();
+    private readonly QueryScanner queryScanner;
 
     public QueryExecutor(ILogger<ICamusDB> logger)
     {
         this.logger = logger;
+        this.queryScanner = new(logger);
     }
 
     public IAsyncEnumerable<QueryResultRow> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)

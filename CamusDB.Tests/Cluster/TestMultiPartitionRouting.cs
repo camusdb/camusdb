@@ -52,44 +52,68 @@ public sealed class TestMultiPartitionRouting
     private static readonly ILogger<ICamusDB> logger =
         sharedLoggerFactory.CreateLogger<ICamusDB>();
 
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
-
     /// <summary>
-    /// Boots an in-memory Kahuna node with <see cref="Partitions"/> partitions
-    /// and waits for all partition leaders to be elected.
+    /// Single shared node for the whole test class. Using one instance avoids background
+    /// actor tasks from a disposed node racing with the next test's actors on the shared
+    /// .NET thread pool.
     /// </summary>
-    private static async Task<EmbeddedKahuna> CreateClusterNodeAsync()
+    private EmbeddedKahuna? sharedNode;
+
+    [OneTimeSetUp]
+    public async Task OneTimeSetUp()
     {
-        EmbeddedKahuna node = new(new EmbeddedKahunaOptions
+        sharedNode = new EmbeddedKahuna(new EmbeddedKahunaOptions
         {
-            NodeName = "test-cluster",
+            NodeName = $"test-cluster-{Guid.NewGuid():N}",
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = Partitions
         });
 
-        await node.StartAsync(CancellationToken.None);
+        await sharedNode.StartAsync(CancellationToken.None);
 
-        // Wait for every partition to have an elected leader before the tests run.
-        for (int p = 1; p <= Partitions; p++)
-            await node.WaitForLeaderAsync($"warmup/p{p}", CancellationToken.None);
+        HashSet<int> seenPartitions = new();
+        int i = 0;
+        while (seenPartitions.Count < Partitions && i < 100)
+        {
+            string key = $"{i++}/warmup";
+            int p = sharedNode.Raft.GetPartitionKey(key);
+            if (!seenPartitions.Contains(p))
+            {
+                TestContext.Out.WriteLine($"Waiting for leader of partition {p} using key {key}");
+                await sharedNode.WaitForLeaderAsync(key, CancellationToken.None);
+                seenPartitions.Add(p);
+            }
+        }
 
-        return node;
+        if (seenPartitions.Count < Partitions)
+            throw new Exception($"Failed to find all {Partitions} partitions after 100 attempts");
+
+        await sharedNode.FlushAsync();
     }
 
+    [OneTimeTearDown]
+    public async Task OneTimeTearDown()
+    {
+        if (sharedNode is not null)
+            await sharedNode.DisposeAsync();
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
     /// <summary>
-    /// Creates a CommandExecutor that uses <paramref name="clusterNode"/> as its
-    /// shared process-level Kahuna store (cluster mode).
+    /// Creates a CommandExecutor that uses the shared cluster node.
+    /// Each test passes its own unique database name so there is no KV-level interference.
     /// </summary>
-    private static (string dbname, CommandExecutor executor) CreateExecutor(EmbeddedKahuna clusterNode)
+    private (string dbname, CommandExecutor executor) CreateExecutor()
     {
         string dbname = Guid.NewGuid().ToString("n");
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
         CommandExecutor executor = new(validator, catalogsManager, logger,
-            loggerFactory: sharedLoggerFactory, clusterNode: clusterNode);
+            loggerFactory: sharedLoggerFactory, clusterNode: sharedNode!);
         return (dbname, executor);
     }
 
@@ -116,35 +140,35 @@ public sealed class TestMultiPartitionRouting
     /// This ensures all rows land on the same partition so full-table scans work.
     /// </summary>
     [Test]
-    public async Task RowKeys_AllRouteToSamePartition()
+    public void RowKeys_AllRouteToSamePartition()
     {
-        await using EmbeddedKahuna node = await CreateClusterNodeAsync();
-
+        EmbeddedKahuna node = sharedNode!;
         string tableId = ObjectIdGenerator.Generate().ToString();
 
         ObjectIdValue[] rowIds =
         [
             new ObjectIdValue(1, 1, 1),
             new ObjectIdValue(2, 2, 2),
-            new ObjectIdValue(3, 3, 3),
-            new ObjectIdValue(99, 99, 99)
+            new ObjectIdValue(3, 3, 3)
         ];
 
-        // All row write keys hash via InversePrefixedStaticHash → SimpleHash("{tableId}/r").
-        string firstKey = $"{tableId}/r/{rowIds[0]}";
+        // All row write keys hash via InversePrefixedStaticHash → SimpleHash("{tableId}:r").
+        string firstKey = $"{tableId}:r/{rowIds[0]}";
         int expectedPartition = node.Raft.GetPartitionKey(firstKey);
+
+        int bucketPartition = node.Raft.GetPartitionKey($"{tableId}:r");
+        Assert.AreEqual(expectedPartition, bucketPartition, "Row bucket prefix must route to the same partition as row keys");
 
         Assert.GreaterOrEqual(expectedPartition, 1);
         Assert.LessOrEqual(expectedPartition, Partitions);
 
         foreach (ObjectIdValue rowId in rowIds.Skip(1))
         {
-            string rowKey = $"{tableId}/r/{rowId}";
-            int keyPartition = node.Raft.GetPartitionKey(rowKey);
-
+            string key = $"{tableId}:r/{rowId}";
+            int keyPartition = node.Raft.GetPartitionKey(key);
             Assert.AreEqual(expectedPartition, keyPartition,
-                $"Row key '{rowKey}' routes to partition {keyPartition} " +
-                $"but expected {expectedPartition} — all rows must share one partition");
+                $"Row key '{key}' routes to partition {keyPartition} but expected {expectedPartition} " +
+                "— all rows must share one partition");
         }
     }
 
@@ -154,22 +178,24 @@ public sealed class TestMultiPartitionRouting
     /// the encoded key suffix, keeping all entries of one index co-located.
     /// </summary>
     [Test]
-    public async Task IndexKeys_AllRouteToSamePartition()
+    public void IndexKeys_AllRouteToSamePartition()
     {
-        await using EmbeddedKahuna node = await CreateClusterNodeAsync();
-
+        EmbeddedKahuna node = sharedNode!;
         string tableId = ObjectIdGenerator.Generate().ToString();
         string indexId = ObjectIdGenerator.Generate().ToString();
 
         string[] indexKeys =
         [
-            $"{tableId}/i/{indexId}/aaaa",
-            $"{tableId}/i/{indexId}/zzzz",
-            $"{tableId}/i/{indexId}/0000",
-            $"{tableId}/i/{indexId}/ffffeeeebbbb000000000000"
+            $"{tableId}:i:{indexId}/aaaa",
+            $"{tableId}:i:{indexId}/zzzz",
+            $"{tableId}:i:{indexId}/0000",
+            $"{tableId}:i:{indexId}/ffffeeeebbbb000000000000"
         ];
 
         int expectedPartition = node.Raft.GetPartitionKey(indexKeys[0]);
+
+        int bucketPartition = node.Raft.GetPartitionKey($"{tableId}:i:{indexId}");
+        Assert.AreEqual(expectedPartition, bucketPartition, "Bucket prefix must route to the same partition as index keys");
 
         Assert.GreaterOrEqual(expectedPartition, 1);
         Assert.LessOrEqual(expectedPartition, Partitions);
@@ -192,8 +218,7 @@ public sealed class TestMultiPartitionRouting
     [Test]
     public async Task SchemaAndRowKeys_RouteConsistentlyAfterDdl()
     {
-        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
-        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+        (string dbname, CommandExecutor executor) = CreateExecutor();
 
         try
         {
@@ -223,15 +248,15 @@ public sealed class TestMultiPartitionRouting
             string systemKey = $"{dbname}/meta/system";
             string rowKey = $"{tableId}/r/{ObjectIdGenerator.Generate()}";
 
-            int schemaPartition = clusterNode.Raft.GetPartitionKey(schemaKey);
-            int systemPartition = clusterNode.Raft.GetPartitionKey(systemKey);
-            int rowPartition = clusterNode.Raft.GetPartitionKey(rowKey);
+            int schemaPartition = sharedNode!.Raft.GetPartitionKey(schemaKey);
+            int systemPartition = sharedNode!.Raft.GetPartitionKey(systemKey);
+            int rowPartition = sharedNode!.Raft.GetPartitionKey(rowKey);
 
-            Assert.AreEqual(schemaPartition, clusterNode.Raft.GetPartitionKey(schemaKey),
+            Assert.AreEqual(schemaPartition, sharedNode!.Raft.GetPartitionKey(schemaKey),
                 "Schema key must always route to the same partition");
-            Assert.AreEqual(systemPartition, clusterNode.Raft.GetPartitionKey(systemKey),
+            Assert.AreEqual(systemPartition, sharedNode!.Raft.GetPartitionKey(systemKey),
                 "System key must always route to the same partition");
-            Assert.AreEqual(rowPartition, clusterNode.Raft.GetPartitionKey(rowKey),
+            Assert.AreEqual(rowPartition, sharedNode!.Raft.GetPartitionKey(rowKey),
                 "Row bucket key must always route to the same partition");
 
             foreach (int p in new[] { schemaPartition, systemPartition, rowPartition })
@@ -242,7 +267,7 @@ public sealed class TestMultiPartitionRouting
 
             // All row ids for this table share one partition (table scan invariant).
             string rowKey2 = $"{tableId}/r/{ObjectIdGenerator.Generate()}";
-            Assert.AreEqual(rowPartition, clusterNode.Raft.GetPartitionKey(rowKey2));
+            Assert.AreEqual(rowPartition, sharedNode!.Raft.GetPartitionKey(rowKey2));
         }
         finally
         {
@@ -254,19 +279,18 @@ public sealed class TestMultiPartitionRouting
     /// Legacy routing-only check kept for clarity: bare schema key string hashing.
     /// </summary>
     [Test]
-    public async Task SchemaKey_RoutesConsistently()
+    public Task SchemaKey_RoutesConsistently()
     {
-        await using EmbeddedKahuna node = await CreateClusterNodeAsync();
-
         string dbName = Guid.NewGuid().ToString("n");
         string schemaKey = $"{dbName}/meta/schema";
 
-        int p1 = node.Raft.GetPartitionKey(schemaKey);
-        int p2 = node.Raft.GetPartitionKey(schemaKey);
+        int p1 = sharedNode!.Raft.GetPartitionKey(schemaKey);
+        int p2 = sharedNode!.Raft.GetPartitionKey(schemaKey);
 
         Assert.AreEqual(p1, p2, "Same key must always route to the same partition");
         Assert.GreaterOrEqual(p1, 1, "Partition id must be >= 1");
         Assert.LessOrEqual(p1, Partitions, $"Partition id must be <= {Partitions}");
+        return Task.CompletedTask;
     }
 
     // -----------------------------------------------------------------------
@@ -281,8 +305,7 @@ public sealed class TestMultiPartitionRouting
     [Test]
     public async Task TenRowInsert_FullTableScan_ReturnsAllRows()
     {
-        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
-        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+        (string dbname, CommandExecutor executor) = CreateExecutor();
 
         try
         {
@@ -372,8 +395,7 @@ public sealed class TestMultiPartitionRouting
     [Test]
     public async Task TwoTableInsert_SingleTransaction_BothTablesHaveRows()
     {
-        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
-        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+        (string dbname, CommandExecutor executor) = CreateExecutor();
 
         try
         {
@@ -470,8 +492,7 @@ public sealed class TestMultiPartitionRouting
     [Test]
     public async Task MetaSchema_PersistsAfterCloseAndReopen()
     {
-        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
-        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+        (string dbname, CommandExecutor executor) = CreateExecutor();
 
         try
         {
@@ -522,8 +543,7 @@ public sealed class TestMultiPartitionRouting
     [Test]
     public async Task Regression_RowUpdater_UpdateMany_FullScanComplete()
     {
-        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
-        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+        (string dbname, CommandExecutor executor) = CreateExecutor();
 
         try
         {
@@ -574,8 +594,7 @@ public sealed class TestMultiPartitionRouting
     [Test]
     public async Task Regression_RowMultiInsertor_IndexScan_ReturnsAllRows()
     {
-        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
-        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+        (string dbname, CommandExecutor executor) = CreateExecutor();
 
         try
         {
@@ -623,6 +642,24 @@ public sealed class TestMultiPartitionRouting
             }
             await database.Transactions.CommitAsync(insertTxn);
 
+            // --- full-table scan returns 10 ---
+            KvTransaction scanTxn = await database.Transactions.BeginAsync();
+            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> scanCursor) = await executor.Query(new QueryTicket(
+                txnState: scanTxn,
+                databaseName: dbname,
+                tableName: "user_robots",
+                index: null,
+                projection: null,
+                filters: null,
+                where: null,
+                orderBy: null,
+                limit: null,
+                offset: null,
+                parameters: null
+            ));
+            List<QueryResultRow> scanRows = await scanCursor.ToListAsync();
+            Assert.AreEqual(10, scanRows.Count, "Full-table scan must return 10 rows");
+
             KvTransaction queryTxn = await database.Transactions.BeginAsync();
             (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(new QueryTicket(
                 txnState: queryTxn,
@@ -640,8 +677,9 @@ public sealed class TestMultiPartitionRouting
 
             List<QueryResultRow> rows = await cursor.ToListAsync();
             Assert.AreEqual(10, rows.Count);
+            List<long> amounts = rows.Select(r => r.Row["amount"].LongValue).OrderBy(x => x).ToList();
             for (int i = 0; i < 10; i++)
-                Assert.AreEqual(i * 1000L, rows[i].Row["amount"].LongValue);
+                Assert.AreEqual(i * 1000L, amounts[i]);
         }
         finally
         {
@@ -655,8 +693,7 @@ public sealed class TestMultiPartitionRouting
     [Test]
     public async Task Regression_ExecuteSqlSelect_OrderBy_ReturnsAllRows()
     {
-        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
-        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+        (string dbname, CommandExecutor executor) = CreateExecutor();
 
         try
         {
@@ -694,8 +731,7 @@ public sealed class TestMultiPartitionRouting
     [Test]
     public async Task ExistingOperations_WithThreePartitions_AllPass()
     {
-        await using EmbeddedKahuna clusterNode = await CreateClusterNodeAsync();
-        (string dbname, CommandExecutor executor) = CreateExecutor(clusterNode);
+        (string dbname, CommandExecutor executor) = CreateExecutor();
 
         try
         {

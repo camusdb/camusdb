@@ -28,7 +28,7 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
         if (ast.nodeType != NodeType.AlterTableDropPrimaryKey && ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing index name");
 
-        if (ast.nodeType == NodeType.AlterTableAddIndex)
+        if (ast.nodeType is NodeType.AlterTableAddIndex or NodeType.AlterTableAddIndexIfNotExists)
         {
             List<ColumnIndexInfo> indexColumns = new();
             GetColumns(ast.extendedOne, indexColumns);
@@ -38,11 +38,12 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
                 tableName,
                 ast.rightAst!.yytext!,
                 indexColumns.ToArray(),
-                AlterIndexOperation.AddIndex
+                AlterIndexOperation.AddIndex,
+                ast.nodeType == NodeType.AlterTableAddIndexIfNotExists
             );
         }
 
-        if (ast.nodeType == NodeType.AlterTableAddUniqueIndex)
+        if (ast.nodeType is NodeType.AlterTableAddUniqueIndex or NodeType.AlterTableAddUniqueIndexIfNotExists)
         {
             List<ColumnIndexInfo> indexColumns = new();
             GetColumns(ast.extendedOne, indexColumns);
@@ -52,7 +53,8 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
                 tableName,
                 ast.rightAst!.yytext!,
                 indexColumns.ToArray(),
-                AlterIndexOperation.AddUniqueIndex
+                AlterIndexOperation.AddUniqueIndex,
+                ast.nodeType == NodeType.AlterTableAddUniqueIndexIfNotExists
             );
         }
 

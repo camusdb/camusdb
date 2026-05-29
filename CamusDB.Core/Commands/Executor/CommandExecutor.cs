@@ -255,7 +255,9 @@ public sealed class CommandExecutor : IAsyncDisposable
                 }
 
             case NodeType.AlterTableAddIndex:
+            case NodeType.AlterTableAddIndexIfNotExists:
             case NodeType.AlterTableAddUniqueIndex:
+            case NodeType.AlterTableAddUniqueIndexIfNotExists:
             case NodeType.AlterTableDropIndex:
             case NodeType.AlterTableAddPrimaryKey:
             case NodeType.AlterTableDropPrimaryKey:

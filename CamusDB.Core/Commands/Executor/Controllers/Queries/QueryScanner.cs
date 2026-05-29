@@ -12,11 +12,19 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 internal sealed class QueryScanner
 {
+    private readonly ILogger<ICamusDB> logger;
+
+    public QueryScanner(ILogger<ICamusDB> logger)
+    {
+        this.logger = logger;
+    }
+
     internal async IAsyncEnumerable<QueryResultRow> ScanUsingTableIndex(
         DatabaseDescriptor database,
         TableDescriptor table,
@@ -76,7 +84,10 @@ internal sealed class QueryScanner
         {
             byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
             if (data is null || data.Length == 0)
+            {
+                logger.LogWarning("Row {RowId} found in index {IndexName} but data is missing in table {TableName}", rowId, index.Name, table.Name);
                 continue;
+            }
 
             Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
 

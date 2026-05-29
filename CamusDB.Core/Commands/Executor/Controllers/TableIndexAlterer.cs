@@ -47,7 +47,10 @@ internal sealed class TableIndexAlterer
     }
 
     private async Task<bool> AddIndex(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket, KvTransaction tx)
-    {        
+    {
+        if (ticket.IfNotExists && table.Indexes.ContainsKey(ticket.IndexName))
+            return false;
+
         await tableIndexAdder.AddIndex(catalogs, tx, queryExecutor, database, table, ticket).ConfigureAwait(false);
         return true;
     }

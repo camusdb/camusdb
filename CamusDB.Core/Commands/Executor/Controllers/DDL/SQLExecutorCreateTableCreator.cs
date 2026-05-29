@@ -247,6 +247,12 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             return;
         }
 
+        if (constraintsList.nodeType == NodeType.ConstraintUnique)
+        {
+            constraintTypes.Add((ColumnConstraintType.Unique, null));
+            return;
+        }
+
         if (constraintsList.nodeType == NodeType.ConstraintDefault)
         {
             constraintTypes.Add((ColumnConstraintType.Default, SqlExecutor.EvalExpr(constraintsList.leftAst!, new(), null)));
@@ -290,6 +296,17 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                         ConstraintInfo constraintInfo = new(
                             ConstraintType.PrimaryKey,
                             CamusDBConfig.PrimaryKeyInternalName,
+                            new ColumnIndexInfo[] { new(name: fieldList.leftAst.yytext! ?? "", OrderType.Ascending) }
+                        );
+
+                        constraintInfos.Add(constraintInfo);
+                    }
+
+                    if (type == ColumnConstraintType.Unique)
+                    {
+                        ConstraintInfo constraintInfo = new(
+                            ConstraintType.IndexUnique,
+                            fieldList.leftAst.yytext! ?? "",
                             new ColumnIndexInfo[] { new(name: fieldList.leftAst.yytext! ?? "", OrderType.Ascending) }
                         );
 

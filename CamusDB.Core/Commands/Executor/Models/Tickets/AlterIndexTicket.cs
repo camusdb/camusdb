@@ -20,19 +20,22 @@ public readonly struct AlterIndexTicket
 
     public AlterIndexOperation Operation { get; }    
 
+    public bool IfNotExists { get; }
+
     public AlterIndexTicket(
         string databaseName,
         string tableName,
         string indexName,
         ColumnIndexInfo[] columns,
-        AlterIndexOperation operation
+        AlterIndexOperation operation,
+        bool ifNotExists = false
     )
     {
         DatabaseName = databaseName;
         TableName = tableName;
         IndexName = indexName;
         Columns = columns;
-        Operation = operation;        
+        Operation = operation;
+        IfNotExists = ifNotExists;
     }
 }
-

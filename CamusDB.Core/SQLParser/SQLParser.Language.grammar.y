@@ -115,7 +115,9 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
 				 ;
 
 create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $7.n, null, null, null, null); }
+                  | TCREATE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $8.n, $6.n, $10.n, null, null, null, null); }
                   | TCREATE TUNIQUE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddUniqueIndex, $6.n, $4.n, $8.n, null, null, null, null); }
+                  | TCREATE TUNIQUE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddUniqueIndexIfNotExists, $9.n, $7.n, $11.n, null, null, null, null); }
                   ;
 
 show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null); }

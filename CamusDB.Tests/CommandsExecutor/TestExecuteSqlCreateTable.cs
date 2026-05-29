@@ -253,6 +253,82 @@ public class TestExecuteSqlCreateTable : BaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteCreateTableInlineUnique()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket createTableTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "CREATE TABLE app_users (id STRING PRIMARY KEY NOT NULL, email STRING UNIQUE NOT NULL, display_name STRING NOT NULL)",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        OpenTableTicket openTableTicket = new(
+            databaseName: dbname,
+            tableName: "app_users"
+        );
+
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+
+        Assert.True(table.Indexes.TryGetValue("email", out TableIndexSchema? index));
+        Assert.AreEqual(IndexType.Unique, index!.Type);
+        Assert.AreEqual(new[] { "email" }, index.Columns);
+
+        await database.Transactions.CommitAsync(txnState);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteCreateUniqueIndexIfNotExists()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket createTableTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "CREATE TABLE app_users (id STRING PRIMARY KEY NOT NULL, email STRING NOT NULL)",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        ExecuteSQLTicket createIndexTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "CREATE UNIQUE INDEX IF NOT EXISTS app_users_email_uq ON app_users (email)",
+            parameters: null
+        );
+
+        ddlResult = await executor.ExecuteDDLSQL(createIndexTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        ddlResult = await executor.ExecuteDDLSQL(createIndexTicket);
+        Assert.IsFalse(ddlResult.Success);
+
+        OpenTableTicket openTableTicket = new(
+            databaseName: dbname,
+            tableName: "app_users"
+        );
+
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+
+        Assert.True(table.Indexes.TryGetValue("app_users_email_uq", out TableIndexSchema? index));
+        Assert.AreEqual(IndexType.Unique, index!.Type);
+
+        await database.Transactions.CommitAsync(txnState);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteCreateTableDoublePk()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();

@@ -25,18 +25,18 @@ namespace CamusDB.Core.Storage.Kv;
 /// Key layout (all keys share the leading <c>{tableId}</c> segment so Kommander routes
 /// the whole table to one partition):
 ///
-///   Primary rows:      {tableId}/r/{rowIdHex24}                         → serialized row bytes
-///   Unique index:      {tableId}/i/{indexId}/{encodedKey}               → rowIdHex24 (UTF-8)
-///   Non-unique index:  {tableId}/i/{indexId}/{encodedKey}{rowIdHex24}   → rowIdHex24 (UTF-8)
+///   Primary rows:      {tableId}:r/{rowIdHex24}                         → serialized row bytes
+///   Unique index:      {tableId}:i:{indexId}/{encodedKey}               → rowIdHex24 (UTF-8)
+///   Non-unique index:  {tableId}:i:{indexId}/{encodedKey}{rowIdHex24}   → rowIdHex24 (UTF-8)
 ///     (rowId appended without separator; it is always exactly 24 lowercase hex chars)
 ///
 /// Routing constraint (T0.5):
 ///   LocateAndGetByBucket routes via SimpleHash(prefix) while individual TrySet/Delete
 ///   route via InversePrefixedStaticHash(key, '/') = SimpleHash(key[..lastSlash]).
-///   For rows: bucket prefix "{tableId}/r" → SimpleHash("{tableId}/r") matches writes.
-///   For indexes: bucket prefix "{tableId}/i/{indexId}" → SimpleHash("{tableId}/i/{indexId}")
-///   matches writes whose key is "{tableId}/i/{indexId}/{...}" (last slash before the suffix).
-///   Note: non-unique keys are "{tableId}/i/{indexId}/{encodedKey}{rowId}" with no extra slash,
+///   For rows: bucket prefix "{tableId}:r" → SimpleHash("{tableId}:r") matches writes.
+///   For indexes: bucket prefix "{tableId}:i:{indexId}" → SimpleHash("{tableId}:i:{indexId}")
+///   matches writes whose key is "{tableId}:i:{indexId}/{...}" (last slash before the suffix).
+///   Note: non-unique keys are "{tableId}:i:{indexId}/{encodedKey}{rowId}" with no extra slash,
 ///   so the routing invariant holds for both unique and non-unique on a single partition.
 ///   With multiple partitions (Phase 6) this requires review.
 ///
@@ -48,10 +48,15 @@ public sealed class KvTableStore
     private readonly IKahuna kahuna;
     private readonly string tableId;
 
-    private readonly string rowBucketPrefix;       // "{tableId}/r"  — used for LocateAndGetByBucket
-    private readonly string rowKeyPrefix;          // "{tableId}/r/" — prepended to rowIdHex
+    private readonly string rowBucketPrefix;       // "{tableId}:r"  — used for LocateAndGetByBucket
+    private readonly string rowKeyPrefix;          // "{tableId}:r/" — prepended to rowIdHex
 
     private const int RowIdHexLength = 24;
+    private const int MaxKahunaRetries = 32;
+    private const int MaxRetryDelayMs   = 50;
+
+    // Exponential back-off: 1 ms, 2 ms, 4 ms, … capped at MaxRetryDelayMs.
+    private static int RetryDelayMs(int attempt) => Math.Min(1 << attempt, MaxRetryDelayMs);
 
     public KvTableStore(IKahuna kahuna, string tableId)
     {
@@ -60,8 +65,8 @@ public sealed class KvTableStore
 
         this.kahuna = kahuna;
         this.tableId = tableId;
-        rowBucketPrefix = $"{tableId}/r";
-        rowKeyPrefix    = $"{tableId}/r/";
+        rowBucketPrefix = $"{tableId}:r";
+        rowKeyPrefix    = $"{tableId}:r/";
     }
 
     // -----------------------------------------------------------------------
@@ -75,11 +80,8 @@ public sealed class KvTableStore
     {
         string key = BuildRowKey(rowId);
 
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
-            txId,
-            key,
-            -1,
-            KeyValueDurability.Persistent,
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetry(
+            () => kahuna.LocateAndTryGetValue(txId, key, -1, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -109,13 +111,13 @@ public sealed class KvTableStore
                 cancellationToken
             ).ConfigureAwait(false);
 
-            if (result.Type == KeyValueResponseType.MustRetry)
-                await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+            if (result.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                await Task.Delay(RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
         }
-        while (result.Type == KeyValueResponseType.MustRetry && ++retries < 32);
+        while (result.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
 
         if (result.Type != KeyValueResponseType.Get)
-            yield break;
+            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"ScanRows failed for bucket {rowBucketPrefix}: {result.Type}");
 
         int prefixLen = rowKeyPrefix.Length;
 
@@ -154,10 +156,8 @@ public sealed class KvTableStore
 
         await AcquireLock(tx, key, cancellationToken).ConfigureAwait(false);
 
-        (KeyValueResponseType type, _, _) = await kahuna.LocateAndTryDeleteKeyValue(
-            tx.TransactionId,
-            key,
-            KeyValueDurability.Persistent,
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
+            () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, key, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -183,11 +183,8 @@ public sealed class KvTableStore
     {
         string kvKey = BuildUniqueIndexKey(indexId, key);
 
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
-            txId,
-            kvKey,
-            -1,
-            KeyValueDurability.Persistent,
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetry(
+            () => kahuna.LocateAndTryGetValue(txId, kvKey, -1, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -231,13 +228,13 @@ public sealed class KvTableStore
                 cancellationToken
             ).ConfigureAwait(false);
 
-            if (result.Type == KeyValueResponseType.MustRetry)
-                await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+            if (result.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                await Task.Delay(RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
         }
-        while (result.Type == KeyValueResponseType.MustRetry && ++retries < 32);
+        while (result.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
 
         if (result.Type != KeyValueResponseType.Get)
-            yield break;
+            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"ScanIndex failed for bucket {bucketPrefix}: {result.Type}");
 
         string? fromEncoded = from is not null ? KeyEncoder.Encode(from) : null;
         string? toEncoded   = to   is not null ? KeyEncoder.Encode(to)   : null;
@@ -249,7 +246,15 @@ public sealed class KvTableStore
             if (entry.Value is null)
                 continue;
 
-            // Strip the "{tableId}/i/{indexId}/" prefix to obtain the raw suffix.
+            // Optional: log here if we had a logger.
+            // Console.WriteLine($"ScanIndex Key: {kvKey}, Expected Prefix: {keyPrefix}");
+
+            // Strip the prefix to obtain the raw suffix.
+            if (!kvKey.StartsWith(keyPrefix))
+            {
+                continue;
+            }
+
             ReadOnlySpan<char> suffix = kvKey.AsSpan(prefixLen);
 
             string encodedKey;
@@ -312,15 +317,8 @@ public sealed class KvTableStore
 
         KeyValueFlags flags = unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
 
-        (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
-            tx.TransactionId,
-            kvKey,
-            value,
-            null,
-            -1,
-            flags,
-            0,
-            KeyValueDurability.Persistent,
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
+            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -350,10 +348,8 @@ public sealed class KvTableStore
 
         await AcquireLock(tx, kvKey, cancellationToken).ConfigureAwait(false);
 
-        (KeyValueResponseType type, _, _) = await kahuna.LocateAndTryDeleteKeyValue(
-            tx.TransactionId,
-            kvKey,
-            KeyValueDurability.Persistent,
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
+            () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, kvKey, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -373,15 +369,8 @@ public sealed class KvTableStore
 
         await AcquireLock(tx, key, cancellationToken).ConfigureAwait(false);
 
-        (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
-            tx.TransactionId,
-            key,
-            data,
-            null,
-            -1,
-            KeyValueFlags.Set,
-            0,
-            KeyValueDurability.Persistent,
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
+            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, data, null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -393,11 +382,8 @@ public sealed class KvTableStore
 
     private async Task AcquireLock(KvTransaction tx, string key, CancellationToken cancellationToken)
     {
-        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability) = await kahuna.LocateAndTryAcquireExclusiveLock(
-            tx.TransactionId,
-            key,
-            0,
-            KeyValueDurability.Persistent,
+        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability) = await RetryOnMustRetry(
+            () => kahuna.LocateAndTryAcquireExclusiveLock(tx.TransactionId, key, 0, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -407,22 +393,93 @@ public sealed class KvTableStore
         tx.TrackLock(key, lockDurability);
     }
 
+    /// <summary>
+    /// Retries a Kahuna get call that returns <see cref="KeyValueResponseType.MustRetry"/> up to
+    /// <see cref="MaxKahunaRetries"/> times with a 1 ms back-off. MustRetry is a transient
+    /// condition that occurs when a key has an active write intent from a 2PC prepare phase
+    /// that hasn't committed or rolled back yet.
+    /// </summary>
+    private static async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> RetryOnMustRetry(
+        Func<Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>> fn,
+        CancellationToken ct)
+    {
+        KeyValueResponseType type;
+        ReadOnlyKeyValueEntry? entry;
+        int retries = 0;
+
+        do
+        {
+            (type, entry) = await fn().ConfigureAwait(false);
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+
+        return (type, entry);
+    }
+
+    /// <summary>
+    /// Retries a Kahuna set/delete call that returns <see cref="KeyValueResponseType.MustRetry"/>.
+    /// </summary>
+    private static async Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetry(
+        Func<Task<(KeyValueResponseType, long, HLCTimestamp)>> fn,
+        CancellationToken ct)
+    {
+        KeyValueResponseType type;
+        long revision;
+        HLCTimestamp ts;
+        int retries = 0;
+
+        do
+        {
+            (type, revision, ts) = await fn().ConfigureAwait(false);
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+
+        return (type, revision, ts);
+    }
+
+    /// <summary>
+    /// Retries a Kahuna lock-acquire call that returns <see cref="KeyValueResponseType.MustRetry"/>.
+    /// </summary>
+    private static async Task<(KeyValueResponseType, string, KeyValueDurability)> RetryOnMustRetry(
+        Func<Task<(KeyValueResponseType, string, KeyValueDurability)>> fn,
+        CancellationToken ct)
+    {
+        KeyValueResponseType type;
+        string endpoint;
+        KeyValueDurability durability;
+        int retries = 0;
+
+        do
+        {
+            (type, endpoint, durability) = await fn().ConfigureAwait(false);
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+
+        return (type, endpoint, durability);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildRowKey(ObjectIdValue rowId) => rowKeyPrefix + rowId.ToString();
 
-    // Returns "{tableId}/i/{indexId}" — the bucket prefix (no trailing slash) used for
-    // LocateAndGetByBucket so that SimpleHash("{tableId}/i/{indexId}") matches the routing
-    // hash of keys "{tableId}/i/{indexId}/{...}".
+    // Returns "{tableId}:i:{indexId}" — the bucket prefix (no trailing slash) used for
+    // LocateAndGetByBucket so that SimpleHash("{tableId}:i:{indexId}") matches the routing
+    // hash of keys "{tableId}:i:{indexId}/{...}".
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private string BuildIndexBucketPrefix(string indexId) => $"{tableId}/i/{indexId}";
+    private string BuildIndexBucketPrefix(string indexId) => $"{tableId}:i:{indexId}";
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildUniqueIndexKey(string indexId, CompositeColumnValue key)
-        => $"{tableId}/i/{indexId}/{KeyEncoder.Encode(key)}";
+        => $"{tableId}:i:{indexId}/{KeyEncoder.Encode(key)}";
 
     // Non-unique: rowIdHex appended directly (no separator) so the last slash in the full
     // key is always the one after {indexId}, keeping the routing hash stable.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildNonUniqueIndexKey(string indexId, CompositeColumnValue key, ObjectIdValue rowId)
-        => $"{tableId}/i/{indexId}/{KeyEncoder.Encode(key)}{rowId}";
+        => $"{tableId}:i:{indexId}/{KeyEncoder.Encode(key)}{rowId}";
 }

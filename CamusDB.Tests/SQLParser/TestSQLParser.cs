@@ -1184,6 +1184,32 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseCreateIndexIfNotExists()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE INDEX IF NOT EXISTS `usersid_idx` ON `some_table` (`usersId`, `id`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddIndexIfNotExists, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("usersid_idx", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.IndexIdentifierList, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
+    public void TestParseCreateUniqueIndexIfNotExists()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE UNIQUE INDEX IF NOT EXISTS `usersid_idx` ON `some_table` (`usersId`, `id`)");
+
+        Assert.AreEqual(NodeType.AlterTableAddUniqueIndexIfNotExists, ast.nodeType);
+
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual("usersid_idx", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.IndexIdentifierList, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
     public void TestParseShowDatabase()
     {
         NodeAst ast = SQLParserProcessor.Parse("SHOW DATABASE");
