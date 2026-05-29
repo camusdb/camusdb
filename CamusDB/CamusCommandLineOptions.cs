@@ -18,6 +18,9 @@ public class CamusCommandLineOptions
     [Option("raft-nodename", Required = false, HelpText = "Unique node name in the cluster")]
     public string RaftNodeName { get; set; } = "";
 
+    [Option("raft-nodeid", Required = false, Default = 1, HelpText = "Unique numeric node id in the cluster")]
+    public int RaftNodeId { get; set; } = 1;
+
     [Option("raft-host", Required = false, Default = "localhost", HelpText = "Host address for Raft communication")]
     public string RaftHost { get; set; } = "localhost";
 
@@ -29,4 +32,10 @@ public class CamusCommandLineOptions
 
     [Option("initial-cluster-partitions", Required = false, Default = 1, HelpText = "Number of Raft partitions")]
     public int InitialClusterPartitions { get; set; } = 1;
+
+    [Option("http-port", Required = false, Default = 5095, HelpText = "Port for the HTTP API")]
+    public int HttpPort { get; set; } = 5095;
+
+    [Option("raft-certificate", Required = false, Default = "", HelpText = "Path to PFX certificate for the Raft gRPC port")]
+    public string RaftCertificate { get; set; } = "";
 }

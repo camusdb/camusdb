@@ -7,6 +7,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         CAMUS_RAFT_NODENAME: camus1
+        CAMUS_RAFT_NODEID: 1
         CAMUS_RAFT_HOST: 172.31.0.2
         CAMUS_RAFT_PORT: 7070
         CAMUS_HTTP_PORT: 5095
@@ -28,6 +29,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         CAMUS_RAFT_NODENAME: camus2
+        CAMUS_RAFT_NODEID: 2
         CAMUS_RAFT_HOST: 172.31.0.3
         CAMUS_RAFT_PORT: 7072
         CAMUS_HTTP_PORT: 5095
@@ -49,6 +51,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         CAMUS_RAFT_NODENAME: camus3
+        CAMUS_RAFT_NODEID: 3
         CAMUS_RAFT_HOST: 172.31.0.4
         CAMUS_RAFT_PORT: 7074
         CAMUS_HTTP_PORT: 5095

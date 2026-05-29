@@ -17,8 +17,10 @@ using CamusDB.Core.Storage.Kv;
 using CamusDB.App.Services;
 using CommandLine;
 using Kahuna;
+using Kahuna.Communication.External.Grpc;
 using Kommander;
 using Kommander.Communication.Grpc;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 
 // Parse CLI flags; fall back to defaults on parse failure so the server still starts.
 ParserResult<CamusCommandLineOptions> optsResult = Parser.Default.ParseArguments<CamusCommandLineOptions>(args);
@@ -38,6 +40,20 @@ if (opts.InitialClusterPartitions > 1) config.InitialPartitions = opts.InitialCl
 if (opts.InitialCluster.Any()) config.Peers = [.. opts.InitialCluster];
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+builder.WebHost.ConfigureKestrel(kestrel =>
+{
+    kestrel.ListenAnyIP(opts.HttpPort);
+    if (config.IsClusterMode)
+    {
+        kestrel.ListenAnyIP(config.RaftPort, o =>
+        {
+            o.Protocols = HttpProtocols.Http2;
+            if (!string.IsNullOrEmpty(opts.RaftCertificate))
+                o.UseHttps(opts.RaftCertificate);
+        });
+    }
+});
 
 // Add logging
 builder.Services.AddLogging(logging =>
@@ -80,6 +96,7 @@ if (config.IsClusterMode)
         EmbeddedKahunaOptions options = new()
         {
             NodeName = !string.IsNullOrEmpty(config.NodeName) ? config.NodeName : Environment.MachineName,
+            NodeId = opts.RaftNodeId,
             Host = config.RaftHost,
             Port = config.RaftPort,
             InitialPartitions = config.InitialPartitions,
@@ -111,17 +128,34 @@ ThreadPool.SetMinThreads(1024, 512);
 WebApplication app = builder.Build();
 
 if (config.IsClusterMode)
-{
-    // Raft consensus endpoint — handles leader election and log replication between nodes.
     app.MapGrpcRaftRoutes();
+    app.MapGrpcKahunaRoutes();
 
-    // Kahuna inter-node KV/lock endpoints (LocksService, KeyValuesService, SequencesService)
-    // require the Kahuna server gRPC services to be available in this project.
-    // Pending Kahuna.Core package update to expose these service types.
-    // app.MapGrpcKahunaRoutes();
+// Configure the HTTP request pipeline.
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler("/Error");
+    app.UseHsts();
+}
 
-    // Start the process-level cluster node and wait for Raft leader election before
-    // accepting any database operations.
+if (!config.IsClusterMode)
+    app.UseHttpsRedirection();
+app.UseStaticFiles();
+
+app.MapControllers();
+
+app.UseRouting();
+
+app.UseAuthorization();
+
+app.MapRazorPages();
+
+// Start Kestrel first so the gRPC Raft port is bound before the cluster node
+// begins leader election and tries to reach peers.
+await app.StartAsync();
+
+if (config.IsClusterMode)
+{
     EmbeddedKahuna clusterNode = app.Services.GetRequiredService<EmbeddedKahuna>();
     await clusterNode.StartAsync();
 }
@@ -137,23 +171,4 @@ CommandExecutor commandExecutor = app.Services.GetRequiredService<CommandExecuto
 app.Lifetime.ApplicationStopping.Register(() =>
     commandExecutor.DisposeAsync().AsTask().GetAwaiter().GetResult());
 
-// Configure the HTTP request pipeline.
-if (!app.Environment.IsDevelopment())
-{
-    app.UseExceptionHandler("/Error");
-    // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
-    app.UseHsts();
-}
-
-app.UseHttpsRedirection();
-app.UseStaticFiles();
-
-app.MapControllers();
-
-app.UseRouting();
-
-app.UseAuthorization();
-
-app.MapRazorPages();
-
-app.Run();
+await app.WaitForShutdownAsync();
