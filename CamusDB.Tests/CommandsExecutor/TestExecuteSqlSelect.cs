@@ -86,7 +86,27 @@ public class TestExecuteSqlSelect : BaseTest
         await database.Transactions.CommitAsync(txnState);
 
         return (dbname, database, executor, objectsId);
-    }    
+    }
+
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId)> SetupBasicTableWithYearIndex()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        AlterIndexTicket alterIndexTicket = new(
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "year_idx",
+            columns: new ColumnIndexInfo[] { new("year", OrderType.Ascending) },
+            operation: AlterIndexOperation.AddIndex
+        );
+
+        await executor.AlterIndex(alterIndexTicket);
+        await database.Transactions.CommitAsync(txnState);
+
+        return (dbname, database, executor, objectsId);
+    }
 
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId)> SetupBasicTableWithNulls()
     {
@@ -1450,6 +1470,105 @@ public class TestExecuteSqlSelect : BaseTest
 
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsNotEmpty(result);
+        Assert.AreEqual(25, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectSecondaryIndexEqualityScan()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTableWithYearIndex();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT id, year FROM robots WHERE year = 2000",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(2000, result[0].Row["year"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectRangePredicateExactRows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT year FROM robots WHERE year >= 2001 AND year < 2005 ORDER BY year",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(4, result.Count);
+        Assert.AreEqual(2001, result[0].Row["year"].LongValue);
+        Assert.AreEqual(2002, result[1].Row["year"].LongValue);
+        Assert.AreEqual(2003, result[2].Row["year"].LongValue);
+        Assert.AreEqual(2004, result[3].Row["year"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregateCountWithAlias()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT COUNT(*) AS total FROM robots",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["total"].Type);
+        Assert.AreEqual(25, result[0].Row["total"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectOrderByLimitExactRows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT year FROM robots ORDER BY year DESC LIMIT 3",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(3, result.Count);
+        Assert.AreEqual(2024, result[0].Row["year"].LongValue);
+        Assert.AreEqual(2023, result[1].Row["year"].LongValue);
+        Assert.AreEqual(2022, result[2].Row["year"].LongValue);
     }
 
     [Test]

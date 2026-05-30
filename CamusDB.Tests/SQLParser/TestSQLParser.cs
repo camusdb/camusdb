@@ -948,6 +948,24 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseCreateTableWithInlineConstraint()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "CREATE TABLE IF NOT EXISTS drivers (\n" +
+            "    id OID NOT NULL,\n" +
+            "    city STRING NOT NULL,\n" +
+            "    name STRING,\n" +
+            "    dl STRING UNIQUE,\n" +
+            "    address STRING,\n" +
+            "    CONSTRAINT \"primary\" PRIMARY KEY (city ASC, id ASC)\n" +
+            ")"
+        );
+
+        Assert.AreEqual(NodeType.CreateTableIfNotExists, ast.nodeType);
+        Assert.AreEqual("drivers", ast.leftAst!.yytext);
+    }
+
+    [Test]
     public void TestParseSimpleAlterTable()
     {
         NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE some_table ADD COLUMN year INT64 NULL");

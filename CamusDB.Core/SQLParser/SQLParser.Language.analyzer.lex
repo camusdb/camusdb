@@ -59,6 +59,7 @@ TTypeObjectId   (O|o)(B|b)(J|j)(E|e)(C|c)(T|t)(_)(I|i)(D|d)
 TTypeSObjectId  (O|o)(I|i)(D|d)
 TTypeBool       (B|b)(O|o)(O|o)(L|l)
 TTypeBoolean    (B|b)(O|o)(O|o)(L|l)(E|e)(A|a)(N|n)
+TConstraint     (C|c)(O|o)(N|n)(S|s)(T|t)(R|r)(A|a)(I|i)(N|n)(T|t)
 TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
 TStart          (S|s)(T|t)(A|a)(R|r)(T|t)
 TCommit         (C|c)(O|o)(M|m)(M|m)(I|i)(T|t)
@@ -237,6 +238,8 @@ TGreaterEquals  >=
 {TTypeBool} { return (int)Token.TTYPE_BOOL; }
 
 {TTypeBoolean} { return (int)Token.TTYPE_BOOL; }
+
+{TConstraint} { return (int)Token.TCONSTRAINT; }
 
 {TAt} { return (int)Token.TAT; }
 

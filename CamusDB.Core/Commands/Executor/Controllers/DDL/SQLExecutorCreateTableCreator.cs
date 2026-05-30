@@ -175,6 +175,9 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             return;
         }
 
+        if (fieldList.nodeType == NodeType.CreateTableConstraintPrimaryKey)
+            return;
+
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid create table field list");
     }
 
@@ -326,6 +329,14 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             if (fieldList.rightAst != null)
                 GetCreateTableConstraintFromFieldList(fieldList.rightAst, constraintInfos);
 
+            return;
+        }
+
+        if (fieldList.nodeType == NodeType.CreateTableConstraintPrimaryKey)
+        {
+            List<ColumnIndexInfo> columnIndexInfos = new();
+            GetIndexColumnList(fieldList.leftAst, columnIndexInfos);
+            constraintInfos.Add(new(ConstraintType.PrimaryKey, CamusDBConfig.PrimaryKeyInternalName, columnIndexInfos.ToArray()));
             return;
         }
 

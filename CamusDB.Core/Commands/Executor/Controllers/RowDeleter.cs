@@ -82,7 +82,7 @@ internal sealed class RowDeleter
             orderBy: null,
             limit: null,
             offset: null,
-            parameters: null
+            parameters: ticket.Parameters
         );
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);

@@ -35,7 +35,7 @@ ENV CAMUS_INITIAL_CLUSTER_PARTITIONS="$CAMUS_INITIAL_CLUSTER_PARTITIONS"
 
 RUN mkdir -p /data
 
-ENTRYPOINT ["sh", "-c", "dotnet CamusDB.dll \
+ENTRYPOINT ["sh", "-c", "exec dotnet CamusDB.dll \
   --mode=cluster \
   --http-port=${CAMUS_HTTP_PORT:-5095} \
   --raft-nodename=${CAMUS_RAFT_NODENAME} \

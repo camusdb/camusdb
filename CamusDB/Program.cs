@@ -18,6 +18,7 @@ using CamusDB.App.Services;
 using CommandLine;
 using Kahuna;
 using Kahuna.Communication.External.Grpc;
+using Kahuna.Server.Configuration;
 using Kommander;
 using Kommander.Communication.Grpc;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
@@ -55,17 +56,14 @@ builder.WebHost.ConfigureKestrel(kestrel =>
     }
 });
 
-// Add logging
-builder.Services.AddLogging(logging =>
-    logging.AddSimpleConsole(options =>
-    {
-        options.SingleLine = true;
-        options.TimestampFormat = "yyyy-MM-dd HH:mm:ss ";
-    })
-);
-
 builder.Logging.ClearProviders();
-builder.Logging.AddConsole();
+builder.Logging.AddSimpleConsole(options =>
+{
+    options.SingleLine = true;
+    options.TimestampFormat = "yyyy-MM-dd HH:mm:ss ";
+});
+builder.Logging.AddFilter("Kahuna", LogLevel.Debug);
+builder.Logging.AddFilter("Kommander", LogLevel.Information);
 
 // Add services to the container.
 builder.Services.AddRazorPages();
@@ -105,7 +103,9 @@ if (config.IsClusterMode)
             StorageRevision = "v1",
             WalStorage = "sqlite",
             WalPath = Path.Combine(config.DataDir, "wal"),
-            WalRevision = "v1"
+            WalRevision = "v1",
+            StartElectionTimeout = 2000,
+            EndElectionTimeout = 4000
         };
 
         ILoggerFactory loggerFactory = services.GetRequiredService<ILoggerFactory>();
@@ -118,6 +118,8 @@ if (config.IsClusterMode)
 
     builder.Services.AddSingleton<IKahuna>(services =>
         services.GetRequiredService<EmbeddedKahuna>().Kahuna);
+
+    builder.Services.AddSingleton(new KahunaConfiguration());
 
     builder.Services.AddGrpc();
 }
@@ -168,7 +170,24 @@ CamusStartup camus = new(
 await camus.Initialize(configYml);
 
 CommandExecutor commandExecutor = app.Services.GetRequiredService<CommandExecutor>();
-app.Lifetime.ApplicationStopping.Register(() =>
-    commandExecutor.DisposeAsync().AsTask().GetAwaiter().GetResult());
 
-await app.WaitForShutdownAsync();
+try
+{
+    await app.WaitForShutdownAsync();
+}
+finally
+{
+    ILogger<ICamusDB> shutdownLogger = app.Services.GetRequiredService<ILogger<ICamusDB>>();
+    shutdownLogger.LogInformation("Graceful shutdown started");
+
+    await commandExecutor.DisposeAsync();
+    shutdownLogger.LogInformation("Databases closed");
+
+    if (config.IsClusterMode)
+    {
+        await app.Services.GetRequiredService<EmbeddedKahuna>().DisposeAsync();
+        shutdownLogger.LogInformation("Cluster node stopped");
+    }
+
+    shutdownLogger.LogInformation("Graceful shutdown complete");
+}
