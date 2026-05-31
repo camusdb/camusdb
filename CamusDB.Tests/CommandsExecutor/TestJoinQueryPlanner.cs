@@ -112,6 +112,31 @@ public sealed class TestJoinQueryPlanner
         Assert.AreEqual("user_id", joinNode.RightIndexColumn);
     }
 
+    [Test]
+    public async Task Plan_UsesIndexNestedLoopJoinForCommaJoinEquiPredicate()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
+            "SELECT u.email, p.title FROM app_users u, posts p WHERE p.user_id = u.id",
+            indexPostsUserId: true);
+
+        QueryPlan plan = new JoinQueryPlanner().GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root);
+    }
+
+    [Test]
+    public async Task Plan_PushesSingleSourceFilterForCommaJoin()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
+            "SELECT u.email, p.title FROM app_users u, posts p WHERE p.user_id = u.id AND u.role = \"admin\"");
+
+        QueryPlan plan = new JoinQueryPlanner().GetPlan(database, bound, ticket);
+
+        TableScanNode usersScan = FindScanForAlias(plan.Root, "u");
+        Assert.IsNotNull(usersScan.ExecutionFilter);
+        Assert.IsNull(plan.ExecutionFilter);
+    }
+
     private static async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket)> BindJoinQuery(
         string sql,
         bool indexPostsUserId = false)

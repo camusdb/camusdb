@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
@@ -2426,23 +2427,78 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
     }
 
     [Test]
-    [Ignore("Pending QP5 - IN subquery")]
     [NonParallelizable]
-    public async Task TestExecuteSelectInSubqueryPending()
+    public async Task TestExecuteSelectScalarSubqueryInWhere()
     {
-        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
 
-        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+        KvTransaction txnState = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
-            database: fixture.DbName,
-            sql: "SELECT email FROM app_users WHERE id IN (SELECT user_id FROM posts WHERE published = true) ORDER BY email",
-            parameters: null
-        );
+            database: dbname,
+            sql: "SELECT id, name FROM robots WHERE year = (SELECT MAX(year) FROM robots) ORDER BY name",
+            parameters: null);
 
-        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
         List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(objectsId[0], result[0].Row["id"].StrValue);
+        Assert.AreEqual("some name 0", result[0].Row["name"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectScalarSubqueryZeroRowsReturnsNull()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT COUNT(*) AS cnt FROM robots WHERE year = (SELECT year FROM robots WHERE year = 9999)",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(0, result[0].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectScalarSubqueryMultipleRowsThrows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT * FROM robots WHERE year = (SELECT year FROM robots)",
+            parameters: null);
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+        {
+            _ = await executor.ExecuteSQLQuery(ticket);
+        })!;
+        Assert.That(ex.Message, Does.Contain("more than one row"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectInSubquery()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT email FROM app_users WHERE id IN (SELECT user_id FROM posts WHERE published = true) ORDER BY email");
 
         Assert.AreEqual(3, result.Count);
         Assert.AreEqual("a@example.com", result[0].Row["email"].StrValue);
@@ -2451,9 +2507,8 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
     }
 
     [Test]
-    [Ignore("Pending QP5 - EXISTS subquery")]
     [NonParallelizable]
-    public async Task TestExecuteSelectExistsSubqueryPending()
+    public async Task TestExecuteSelectInSubqueryMultipleColumnsThrows()
     {
         AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
 
@@ -2462,18 +2517,390 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
             database: fixture.DbName,
-            sql: "SELECT email FROM app_users WHERE EXISTS (SELECT * FROM posts WHERE posts.user_id = app_users.id) ORDER BY email",
-            parameters: null
-        );
+            sql: "SELECT email FROM app_users WHERE id IN (SELECT user_id, title FROM posts)",
+            parameters: null);
 
-        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
-        List<QueryResultRow> result = await cursor.ToListAsync();
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+        {
+            _ = await fixture.Executor.ExecuteSQLQuery(ticket);
+        })!;
+
+        Assert.That(ex.Message, Does.Contain("exactly one column"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectExistsSubquery()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT email FROM app_users WHERE EXISTS (SELECT * FROM posts WHERE posts.user_id = app_users.id) ORDER BY email");
 
         Assert.AreEqual(4, result.Count);
         Assert.AreEqual("a@example.com", result[0].Row["email"].StrValue);
         Assert.AreEqual("b@example.com", result[1].Row["email"].StrValue);
         Assert.AreEqual("c@example.com", result[2].Row["email"].StrValue);
         Assert.AreEqual("d@example.com", result[3].Row["email"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectExistsSubqueryCorrelatedToOuterDerivedTable()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT d.user_id FROM (SELECT user_id FROM posts GROUP BY user_id) d "
+            + "WHERE EXISTS (SELECT * FROM app_users u WHERE u.id = d.user_id) "
+            + "ORDER BY user_id");
+
+        Assert.AreEqual(4, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectUncorrelatedExistsSelectStar()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT email FROM app_users WHERE EXISTS (SELECT * FROM posts) ORDER BY email");
+
+        Assert.AreEqual(4, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectUncorrelatedExistsMultiColumnProjection()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT email FROM app_users WHERE EXISTS (SELECT user_id, title FROM posts) ORDER BY email");
+
+        Assert.AreEqual(4, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectJoinAggregatedDerivedTable()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT u.email, d.post_count FROM app_users u "
+            + "JOIN (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d "
+            + "ON d.user_id = u.id ORDER BY u.email");
+
+        Assert.AreEqual(4, result.Count);
+
+        Assert.AreEqual("a@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual(2, result[0].Row["post_count"].LongValue);
+
+        Assert.AreEqual("b@example.com", result[1].Row["email"].StrValue);
+        Assert.AreEqual(1, result[1].Row["post_count"].LongValue);
+
+        Assert.AreEqual("c@example.com", result[2].Row["email"].StrValue);
+        Assert.AreEqual(1, result[2].Row["post_count"].LongValue);
+
+        Assert.AreEqual("d@example.com", result[3].Row["email"].StrValue);
+        Assert.AreEqual(1, result[3].Row["post_count"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectFromDerivedTableOnly()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT post_count FROM (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d "
+            + "ORDER BY post_count");
+
+        Assert.AreEqual(4, result.Count);
+        Assert.AreEqual(1, result[0].Row["post_count"].LongValue);
+        Assert.AreEqual(1, result[1].Row["post_count"].LongValue);
+        Assert.AreEqual(1, result[2].Row["post_count"].LongValue);
+        Assert.AreEqual(2, result[3].Row["post_count"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectFromDerivedTableOnlyWithUnqualifiedWhere()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT post_count FROM (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d "
+            + "WHERE post_count = 2 ORDER BY post_count");
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(2, result[0].Row["post_count"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectFromDerivedTableOnlyWithQualifiedWhere()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT post_count FROM (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d "
+            + "WHERE d.post_count = 2 ORDER BY post_count");
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(2, result[0].Row["post_count"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectDerivedTableJoinBaseTable()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT u.email, d.post_count FROM (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d "
+            + "JOIN app_users u ON d.user_id = u.id ORDER BY u.email");
+
+        Assert.AreEqual(4, result.Count);
+
+        Assert.AreEqual("a@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual(2, result[0].Row["post_count"].LongValue);
+
+        Assert.AreEqual("b@example.com", result[1].Row["email"].StrValue);
+        Assert.AreEqual(1, result[1].Row["post_count"].LongValue);
+
+        Assert.AreEqual("c@example.com", result[2].Row["email"].StrValue);
+        Assert.AreEqual(1, result[2].Row["post_count"].LongValue);
+
+        Assert.AreEqual("d@example.com", result[3].Row["email"].StrValue);
+        Assert.AreEqual(1, result[3].Row["post_count"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectJoinDerivedTableWithDerivedWherePushdown()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT u.email, d.post_count FROM app_users u "
+            + "JOIN (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d "
+            + "ON d.user_id = u.id WHERE d.post_count = 2 ORDER BY u.email");
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual("a@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual(2, result[0].Row["post_count"].LongValue);
+    }
+
+    private sealed record RobotsUserRobotsFixture(
+        string DbName,
+        DatabaseDescriptor Database,
+        CommandExecutor Executor);
+
+    private async Task<RobotsUserRobotsFixture> SetupRobotsAndUserRobots(bool indexRobotsId = true)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "robots",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("enabled", ColumnType.Bool),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "user_robots",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("robots_id", ColumnType.Id, notNull: true),
+                new("amount", ColumnType.Integer64),
+            },
+            constraints: indexRobotsId
+                ?
+                [
+                    new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                    new(ConstraintType.IndexMulti, "robots_id_idx", new ColumnIndexInfo[] { new("robots_id", OrderType.Ascending) }),
+                ]
+                :
+                [
+                    new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                ],
+            ifNotExists: false));
+
+        string robotAId = ObjectIdGenerator.Generate().ToString();
+        string robotBId = ObjectIdGenerator.Generate().ToString();
+
+        await executor.Insert(new InsertTicket(
+            txnState,
+            dbname,
+            "robots",
+            values: new()
+            {
+                new()
+                {
+                    { "id", new(ColumnType.Id, robotAId) },
+                    { "name", new(ColumnType.String, "Alpha") },
+                    { "enabled", new(ColumnType.Bool, true) },
+                },
+                new()
+                {
+                    { "id", new(ColumnType.Id, robotBId) },
+                    { "name", new(ColumnType.String, "Beta") },
+                    { "enabled", new(ColumnType.Bool, false) },
+                },
+            }));
+
+        await executor.Insert(new InsertTicket(
+            txnState,
+            dbname,
+            "user_robots",
+            values: new()
+            {
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "robots_id", new(ColumnType.Id, robotAId) },
+                    { "amount", new(ColumnType.Integer64, 100) },
+                },
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "robots_id", new(ColumnType.Id, robotAId) },
+                    { "amount", new(ColumnType.Integer64, 200) },
+                },
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "robots_id", new(ColumnType.Id, robotBId) },
+                    { "amount", new(ColumnType.Integer64, 50) },
+                },
+            }));
+
+        await database.Transactions.CommitAsync(txnState);
+
+        return new RobotsUserRobotsFixture(dbname, database, executor);
+    }
+
+    private static async Task<List<QueryResultRow>> ExecuteRobotsJoinSelect(RobotsUserRobotsFixture fixture, string sql)
+    {
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: sql,
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        return await cursor.ToListAsync();
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectCommaJoinMatchesExplicitJoin()
+    {
+        RobotsUserRobotsFixture fixture = await SetupRobotsAndUserRobots();
+
+        List<QueryResultRow> commaRows = await ExecuteRobotsJoinSelect(
+            fixture,
+            "SELECT r.name, u.amount FROM robots r, user_robots u "
+            + "WHERE r.id = u.robots_id ORDER BY r.name, u.amount");
+
+        List<QueryResultRow> explicitRows = await ExecuteRobotsJoinSelect(
+            fixture,
+            "SELECT r.name, u.amount FROM robots r JOIN user_robots u ON r.id = u.robots_id "
+            + "ORDER BY r.name, u.amount");
+
+        Assert.AreEqual(explicitRows.Count, commaRows.Count);
+
+        for (int i = 0; i < commaRows.Count; i++)
+        {
+            Assert.AreEqual(explicitRows[i].Row["name"].StrValue, commaRows[i].Row["name"].StrValue);
+            Assert.AreEqual(explicitRows[i].Row["amount"].LongValue, commaRows[i].Row["amount"].LongValue);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectCommaJoinWithSingleSourceFilter()
+    {
+        RobotsUserRobotsFixture fixture = await SetupRobotsAndUserRobots();
+
+        List<QueryResultRow> result = await ExecuteRobotsJoinSelect(
+            fixture,
+            "SELECT r.name, u.amount FROM robots r, user_robots u "
+            + "WHERE r.id = u.robots_id AND r.enabled = true ORDER BY u.amount");
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual("Alpha", result[0].Row["name"].StrValue);
+        Assert.AreEqual(100, result[0].Row["amount"].LongValue);
+        Assert.AreEqual("Alpha", result[1].Row["name"].StrValue);
+        Assert.AreEqual(200, result[1].Row["amount"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectCommaJoinIndexedMatchesNestedLoop()
+    {
+        RobotsUserRobotsFixture nestedLoopFixture = await SetupRobotsAndUserRobots(indexRobotsId: false);
+        RobotsUserRobotsFixture indexedFixture = await SetupRobotsAndUserRobots(indexRobotsId: true);
+
+        const string sql =
+            "SELECT r.name, u.amount FROM robots r, user_robots u "
+            + "WHERE r.id = u.robots_id ORDER BY r.name, u.amount";
+
+        List<QueryResultRow> nestedLoopRows = await ExecuteRobotsJoinSelect(nestedLoopFixture, sql);
+        List<QueryResultRow> indexedRows = await ExecuteRobotsJoinSelect(indexedFixture, sql);
+
+        Assert.AreEqual(nestedLoopRows.Count, indexedRows.Count);
+
+        for (int i = 0; i < nestedLoopRows.Count; i++)
+        {
+            Assert.AreEqual(nestedLoopRows[i].Row["name"].StrValue, indexedRows[i].Row["name"].StrValue);
+            Assert.AreEqual(nestedLoopRows[i].Row["amount"].LongValue, indexedRows[i].Row["amount"].LongValue);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectCommaJoinWithAliasedProjection()
+    {
+        RobotsUserRobotsFixture fixture = await SetupRobotsAndUserRobots();
+
+        List<QueryResultRow> result = await ExecuteRobotsJoinSelect(
+            fixture,
+            "SELECT r.id, u.id AS uid, r.name, u.amount FROM robots r, user_robots u "
+            + "WHERE r.id = u.robots_id ORDER BY u.amount DESC");
+
+        Assert.AreEqual(3, result.Count);
+        Assert.AreEqual(200, result[0].Row["amount"].LongValue);
+        Assert.AreEqual(100, result[1].Row["amount"].LongValue);
+        Assert.AreEqual(50, result[2].Row["amount"].LongValue);
+        Assert.IsTrue(result[0].Row.ContainsKey("uid"));
     }
 
     #endregion

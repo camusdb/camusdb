@@ -41,7 +41,7 @@ internal sealed class QueryScanner
 
             Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
 
-            if (queryFilterer.MeetPlanFilter(plan, row))
+            if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);
         }
     }
@@ -78,7 +78,7 @@ internal sealed class QueryScanner
 
             Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
 
-            if (queryFilterer.MeetPlanFilter(plan, row))
+            if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);
         }
     }

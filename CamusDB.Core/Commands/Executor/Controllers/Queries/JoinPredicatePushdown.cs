@@ -32,6 +32,9 @@ internal static class JoinPredicatePushdown
         foreach (BoundTableSource source in bound.Sources)
             conjunctsByAlias[source.Alias] = new List<NodeAst>();
 
+        foreach (BoundDerivedTableSource source in bound.DerivedSources)
+            conjunctsByAlias[source.Alias] = new List<NodeAst>();
+
         List<NodeAst> postJoinConjuncts = new();
 
         if (where is not null)
@@ -104,6 +107,12 @@ internal static class JoinPredicatePushdown
         foreach (BoundTableSource source in bound.Sources)
         {
             if (SourceHasColumn(source, identifier))
+                owners.Add(source.Alias);
+        }
+
+        foreach (BoundDerivedTableSource source in bound.DerivedSources)
+        {
+            if (source.HasColumn(identifier))
                 owners.Add(source.Alias);
         }
 

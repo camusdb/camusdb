@@ -7,6 +7,7 @@
  */
 
 using NUnit.Framework;
+using CamusDB.Core;
 using CamusDB.Core.SQLParser;
 using NUnit.Framework.Internal;
 
@@ -1382,6 +1383,63 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSelectJoinDerivedTable()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT u.email, d.post_count FROM app_users u "
+            + "JOIN (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d "
+            + "ON d.user_id = u.id ORDER BY u.email");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.Join, ast.rightAst!.nodeType);
+
+        NodeAst join = ast.rightAst!;
+        Assert.AreEqual(NodeType.TableReference, join.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.DerivedTableReference, join.rightAst!.nodeType);
+        Assert.AreEqual("d", join.rightAst!.rightAst!.yytext);
+        Assert.AreEqual(NodeType.Select, join.rightAst!.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.GroupBy, join.rightAst!.leftAst!.extendedFive!.nodeType);
+        Assert.AreEqual("d.user_id", join.extendedOne!.leftAst!.yytext);
+        Assert.AreEqual("u.id", join.extendedOne!.rightAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSelectCommaJoinTwoSources()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT r.id, u.amount FROM robots r, user_robots u WHERE r.id = u.robots_id");
+
+        Assert.AreEqual(NodeType.CommaJoin, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.leftAst!.nodeType);
+        Assert.AreEqual("robots", ast.rightAst!.leftAst!.leftAst!.yytext);
+        Assert.AreEqual("r", ast.rightAst!.leftAst!.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.rightAst!.nodeType);
+        Assert.AreEqual("user_robots", ast.rightAst!.rightAst!.leftAst!.yytext);
+        Assert.AreEqual("u", ast.rightAst!.rightAst!.rightAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSelectCommaJoinThreeSources()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT r.id, u.amount, p.title FROM robots r, user_robots u, posts p "
+            + "WHERE r.id = u.robots_id AND u.amount > 0");
+
+        Assert.AreEqual(NodeType.CommaJoin, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.CommaJoinTableList, ast.rightAst!.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.rightAst!.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.rightAst!.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSelectMixedCommaAndExplicitJoin_throws()
+    {
+        Assert.Throws<CamusDBException>(() =>
+            SQLParserProcessor.Parse(
+                "SELECT r.id FROM robots r, user_robots u JOIN posts p ON p.user_id = u.id"));
+    }
+
+    [Test]
     public void TestParseSelectTableAliasWithAs()
     {
         NodeAst ast = SQLParserProcessor.Parse("SELECT id FROM robots AS r");
@@ -1422,23 +1480,48 @@ public class TestSQLParser
     }
 
     [Test]
-    [Ignore("Pending QP5.1 - IN subquery parsing")]
-    public void TestParseSelectInSubqueryPending()
+    public void TestParseSelectScalarSubqueryInWhere()
     {
-        NodeAst ast = SQLParserProcessor.Parse("SELECT * FROM app_users WHERE id IN (SELECT user_id FROM posts WHERE published = true)");
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT * FROM robots WHERE year = (SELECT MAX(year) FROM robots)");
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
-        Assert.IsNotNull(ast.extendedOne, "WHERE should capture the IN (subquery) predicate");
+        Assert.IsNotNull(ast.extendedOne);
+        Assert.AreEqual(NodeType.ExprEquals, ast.extendedOne!.nodeType);
+        Assert.AreEqual(NodeType.ExprScalarSubquery, ast.extendedOne!.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.Select, ast.extendedOne!.rightAst!.leftAst!.nodeType);
     }
 
     [Test]
-    [Ignore("Pending QP5.1 - EXISTS subquery parsing")]
-    public void TestParseSelectExistsSubqueryPending()
+    public void TestParseSelectInSubquery()
     {
-        NodeAst ast = SQLParserProcessor.Parse("SELECT * FROM app_users WHERE EXISTS (SELECT * FROM posts WHERE posts.user_id = app_users.id)");
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT * FROM app_users WHERE id IN (SELECT user_id FROM posts WHERE published = true)");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.IsNotNull(ast.extendedOne, "WHERE should capture the IN (subquery) predicate");
+        Assert.AreEqual(NodeType.ExprInSubquery, ast.extendedOne!.nodeType);
+        Assert.AreEqual("id", ast.extendedOne!.leftAst!.yytext);
+        Assert.AreEqual(NodeType.Select, ast.extendedOne!.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.extendedOne!.rightAst!.rightAst!.nodeType);
+        Assert.AreEqual("posts", ast.extendedOne!.rightAst!.rightAst!.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSelectExistsSubquery()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT * FROM app_users WHERE EXISTS (SELECT * FROM posts WHERE posts.user_id = app_users.id)");
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.IsNotNull(ast.extendedOne, "WHERE should capture the EXISTS (subquery) predicate");
+        Assert.AreEqual(NodeType.ExprExistsSubquery, ast.extendedOne!.nodeType);
+        Assert.AreEqual(NodeType.Select, ast.extendedOne!.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.extendedOne!.leftAst!.rightAst!.nodeType);
+        Assert.AreEqual("posts", ast.extendedOne!.leftAst!.rightAst!.leftAst!.yytext);
+        Assert.AreEqual(NodeType.ExprEquals, ast.extendedOne!.leftAst!.extendedOne!.nodeType);
+        Assert.AreEqual("posts.user_id", ast.extendedOne!.leftAst!.extendedOne!.leftAst!.yytext);
+        Assert.AreEqual("app_users.id", ast.extendedOne!.leftAst!.extendedOne!.rightAst!.yytext);
     }
 
     #endregion

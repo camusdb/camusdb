@@ -9,6 +9,7 @@
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.Util.ObjectIds;
 using System.Text.RegularExpressions;
@@ -268,6 +269,35 @@ internal abstract class SQLExecutorBaseCreator
 
                     return new ColumnValue(ColumnType.Bool, ILike(leftValue.StrValue!, rightValue.StrValue!));
                 }
+
+            case NodeType.ExprScalarSubquery:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "Scalar subquery must be resolved before expression evaluation");
+
+            case NodeType.ExprInSubquery:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "IN subquery must be resolved before expression evaluation");
+
+            case NodeType.ExprInMembership:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+
+                    return new ColumnValue(
+                        ColumnType.Bool,
+                        SubqueryValueListAst.ContainsValue(leftValue, expr.rightAst));
+                }
+
+            case NodeType.ExprExistsSubquery:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "EXISTS subquery must be resolved before expression evaluation");
+
+            case NodeType.ExprExistsCorrelated:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "Correlated EXISTS subquery must be evaluated by the query filter");
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.UnknownType, $"ERROR {expr.nodeType}");

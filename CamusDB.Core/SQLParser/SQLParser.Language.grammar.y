@@ -51,6 +51,9 @@ select_stmt : TSELECT select_field_list TFROM select_table opt_where opt_group o
             { $$.n = new(NodeType.Select, $2.n, $4.n, $5.n, $7.n, $8.n, $9.n, $6.n, null); }
             ;
 
+query_expr : LPAREN select_stmt RPAREN { $$.n = $2.n; $$.s = $2.s; }
+           ;
+
 opt_where : TWHERE condition { $$.n = $2.n; }
           | { $$.n = null; }
           ;
@@ -156,10 +159,25 @@ identifier_index : any_identifier { $$.n = $1.n; $$.s = $1.s; }
 select_table : from_clause { $$.n = $1.n; $$.s = $1.s; }
              ;
 
-from_clause : from_clause join_op table_reference TON condition
-            { $$.n = new(NodeType.Join, $1.n, $3.n, $5.n, null, null, null, null, null); }
+from_clause : explicit_join_from
+            | comma_join_from
             | table_reference { $$.n = $1.n; $$.s = $1.s; }
             ;
+
+explicit_join_from : table_reference join_op table_reference TON condition
+                   { $$.n = new(NodeType.Join, $1.n, $3.n, $5.n, null, null, null, null, null); }
+                   | explicit_join_from join_op table_reference TON condition
+                   { $$.n = new(NodeType.Join, $1.n, $3.n, $5.n, null, null, null, null, null); }
+                   ;
+
+comma_join_from : table_reference TCOMMA comma_table_list
+                { $$.n = new(NodeType.CommaJoin, $1.n, $3.n, null, null, null, null, null, null); }
+                ;
+
+comma_table_list : comma_table_list TCOMMA table_reference
+                 { $$.n = new(NodeType.CommaJoinTableList, $1.n, $3.n, null, null, null, null, null, null); }
+                 | table_reference { $$.n = $1.n; $$.s = $1.s; }
+                 ;
 
 join_op : TJOIN
         | TINNER TJOIN
@@ -167,7 +185,16 @@ join_op : TJOIN
 
 table_reference : table_name opt_table_alias opt_table_hint
                 { $$.n = new(NodeType.TableReference, $1.n, $2.n, $3.n, null, null, null, null, null); }
+                | derived_table_reference
                 ;
+
+derived_table_reference : query_expr derived_table_alias
+                { $$.n = new(NodeType.DerivedTableReference, $1.n, $2.n, null, null, null, null, null, null); }
+                ;
+
+derived_table_alias : TAS any_identifier { $$.n = $2.n; }
+                    | any_identifier { $$.n = $1.n; }
+                    ;
 
 table_name : any_identifier { $$.n = $1.n; $$.s = $1.s; }
            ;
@@ -288,6 +315,9 @@ expr       : equals_expr { $$.n = $1.n; }
            | use_default_expr { $$.n = $1.n; }
            | is_null_expr { $$.n = $1.n; }
            | is_not_null_expr { $$.n = $1.n; }
+           | in_subquery_expr { $$.n = $1.n; }
+           | exists_subquery_expr { $$.n = $1.n; }
+           | scalar_subquery_expr { $$.n = $1.n; }
            ;
 
 and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, null, null, null, null, null, null); }
@@ -334,6 +364,15 @@ is_null_expr : condition TIS TNULL { $$.n = new(NodeType.ExprIsNull, $1.n, $3.n,
 
 is_not_null_expr : condition TIS TNOT TNULL { $$.n = new(NodeType.ExprIsNotNull, $1.n, $3.n, null, null, null, null, null, null); }
                  ;
+
+in_subquery_expr : condition TIN query_expr { $$.n = new(NodeType.ExprInSubquery, $1.n, $3.n, null, null, null, null, null, null); }
+                 ;
+
+exists_subquery_expr : TEXISTS query_expr { $$.n = new(NodeType.ExprExistsSubquery, $2.n, null, null, null, null, null, null, null); }
+                     ;
+
+scalar_subquery_expr : query_expr { $$.n = new(NodeType.ExprScalarSubquery, $1.n, null, null, null, null, null, null, null); }
+                     ;
 
 fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, null, null, null, null, null, null, null); }
            | identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, $3.n, null, null, null, null, null, null); }

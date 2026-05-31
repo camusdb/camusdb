@@ -21,16 +21,23 @@ internal sealed class JoinQueryPlanner
 {
     public QueryPlan GetPlan(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket)
     {
-        if (bound.Sources.Count < 2)
+        if (!bound.IsMultiSource)
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
-                "Join planning requires at least two bound sources");
+                "Join planning requires a multi-source query");
+        }
+
+        if (bound.Sources.Count == 0 && bound.DerivedSources.Count == 0)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Join planning requires at least one bound source");
         }
 
         JoinPredicatePushdown.Result pushdown = JoinPredicatePushdown.Analyze(bound, ticket.Where);
 
-        QueryPlan plan = new(database, bound.Sources[0].Table, ticket)
+        QueryPlan plan = new(database, ResolvePlanTable(bound), ticket)
         {
             BoundQuery = bound,
             PredicateAnalysis = PredicateAnalyzer.Analyze(ticket.Where, ticket.Parameters),
@@ -52,7 +59,7 @@ internal sealed class JoinQueryPlanner
         {
             case TableSource tableSource:
             {
-                BoundTableSource boundSource = FindBoundSource(tableSource, bound);
+                BoundTableSource boundSource = BoundSourceCatalog.FindTableSource(bound, tableSource);
                 pushdown.ScanFiltersByAlias.TryGetValue(boundSource.Alias, out NodeAst? scanFilter);
 
                 return new TableScanNode(TableScanSource.PrimaryRows)
@@ -62,17 +69,30 @@ internal sealed class JoinQueryPlanner
                 };
             }
 
+            case DerivedTableSource derivedSource:
+            {
+                BoundDerivedTableSource boundDerived = BoundSourceCatalog.FindDerivedSource(bound, derivedSource);
+                pushdown.ScanFiltersByAlias.TryGetValue(boundDerived.Alias, out NodeAst? scanFilter);
+
+                return new DerivedTableScanNode
+                {
+                    BoundSource = boundDerived,
+                    ExecutionFilter = scanFilter,
+                };
+            }
+
             case JoinSource joinSource:
             {
                 PhysicalPlanNode left = BuildJoinTree(joinSource.Left, bound, pushdown);
-                BoundTableSource right = FindBoundSource((TableSource)joinSource.Right, bound);
+                BoundJoinRightSource right = BoundSourceCatalog.FindJoinRightSource(bound, joinSource.Right);
                 pushdown.ScanFiltersByAlias.TryGetValue(right.Alias, out NodeAst? rightFilter);
 
-                if (JoinEquiJoinAnalyzer.TryMatch(right, joinSource.OnPredicate, bound, out JoinEquiJoinIndexMatch? indexMatch))
+                if (right.Table is not null
+                    && JoinEquiJoinAnalyzer.TryMatch(right.Table, joinSource.OnPredicate, bound, out JoinEquiJoinIndexMatch? indexMatch))
                 {
                     return new IndexNestedLoopJoinNode(
                         left,
-                        right,
+                        right.Table,
                         joinSource.OnPredicate,
                         indexMatch.Index,
                         indexMatch.LeftLookupColumn,
@@ -95,18 +115,19 @@ internal sealed class JoinQueryPlanner
         }
     }
 
-    private static BoundTableSource FindBoundSource(TableSource tableSource, BoundSelectQuery bound)
+    private static TableDescriptor ResolvePlanTable(BoundSelectQuery bound)
     {
-        string alias = tableSource.Alias ?? tableSource.TableName;
+        if (bound.Sources.Count > 0)
+            return bound.Sources[0].Table;
 
-        foreach (BoundTableSource source in bound.Sources)
+        foreach (BoundDerivedTableSource derived in bound.DerivedSources)
         {
-            if (source.Source.TableName == tableSource.TableName && source.Alias == alias)
-                return source;
+            if (derived.InnerBound.Sources.Count > 0)
+                return derived.InnerBound.Sources[0].Table;
         }
 
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
-            $"Bound source not found for table '{tableSource.TableName}' alias '{alias}'");
+            "Could not resolve plan table metadata for derived-only query");
     }
 }

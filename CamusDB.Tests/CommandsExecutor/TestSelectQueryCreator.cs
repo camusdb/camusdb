@@ -336,6 +336,117 @@ public class TestSelectQueryCreator
         Assert.AreEqual("p.title", query.Projections[1].Expression.yytext);
     }
 
+    [Test]
+    public void CreateSelectQuery_JoinAggregatedDerivedTable()
+    {
+        SelectQuery query = ParseSelectQuery(
+            "SELECT u.email, d.post_count FROM app_users u "
+            + "JOIN (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d "
+            + "ON d.user_id = u.id ORDER BY u.email");
+
+        Assert.IsInstanceOf<JoinSource>(query.Source);
+        JoinSource join = (JoinSource)query.Source;
+
+        Assert.IsInstanceOf<TableSource>(join.Left);
+        Assert.IsInstanceOf<DerivedTableSource>(join.Right);
+
+        DerivedTableSource derived = (DerivedTableSource)join.Right;
+        Assert.AreEqual("d", derived.Alias);
+        Assert.IsInstanceOf<TableSource>(derived.Query.Source);
+        Assert.AreEqual("posts", ((TableSource)derived.Query.Source).TableName);
+        Assert.AreEqual(2, derived.Query.Projections.Count);
+        Assert.IsNotNull(derived.Query.GroupBy);
+        Assert.AreEqual(1, derived.Query.GroupBy!.Count);
+    }
+
+    [Test]
+    public void CreateSelectQuery_CommaJoinNormalizesToLeftDeepJoinTree()
+    {
+        SelectQuery query = ParseSelectQuery(
+            "SELECT r.id, u.amount FROM robots r, user_robots u WHERE r.id = u.robots_id");
+
+        Assert.IsInstanceOf<JoinSource>(query.Source);
+        JoinSource join = (JoinSource)query.Source;
+
+        Assert.IsInstanceOf<TableSource>(join.Left);
+        Assert.IsInstanceOf<TableSource>(join.Right);
+        Assert.AreEqual("r", ((TableSource)join.Left).Alias);
+        Assert.AreEqual("u", ((TableSource)join.Right).Alias);
+        Assert.AreEqual(NodeType.ExprEquals, join.OnPredicate.nodeType);
+        Assert.AreEqual("r.id", join.OnPredicate.leftAst!.yytext);
+        Assert.AreEqual("u.robots_id", join.OnPredicate.rightAst!.yytext);
+        Assert.IsNull(query.Where);
+    }
+
+    [Test]
+    public void CreateSelectQuery_CommaJoinLeavesResidualSingleSourceFilterInWhere()
+    {
+        SelectQuery query = ParseSelectQuery(
+            "SELECT r.id, u.amount FROM robots r, user_robots u "
+            + "WHERE r.id = u.robots_id AND u.amount > 10");
+
+        JoinSource join = (JoinSource)query.Source;
+        Assert.AreEqual(NodeType.ExprEquals, join.OnPredicate.nodeType);
+        Assert.IsNotNull(query.Where);
+        Assert.AreEqual(NodeType.ExprGreaterThan, query.Where!.Expression.nodeType);
+    }
+
+    [Test]
+    public void CreateSelectQuery_CommaJoinThreeSourcesBuildsNestedJoinTree()
+    {
+        SelectQuery query = ParseSelectQuery(
+            "SELECT u.email, p.title, u2.email FROM app_users u, posts p, app_users u2 "
+            + "WHERE p.user_id = u.id AND u2.id = p.user_id");
+
+        JoinSource outerJoin = (JoinSource)query.Source;
+        Assert.IsInstanceOf<JoinSource>(outerJoin.Left);
+        JoinSource innerJoin = (JoinSource)outerJoin.Left!;
+        Assert.AreEqual("u2", ((TableSource)outerJoin.Right).Alias);
+        Assert.AreEqual("p", ((TableSource)innerJoin.Right).Alias);
+        Assert.AreEqual("u", ((TableSource)innerJoin.Left).Alias);
+        Assert.AreEqual("p.user_id", innerJoin.OnPredicate.leftAst!.yytext);
+        Assert.AreEqual("u.id", innerJoin.OnPredicate.rightAst!.yytext);
+        Assert.AreEqual("u2.id", outerJoin.OnPredicate.leftAst!.yytext);
+        Assert.AreEqual("p.user_id", outerJoin.OnPredicate.rightAst!.yytext);
+        Assert.IsNull(query.Where);
+    }
+
+    [Test]
+    public void QueryTicketAdapter_RoundTripsDerivedTableOnlySource()
+    {
+        SelectQuery query = ParseSelectQuery(
+            "SELECT post_count FROM (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d");
+
+        ExecuteSQLTicket ticket = new(
+            txnState: null!,
+            database: "db",
+            sql: "",
+            parameters: null);
+
+        QueryTicket legacyTicket = QueryTicketAdapter.ToQueryTicket(query, ticket);
+
+        Assert.AreEqual("posts", legacyTicket.TableName);
+        Assert.AreEqual(1, legacyTicket.Projection!.Count);
+    }
+
+    [Test]
+    public void QueryTicketAdapter_RoundTripsDerivedTableJoinSource()
+    {
+        SelectQuery query = ParseSelectQuery(
+            "SELECT u.email, d.post_count FROM (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d "
+            + "JOIN app_users u ON d.user_id = u.id");
+
+        ExecuteSQLTicket ticket = new(
+            txnState: null!,
+            database: "db",
+            sql: "",
+            parameters: null);
+
+        QueryTicket legacyTicket = QueryTicketAdapter.ToQueryTicket(query, ticket);
+
+        Assert.AreEqual("posts", legacyTicket.TableName);
+    }
+
     private static TableSource AssertTableSource(SelectQuery query)
     {
         Assert.IsInstanceOf<TableSource>(query.Source);

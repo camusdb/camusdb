@@ -45,6 +45,7 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(kestrel =>
 {
     kestrel.ListenAnyIP(opts.HttpPort);
+    kestrel.ListenAnyIP(opts.HttpsPort, o => o.UseHttps());
     if (config.IsClusterMode)
     {
         kestrel.ListenAnyIP(config.RaftPort, o =>
@@ -130,8 +131,10 @@ ThreadPool.SetMinThreads(1024, 512);
 WebApplication app = builder.Build();
 
 if (config.IsClusterMode)
+{
     app.MapGrpcRaftRoutes();
     app.MapGrpcKahunaRoutes();
+}
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())

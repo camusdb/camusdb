@@ -16,20 +16,32 @@ public sealed class BoundSelectQuery
     public SelectQuery Query { get; }
 
     /// <summary>
-    /// Ordered bound sources for nested-loop join execution. Left-deep join trees preserve
+    /// Ordered bound table sources for nested-loop join execution. Left-deep join trees preserve
     /// left-to-right source order in this list.
     /// </summary>
     public IReadOnlyList<BoundTableSource> Sources { get; }
 
+    /// <summary>
+    /// Bound derived-table sources referenced by the query (QP5.5).
+    /// </summary>
+    public IReadOnlyList<BoundDerivedTableSource> DerivedSources { get; }
+
     public QueryRowNameResolver RowNames { get; }
+
+    public bool IsMultiSource =>
+        Query.Source is JoinSource
+        || Sources.Count > 1
+        || DerivedSources.Count > 0;
 
     public BoundSelectQuery(
         SelectQuery query,
         IReadOnlyList<BoundTableSource> sources,
-        QueryRowNameResolver rowNames)
+        QueryRowNameResolver rowNames,
+        IReadOnlyList<BoundDerivedTableSource>? derivedSources = null)
     {
         Query = query;
         Sources = sources;
+        DerivedSources = derivedSources ?? Array.Empty<BoundDerivedTableSource>();
         RowNames = rowNames;
     }
 
@@ -40,7 +52,7 @@ public sealed class BoundSelectQuery
     {
         get
         {
-            if (Sources.Count != 1)
+            if (IsMultiSource)
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,

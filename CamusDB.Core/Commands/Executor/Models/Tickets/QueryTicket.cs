@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
@@ -44,6 +45,9 @@ public sealed class QueryTicket
     /// <summary>Predicate analysis for <see cref="Where"/>; populated at ticket creation.</summary>
     public PredicateAnalysis? AnalyzedWhere { get; }
 
+    /// <summary>Prepared correlated EXISTS subqueries keyed by rewritten AST nodes (QP5.4).</summary>
+    internal ExistsSubqueryRegistry? ExistsSubqueries { get; }
+
     public QueryTicket(
         KvTransaction txnState,
         string databaseName,
@@ -58,7 +62,8 @@ public sealed class QueryTicket
         Dictionary<string, ColumnValue>? parameters,
         IReadOnlyList<NodeAst>? groupBy = null,
         QueryRowNameResolver? rowNameResolver = null,
-        PredicateAnalysis? analyzedWhere = null)
+        PredicateAnalysis? analyzedWhere = null,
+        ExistsSubqueryRegistry? existsSubqueries = null)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -74,5 +79,6 @@ public sealed class QueryTicket
         Parameters = parameters;
         RowNameResolver = rowNameResolver;
         AnalyzedWhere = analyzedWhere;
+        ExistsSubqueries = existsSubqueries;
     }
 }

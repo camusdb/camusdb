@@ -24,12 +24,19 @@ internal static class QueryTicketAdapter
         ToQueryTicketInternal(query, ticket, rowNameResolver: null);
 
     public static QueryTicket ToQueryTicket(BoundSelectQuery bound, ExecuteSQLTicket ticket) =>
-        ToQueryTicketInternal(bound.Query, ticket, bound.RowNames);
+        ToQueryTicket(bound, ticket, existsSubqueries: null);
+
+    public static QueryTicket ToQueryTicket(
+        BoundSelectQuery bound,
+        ExecuteSQLTicket ticket,
+        ExistsSubqueryRegistry? existsSubqueries) =>
+        ToQueryTicketInternal(bound.Query, ticket, bound.RowNames, existsSubqueries);
 
     private static QueryTicket ToQueryTicketInternal(
         SelectQuery query,
         ExecuteSQLTicket ticket,
-        QueryRowNameResolver? rowNameResolver)
+        QueryRowNameResolver? rowNameResolver,
+        ExistsSubqueryRegistry? existsSubqueries = null)
     {
         TableSource tableSource = GetPrimaryTableSource(query.Source);
         NodeAst? where = query.Where?.Expression;
@@ -49,9 +56,14 @@ internal static class QueryTicketAdapter
             parameters: ticket.Parameters,
             groupBy: query.GroupBy,
             rowNameResolver: rowNameResolver,
-            analyzedWhere: analyzedWhere);
+            analyzedWhere: analyzedWhere,
+            existsSubqueries: existsSubqueries);
     }
 
+    /// <summary>
+    /// Resolves legacy ticket table metadata for single-table scans and multi-source queries.
+    /// Derived sources use the first inner base table when available, otherwise the derived alias.
+    /// </summary>
     private static TableSource GetPrimaryTableSource(QuerySource source)
     {
         switch (source)
@@ -59,13 +71,44 @@ internal static class QueryTicketAdapter
             case TableSource tableSource:
                 return tableSource;
 
+            case DerivedTableSource derivedSource:
+                return GetPrimaryTableSourceFromDerived(derivedSource);
+
             case JoinSource joinSource:
                 return GetPrimaryTableSource(joinSource.Left);
 
             default:
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
-                    "Only single-table SELECT execution is supported");
+                    $"Unsupported query source: {source.GetType().Name}");
+        }
+    }
+
+    private static TableSource GetPrimaryTableSourceFromDerived(DerivedTableSource derived)
+    {
+        TableSource? innerTable = TryGetFirstTableSource(derived.Query.Source);
+
+        if (innerTable is not null)
+            return innerTable;
+
+        return new TableSource(derived.Alias, Alias: derived.Alias);
+    }
+
+    private static TableSource? TryGetFirstTableSource(QuerySource source)
+    {
+        switch (source)
+        {
+            case TableSource tableSource:
+                return tableSource;
+
+            case DerivedTableSource derivedSource:
+                return TryGetFirstTableSource(derivedSource.Query.Source);
+
+            case JoinSource joinSource:
+                return TryGetFirstTableSource(joinSource.Left) ?? TryGetFirstTableSource(joinSource.Right);
+
+            default:
+                return null;
         }
     }
 

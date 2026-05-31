@@ -138,6 +138,18 @@ internal static class JoinEquiJoinAnalyzer
                 return true;
             }
 
+            foreach (BoundDerivedTableSource source in bound.DerivedSources)
+            {
+                if (source.Alias != alias)
+                    continue;
+
+                if (!source.HasColumn(columnName))
+                    return false;
+
+                leftLookupColumn = QueryRowNameResolver.FormatQualifiedKey(alias, columnName);
+                return true;
+            }
+
             return false;
         }
 

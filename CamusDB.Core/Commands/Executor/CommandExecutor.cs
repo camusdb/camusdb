@@ -65,6 +65,10 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly QueryBinder queryBinder;
 
+    private readonly SubqueryRewriter subqueryRewriter;
+
+    private readonly ExistsSubqueryPreparer existsSubqueryPreparer;
+
     private readonly SelectQueryCreator selectQueryCreator = new();
 
     private readonly CommandValidator validator;
@@ -100,6 +104,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         sqlExecutor = new(logger);
         schemaQuerier = new(catalogs, logger);
         queryBinder = new QueryBinder(tableOpener);
+        SubqueryQueryExecutor subqueryQueryExecutor = new(queryBinder, queryExecutor);
+        ExistsSubqueryExecutor existsSubqueryExecutor = new(subqueryQueryExecutor);
+        subqueryRewriter = new SubqueryRewriter(
+            new ScalarSubqueryExecutor(subqueryQueryExecutor),
+            new InSubqueryExecutor(subqueryQueryExecutor));
+        existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder);
     }
 
     #region database
@@ -450,10 +460,26 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.Select:
                 {
                     SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
+                    selectQuery = await subqueryRewriter
+                        .RewriteSelectQueryAsync(database, selectQuery, ticket)
+                        .ConfigureAwait(false);
                     BoundSelectQuery boundQuery = await queryBinder.BindAsync(database, selectQuery).ConfigureAwait(false);
-                    QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(boundQuery, ticket);
+                    (selectQuery, ExistsSubqueryRegistry? existsRegistry) = await existsSubqueryPreparer
+                        .PrepareAsync(
+                            database,
+                            selectQuery,
+                            boundQuery.Sources,
+                            boundQuery.DerivedSources,
+                            ticket)
+                        .ConfigureAwait(false);
+                    boundQuery = new BoundSelectQuery(
+                        selectQuery,
+                        boundQuery.Sources,
+                        boundQuery.RowNames,
+                        boundQuery.DerivedSources);
+                    QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(boundQuery, ticket, existsRegistry);
 
-                    if (boundQuery.Sources.Count > 1)
+                    if (boundQuery.IsMultiSource)
                         return (database, queryExecutor.ExecuteJoinQuery(database, boundQuery, queryTicket));
 
                     TableDescriptor table = boundQuery.PrimaryTable;

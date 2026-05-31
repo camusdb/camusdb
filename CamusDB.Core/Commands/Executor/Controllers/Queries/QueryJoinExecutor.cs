@@ -23,7 +23,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// </summary>
 internal sealed class QueryJoinExecutor
 {
-    private readonly QueryFilterer queryFilterer = new();
+    private readonly QueryExecutor queryExecutor;
+    private readonly DerivedTableExecutor derivedTableExecutor;
+    private readonly QueryFilterer queryFilterer = new(new ExistsSubqueryExecutor());
 
     private readonly QuerySorter querySorter = new();
 
@@ -32,6 +34,12 @@ internal sealed class QueryJoinExecutor
     private readonly QueryLimiter queryLimiter = new();
 
     private readonly QueryProjector queryProjector = new();
+
+    public QueryJoinExecutor(QueryExecutor queryExecutor)
+    {
+        this.queryExecutor = queryExecutor;
+        derivedTableExecutor = new DerivedTableExecutor(queryExecutor, this);
+    }
 
     public IAsyncEnumerable<QueryResultRow> ExecuteJoinQuery(
         DatabaseDescriptor database,
@@ -44,7 +52,7 @@ internal sealed class QueryJoinExecutor
         IAsyncEnumerable<QueryResultRow> cursor = ExecuteJoinTree(plan.Root, plan);
 
         if (plan.ExecutionFilter is not null)
-            cursor = ApplyWhere(cursor, plan.ExecutionFilter, plan.Ticket);
+            cursor = ApplyWhere(cursor, plan.ExecutionFilter, plan);
 
         return QueryPostScanPipeline.Apply(
             ticket,
@@ -82,6 +90,17 @@ internal sealed class QueryJoinExecutor
                 await foreach (QueryResultRow row in ScanBoundTable(
                     scanNode.BoundSource,
                     scanNode.ExecutionFilter,
+                    plan).ConfigureAwait(false))
+                    yield return row;
+
+                yield break;
+            }
+
+            case DerivedTableScanNode { BoundSource: not null } derivedScanNode:
+            {
+                await foreach (QueryResultRow row in ScanDerivedTable(
+                    derivedScanNode.BoundSource,
+                    derivedScanNode.ExecutionFilter,
                     plan).ConfigureAwait(false))
                     yield return row;
 
@@ -127,7 +146,7 @@ internal sealed class QueryJoinExecutor
                     rightRow.Row,
                     rightAlias);
 
-                if (!queryFilterer.MeetWhere(joinNode.OnPredicate, merged, ticket))
+                if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
 
                 yield return new QueryResultRow(default(ObjectIdValue), merged);
@@ -148,7 +167,7 @@ internal sealed class QueryJoinExecutor
                 leftRow.Row,
                 ResolveLeftAlias(joinNode.Input!, leftRow));
 
-            await foreach (QueryResultRow rightRow in ScanBoundTable(
+            await foreach (QueryResultRow rightRow in ScanJoinRightSource(
                 joinNode.RightSource,
                 joinNode.RightExecutionFilter,
                 plan).ConfigureAwait(false))
@@ -158,7 +177,7 @@ internal sealed class QueryJoinExecutor
                     rightRow.Row,
                     rightAlias);
 
-                if (!queryFilterer.MeetWhere(joinNode.OnPredicate, merged, ticket))
+                if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
 
                 yield return new QueryResultRow(default(ObjectIdValue), merged);
@@ -252,7 +271,7 @@ internal sealed class QueryJoinExecutor
         {
             Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
 
-            if (!queryFilterer.MeetWhere(executionFilter, qualified, plan.Ticket))
+            if (!await queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
                 return null;
         }
 
@@ -261,8 +280,17 @@ internal sealed class QueryJoinExecutor
 
     private static string ResolveLeftAlias(PhysicalPlanNode leftNode, QueryResultRow leftRow)
     {
-        if (leftNode is TableScanNode { BoundSource: not null } scanNode)
-            return scanNode.BoundSource.Alias;
+        switch (leftNode)
+        {
+            case TableScanNode { BoundSource: not null } scanNode:
+                return scanNode.BoundSource.Alias;
+
+            case DerivedTableScanNode { BoundSource: not null } derivedScanNode:
+                return derivedScanNode.BoundSource.Alias;
+
+            default:
+                break;
+        }
 
         foreach (KeyValuePair<string, ColumnValue> entry in leftRow.Row)
         {
@@ -276,6 +304,23 @@ internal sealed class QueryJoinExecutor
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
             "Could not resolve alias for nested join left row");
+    }
+
+    private async IAsyncEnumerable<QueryResultRow> ScanJoinRightSource(
+        BoundJoinRightSource source,
+        NodeAst? executionFilter,
+        QueryPlan plan)
+    {
+        if (source.Table is not null)
+        {
+            await foreach (QueryResultRow row in ScanBoundTable(source.Table, executionFilter, plan).ConfigureAwait(false))
+                yield return row;
+
+            yield break;
+        }
+
+        await foreach (QueryResultRow row in ScanDerivedTable(source.Derived!, executionFilter, plan).ConfigureAwait(false))
+            yield return row;
     }
 
     private async IAsyncEnumerable<QueryResultRow> ScanBoundTable(
@@ -297,7 +342,7 @@ internal sealed class QueryJoinExecutor
             {
                 Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
 
-                if (!queryFilterer.MeetWhere(executionFilter, qualified, plan.Ticket))
+                if (!await queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
                     continue;
             }
 
@@ -305,14 +350,31 @@ internal sealed class QueryJoinExecutor
         }
     }
 
+    private async IAsyncEnumerable<QueryResultRow> ScanDerivedTable(
+        BoundDerivedTableSource source,
+        NodeAst? executionFilter,
+        QueryPlan plan)
+    {
+        if (!plan.DerivedMaterializations.TryGetValue(source, out List<Dictionary<string, ColumnValue>>? rows))
+        {
+            rows = await derivedTableExecutor
+                .MaterializeAsync(plan.Database, source, plan.Ticket, executionFilter)
+                .ConfigureAwait(false);
+            plan.DerivedMaterializations[source] = rows;
+        }
+
+        foreach (Dictionary<string, ColumnValue> row in rows)
+            yield return new QueryResultRow(default(ObjectIdValue), row);
+    }
+
     private async IAsyncEnumerable<QueryResultRow> ApplyWhere(
         IAsyncEnumerable<QueryResultRow> cursor,
         NodeAst where,
-        QueryTicket ticket)
+        QueryPlan plan)
     {
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
         {
-            if (queryFilterer.MeetWhere(where, row.Row, ticket))
+            if (await queryFilterer.MeetWhereAsync(where, row.Row, plan.Ticket, plan.Database).ConfigureAwait(false))
                 yield return row;
         }
     }

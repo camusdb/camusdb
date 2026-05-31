@@ -44,6 +44,10 @@ public sealed class QueryPlan
 
 	public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }
 
+    /// <summary>Cached materializations for derived table scans within a join query (QP5.5).</summary>
+    internal Dictionary<BoundDerivedTableSource, List<Dictionary<string, ColumnValue>>> DerivedMaterializations { get; } =
+        new();
+
     public QueryPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
 	{
 		Database = database;

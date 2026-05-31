@@ -52,8 +52,22 @@ internal static class QueryExpressionWalker
 
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
+            case NodeType.ExprInMembership:
                 if (expr.leftAst is not null)
                     CollectColumnReferences(expr.leftAst, identifiers);
+
+                return;
+
+            case NodeType.ExprExistsSubquery:
+            case NodeType.ExprExistsCorrelated:
+                return;
+
+            case NodeType.ExprList:
+                if (expr.leftAst is not null)
+                    CollectColumnReferences(expr.leftAst, identifiers);
+
+                if (expr.rightAst is not null)
+                    CollectColumnReferences(expr.rightAst, identifiers);
 
                 return;
 

@@ -17,14 +17,14 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 /// </summary>
 public sealed class NestedLoopJoinNode : PhysicalPlanNode
 {
-    public BoundTableSource RightSource { get; }
+    public BoundJoinRightSource RightSource { get; }
 
     public NodeAst OnPredicate { get; }
 
     /// <summary>Single-table predicate pushed into the right-side scan (QP4.4).</summary>
     public NodeAst? RightExecutionFilter { get; init; }
 
-    public NestedLoopJoinNode(PhysicalPlanNode left, BoundTableSource rightSource, NodeAst onPredicate)
+    public NestedLoopJoinNode(PhysicalPlanNode left, BoundJoinRightSource rightSource, NodeAst onPredicate)
     {
         Input = left;
         RightSource = rightSource;

@@ -69,37 +69,17 @@ internal static class QueryPostScanPipeline
     {
         foreach (NodeAst nodeAst in projection)
         {
-            switch (nodeAst.nodeType)
+            if (!QueryExpressionClassifier.IsAggregateProjection(nodeAst))
+                continue;
+
+            if (projection.Count > 1 && ticket.GroupBy is not { Count: > 0 })
             {
-                case NodeType.ExprFuncCall:
-                    return IsSupportedAggregation(nodeAst, projection, ticket);
-
-                case NodeType.ExprAlias:
-                    return IsSupportedAggregation(nodeAst.leftAst!, projection, ticket);
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Aggregations cannot be accompanied by other projections or expressions.");
             }
-        }
 
-        return false;
-    }
-
-    private static bool IsSupportedAggregation(NodeAst nodeAst, List<NodeAst> projection, QueryTicket ticket)
-    {
-        switch (nodeAst.leftAst!.yytext!.ToLowerInvariant())
-        {
-            case "count":
-            case "max":
-            case "min":
-            case "sum":
-            case "avg":
-            case "distinct":
-                if (projection.Count > 1 && ticket.GroupBy is not { Count: > 0 })
-                {
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInput,
-                        "Aggregations cannot be accompanied by other projections or expressions.");
-                }
-
-                return true;
+            return true;
         }
 
         return false;

@@ -26,7 +26,7 @@ internal sealed class QueryExecutor
 
     private readonly QueryPlanner queryPlanner = new();
 
-    private readonly QueryFilterer queryFilterer = new();
+    private readonly QueryFilterer queryFilterer = new(new ExistsSubqueryExecutor());
 
     private readonly QuerySorter querySorter = new();
 
@@ -36,13 +36,14 @@ internal sealed class QueryExecutor
 
     private readonly QueryLimiter queryLimiter = new();
 
-    private readonly QueryJoinExecutor queryJoinExecutor = new();
+    private readonly QueryJoinExecutor queryJoinExecutor;
 
     private readonly QueryScanner queryScanner;
 
     public QueryExecutor(ILogger<ICamusDB> logger)
     {
         this.logger = logger;
+        queryJoinExecutor = new QueryJoinExecutor(this);
         this.queryScanner = new(logger);
     }
 
@@ -200,8 +201,8 @@ internal sealed class QueryExecutor
         ObjectIdValue resolvedRowId = rowId.Value;
         Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, resolvedRowId, data);
 
-        if (queryFilterer.MeetPlanFilter(plan, row))
-            yield return new(resolvedRowId, row);
+            if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
+                yield return new(resolvedRowId, row);
     }
 
     private IAsyncEnumerable<QueryResultRow> QueryUsingRangeIndex(
@@ -242,7 +243,7 @@ internal sealed class QueryExecutor
 
             Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
 
-            if (queryFilterer.MeetPlanFilter(plan, row))
+            if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);
         }
     }

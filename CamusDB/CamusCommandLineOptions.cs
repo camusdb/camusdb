@@ -36,6 +36,9 @@ public class CamusCommandLineOptions
     [Option("http-port", Required = false, Default = 5095, HelpText = "Port for the HTTP API")]
     public int HttpPort { get; set; } = 5095;
 
+    [Option("https-port", Required = false, Default = 7141, HelpText = "Port for the HTTPS API")]
+    public int HttpsPort { get; set; } = 7141;
+
     [Option("raft-certificate", Required = false, Default = "", HelpText = "Path to PFX certificate for the Raft gRPC port")]
     public string RaftCertificate { get; set; } = "";
 }

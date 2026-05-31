@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
@@ -26,12 +27,8 @@ internal sealed class SelectQueryCreator
         if (ast.leftAst is null || ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid SELECT statement");
 
-        QuerySource source = CreateQuerySource(ast.rightAst);
+        (QuerySource source, BoundPredicate? where) = CreateFromClause(ast.rightAst, ast.extendedOne);
         IReadOnlyList<ProjectionItem> projections = CreateProjections(ast.leftAst);
-
-        BoundPredicate? where = ast.extendedOne is not null
-            ? new BoundPredicate(ast.extendedOne)
-            : null;
 
         IReadOnlyList<OrderByItem>? orderBy = CreateOrderBy(ast.extendedTwo);
         IReadOnlyList<NodeAst>? groupBy = CreateGroupBy(ast.extendedFive);
@@ -46,14 +43,33 @@ internal sealed class SelectQueryCreator
             Offset: ast.extendedFour);
     }
 
+    private (QuerySource Source, BoundPredicate? Where) CreateFromClause(NodeAst fromAst, NodeAst? whereAst)
+    {
+        BoundPredicate? where = whereAst is not null ? new BoundPredicate(whereAst) : null;
+
+        if (fromAst.nodeType == NodeType.CommaJoin)
+            return CommaJoinNormalizer.Normalize(fromAst, where, CreateTableReferenceSource);
+
+        return (CreateQuerySource(fromAst), where);
+    }
+
+    private static QuerySource CreateTableReferenceSource(NodeAst tableAst) =>
+        tableAst.nodeType switch
+        {
+            NodeType.TableReference => CreateTableSource(tableAst),
+            NodeType.DerivedTableReference => CreateDerivedTableSource(tableAst),
+            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid comma join table reference"),
+        };
+
     private static QuerySource CreateQuerySource(NodeAst fromAst)
     {
         return fromAst.nodeType switch
         {
             NodeType.TableReference => CreateTableSource(fromAst),
+            NodeType.DerivedTableReference => CreateDerivedTableSource(fromAst),
             NodeType.Join => new JoinSource(
                 CreateQuerySource(fromAst.leftAst!),
-                CreateTableSource(fromAst.rightAst!),
+                CreateQuerySource(fromAst.rightAst!),
                 JoinKind.Inner,
                 fromAst.extendedOne!),
             NodeType.Identifier => new TableSource(fromAst.yytext!),
@@ -87,6 +103,19 @@ internal sealed class SelectQueryCreator
                 ForcedIndexName: GetForcedIndex(tableAst)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid table reference"),
         };
+    }
+
+    private static DerivedTableSource CreateDerivedTableSource(NodeAst derivedAst)
+    {
+        if (derivedAst.leftAst is null || derivedAst.rightAst?.yytext is null)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Derived table requires a subquery and alias");
+        }
+
+        SelectQuery innerQuery = new SelectQueryCreator().CreateSelectQuery(derivedAst.leftAst);
+        return new DerivedTableSource(innerQuery, derivedAst.rightAst.yytext);
     }
 
     private static string? GetForcedIndex(NodeAst rightAst)

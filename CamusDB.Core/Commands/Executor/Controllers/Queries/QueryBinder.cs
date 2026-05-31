@@ -29,21 +29,53 @@ internal sealed class QueryBinder
     public async Task<BoundSelectQuery> BindAsync(DatabaseDescriptor database, SelectQuery query)
     {
         List<BoundTableSource> sources = new();
+        List<BoundDerivedTableSource> derivedSources = new();
         HashSet<string> aliases = new(StringComparer.Ordinal);
 
-        await CollectBoundSourcesAsync(database, query.Source, sources, aliases).ConfigureAwait(false);
-        ValidateJoinPredicates(query.Source, sources);
+        await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases).ConfigureAwait(false);
+        ValidateJoinPredicates(query.Source, sources, derivedSources);
 
-        QueryRowNameResolver rowNames = new(sources);
+        QueryRowNameResolver rowNames = new(sources, derivedSources);
         ValidateQuery(query, rowNames);
 
-        return new BoundSelectQuery(query, sources, rowNames);
+        return new BoundSelectQuery(query, sources, rowNames, derivedSources);
+    }
+
+    /// <summary>
+    /// Binds a subquery shell for correlated EXISTS execution. Inner WHERE may reference outer
+    /// columns and is validated separately by the caller.
+    /// </summary>
+    internal async Task<BoundSelectQuery> BindSubqueryAsync(DatabaseDescriptor database, SelectQuery query)
+    {
+        List<BoundTableSource> sources = new();
+        List<BoundDerivedTableSource> derivedSources = new();
+        HashSet<string> aliases = new(StringComparer.Ordinal);
+
+        await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases).ConfigureAwait(false);
+        ValidateJoinPredicates(query.Source, sources, derivedSources);
+
+        QueryRowNameResolver rowNames = new(sources, derivedSources);
+
+        foreach (ProjectionItem projection in query.Projections)
+            ValidateExpression(projection.Expression, rowNames);
+
+        if (query.GroupBy is not null)
+        {
+            foreach (NodeAst groupExpr in query.GroupBy)
+                ValidateExpression(groupExpr, rowNames);
+        }
+
+        ValidateOrderBy(query, rowNames);
+        ValidateProjectionAndGrouping(query);
+
+        return new BoundSelectQuery(query, sources, rowNames, derivedSources);
     }
 
     private async Task CollectBoundSourcesAsync(
         DatabaseDescriptor database,
         QuerySource source,
         List<BoundTableSource> sources,
+        List<BoundDerivedTableSource> derivedSources,
         HashSet<string> aliases)
     {
         switch (source)
@@ -64,15 +96,33 @@ internal sealed class QueryBinder
                 return;
             }
 
-            case JoinSource joinSource:
-                await CollectBoundSourcesAsync(database, joinSource.Left, sources, aliases).ConfigureAwait(false);
-                await CollectBoundSourcesAsync(database, joinSource.Right, sources, aliases).ConfigureAwait(false);
-                return;
+            case DerivedTableSource derivedSource:
+            {
+                if (!aliases.Add(derivedSource.Alias))
+                {
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        $"Duplicate alias '{derivedSource.Alias}'");
+                }
 
-            case DerivedTableSource:
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Derived table sources are not supported yet");
+                BoundSelectQuery innerBound = await BindAsync(database, derivedSource.Query).ConfigureAwait(false);
+                IReadOnlyList<DerivedColumnSchema> columns =
+                    DerivedTableSchemaBuilder.Build(derivedSource.Query, innerBound);
+
+                derivedSources.Add(new BoundDerivedTableSource(
+                    derivedSource,
+                    derivedSource.Alias,
+                    columns,
+                    innerBound));
+                return;
+            }
+
+            case JoinSource joinSource:
+                await CollectBoundSourcesAsync(database, joinSource.Left, sources, derivedSources, aliases)
+                    .ConfigureAwait(false);
+                await CollectBoundSourcesAsync(database, joinSource.Right, sources, derivedSources, aliases)
+                    .ConfigureAwait(false);
+                return;
 
             default:
                 throw new CamusDBException(
@@ -81,20 +131,25 @@ internal sealed class QueryBinder
         }
     }
 
-    private static void ValidateJoinPredicates(QuerySource source, IReadOnlyList<BoundTableSource> allSources)
+    private static void ValidateJoinPredicates(
+        QuerySource source,
+        IReadOnlyList<BoundTableSource> allSources,
+        IReadOnlyList<BoundDerivedTableSource> allDerivedSources)
     {
         switch (source)
         {
             case JoinSource joinSource:
-                ValidateJoinPredicates(joinSource.Left, allSources);
+                ValidateJoinPredicates(joinSource.Left, allSources, allDerivedSources);
 
-                List<BoundTableSource> inScope = new();
-                CollectBoundSourcesFromSubtree(joinSource.Left, allSources, inScope);
-                CollectBoundSourcesFromSubtree(joinSource.Right, allSources, inScope);
-                ValidateExpression(joinSource.OnPredicate, new QueryRowNameResolver(inScope));
+                List<BoundTableSource> inScopeTables = new();
+                List<BoundDerivedTableSource> inScopeDerived = new();
+                CollectBoundSourcesFromSubtree(joinSource.Left, allSources, allDerivedSources, inScopeTables, inScopeDerived);
+                CollectBoundSourcesFromSubtree(joinSource.Right, allSources, allDerivedSources, inScopeTables, inScopeDerived);
+                ValidateExpression(joinSource.OnPredicate, new QueryRowNameResolver(inScopeTables, inScopeDerived));
                 return;
 
             case TableSource:
+            case DerivedTableSource:
                 return;
 
             default:
@@ -107,26 +162,27 @@ internal sealed class QueryBinder
     private static void CollectBoundSourcesFromSubtree(
         QuerySource source,
         IReadOnlyList<BoundTableSource> allSources,
-        List<BoundTableSource> output)
+        IReadOnlyList<BoundDerivedTableSource> allDerivedSources,
+        List<BoundTableSource> tableOutput,
+        List<BoundDerivedTableSource> derivedOutput)
     {
         switch (source)
         {
             case TableSource tableSource:
             {
                 string alias = tableSource.Alias ?? tableSource.TableName;
-                output.Add(FindBoundSource(allSources, tableSource.TableName, alias));
+                tableOutput.Add(FindBoundTableSource(allSources, tableSource.TableName, alias));
                 return;
             }
 
-            case JoinSource joinSource:
-                CollectBoundSourcesFromSubtree(joinSource.Left, allSources, output);
-                CollectBoundSourcesFromSubtree(joinSource.Right, allSources, output);
+            case DerivedTableSource derivedSource:
+                derivedOutput.Add(FindBoundDerivedSource(allDerivedSources, derivedSource.Alias));
                 return;
 
-            case DerivedTableSource:
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Derived table sources are not supported yet");
+            case JoinSource joinSource:
+                CollectBoundSourcesFromSubtree(joinSource.Left, allSources, allDerivedSources, tableOutput, derivedOutput);
+                CollectBoundSourcesFromSubtree(joinSource.Right, allSources, allDerivedSources, tableOutput, derivedOutput);
+                return;
 
             default:
                 throw new CamusDBException(
@@ -135,7 +191,7 @@ internal sealed class QueryBinder
         }
     }
 
-    private static BoundTableSource FindBoundSource(
+    private static BoundTableSource FindBoundTableSource(
         IReadOnlyList<BoundTableSource> sources,
         string tableName,
         string alias)
@@ -149,6 +205,21 @@ internal sealed class QueryBinder
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
             $"Bound source not found for table '{tableName}' alias '{alias}'");
+    }
+
+    private static BoundDerivedTableSource FindBoundDerivedSource(
+        IReadOnlyList<BoundDerivedTableSource> sources,
+        string alias)
+    {
+        foreach (BoundDerivedTableSource source in sources)
+        {
+            if (source.Alias == alias)
+                return source;
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Bound derived source not found for alias '{alias}'");
     }
 
     private static void ValidateQuery(SelectQuery query, QueryRowNameResolver rowNames)
@@ -267,6 +338,12 @@ internal sealed class QueryBinder
 
     private static void ValidateExpression(NodeAst expression, QueryRowNameResolver rowNames)
     {
+        if (expression.nodeType == NodeType.ExprExistsSubquery)
+        {
+            ExistsSubqueryValidator.ValidateOuterReferences(expression, rowNames);
+            return;
+        }
+
         HashSet<string> identifiers = new(StringComparer.Ordinal);
 
         QueryExpressionWalker.CollectColumnReferences(expression, identifiers);

@@ -62,6 +62,9 @@ internal static class QueryPlanStepAdapter
             case IndexNestedLoopJoinNode:
                 return;
 
+            case DerivedTableScanNode:
+                return;
+
             case SortNode:
                 steps.Add(new QueryPlanStep(QueryPlanStepType.SortBy));
                 return;

@@ -17,14 +17,22 @@ public sealed class QueryRowNameResolver
 {
     private readonly IReadOnlyList<BoundTableSource> sources;
 
+    private readonly IReadOnlyList<BoundDerivedTableSource> derivedSources;
+
     private readonly Dictionary<string, BoundTableSource> aliasToSource;
+
+    private readonly Dictionary<string, BoundDerivedTableSource> aliasToDerived;
 
     private readonly Dictionary<string, List<string>> columnNameToAliases;
 
-    public QueryRowNameResolver(IReadOnlyList<BoundTableSource> sources)
+    public QueryRowNameResolver(
+        IReadOnlyList<BoundTableSource> sources,
+        IReadOnlyList<BoundDerivedTableSource>? derivedSources = null)
     {
         this.sources = sources;
+        this.derivedSources = derivedSources ?? Array.Empty<BoundDerivedTableSource>();
         aliasToSource = new Dictionary<string, BoundTableSource>(StringComparer.Ordinal);
+        aliasToDerived = new Dictionary<string, BoundDerivedTableSource>(StringComparer.Ordinal);
         columnNameToAliases = new Dictionary<string, List<string>>(StringComparer.Ordinal);
 
         foreach (BoundTableSource source in sources)
@@ -37,12 +45,20 @@ public sealed class QueryRowNameResolver
             }
 
             foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
-            {
-                if (!columnNameToAliases.TryGetValue(column.Name, out List<string>? aliases))
-                    columnNameToAliases[column.Name] = aliases = new();
+                RegisterColumnAlias(column.Name, source.Alias);
+        }
 
-                aliases.Add(source.Alias);
+        foreach (BoundDerivedTableSource source in this.derivedSources)
+        {
+            if (!aliasToDerived.TryAdd(source.Alias, source))
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Duplicate alias '{source.Alias}'");
             }
+
+            foreach (DerivedColumnSchema column in source.Columns)
+                RegisterColumnAlias(column.Name, source.Alias);
         }
     }
 
@@ -56,8 +72,8 @@ public sealed class QueryRowNameResolver
 
     /// <summary>
     /// Maps a parsed column reference to the dictionary key used when reading a row.
-    /// Single-table scans still store unqualified keys; joined rows use qualified keys per
-    /// <see cref="BoundRow"/>.
+    /// Single base-table scans store unqualified keys; joins and derived-table execution use
+    /// qualified keys per <see cref="BoundRow"/>.
     /// </summary>
     public string ResolveRowLookupKey(string identifier)
     {
@@ -72,24 +88,33 @@ public sealed class QueryRowNameResolver
 
     private string ResolveQualifiedColumn(string alias, string columnName, string originalIdentifier)
     {
-        if (!aliasToSource.TryGetValue(alias, out BoundTableSource? source))
+        if (aliasToSource.TryGetValue(alias, out BoundTableSource? source))
         {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                $"Unknown alias '{alias}'");
+            if (!SourceHasColumn(source, columnName))
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.UnknownColumn,
+                    $"Unknown column: {originalIdentifier}");
+            }
+
+            return FormatLookupKey(alias, columnName);
         }
 
-        if (!SourceHasColumn(source, columnName))
+        if (aliasToDerived.TryGetValue(alias, out BoundDerivedTableSource? derived))
         {
-            throw new CamusDBException(
-                CamusDBErrorCodes.UnknownColumn,
-                $"Unknown column: {originalIdentifier}");
+            if (!derived.HasColumn(columnName))
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.UnknownColumn,
+                    $"Unknown column: {originalIdentifier}");
+            }
+
+            return FormatLookupKey(alias, columnName);
         }
 
-        if (sources.Count == 1)
-            return columnName;
-
-        return FormatQualifiedKey(alias, columnName);
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"Unknown alias '{alias}'");
     }
 
     private string ResolveUnqualifiedColumn(string columnName)
@@ -108,10 +133,37 @@ public sealed class QueryRowNameResolver
                 $"Ambiguous column: {columnName}");
         }
 
-        if (sources.Count == 1)
-            return columnName;
+        return FormatLookupKey(aliases[0], columnName);
+    }
 
-        return FormatQualifiedKey(aliases[0], columnName);
+    private string FormatLookupKey(string alias, string columnName)
+    {
+        if (UsesQualifiedRowKeys())
+            return FormatQualifiedKey(alias, columnName);
+
+        return columnName;
+    }
+
+    /// <summary>
+    /// Whether row dictionaries use qualified alias.column keys for this query shape.
+    /// </summary>
+    internal bool UsesQualifiedRowKeys()
+    {
+        if (sources.Count == 1 && derivedSources.Count == 0)
+            return false;
+
+        if (sources.Count == 0 && derivedSources.Count == 1)
+            return false;
+
+        return true;
+    }
+
+    private void RegisterColumnAlias(string columnName, string alias)
+    {
+        if (!columnNameToAliases.TryGetValue(columnName, out List<string>? aliases))
+            columnNameToAliases[columnName] = aliases = new();
+
+        aliases.Add(alias);
     }
 
     private static bool SourceHasColumn(BoundTableSource source, string columnName)

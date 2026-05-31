@@ -463,6 +463,75 @@ public class TestQueryBinder : BaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task BindAsync_CommaJoinWithAliases_bindsSuccessfully()
+    {
+        (DatabaseDescriptor database, CatalogsManager catalogs) = await SetupUsersAndPostsTables();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT u.email, p.title FROM app_users u, posts p WHERE p.user_id = u.id"));
+
+        BoundSelectQuery bound = await new QueryBinder(new TableOpener(catalogs, logger))
+            .BindAsync(database, query);
+
+        Assert.AreEqual(2, bound.Sources.Count);
+        Assert.AreEqual("u.email", bound.RowNames.ResolveRowLookupKey("u.email"));
+        Assert.IsNull(query.Where);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_CommaJoinWithoutRequiredAlias_throwsInvalidInput()
+    {
+        (DatabaseDescriptor database, CatalogsManager catalogs) = await SetupUsersAndPostsTables();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT u.email FROM app_users, posts WHERE posts.user_id = app_users.id"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("Unknown alias", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_CommaJoinDuplicateAlias_throwsInvalidInput()
+    {
+        (DatabaseDescriptor database, CatalogsManager catalogs) = await SetupUsersAndPostsTables();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT u.email FROM app_users u, posts u WHERE p.user_id = u.id"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("Duplicate alias", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_CommaJoinAmbiguousColumn_throwsInvalidInput()
+    {
+        (DatabaseDescriptor database, CatalogsManager catalogs) = await SetupUsersAndPostsTables();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT id FROM app_users u, posts p WHERE p.user_id = u.id"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("Ambiguous column", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task ExecuteSQLQuery_UnknownColumn_throwsAtBindTime()
     {
         (string dbname, DatabaseDescriptor database, _, CommandExecutor executor) = await SetupExecutorWithRobotsTable();
