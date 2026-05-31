@@ -26,7 +26,7 @@ using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public sealed class TestExecuteSqlInsert : BaseTest
+public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
 {
     private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()
     {

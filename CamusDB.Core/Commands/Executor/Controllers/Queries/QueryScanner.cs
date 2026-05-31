@@ -26,14 +26,13 @@ internal sealed class QueryScanner
     }
 
     internal async IAsyncEnumerable<QueryResultRow> ScanUsingTableIndex(
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        QueryTicket ticket,
+        QueryPlan plan,
         QueryFilterer queryFilterer,
         RowDeserializer rowDeserializer
     )
     {
-        HLCTimestamp txId = ticket.TxnState.TransactionId;
+        TableDescriptor table = plan.Table;
+        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
 
         await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(txId))
         {
@@ -42,32 +41,20 @@ internal sealed class QueryScanner
 
             Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
 
-            if (ticket.Filters is not null && ticket.Filters.Count > 0)
-            {
-                if (queryFilterer.MeetFilters(ticket.Filters, row))
-                    yield return new(rowId, row);
-            }
-            else
-            {
-                if (ticket.Where is not null)
-                {
-                    if (queryFilterer.MeetWhere(ticket.Where, row, ticket.Parameters))
-                        yield return new(rowId, row);
-                }
-                else
-                    yield return new(rowId, row);
-            }
+            if (queryFilterer.MeetPlanFilter(plan, row))
+                yield return new(rowId, row);
         }
     }
 
     internal async IAsyncEnumerable<QueryResultRow> ScanUsingIndex(
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        QueryTicket ticket,
+        QueryPlan plan,
         QueryFilterer queryFilterer,
         RowDeserializer rowDeserializer
     )
     {
+        TableDescriptor table = plan.Table;
+        QueryTicket ticket = plan.Ticket;
+
         if (!table.Indexes.TryGetValue(ticket.IndexName!, out TableIndexSchema? index))
         {
             throw new CamusDBException(
@@ -91,21 +78,8 @@ internal sealed class QueryScanner
 
             Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
 
-            if (ticket.Filters is not null && ticket.Filters.Count > 0)
-            {
-                if (queryFilterer.MeetFilters(ticket.Filters, row))
-                    yield return new(rowId, row);
-            }
-            else
-            {
-                if (ticket.Where is not null)
-                {
-                    if (queryFilterer.MeetWhere(ticket.Where, row, ticket.Parameters))
-                        yield return new(rowId, row);
-                }
-                else
-                    yield return new(rowId, row);
-            }
+            if (queryFilterer.MeetPlanFilter(plan, row))
+                yield return new(rowId, row);
         }
     }
 

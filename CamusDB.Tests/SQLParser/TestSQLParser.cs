@@ -14,6 +14,22 @@ namespace CamusDB.Tests.SQLParser;
 
 public class TestSQLParser
 {
+    private static NodeAst SelectFromClause(NodeAst selectAst)
+    {
+        Assert.AreEqual(NodeType.Select, selectAst.nodeType);
+        return selectAst.rightAst!;
+    }
+
+    private static NodeAst SelectFromTable(NodeAst selectAst)
+    {
+        NodeAst from = SelectFromClause(selectAst);
+        Assert.AreEqual(NodeType.TableReference, from.nodeType);
+        return from.leftAst!;
+    }
+
+    private static string SelectFromTableName(NodeAst selectAst) =>
+        SelectFromTable(selectAst).yytext!;
+
     [Test]
     public void TestParseSimpleSelect()
     {
@@ -22,10 +38,10 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
 
         Assert.AreEqual("some_field", ast.leftAst!.yytext);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
     }
 
     [Test]
@@ -35,7 +51,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -45,7 +61,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -55,7 +71,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -65,7 +81,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -75,7 +91,7 @@ public class TestSQLParser
 
         Assert.AreEqual("some_field", ast.leftAst!.leftAst!.yytext);
         Assert.AreEqual("another_field", ast.leftAst!.rightAst!.yytext);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
         Assert.AreEqual("userid", ast.extendedOne!.leftAst!.yytext);
         Assert.AreEqual("createdat", ast.extendedTwo!.leftAst!.yytext);
     }
@@ -86,7 +102,7 @@ public class TestSQLParser
         NodeAst ast = SQLParserProcessor.Parse("SELECT `UserName` FROM `Users`");
 
         Assert.AreEqual("username", ast.leftAst!.yytext);
-        Assert.AreEqual("users", ast.rightAst!.yytext);
+        Assert.AreEqual("users", SelectFromTableName(ast));
     }
 
     [Test]
@@ -96,7 +112,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -106,7 +122,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -116,7 +132,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -126,7 +142,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -136,7 +152,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -146,7 +162,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -156,7 +172,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -166,7 +182,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
     }
 
     [Test]
@@ -176,7 +192,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.ExprAnd, ast.extendedOne!.nodeType);
     }
 
@@ -187,7 +203,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.ExprOr, ast.extendedOne!.nodeType);
     }
 
@@ -198,7 +214,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.ExprOr, ast.extendedOne!.nodeType);
     }
 
@@ -209,7 +225,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.ExprOr, ast.extendedOne!.nodeType);
     }
 
@@ -220,7 +236,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.ExprOr, ast.extendedOne!.nodeType);
     }
 
@@ -231,7 +247,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.ExprLike, ast.extendedOne!.nodeType);
     }
 
@@ -242,7 +258,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.ExprILike, ast.extendedOne!.nodeType);
     }
 
@@ -253,7 +269,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.ExprIsNull, ast.extendedOne!.nodeType);
     }
 
@@ -264,7 +280,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.ExprIsNotNull, ast.extendedOne!.nodeType);
     }
 
@@ -275,7 +291,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.extendedTwo!.nodeType);
     }
 
@@ -286,7 +302,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.extendedTwo!.nodeType);
     }
 
@@ -297,7 +313,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.extendedTwo!.nodeType);
     }
 
@@ -308,7 +324,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.extendedTwo!.nodeType);
     }
 
@@ -319,7 +335,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.extendedTwo!.nodeType);
     }
 
@@ -330,7 +346,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.SortAsc, ast.extendedTwo!.nodeType);
     }
 
@@ -341,7 +357,7 @@ public class TestSQLParser
 
         Assert.AreEqual(NodeType.Select, ast.nodeType);
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
         Assert.AreEqual(NodeType.SortDesc, ast.extendedTwo!.nodeType);
     }
 
@@ -353,9 +369,9 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.ExprAllFields, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
 
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
     }
 
     [Test]
@@ -366,9 +382,9 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
 
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
     }
 
     [Test]
@@ -379,9 +395,9 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
 
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
     }
 
     [Test]
@@ -392,8 +408,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.ExprFuncCall, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
     }
 
     [Test]
@@ -404,8 +420,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
         Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
     }
 
@@ -417,8 +433,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
         Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);        
     }
 
@@ -430,8 +446,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
         Assert.AreEqual(NodeType.Placeholder, ast.extendedThree!.nodeType);
     }
 
@@ -443,8 +459,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
         Assert.AreEqual(NodeType.Placeholder, ast.extendedThree!.nodeType);
     }
 
@@ -456,8 +472,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
         Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
     }
 
@@ -469,8 +485,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
         Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
         Assert.AreEqual(NodeType.Integer, ast.extendedFour!.nodeType);
     }
@@ -483,8 +499,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
         Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
         Assert.AreEqual(NodeType.Integer, ast.extendedFour!.nodeType);
     }
@@ -497,8 +513,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
         Assert.AreEqual(NodeType.Placeholder, ast.extendedThree!.nodeType);
         Assert.AreEqual(NodeType.Placeholder, ast.extendedFour!.nodeType);
     }
@@ -511,8 +527,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
         Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
         Assert.AreEqual(NodeType.Integer, ast.extendedFour!.nodeType);
     }
@@ -525,8 +541,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
         Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
         Assert.AreEqual(NodeType.Integer, ast.extendedFour!.nodeType);
     }
@@ -539,8 +555,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.ExprAlias, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);        
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));        
     }
 
     [Test]
@@ -551,8 +567,8 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.ExprAlias, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
-        Assert.AreEqual("some_table", ast.rightAst!.yytext);        
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));        
     }
 
     [Test]
@@ -563,12 +579,13 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
-        Assert.AreEqual(NodeType.IdentifierWithOpts, ast.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TableReference, ast.rightAst!.nodeType);
 
         Assert.AreEqual("some_field", ast.leftAst!.yytext);
         Assert.AreEqual("some_table", ast.rightAst!.leftAst!.yytext);
-        Assert.AreEqual("force_index", ast.rightAst!.rightAst!.yytext);
-        Assert.AreEqual("pk", ast.rightAst!.extendedOne!.yytext);
+        Assert.IsNotNull(ast.rightAst!.extendedOne);
+        Assert.AreEqual("force_index", ast.rightAst!.extendedOne!.rightAst!.yytext);
+        Assert.AreEqual("pk", ast.rightAst!.extendedOne!.extendedOne!.yytext);
     }
 
     [Test]
@@ -1287,4 +1304,142 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.ShowIndexes, ast.nodeType);
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
     }
+
+    #region QP0.2 pending query feature acceptance fixtures
+
+    [Test]
+    public void TestParseSelectGroupBySingleColumn()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT role, COUNT(*) FROM app_users GROUP BY role");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.IsNotNull(ast.extendedFive);
+        Assert.AreEqual(NodeType.GroupBy, ast.extendedFive!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.extendedFive.leftAst!.nodeType);
+        Assert.AreEqual("role", ast.extendedFive.leftAst.yytext);
+    }
+
+    [Test]
+    public void TestParseSelectGroupByMultipleColumns()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT role, department, COUNT(*) FROM app_users GROUP BY role, department");
+
+        Assert.AreEqual(NodeType.GroupBy, ast.extendedFive!.nodeType);
+        Assert.AreEqual(NodeType.ExprList, ast.extendedFive.leftAst!.nodeType);
+        Assert.AreEqual("role", ast.extendedFive.leftAst.leftAst!.yytext);
+        Assert.AreEqual("department", ast.extendedFive.leftAst.rightAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSelectGroupByWithWhereOrderByLimitOffset()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT role FROM app_users WHERE enabled = true GROUP BY role ORDER BY role LIMIT 10 OFFSET 5");
+
+        Assert.AreEqual(NodeType.ExprEquals, ast.extendedOne!.nodeType);
+        Assert.AreEqual(NodeType.GroupBy, ast.extendedFive!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.extendedTwo!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
+        Assert.AreEqual(10, long.Parse(ast.extendedThree.yytext!));
+        Assert.AreEqual(NodeType.Integer, ast.extendedFour!.nodeType);
+        Assert.AreEqual(5, long.Parse(ast.extendedFour.yytext!));
+    }
+
+    [Test]
+    public void TestParseSelectGroupByExpression()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT year + 100 AS y FROM robots GROUP BY year + 100");
+
+        Assert.AreEqual(NodeType.GroupBy, ast.extendedFive!.nodeType);
+        Assert.AreEqual(NodeType.ExprAdd, ast.extendedFive.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSelectInnerJoin()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.Join, ast.rightAst!.nodeType);
+
+        NodeAst join = ast.rightAst!;
+        Assert.AreEqual(NodeType.TableReference, join.leftAst!.nodeType);
+        Assert.AreEqual("app_users", join.leftAst!.leftAst!.yytext);
+        Assert.AreEqual("u", join.leftAst!.rightAst!.yytext);
+
+        Assert.AreEqual(NodeType.TableReference, join.rightAst!.nodeType);
+        Assert.AreEqual("posts", join.rightAst!.leftAst!.yytext);
+        Assert.AreEqual("p", join.rightAst!.rightAst!.yytext);
+
+        Assert.AreEqual(NodeType.ExprEquals, join.extendedOne!.nodeType);
+        Assert.AreEqual("p.user_id", join.extendedOne!.leftAst!.yytext);
+        Assert.AreEqual("u.id", join.extendedOne!.rightAst!.yytext);
+
+        Assert.AreEqual("u.email", ast.leftAst!.leftAst!.yytext);
+        Assert.AreEqual("p.title", ast.leftAst!.rightAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSelectTableAliasWithAs()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT id FROM robots AS r");
+
+        NodeAst from = SelectFromClause(ast);
+        Assert.AreEqual(NodeType.TableReference, from.nodeType);
+        Assert.AreEqual("robots", from.leftAst!.yytext);
+        Assert.AreEqual("r", from.rightAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSelectTableAliasWithoutAs()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT id FROM robots r");
+
+        NodeAst from = SelectFromClause(ast);
+        Assert.AreEqual(NodeType.TableReference, from.nodeType);
+        Assert.AreEqual("robots", from.leftAst!.yytext);
+        Assert.AreEqual("r", from.rightAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSelectInnerJoinExplicit()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT u.email FROM app_users u INNER JOIN posts p ON p.user_id = u.id");
+
+        Assert.AreEqual(NodeType.Join, ast.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSelectQualifiedColumnsInWhere()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT u.email FROM app_users u WHERE u.enabled = true");
+
+        Assert.AreEqual("u.enabled", ast.extendedOne!.leftAst!.yytext);
+    }
+
+    [Test]
+    [Ignore("Pending QP5.1 - IN subquery parsing")]
+    public void TestParseSelectInSubqueryPending()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT * FROM app_users WHERE id IN (SELECT user_id FROM posts WHERE published = true)");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.IsNotNull(ast.extendedOne, "WHERE should capture the IN (subquery) predicate");
+    }
+
+    [Test]
+    [Ignore("Pending QP5.1 - EXISTS subquery parsing")]
+    public void TestParseSelectExistsSubqueryPending()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT * FROM app_users WHERE EXISTS (SELECT * FROM posts WHERE posts.user_id = app_users.id)");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.IsNotNull(ast.extendedOne, "WHERE should capture the EXISTS (subquery) predicate");
+    }
+
+    #endregion
 }

@@ -9,6 +9,7 @@
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.Util.ObjectIds;
@@ -35,6 +36,8 @@ internal sealed class QueryExecutor
 
     private readonly QueryLimiter queryLimiter = new();
 
+    private readonly QueryJoinExecutor queryJoinExecutor = new();
+
     private readonly QueryScanner queryScanner;
 
     public QueryExecutor(ILogger<ICamusDB> logger)
@@ -50,6 +53,12 @@ internal sealed class QueryExecutor
         return ExecuteQueryPlanInternal(plan);
     }
 
+    public IAsyncEnumerable<QueryResultRow> ExecuteJoinQuery(
+        DatabaseDescriptor database,
+        BoundSelectQuery bound,
+        QueryTicket ticket) =>
+        queryJoinExecutor.ExecuteJoinQuery(database, bound, ticket);
+
     private IAsyncEnumerable<QueryResultRow> ExecuteQueryPlanInternal(QueryPlan plan)
     {
         foreach (QueryPlanStep step in plan.Steps)
@@ -59,19 +68,19 @@ internal sealed class QueryExecutor
             switch (step.Type)
             {
                 case QueryPlanStepType.QueryFromIndex:
-                    plan.DataCursor = QueryUsingIndex(plan.Table, plan.Ticket, step.Index, step.ColumnValue);
+                    plan.DataCursor = QueryUsingIndex(plan, step.Index, step.LookupKey, step.ColumnValue);
                     break;
 
                 case QueryPlanStepType.RangeScanFromIndex:
-                    plan.DataCursor = QueryUsingRangeIndex(plan.Table, plan.Ticket, step.Index, step.FromBound, step.FromInclusive, step.ToBound, step.ToInclusive);
+                    plan.DataCursor = QueryUsingRangeIndex(plan, step.Index, step.FromBound, step.FromInclusive, step.ToBound, step.ToInclusive);
                     break;
 
                 case QueryPlanStepType.FullScanFromIndex:
-                    plan.DataCursor = queryScanner.ScanUsingIndex(plan.Database, plan.Table, plan.Ticket, queryFilterer, rowDeserializer);
+                    plan.DataCursor = queryScanner.ScanUsingIndex(plan, queryFilterer, rowDeserializer);
                     break;
 
                 case QueryPlanStepType.FullScanFromTableIndex:
-                    plan.DataCursor = queryScanner.ScanUsingTableIndex(plan.Database, plan.Table, plan.Ticket, queryFilterer, rowDeserializer);
+                    plan.DataCursor = queryScanner.ScanUsingTableIndex(plan, queryFilterer, rowDeserializer);
                     break;
 
                 case QueryPlanStepType.SortBy:
@@ -114,34 +123,73 @@ internal sealed class QueryExecutor
     }
 
     private IAsyncEnumerable<QueryResultRow> QueryUsingIndex(
-        TableDescriptor table,
-        QueryTicket ticket,
+        QueryPlan plan,
         TableIndexSchema? index,
+        CompositeColumnValue? lookupKey,
         ColumnValue? columnValue
     )
     {
         if (index is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Couldn't access table's unique index");
 
-        if (columnValue is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid column value");
+        CompositeColumnValue key = lookupKey ?? new CompositeColumnValue(new[] { columnValue! });
+
+        if (columnValue is null && lookupKey is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid lookup key");
 
         if (index.Type == IndexType.Unique)
-            return QueryUsingUniqueIndex(table, ticket, index, columnValue);
+            return QueryUsingUniqueIndex(plan, index, key);
 
-        return QueryUsingMultiIndex(table, ticket, index, columnValue);
+        if (!IndexScanSelector.SupportsExactEqualityPrefixUpperBound(plan.Table, index.Columns, key.Values.Length))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Non-unique index lookup requires a bounded scan plan");
+
+        CompositeColumnValue? upperBound = BuildPrefixScanUpperBound(plan.Table, index, key);
+
+        return QueryUsingRangeIndex(plan, index, key, fromInclusive: true, upperBound, toInclusive: false);
+    }
+
+    private static CompositeColumnValue? BuildPrefixScanUpperBound(
+        TableDescriptor table,
+        TableIndexSchema index,
+        CompositeColumnValue lookupKey)
+    {
+        if (lookupKey.Values.Length == 0)
+            return null;
+
+        ColumnValue[] upperValues = new ColumnValue[lookupKey.Values.Length];
+        Array.Copy(lookupKey.Values, upperValues, lookupKey.Values.Length - 1);
+
+        string lastColumn = index.Columns[lookupKey.Values.Length - 1];
+        TableColumnSchema? column = table.Schema.Columns?.Find(c => c.Name == lastColumn);
+        ColumnType columnType = column?.Type ?? ColumnType.String;
+        ColumnValue lastValue = lookupKey.Values[^1];
+        ColumnValue? nextValue = NextSortValue(columnType, lastValue);
+
+        if (nextValue is null)
+            return null;
+
+        upperValues[^1] = nextValue;
+        return new CompositeColumnValue(upperValues);
+    }
+
+    private static ColumnValue? NextSortValue(ColumnType columnType, ColumnValue value)
+    {
+        return IndexScanSelector.NextSortValue(columnType, value);
     }
 
     private async IAsyncEnumerable<QueryResultRow> QueryUsingUniqueIndex(
-        TableDescriptor table,
-        QueryTicket ticket,
+        QueryPlan plan,
         TableIndexSchema index,
-        ColumnValue columnValue
+        CompositeColumnValue lookupKey
     )
     {
+        TableDescriptor table = plan.Table;
+        QueryTicket ticket = plan.Ticket;
         HLCTimestamp txId = ticket.TxnState.TransactionId;
 
-        ObjectIdValue? rowId = await table.Store.LookupUnique(txId, index.Name, new CompositeColumnValue(new[] { columnValue })).ConfigureAwait(false);
+        ObjectIdValue? rowId = await table.Store.LookupUnique(txId, index.Name, lookupKey).ConfigureAwait(false);
         if (rowId is null)
             yield break;
 
@@ -152,66 +200,12 @@ internal sealed class QueryExecutor
         ObjectIdValue resolvedRowId = rowId.Value;
         Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, resolvedRowId, data);
 
-        if (ticket.Filters is not null && ticket.Filters.Count > 0)
-        {
-            if (queryFilterer.MeetFilters(ticket.Filters, row))
-                yield return new(resolvedRowId, row);
-        }
-        else
-        {
-            if (ticket.Where is not null)
-            {
-                if (queryFilterer.MeetWhere(ticket.Where, row, ticket.Parameters))
-                    yield return new(resolvedRowId, row);
-            }
-            else
-                yield return new(resolvedRowId, row);
-        }
-    }
-
-    private async IAsyncEnumerable<QueryResultRow> QueryUsingMultiIndex(
-        TableDescriptor table,
-        QueryTicket ticket,
-        TableIndexSchema index,
-        ColumnValue columnValue
-    )
-    {
-        HLCTimestamp txId = ticket.TxnState.TransactionId;
-        ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
-
-        await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId) in table.Store.ScanIndex(txId, index.Name, keyTypes, null, null, unique: false))
-        {
-            // Filter: first component must match the queried value.
-            if (decodedKey.Values.Length == 0 || decodedKey.Values[0].CompareTo(columnValue) != 0)
-                continue;
-
-            byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
-            if (data is null || data.Length == 0)
-                continue;
-
-            Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
-
-            if (ticket.Filters is not null && ticket.Filters.Count > 0)
-            {
-                if (queryFilterer.MeetFilters(ticket.Filters, row))
-                    yield return new(rowId, row);
-            }
-            else
-            {
-                if (ticket.Where is not null)
-                {
-                    if (queryFilterer.MeetWhere(ticket.Where, row, ticket.Parameters))
-                        yield return new(rowId, row);
-                }
-                else
-                    yield return new(rowId, row);
-            }
-        }
+        if (queryFilterer.MeetPlanFilter(plan, row))
+            yield return new(resolvedRowId, row);
     }
 
     private IAsyncEnumerable<QueryResultRow> QueryUsingRangeIndex(
-        TableDescriptor table,
-        QueryTicket ticket,
+        QueryPlan plan,
         TableIndexSchema? index,
         CompositeColumnValue? fromBound,
         bool fromInclusive,
@@ -222,12 +216,11 @@ internal sealed class QueryExecutor
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Couldn't access table's index for range scan");
 
         bool unique = index.Type == IndexType.Unique;
-        return QueryUsingRangeIndexInternal(table, ticket, index, fromBound, fromInclusive, toBound, toInclusive, unique);
+        return QueryUsingRangeIndexInternal(plan, index, fromBound, fromInclusive, toBound, toInclusive, unique);
     }
 
     private async IAsyncEnumerable<QueryResultRow> QueryUsingRangeIndexInternal(
-        TableDescriptor table,
-        QueryTicket ticket,
+        QueryPlan plan,
         TableIndexSchema index,
         CompositeColumnValue? fromBound,
         bool fromInclusive,
@@ -235,6 +228,8 @@ internal sealed class QueryExecutor
         bool toInclusive,
         bool unique)
     {
+        TableDescriptor table = plan.Table;
+        QueryTicket ticket = plan.Ticket;
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
 
@@ -247,21 +242,8 @@ internal sealed class QueryExecutor
 
             Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
 
-            if (ticket.Filters is not null && ticket.Filters.Count > 0)
-            {
-                if (queryFilterer.MeetFilters(ticket.Filters, row))
-                    yield return new(rowId, row);
-            }
-            else
-            {
-                if (ticket.Where is not null)
-                {
-                    if (queryFilterer.MeetWhere(ticket.Where, row, ticket.Parameters))
-                        yield return new(rowId, row);
-                }
-                else
-                    yield return new(rowId, row);
-            }
+            if (queryFilterer.MeetPlanFilter(plan, row))
+                yield return new(rowId, row);
         }
     }
 

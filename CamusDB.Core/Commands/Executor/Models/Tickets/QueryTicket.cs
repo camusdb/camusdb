@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Models.Predicates;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Transactions;
 
@@ -29,11 +31,18 @@ public sealed class QueryTicket
 
     public List<QueryOrderBy>? OrderBy { get; }
 
+    public IReadOnlyList<NodeAst>? GroupBy { get; }
+
     public NodeAst? Limit { get; }
 
     public NodeAst? Offset { get; }
 
     public Dictionary<string, ColumnValue>? Parameters { get; }
+
+    public QueryRowNameResolver? RowNameResolver { get; }
+
+    /// <summary>Predicate analysis for <see cref="Where"/>; populated at ticket creation.</summary>
+    public PredicateAnalysis? AnalyzedWhere { get; }
 
     public QueryTicket(
         KvTransaction txnState,
@@ -46,7 +55,10 @@ public sealed class QueryTicket
         List<QueryOrderBy>? orderBy,
         NodeAst? limit,
         NodeAst? offset,
-        Dictionary<string, ColumnValue>? parameters)
+        Dictionary<string, ColumnValue>? parameters,
+        IReadOnlyList<NodeAst>? groupBy = null,
+        QueryRowNameResolver? rowNameResolver = null,
+        PredicateAnalysis? analyzedWhere = null)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -56,8 +68,11 @@ public sealed class QueryTicket
         Filters = filters;
         Where = where;
         OrderBy = orderBy;
+        GroupBy = groupBy;
         Limit = limit;
         Offset = offset;
         Parameters = parameters;
+        RowNameResolver = rowNameResolver;
+        AnalyzedWhere = analyzedWhere;
     }
 }

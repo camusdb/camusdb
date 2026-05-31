@@ -6,22 +6,22 @@
  * file that was distributed with this source code.
  */
 
-using NUnit.Framework;
-
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using System.Collections.Generic;
+
+using NUnit.Framework;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Plans;
+using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
-using CamusDB.Core.Transactions;
-using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -29,86 +29,29 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Documents current single-table planner behavior via <see cref="QueryPlanStepType"/> assertions.
 /// These tests call <see cref="QueryPlanner.GetPlan"/> only; they do not execute scans.
 /// </summary>
-public class TestQueryPlanner : BaseTest
+public class TestQueryPlanner
 {
+    private static QueryPlannerTestContext? context;
+
     private readonly QueryPlanner queryPlanner = new();
 
-    private async Task<(string dbname, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, CommandExecutor executor, List<string> objectIds)> SetupRobotsTableWithYearIndex()
+    [OneTimeSetUp]
+    public void OneTimeSetUp()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        context = QueryPlannerTestContext.Create();
+    }
 
-        KvTransaction txnState = await database.Transactions.BeginAsync();
-
-        CreateTableTicket tableTicket = new(
-            databaseName: dbname,
-            tableName: "robots",
-            columns: new ColumnInfo[]
-            {
-                new("id", ColumnType.Id),
-                new("name", ColumnType.String, notNull: true),
-                new("year", ColumnType.Integer64),
-                new("enabled", ColumnType.Bool)
-            },
-            constraints: new ConstraintInfo[]
-            {
-                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
-            },
-            ifNotExists: false
-        );
-
-        await executor.CreateTable(tableTicket);
-
-        List<string> objectIds = new(25);
-
-        for (int i = 0; i < 25; i++)
+    [OneTimeTearDown]
+    public async Task OneTimeTearDown()
+    {
+        if (context is not null)
         {
-            string objectId = ObjectIdGenerator.Generate().ToString();
-
-            InsertTicket insertTicket = new(
-                txnState: txnState,
-                databaseName: dbname,
-                tableName: "robots",
-                values: new()
-                {
-                    new()
-                    {
-                        { "id", new(ColumnType.Id, objectId) },
-                        { "name", new(ColumnType.String, "some name " + i) },
-                        { "year", new(ColumnType.Integer64, 2024 - i) },
-                        { "enabled", new(ColumnType.Bool, (i + 1) % 2 == 0) },
-                    }
-                }
-            );
-
-            await executor.Insert(insertTicket);
-            objectIds.Add(objectId);
+            await context.DisposeAsync().ConfigureAwait(false);
+            context = null;
         }
-
-        AlterIndexTicket alterIndexTicket = new(
-            databaseName: dbname,
-            tableName: "robots",
-            indexName: "year_idx",
-            columns: new ColumnIndexInfo[] { new("year", OrderType.Ascending) },
-            operation: AlterIndexOperation.AddIndex
-        );
-
-        await database.Transactions.CommitAsync(txnState);
-
-        txnState = await database.Transactions.BeginAsync();
-
-        await executor.AlterIndex(alterIndexTicket);
-        await database.Transactions.CommitAsync(txnState);
-
-        txnState = await database.Transactions.BeginAsync();
-
-        TableDescriptor table = await executor.OpenTable(new OpenTableTicket(dbname, "robots"));
-
-        return (dbname, database, table, txnState, executor, objectIds);
     }
 
     private static QueryTicket CreateQueryTicketFromSelectSql(
-        KvTransaction txnState,
-        string databaseName,
         string sql,
         Dictionary<string, ColumnValue>? parameters = null)
     {
@@ -137,8 +80,8 @@ public class TestQueryPlanner : BaseTest
         }
 
         return new QueryTicket(
-            txnState: txnState,
-            databaseName: databaseName,
+            txnState: context!.Txn,
+            databaseName: QueryPlannerTestContext.DatabaseName,
             tableName: tableName,
             index: indexName,
             projection: GetProjection(ast),
@@ -147,8 +90,18 @@ public class TestQueryPlanner : BaseTest
             orderBy: GetOrderBy(ast),
             limit: ast.extendedThree,
             offset: ast.extendedFour,
-            parameters: parameters
+            parameters: parameters,
+            groupBy: GetGroupBy(ast),
+            analyzedWhere: PredicateAnalyzer.Analyze(ast.extendedOne, parameters)
         );
+    }
+
+    private static IReadOnlyList<NodeAst>? GetGroupBy(NodeAst ast)
+    {
+        if (ast.extendedFive is null)
+            return null;
+
+        return new SelectQueryCreator().CreateSelectQuery(ast).GroupBy;
     }
 
     private static List<NodeAst>? GetProjection(NodeAst ast)
@@ -226,81 +179,101 @@ public class TestQueryPlanner : BaseTest
     private static QueryPlanStepType[] StepTypes(QueryPlan plan) =>
         plan.Steps.Select(step => step.Type).ToArray();
 
-    [Test]
-    [NonParallelizable]
-    public async Task PlanUsesFullTableScanWhenNoPredicate()
+    private static Type[] PhysicalNodeTypes(QueryPlan plan)
     {
-        (_, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, _, _) = await SetupRobotsTableWithYearIndex();
+        List<Type> types = new();
+        CollectPhysicalNodeTypes(plan.Root, types);
+        return types.ToArray();
+    }
 
-        QueryTicket ticket = CreateQueryTicketFromSelectSql(txn, database.Name, "SELECT * FROM robots");
-        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
+    private static void CollectPhysicalNodeTypes(PhysicalPlanNode node, List<Type> types)
+    {
+        if (node.Input is not null)
+            CollectPhysicalNodeTypes(node.Input, types);
+
+        types.Add(node.GetType());
+    }
+
+    private static PhysicalPlanNode ScanRoot(QueryPlan plan)
+    {
+        PhysicalPlanNode node = plan.Root;
+
+        while (node.Input is not null)
+            node = node.Input;
+
+        return node;
+    }
+
+    [Test]
+    public void PlanUsesFullTableScanWhenNoPredicate()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         Assert.AreEqual(QueryPlanStepType.FullScanFromTableIndex, plan.Steps[0].Type);
         CollectionAssert.AreEqual(
             new[] { QueryPlanStepType.FullScanFromTableIndex },
             StepTypes(plan));
+        CollectionAssert.AreEqual(
+            new[] { typeof(TableScanNode) },
+            PhysicalNodeTypes(plan));
+        Assert.AreEqual(TableScanSource.PrimaryRows, ((TableScanNode)plan.Root).Source);
     }
 
     [Test]
-    [NonParallelizable]
-    public async Task PlanUsesForcedIndexFullScan()
+    public void PlanUsesForcedIndexFullScan()
     {
-        (_, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, _, _) = await SetupRobotsTableWithYearIndex();
-
-        QueryTicket ticket = CreateQueryTicketFromSelectSql(txn, database.Name, "SELECT id FROM robots@{FORCE_INDEX=year_idx}");
-        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT id FROM robots@{FORCE_INDEX=year_idx}");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         Assert.AreEqual(QueryPlanStepType.FullScanFromIndex, plan.Steps[0].Type);
         CollectionAssert.AreEqual(
             new[] { QueryPlanStepType.FullScanFromIndex, QueryPlanStepType.ReduceToProjections },
             StepTypes(plan));
+        CollectionAssert.AreEqual(
+            new[] { typeof(TableScanNode), typeof(ProjectNode) },
+            PhysicalNodeTypes(plan));
+        Assert.AreEqual(TableScanSource.ForcedIndex, ((TableScanNode)ScanRoot(plan)).Source);
+        Assert.AreEqual("year_idx", ((TableScanNode)ScanRoot(plan)).Index!.Name);
     }
 
     [Test]
-    [NonParallelizable]
-    public async Task PlanUsesPrimaryKeyLookupForIdEquality()
+    public void PlanUsesPrimaryKeyLookupForIdEquality()
     {
-        (_, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, _, List<string> objectIds) = await SetupRobotsTableWithYearIndex();
-
         QueryTicket ticket = CreateQueryTicketFromSelectSql(
-            txn,
-            database.Name,
             "SELECT * FROM robots WHERE id = @id",
-            new() { { "@id", new ColumnValue(ColumnType.Id, objectIds[0]) } });
+            new() { { "@id", new ColumnValue(ColumnType.Id, QueryPlannerTestContext.SampleRowId) } });
 
-        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type);
         Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, plan.Steps[0].Index!.Name);
-        Assert.AreEqual(objectIds[0], plan.Steps[0].ColumnValue!.StrValue);
+        Assert.AreEqual(QueryPlannerTestContext.SampleRowId, plan.Steps[0].ColumnValue!.StrValue);
+        Assert.IsInstanceOf<IndexLookupNode>(ScanRoot(plan));
+        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, ((IndexLookupNode)ScanRoot(plan)).Index.Name);
     }
 
     [Test]
-    [NonParallelizable]
-    public async Task PlanUsesSecondaryIndexEqualityLookup()
+    public void PlanUsesSecondaryIndexEqualityLookup()
     {
-        (_, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, _, _) = await SetupRobotsTableWithYearIndex();
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE year = 2000");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
-        QueryTicket ticket = CreateQueryTicketFromSelectSql(txn, database.Name, "SELECT * FROM robots WHERE year = 2000");
-        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
-
-        Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
         Assert.AreEqual("year_idx", plan.Steps[0].Index!.Name);
-        Assert.AreEqual(2000, plan.Steps[0].ColumnValue!.LongValue);
+        Assert.AreEqual(2000, plan.Steps[0].FromBound!.Values[0].LongValue);
+        Assert.AreEqual(2001, plan.Steps[0].ToBound!.Values[0].LongValue);
+        Assert.IsFalse(plan.Steps[0].ToInclusive);
+        Assert.IsInstanceOf<IndexRangeScanNode>(ScanRoot(plan));
     }
 
     [Test]
-    [NonParallelizable]
-    public async Task PlanUsesSecondaryIndexRangeScanForBoundedRange()
+    public void PlanUsesSecondaryIndexRangeScanForBoundedRange()
     {
-        (_, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, _, _) = await SetupRobotsTableWithYearIndex();
-
         QueryTicket ticket = CreateQueryTicketFromSelectSql(
-            txn,
-            database.Name,
             "SELECT * FROM robots WHERE year >= 2001 AND year < 2005");
 
-        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
         Assert.AreEqual("year_idx", plan.Steps[0].Index!.Name);
@@ -308,16 +281,15 @@ public class TestQueryPlanner : BaseTest
         Assert.IsTrue(plan.Steps[0].FromInclusive);
         Assert.AreEqual(2005, plan.Steps[0].ToBound!.Values[0].LongValue);
         Assert.IsFalse(plan.Steps[0].ToInclusive);
+        Assert.IsInstanceOf<IndexRangeScanNode>(ScanRoot(plan));
+        Assert.IsNull(plan.ExecutionFilter);
     }
 
     [Test]
-    [NonParallelizable]
-    public async Task PlanUsesSecondaryIndexRangeScanForLowerBoundOnly()
+    public void PlanUsesSecondaryIndexRangeScanForLowerBoundOnly()
     {
-        (_, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, _, _) = await SetupRobotsTableWithYearIndex();
-
-        QueryTicket ticket = CreateQueryTicketFromSelectSql(txn, database.Name, "SELECT * FROM robots WHERE year > 2020");
-        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE year > 2020");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
         Assert.AreEqual("year_idx", plan.Steps[0].Index!.Name);
@@ -327,33 +299,25 @@ public class TestQueryPlanner : BaseTest
     }
 
     [Test]
-    [NonParallelizable]
-    public async Task PlanFallsBackToFullScanWhenOrPreventsIndexUse()
+    public void PlanFallsBackToFullScanWhenOrPreventsIndexUse()
     {
-        (_, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, _, _) = await SetupRobotsTableWithYearIndex();
-
         QueryTicket ticket = CreateQueryTicketFromSelectSql(
-            txn,
-            database.Name,
             "SELECT * FROM robots WHERE year = 2000 OR year = 2001");
 
-        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         Assert.AreEqual(QueryPlanStepType.FullScanFromTableIndex, plan.Steps[0].Type);
+        Assert.IsInstanceOf<FilterNode>(plan.Root);
+        Assert.IsInstanceOf<TableScanNode>(ScanRoot(plan));
     }
 
     [Test]
-    [NonParallelizable]
-    public async Task PlanAddsSortAndLimitStepsInCurrentOrder()
+    public void PlanAddsSortAndLimitStepsInCurrentOrder()
     {
-        (_, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, _, _) = await SetupRobotsTableWithYearIndex();
-
         QueryTicket ticket = CreateQueryTicketFromSelectSql(
-            txn,
-            database.Name,
             "SELECT * FROM robots WHERE year >= 2020 ORDER BY year LIMIT 5");
 
-        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         CollectionAssert.AreEqual(
             new[]
@@ -363,16 +327,21 @@ public class TestQueryPlanner : BaseTest
                 QueryPlanStepType.Limit
             },
             StepTypes(plan));
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                typeof(IndexRangeScanNode),
+                typeof(SortNode),
+                typeof(LimitNode)
+            },
+            PhysicalNodeTypes(plan));
     }
 
     [Test]
-    [NonParallelizable]
-    public async Task PlanAddsAggregateAndProjectionStepsForCountStar()
+    public void PlanAddsAggregateAndProjectionStepsForCountStar()
     {
-        (_, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, _, _) = await SetupRobotsTableWithYearIndex();
-
-        QueryTicket ticket = CreateQueryTicketFromSelectSql(txn, database.Name, "SELECT COUNT(*) FROM robots");
-        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT COUNT(*) FROM robots");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         CollectionAssert.AreEqual(
             new[]
@@ -382,20 +351,61 @@ public class TestQueryPlanner : BaseTest
                 QueryPlanStepType.ReduceToProjections
             },
             StepTypes(plan));
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                typeof(TableScanNode),
+                typeof(AggregateNode),
+                typeof(ProjectNode)
+            },
+            PhysicalNodeTypes(plan));
     }
 
     [Test]
-    [NonParallelizable]
-    public async Task PlanAddsAggregateStepForAliasedAggregate()
+    public void PlanGroupsBeforeSortForGroupedAggregateQuery()
     {
-        (_, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, _, _) = await SetupRobotsTableWithYearIndex();
-
         QueryTicket ticket = CreateQueryTicketFromSelectSql(
-            txn,
-            database.Name,
+            "SELECT role, COUNT(*) AS cnt FROM robots GROUP BY role ORDER BY role");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                QueryPlanStepType.FullScanFromTableIndex,
+                QueryPlanStepType.Aggregate,
+                QueryPlanStepType.SortBy,
+                QueryPlanStepType.ReduceToProjections
+            },
+            StepTypes(plan));
+    }
+
+    [Test]
+    public void PlanGroupsForGroupByOnlyQuery()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT role FROM robots GROUP BY role ORDER BY role");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                QueryPlanStepType.FullScanFromTableIndex,
+                QueryPlanStepType.Aggregate,
+                QueryPlanStepType.SortBy,
+                QueryPlanStepType.ReduceToProjections
+            },
+            StepTypes(plan));
+    }
+
+    [Test]
+    public void PlanAddsAggregateStepForAliasedAggregate()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
             "SELECT COUNT(*) AS total FROM robots WHERE year < 2005");
 
-        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         CollectionAssert.AreEqual(
             new[]
@@ -408,20 +418,95 @@ public class TestQueryPlanner : BaseTest
     }
 
     [Test]
-    [NonParallelizable]
-    public async Task PlanAddsProjectionStepForPartialSelect()
+    public void PlanAddsProjectionStepForPartialSelect()
     {
-        (_, DatabaseDescriptor database, TableDescriptor table, KvTransaction txn, _, _) = await SetupRobotsTableWithYearIndex();
-
-        QueryTicket ticket = CreateQueryTicketFromSelectSql(txn, database.Name, "SELECT id, name FROM robots WHERE year = 2000");
-        QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT id, name FROM robots WHERE year = 2000");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         CollectionAssert.AreEqual(
             new[]
             {
-                QueryPlanStepType.QueryFromIndex,
+                QueryPlanStepType.RangeScanFromIndex,
                 QueryPlanStepType.ReduceToProjections
             },
+            StepTypes(plan));
+        CollectionAssert.AreEqual(
+            new[] { typeof(IndexRangeScanNode), typeof(ProjectNode) },
+            PhysicalNodeTypes(plan));
+    }
+
+    [Test]
+    public void PlanUsesCompositeIndexUniqueLookupForFullKeyEquality()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2000 AND enabled = true");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("year_enabled_idx", plan.Steps[0].Index!.Name);
+        Assert.AreEqual(2, plan.Steps[0].LookupKey!.Values.Length);
+        Assert.AreEqual(2000, plan.Steps[0].LookupKey!.Values[0].LongValue);
+        Assert.IsTrue(plan.Steps[0].LookupKey!.Values[1].BoolValue);
+        Assert.IsNull(plan.ExecutionFilter);
+    }
+
+    [Test]
+    public void PlanPrefersPrimaryKeyLookupOverSecondaryRange()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE id = @id AND year > 2000",
+            new() { { "@id", new ColumnValue(ColumnType.Id, QueryPlannerTestContext.SampleRowId) } });
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, plan.Steps[0].Index!.Name);
+        Assert.IsNotNull(plan.ExecutionFilter);
+    }
+
+    [Test]
+    public void PlanUsesCompositeIndexPrefixRangeForLeadingEqualityAndTrailingRange()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2000 AND enabled > false");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("year_enabled_idx", plan.Steps[0].Index!.Name);
+        Assert.AreEqual(2, plan.Steps[0].FromBound!.Values.Length);
+        Assert.AreEqual(2000, plan.Steps[0].FromBound!.Values[0].LongValue);
+        Assert.IsFalse(plan.Steps[0].FromBound!.Values[1].BoolValue);
+        Assert.IsFalse(plan.Steps[0].FromInclusive);
+        Assert.AreEqual(2001, plan.Steps[0].ToBound!.Values[0].LongValue);
+        Assert.AreEqual(1, plan.Steps[0].ToBound!.Values.Length);
+        Assert.IsFalse(plan.Steps[0].ToInclusive);
+        Assert.IsNull(plan.ExecutionFilter);
+    }
+
+    [Test]
+    public void PlanUsesFullScanWhenNonUniqueStringEqualityCannotBeBoundedExactly()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE name = 'bob'");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.FullScanFromTableIndex, plan.Steps[0].Type);
+        Assert.IsNotNull(plan.ExecutionFilter);
+    }
+
+    [Test]
+    public void PlanUsesOrderByIndexScanWhenNoPredicate()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots ORDER BY year");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("year_idx", plan.Steps[0].Index!.Name);
+        Assert.IsNull(plan.Steps[0].FromBound);
+        Assert.IsNull(plan.Steps[0].ToBound);
+        CollectionAssert.AreEqual(
+            new[] { QueryPlanStepType.RangeScanFromIndex, QueryPlanStepType.SortBy },
             StepTypes(plan));
     }
 }

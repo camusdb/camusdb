@@ -26,7 +26,7 @@ using CamusDB.Core.CommandsExecutor.Models.Results;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestRowDeletor : BaseTest
+public class TestRowDeletor : SharedNodeBaseTest
 {
     private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()
     {

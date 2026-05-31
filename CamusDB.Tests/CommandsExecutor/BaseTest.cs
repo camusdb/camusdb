@@ -20,6 +20,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
@@ -28,7 +29,7 @@ public abstract class BaseTest
 {
     // One logger factory for the entire test run — avoids spawning a ConsoleLoggerProvider
     // thread per fixture, which previously caused OutOfMemoryException after ~166 tests.
-    private static readonly ILoggerFactory sharedLoggerFactory = LoggerFactory.Create(builder =>
+    protected static readonly ILoggerFactory SharedLoggerFactory = LoggerFactory.Create(builder =>
         builder.AddFilter("Camus", LogLevel.Warning).AddConsole());
 
     protected readonly ILogger<ICamusDB> logger;
@@ -38,7 +39,18 @@ public abstract class BaseTest
 
     protected BaseTest()
     {
-        logger = sharedLoggerFactory.CreateLogger<ICamusDB>();
+        logger = SharedLoggerFactory.CreateLogger<ICamusDB>();
+    }
+
+    /// <summary>
+    /// Builds a <see cref="CommandExecutor"/> for the current test. Override in shared-node
+    /// fixtures to pass a process-level cluster node instead of standalone per-database nodes.
+    /// </summary>
+    protected virtual CommandExecutor CreateCommandExecutor()
+    {
+        CommandValidator validator = new();
+        CatalogsManager catalogsManager = new(logger);
+        return new(validator, catalogsManager, logger);
     }
 
     /// <summary>
@@ -48,9 +60,7 @@ public abstract class BaseTest
     {
         string dbname = Guid.NewGuid().ToString("n");
 
-        CommandValidator validator = new();
-        CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(validator, catalogsManager, logger);
+        CommandExecutor executor = CreateCommandExecutor();
 
         CreateDatabaseTicket databaseTicket = new(name: dbname, ifNotExists: false);
         DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);
@@ -74,6 +84,16 @@ public abstract class BaseTest
     {
         foreach ((string dbname, CommandExecutor executor) in openDatabases)
         {
+            try
+            {
+                DatabaseDescriptor database = await executor.OpenDatabase(dbname);
+                await database.Transactions.RollbackAllActiveAsync();
+            }
+            catch
+            {
+                // best-effort cleanup — ignore errors
+            }
+
             try
             {
                 await executor.CloseDatabase(new CloseDatabaseTicket(dbname));

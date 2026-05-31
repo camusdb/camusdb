@@ -10,6 +10,9 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
@@ -60,6 +63,10 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly SchemaQuerier schemaQuerier;
 
+    private readonly QueryBinder queryBinder;
+
+    private readonly SelectQueryCreator selectQueryCreator = new();
+
     private readonly CommandValidator validator;
 
     /// <summary>
@@ -92,6 +99,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         queryExecutor = new(logger);
         sqlExecutor = new(logger);
         schemaQuerier = new(catalogs, logger);
+        queryBinder = new QueryBinder(tableOpener);
     }
 
     #region database
@@ -441,9 +449,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             case NodeType.Select:
                 {
-                    QueryTicket queryTicket = sqlExecutor.CreateQueryTicket(ticket, ast);
+                    SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
+                    BoundSelectQuery boundQuery = await queryBinder.BindAsync(database, selectQuery).ConfigureAwait(false);
+                    QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(boundQuery, ticket);
 
-                    TableDescriptor table = await tableOpener.Open(database, queryTicket.TableName).ConfigureAwait(false);
+                    if (boundQuery.Sources.Count > 1)
+                        return (database, queryExecutor.ExecuteJoinQuery(database, boundQuery, queryTicket));
+
+                    TableDescriptor table = boundQuery.PrimaryTable;
 
                     return (database, queryExecutor.Query(database, table, queryTicket));
                 }

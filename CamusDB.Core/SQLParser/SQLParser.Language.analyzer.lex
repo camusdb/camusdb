@@ -47,6 +47,8 @@ TLimit          (L|l)(I|i)(M|m)(I|i)(T|t)
 TOffset         (O|o)(F|f)(F|f)(S|s)(E|e)(T|t)
 TAs 		    (A|a)(S|s)
 TGroup 		    (G|g)(R|r)(O|o)(U|u)(P|p)
+TJoin           (J|j)(O|o)(I|i)(N|n)
+TInner          (I|i)(N|n)(N|n)(E|e)(R|r)
 TShow 		    (S|s)(H|h)(O|o)(W|w)
 TColumns 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)(S|s)
 TTables         (T|t)(A|a)(B|b)(L|l)(E|e)(S|s)
@@ -102,6 +104,7 @@ TLess           <
 TGreater        >
 TLessEquals     <=
 TGreaterEquals  >=
+TDot            \.
 
 %{
 
@@ -217,6 +220,10 @@ TGreaterEquals  >=
 
 {TGroup} { return (int)Token.TGROUP; }
 
+{TJoin} { return (int)Token.TJOIN; }
+
+{TInner} { return (int)Token.TINNER; }
+
 {TShow} { return (int)Token.TSHOW; }
 
 {TColumns} { return (int)Token.TCOLUMNS; }
@@ -274,6 +281,8 @@ TGreaterEquals  >=
 {TNotEquals} { return (int)Token.TNOTEQUALS; }
 
 {TNotEquals2} { return (int)Token.TNOTEQUALS; }
+
+{TDot} { return (int)Token.TDOT; }
 
 {Identifier} { yylval.s = yytext; return (int)Token.TIDENTIFIER; }
 

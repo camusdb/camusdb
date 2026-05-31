@@ -8,6 +8,7 @@
 
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.Time;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -114,8 +115,12 @@ internal sealed class SqlExecutor
     /// <param name="row"></param>
     /// <param name="parameters"></param>
     /// <returns></returns>
-    public static ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters)
+    public static ColumnValue EvalExpr(
+        NodeAst expr,
+        Dictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver = null)
     {
-        return SQLExecutorBaseCreator.EvalExpr(expr, row, parameters);
+        return SQLExecutorBaseCreator.EvalExpr(expr, row, parameters, rowNameResolver);
     }
 }

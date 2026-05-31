@@ -24,6 +24,8 @@ public sealed class NodeAst
 
     public NodeAst? extendedFour;
 
+    public NodeAst? extendedFive;
+
     public string? yytext;
 
     public NodeAst(
@@ -34,6 +36,7 @@ public sealed class NodeAst
         NodeAst? extendedTwo,
         NodeAst? extendedThree,
         NodeAst? extendedFour,
+        NodeAst? extendedFive,
         string? yytext
     )
 	{
@@ -44,6 +47,7 @@ public sealed class NodeAst
 		this.extendedTwo = extendedTwo;
         this.extendedThree = extendedThree;
         this.extendedFour = extendedFour;
+        this.extendedFive = extendedFive;
         this.yytext = yytext;
 
         //if (leftAst is not null)

@@ -19,14 +19,31 @@ internal sealed class QueryProjector
         if (ticket.Projection is null || ticket.Projection.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "This resultset shouldn't be projected");
 
+        if (ticket.GroupBy is { Count: > 0 })
+        {
+            List<string> visibleColumns = GetVisibleProjectionColumns(ticket);
+
+            await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
+            {
+                Dictionary<string, ColumnValue> projected = new(visibleColumns.Count);
+
+                foreach (string columnName in visibleColumns)
+                    projected[columnName] = resultRow.Row[columnName];
+
+                yield return new QueryResultRow(resultRow.RowId, projected);
+            }
+
+            yield break;
+        }
+
         await foreach (QueryResultRow resultRow in dataCursor)
         {
             Dictionary<string, ColumnValue> projected = new(ticket.Projection.Count);
 
-            int i = 0;
-
-            foreach (NodeAst ast in ticket.Projection)
+            for (int i = 0; i < ticket.Projection.Count; i++)
             {
+                NodeAst ast = ticket.Projection[i];
+
                 switch (ast.nodeType)
                 {
                     case NodeType.ExprAllFields:
@@ -38,15 +55,16 @@ internal sealed class QueryProjector
                     }
                     
                     case NodeType.Identifier:
-                        projected[ast.yytext!] = EvalOrProjectExpr(ast, resultRow.Row, ticket.Parameters);
+                        projected[QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, i)] =
+                            EvalOrProjectExpr(ast, resultRow.Row, ticket);
                         continue;
                     
                     case NodeType.ExprAlias:
-                        projected[ast.rightAst!.yytext ?? ""] = EvalOrProjectExpr(ast.leftAst!, resultRow.Row, ticket.Parameters);
+                        projected[ast.rightAst!.yytext ?? ""] = EvalOrProjectExpr(ast.leftAst!, resultRow.Row, ticket);
                         break;
                     
                     default:
-                        projected[(i++).ToString()] = EvalOrProjectExpr(ast, resultRow.Row, ticket.Parameters);
+                        projected[i.ToString()] = EvalOrProjectExpr(ast, resultRow.Row, ticket);
                         break;
                 }
             }
@@ -55,12 +73,26 @@ internal sealed class QueryProjector
         }
     }
 
-    private static ColumnValue EvalOrProjectExpr(NodeAst ast, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters)
+    private static List<string> GetVisibleProjectionColumns(QueryTicket ticket)
+    {
+        List<string> columns = new(ticket.Projection!.Count);
+
+        for (int i = 0; i < ticket.Projection.Count; i++)
+        {
+            columns.Add(QueryProjectionResolver.GetOutputNameFromProjectionExpression(
+                ticket.Projection[i],
+                i));
+        }
+
+        return columns;
+    }
+
+    private static ColumnValue EvalOrProjectExpr(NodeAst ast, Dictionary<string, ColumnValue> row, QueryTicket ticket)
     {
         if (ast.nodeType == NodeType.ExprFuncCall && IsAggregation(ast))
             return row["0"];
 
-        return SqlExecutor.EvalExpr(ast, row, parameters);
+        return SqlExecutor.EvalExpr(ast, row, ticket.Parameters, ticket.RowNameResolver);
     }    
 
     private static bool IsAggregation(NodeAst nodeAst)

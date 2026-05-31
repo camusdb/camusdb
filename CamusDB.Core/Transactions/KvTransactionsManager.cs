@@ -41,11 +41,51 @@ namespace CamusDB.Core.Transactions;
 public sealed class KvTransactionsManager
 {
     private readonly IKahuna kahuna;
+    private readonly object activeSync = new();
+    private readonly List<KvTransaction> activeTransactions = new();
 
     public KvTransactionsManager(IKahuna kahuna)
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         this.kahuna = kahuna;
+    }
+
+    /// <summary>
+    /// Rolls back every transaction still marked <see cref="KvTransactionStatus.Active"/>.
+    /// Used by test fixtures that reuse a long-lived Kahuna node across methods.
+    /// </summary>
+    public async Task RollbackAllActiveAsync(CancellationToken cancellationToken = default)
+    {
+        List<KvTransaction> snapshot;
+        lock (activeSync)
+            snapshot = activeTransactions.ToList();
+
+        foreach (KvTransaction tx in snapshot)
+        {
+            try
+            {
+                await RollbackIfNotCompletedAsync(tx, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // best-effort cleanup
+            }
+        }
+
+        lock (activeSync)
+            activeTransactions.RemoveAll(tx => tx.Status != KvTransactionStatus.Active);
+    }
+
+    private void Track(KvTransaction tx)
+    {
+        lock (activeSync)
+            activeTransactions.Add(tx);
+    }
+
+    private void Untrack(KvTransaction tx)
+    {
+        lock (activeSync)
+            activeTransactions.Remove(tx);
     }
 
     /// <summary>
@@ -72,7 +112,9 @@ public sealed class KvTransactionsManager
                 $"Failed to start Kahuna transaction: {type}"
             );
 
-        return new KvTransaction(txId, uniqueId);
+        KvTransaction tx = new KvTransaction(txId, uniqueId);
+        Track(tx);
+        return tx;
     }
 
     /// <summary>
@@ -101,12 +143,14 @@ public sealed class KvTransactionsManager
         if (result == KeyValueResponseType.Committed)
         {
             tx.Status = KvTransactionStatus.Committed;
+            Untrack(tx);
             return;
         }
 
         // Kahuna aborted — the transaction is dead; mark it rolled back so
         // a subsequent RollbackIfNotCompletedAsync is a no-op.
         tx.Status = KvTransactionStatus.RolledBack;
+        Untrack(tx);
 
         throw new CamusDBException(
             CamusDBErrorCodes.TransactionAlreadyCompleted,
@@ -128,6 +172,7 @@ public sealed class KvTransactionsManager
             );
 
         tx.Status = KvTransactionStatus.RolledBack;
+        Untrack(tx);
 
         await kahuna.LocateAndRollbackTransaction(
             tx.UniqueId,

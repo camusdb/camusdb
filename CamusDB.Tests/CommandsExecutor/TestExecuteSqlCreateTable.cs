@@ -25,7 +25,7 @@ using CamusDB.Core.CommandsExecutor.Models.Results;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestExecuteSqlCreateTable : BaseTest
+public class TestExecuteSqlCreateTable : SharedNodeBaseTest
 {
     [SetUp]
     public void Setup()

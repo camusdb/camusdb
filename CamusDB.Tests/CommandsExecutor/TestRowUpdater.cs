@@ -26,7 +26,7 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public sealed class TestRowUpdater : BaseTest
+public sealed class TestRowUpdater : SharedNodeBaseTest
 {
     private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()
     {
@@ -395,13 +395,11 @@ public sealed class TestRowUpdater : BaseTest
 
     [Test]
     [NonParallelizable]
-    public async Task TestMultiUpdateParallel()
+    public async Task TestMultiUpdateSameTransaction()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
         
         KvTransaction txnState = await database.Transactions.BeginAsync();
-
-        List<Task> tasks = new(objectsId.Count);
 
         foreach (string objectId in objectsId)
         {
@@ -422,11 +420,137 @@ public sealed class TestRowUpdater : BaseTest
                 parameters: null
             );
 
-            tasks.Add(executor.Update(ticket));
+            UpdateResult execResult = await executor.Update(ticket);
+            Assert.AreEqual(1, execResult.UpdatedRows);
         }
+
+        await AssertAllRowsUpdated(dbname, database, executor, txnState);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestMultiUpdateParallel()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<(string TableName, string RowId)> rows) =
+            await SetupParallelUpdateTables(tableCount: 4);
+
+        List<Task> tasks = new(rows.Count);
+
+        foreach ((string tableName, string rowId) in rows)
+            tasks.Add(DoUpdateInOwnTransaction(dbname, database, executor, tableName, rowId));
 
         await Task.WhenAll(tasks);
 
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        foreach ((string tableName, string rowId) in rows)
+        {
+            QueryByIdTicket queryByIdTicket = new(
+                txnState: txnState,
+                databaseName: dbname,
+                tableName: tableName,
+                id: rowId
+            );
+
+            List<Dictionary<string, ColumnValue>> result = await (await executor.QueryById(queryByIdTicket)).ToListAsync();
+            Assert.AreEqual("updated value", result[0]["name"].StrValue);
+        }
+    }
+
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<(string TableName, string RowId)> rows)> SetupParallelUpdateTables(int tableCount)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+        List<(string TableName, string RowId)> rows = new(tableCount);
+
+        for (int i = 0; i < tableCount; i++)
+        {
+            string tableName = $"robots_{i}";
+            string objectId = ObjectIdGenerator.Generate().ToString();
+
+            CreateTableTicket tableTicket = new(
+                databaseName: dbname,
+                tableName: tableName,
+                columns: new ColumnInfo[]
+                {
+                    new("id", ColumnType.Id),
+                    new("name", ColumnType.String, notNull: true),
+                    new("year", ColumnType.Integer64),
+                    new("enabled", ColumnType.Bool)
+                },
+                constraints: new ConstraintInfo[]
+                {
+                    new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                },
+                ifNotExists: false
+            );
+
+            await executor.CreateTable(tableTicket);
+
+            InsertTicket insertTicket = new(
+                txnState: txnState,
+                databaseName: dbname,
+                tableName: tableName,
+                values: new()
+                {
+                    new()
+                    {
+                        { "id", new(ColumnType.Id, objectId) },
+                        { "name", new(ColumnType.String, "original value") },
+                        { "year", new(ColumnType.Integer64, 2000 + i) },
+                        { "enabled", new(ColumnType.Bool, false) },
+                    }
+                }
+            );
+
+            await executor.Insert(insertTicket);
+            rows.Add((tableName, objectId));
+        }
+
+        await database.Transactions.CommitAsync(txnState);
+
+        return (dbname, database, executor, rows);
+    }
+
+    private static async Task DoUpdateInOwnTransaction(
+        string dbname,
+        DatabaseDescriptor database,
+        CommandExecutor executor,
+        string tableName,
+        string objectId)
+    {
+        KvTransaction txnState = await database.Transactions.BeginAsync().ConfigureAwait(false);
+
+        UpdateTicket ticket = new(
+            txnState: txnState,
+            databaseName: dbname,
+            tableName: tableName,
+            plainValues: new()
+            {
+                { "name", new(ColumnType.String, "updated value") }
+            },
+            exprValues: null,
+            where: null,
+            filters: new()
+            {
+                new("id", "=", new(ColumnType.Id, objectId))
+            },
+            parameters: null
+        );
+
+        UpdateResult execResult = await executor.Update(ticket).ConfigureAwait(false);
+        Assert.AreEqual(1, execResult.UpdatedRows);
+
+        await database.Transactions.CommitAsync(txnState).ConfigureAwait(false);
+    }
+
+    private static async Task AssertAllRowsUpdated(
+        string dbname,
+        DatabaseDescriptor database,
+        CommandExecutor executor,
+        KvTransaction txnState)
+    {
         QueryTicket queryTicket = new(
             txnState: txnState,
             databaseName: dbname,
@@ -463,7 +587,7 @@ public sealed class TestRowUpdater : BaseTest
             parameters: null
         );
         
-        (DatabaseDescriptor _, cursor) = await executor.Query(queryTicket);
+        (_, cursor) = await executor.Query(queryTicket);
 
         result = await cursor.ToListAsync();
         Assert.AreEqual(25, result.Count);
@@ -485,7 +609,7 @@ public sealed class TestRowUpdater : BaseTest
             parameters: null
         );
 
-        (DatabaseDescriptor _, cursor) = await executor.Query(queryTicket);
+        (_, cursor) = await executor.Query(queryTicket);
 
         result = await cursor.ToListAsync();
         Assert.IsEmpty(result);

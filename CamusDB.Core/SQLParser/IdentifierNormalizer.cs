@@ -28,5 +28,6 @@ internal static class IdentifierNormalizer
         Normalize(node.extendedTwo);
         Normalize(node.extendedThree);
         Normalize(node.extendedFour);
+        Normalize(node.extendedFive);
     }
 }

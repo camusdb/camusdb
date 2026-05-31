@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.Comparers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -14,68 +13,69 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 internal sealed class QuerySorter
 {
-    // @todo rewrite this method to support any level of sorting
-    internal async IAsyncEnumerable<QueryResultRow> SortResultset(QueryTicket ticket, IAsyncEnumerable<QueryResultRow> dataCursor)
+    internal async IAsyncEnumerable<QueryResultRow> SortResultset(
+        QueryTicket ticket,
+        IAsyncEnumerable<QueryResultRow> dataCursor)
     {
         if (ticket.OrderBy is null || ticket.OrderBy.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal sort context");
 
-        if (ticket.OrderBy.Count > 2)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "High number of order clauses is not supported");
+        List<QueryResultRow> rows = new();
+        await foreach (QueryResultRow row in dataCursor.ConfigureAwait(false))
+            rows.Add(row);
 
-        string firstSortColumn = ticket.OrderBy[0].ColumnName;
-        string secondSortColumn = ticket.OrderBy.Count > 1 ? ticket.OrderBy[1].ColumnName : "id"; // @todo many tables won't have an id column
+        ValidateSortKeys(ticket.OrderBy, rows);
+        rows.Sort(new QueryResultRowOrderComparer(ticket.OrderBy));
 
-        SortedDictionary<ColumnValue, SortedDictionary<ColumnValue, List<QueryResultRow>>> sortedRows;
+        foreach (QueryResultRow row in rows)
+            yield return row;
+    }
 
-        if (ticket.OrderBy[0].Type == OrderType.Ascending)
-            sortedRows = new();
-        else
-            sortedRows = new(new DescendingComparer<ColumnValue>());
-
-        await foreach (QueryResultRow resultRow in dataCursor)
+    private static void ValidateSortKeys(IReadOnlyList<QueryOrderBy> orderBy, IReadOnlyList<QueryResultRow> rows)
+    {
+        foreach (QueryResultRow row in rows)
         {
-            Dictionary<string, ColumnValue> row = resultRow.Row;
+            foreach (QueryOrderBy clause in orderBy)
+                _ = GetSortValue(row, clause.ColumnName);
+        }
+    }
 
-            if (!row.TryGetValue(firstSortColumn, out ColumnValue? firstSortColumnValue))
-                continue;
-
-            if (!row.TryGetValue(secondSortColumn, out ColumnValue? secondSortColumnValue))
-                continue;
-
-            if (sortedRows.TryGetValue(firstSortColumnValue, out SortedDictionary<ColumnValue, List<QueryResultRow>>? existingSortGroup))
-            {
-                if (existingSortGroup.TryGetValue(secondSortColumnValue, out List<QueryResultRow>? innerSortGroup))
-                    innerSortGroup.Add(resultRow);
-                else
-                    existingSortGroup.Add(secondSortColumnValue, new() { resultRow });
-            }
-            else
-            {
-                SortedDictionary<ColumnValue, List<QueryResultRow>> secondSortGroup;
-                
-                if (ticket.OrderBy.Count == 1 || ticket.OrderBy[1].Type == OrderType.Ascending)
-                    secondSortGroup = new()
-                    {
-                        { secondSortColumnValue, new() { resultRow } }
-                    };
-                else
-                    secondSortGroup = new(new DescendingComparer<ColumnValue>())
-                    {
-                        { secondSortColumnValue, new() { resultRow } }
-                    };
-
-                sortedRows.Add(firstSortColumnValue, secondSortGroup);
-            }
+    private static ColumnValue GetSortValue(QueryResultRow row, string columnName)
+    {
+        if (!row.Row.TryGetValue(columnName, out ColumnValue? value))
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Sort column '{columnName}' is missing from result row");
         }
 
-        foreach (KeyValuePair<ColumnValue, SortedDictionary<ColumnValue, List<QueryResultRow>>> sortedGroup in sortedRows)
+        return value;
+    }
+
+    private sealed class QueryResultRowOrderComparer : IComparer<QueryResultRow>
+    {
+        private readonly IReadOnlyList<QueryOrderBy> orderBy;
+
+        public QueryResultRowOrderComparer(IReadOnlyList<QueryOrderBy> orderBy)
         {
-            foreach (KeyValuePair<ColumnValue, List<QueryResultRow>> secondSortGroup in sortedGroup.Value)
+            this.orderBy = orderBy;
+        }
+
+        public int Compare(QueryResultRow left, QueryResultRow right)
+        {
+            foreach (QueryOrderBy clause in orderBy)
             {
-                foreach (QueryResultRow sortedRow in secondSortGroup.Value)
-                    yield return sortedRow;
+                ColumnValue leftValue = GetSortValue(left, clause.ColumnName);
+                ColumnValue rightValue = GetSortValue(right, clause.ColumnName);
+                int comparison = leftValue.CompareTo(rightValue);
+
+                if (comparison == 0)
+                    continue;
+
+                return clause.Type == OrderType.Ascending ? comparison : -comparison;
             }
+
+            return 0;
         }
     }
 }

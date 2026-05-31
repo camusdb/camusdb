@@ -23,7 +23,7 @@ using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-internal sealed class TestTableCreator : BaseTest
+internal sealed class TestTableCreator : SharedNodeBaseTest
 {    
     private async Task<(string, DatabaseDescriptor, CommandExecutor, CatalogsManager)> SetupDatabase()
     {

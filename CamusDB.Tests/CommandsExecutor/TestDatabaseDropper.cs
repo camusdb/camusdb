@@ -15,7 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-internal sealed class TestDatabaseDropper : BaseTest
+internal sealed class TestDatabaseDropper : SharedNodeBaseTest
 {
     [Test]
     [NonParallelizable]

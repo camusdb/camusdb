@@ -9,6 +9,7 @@
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.Util.ObjectIds;
 using System.Text.RegularExpressions;
 
@@ -38,7 +39,11 @@ internal abstract class SQLExecutorBaseCreator
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid order by clause");
     }
 
-    public static ColumnValue EvalExpr(NodeAst expr, Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters)
+    public static ColumnValue EvalExpr(
+        NodeAst expr,
+        Dictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver = null)
     {
         switch (expr.nodeType)
         {
@@ -73,12 +78,20 @@ internal abstract class SQLExecutorBaseCreator
             case NodeType.Null:
                 return new ColumnValue(ColumnType.Null, 0);
 
+            case NodeType.ObjectIdLiteral:
+                if (string.IsNullOrEmpty(expr.yytext))
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid ObjectId literal");
+
+                return new ColumnValue(ColumnType.Id, expr.yytext);
+
             case NodeType.Identifier:
                 {
-                    if (row.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
+                    string lookupKey = rowNameResolver?.ResolveRowLookupKey(expr.yytext!) ?? expr.yytext!;
+
+                    if (row.TryGetValue(lookupKey, out ColumnValue? columnValue))
                         return columnValue;
 
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown column: " + expr.yytext!);
+                    throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, "Unknown column: " + expr.yytext!);
                 }
 
             case NodeType.Placeholder:
@@ -94,56 +107,56 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprEquals:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) == 0);
                 }
 
             case NodeType.ExprNotEquals:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) != 0);
                 }
 
             case NodeType.ExprLessThan:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) < 0);
                 }
 
             case NodeType.ExprGreaterThan:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) > 0);
                 }
 
             case NodeType.ExprLessEqualsThan:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) <= 0);
                 }
 
             case NodeType.ExprGreaterEqualsThan:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) >= 0);
                 }
 
             case NodeType.ExprOr:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator OR for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -153,8 +166,8 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprAnd:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator AND for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -164,8 +177,8 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprAdd:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator + for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -175,8 +188,8 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprSub:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator - for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -186,8 +199,8 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprMult:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator * for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -208,7 +221,7 @@ internal abstract class SQLExecutorBaseCreator
                         case "str_id":
                             List<ColumnValue> argumentList = [];
 
-                            GetArgumentList(expr.rightAst!, row, parameters, argumentList);
+                            GetArgumentList(expr.rightAst!, row, parameters, argumentList, rowNameResolver);
 
                             return new ColumnValue(ColumnType.Id, argumentList.FirstOrDefault()!.StrValue ?? "");
 
@@ -222,22 +235,22 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprIsNull:
                 {
-                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
 
                     return new ColumnValue(ColumnType.Bool, columnValue.Type == ColumnType.Null);
                 }
 
             case NodeType.ExprIsNotNull:
                 {
-                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters);
+                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
 
                     return new ColumnValue(ColumnType.Bool, columnValue.Type != ColumnType.Null);
                 }
 
             case NodeType.ExprLike:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
                     
                     if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator LIKE for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -247,8 +260,8 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprILike:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
                     if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator ILIKE for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -262,24 +275,24 @@ internal abstract class SQLExecutorBaseCreator
     }
 
     private static void GetArgumentList(
-        NodeAst argumentAst, 
-        Dictionary<string, ColumnValue> row, 
-        Dictionary<string, ColumnValue>? parameters, 
-        List<ColumnValue> argumentList
-    )
-    {        
+        NodeAst argumentAst,
+        Dictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        List<ColumnValue> argumentList,
+        QueryRowNameResolver? rowNameResolver)
+    {
         if (argumentAst.nodeType == NodeType.ExprArgumentList)
         {
             if (argumentAst.leftAst != null)
-                GetArgumentList(argumentAst.leftAst, row, parameters, argumentList);
+                GetArgumentList(argumentAst.leftAst, row, parameters, argumentList, rowNameResolver);
 
             if (argumentAst.rightAst != null)
-                GetArgumentList(argumentAst.rightAst, row, parameters, argumentList);
+                GetArgumentList(argumentAst.rightAst, row, parameters, argumentList, rowNameResolver);
 
             return;
         }
 
-        argumentList.Add(EvalExpr(argumentAst, row, parameters));
+        argumentList.Add(EvalExpr(argumentAst, row, parameters, rowNameResolver));
     }
 
     private static bool Like(string text, string pattern)

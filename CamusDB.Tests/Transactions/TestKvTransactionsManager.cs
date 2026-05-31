@@ -259,4 +259,26 @@ public sealed class TestKvTransactionsManager
         byte[]? got = await store.GetRow(Kommander.Time.HLCTimestamp.Zero, rowId);
         Assert.IsNull(got, "Row written in rolled-back transaction must not be visible");
     }
+
+    [Test]
+    public async Task RollbackAllActiveAsync_RollsBackEveryOpenTransaction()
+    {
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("m13");
+        await using EmbeddedKahuna __ = node;
+
+        TableSchema schema = SingleCol(ColumnType.Integer64);
+        CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(100, 0, 0);
+        byte[] data = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 9L) }, rowId);
+
+        KvTransaction tx1 = await mgr.BeginAsync();
+        KvTransaction tx2 = await mgr.BeginAsync();
+        await store.InsertRow(tx1, rowId, data);
+
+        await mgr.RollbackAllActiveAsync();
+
+        Assert.AreEqual(KvTransactionStatus.RolledBack, tx1.Status);
+        Assert.AreEqual(KvTransactionStatus.RolledBack, tx2.Status);
+        byte[]? got = await store.GetRow(Kommander.Time.HLCTimestamp.Zero, rowId);
+        Assert.IsNull(got, "Rows from rolled-back transactions must not be visible");
+    }
 }

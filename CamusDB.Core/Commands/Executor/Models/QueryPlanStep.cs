@@ -19,6 +19,9 @@ public record struct QueryPlanStep
     /// <summary>Single equality value used by <see cref="QueryPlanStepType.QueryFromIndex"/>.</summary>
     public ColumnValue? ColumnValue { get; } = null;
 
+    /// <summary>Composite lookup key used by <see cref="QueryPlanStepType.QueryFromIndex"/>.</summary>
+    public CompositeColumnValue? LookupKey { get; } = null;
+
     /// <summary>Inclusive lower bound for <see cref="QueryPlanStepType.RangeScanFromIndex"/>. Null means unbounded.</summary>
     public CompositeColumnValue? FromBound { get; } = null;
 
@@ -36,6 +39,16 @@ public record struct QueryPlanStep
         Type = type;
         Index = index;
         ColumnValue = columnValue;
+        if (columnValue is not null)
+            LookupKey = new CompositeColumnValue(new[] { columnValue });
+    }
+
+    public QueryPlanStep(QueryPlanStepType type, TableIndexSchema index, CompositeColumnValue lookupKey)
+    {
+        Type = type;
+        Index = index;
+        LookupKey = lookupKey;
+        ColumnValue = lookupKey.Values.Length == 1 ? lookupKey.Values[0] : null;
     }
 
     public QueryPlanStep(

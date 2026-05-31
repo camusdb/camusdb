@@ -24,7 +24,7 @@ using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-public class TestExecuteSqlSelect : BaseTest
+public class TestExecuteSqlSelect : SharedNodeBaseTest
 {
     private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()
     {
@@ -106,6 +106,93 @@ public class TestExecuteSqlSelect : BaseTest
         await database.Transactions.CommitAsync(txnState);
 
         return (dbname, database, executor, objectsId);
+    }
+
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId)> SetupBasicTableWithCompositeIndex()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTableWithYearIndex();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        AlterIndexTicket alterIndexTicket = new(
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "year_enabled_idx",
+            columns: new ColumnIndexInfo[]
+            {
+                new("year", OrderType.Ascending),
+                new("enabled", OrderType.Ascending)
+            },
+            operation: AlterIndexOperation.AddUniqueIndex
+        );
+
+        await executor.AlterIndex(alterIndexTicket);
+        await database.Transactions.CommitAsync(txnState);
+
+        return (dbname, database, executor, objectsId);
+    }
+
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupNamedRobotsWithNameIndex()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        CreateTableTicket tableTicket = new(
+            databaseName: dbname,
+            tableName: "robots",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false
+        );
+
+        await executor.CreateTable(tableTicket);
+
+        string[] names = ["alice", "bob", "boba", "carl"];
+
+        foreach (string name in names)
+        {
+            InsertTicket ticket = new(
+                txnState: txnState,
+                databaseName: dbname,
+                tableName: "robots",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "name", new ColumnValue(ColumnType.String, name) },
+                        { "year", new ColumnValue(ColumnType.Integer64, 2000) },
+                        { "enabled", new ColumnValue(ColumnType.Bool, true) },
+                    }
+                }
+            );
+
+            await executor.Insert(ticket);
+        }
+
+        await database.Transactions.CommitAsync(txnState);
+
+        AlterIndexTicket alterIndexTicket = new(
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "name_idx",
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
+            operation: AlterIndexOperation.AddIndex
+        );
+
+        await executor.AlterIndex(alterIndexTicket);
+
+        return (dbname, database, executor);
     }
 
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId)> SetupBasicTableWithNulls()
@@ -859,6 +946,49 @@ public class TestExecuteSqlSelect : BaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectOrderByThreeColumns()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT enabled, year, name FROM robots ORDER BY enabled ASC, year DESC, name ASC",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(25, result.Count);
+
+        for (int i = 1; i < result.Count; i++)
+        {
+            QueryResultRow previous = result[i - 1];
+            QueryResultRow current = result[i];
+
+            int enabledCompare = previous.Row["enabled"].CompareTo(current.Row["enabled"]);
+            Assert.LessOrEqual(enabledCompare, 0);
+
+            if (enabledCompare != 0)
+                continue;
+
+            int yearCompare = previous.Row["year"].CompareTo(current.Row["year"]);
+            Assert.GreaterOrEqual(yearCompare, 0);
+
+            if (yearCompare != 0)
+                continue;
+
+            Assert.LessOrEqual(
+                string.CompareOrdinal(previous.Row["name"].StrValue, current.Row["name"].StrValue),
+                0);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectOrderBy5()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
@@ -1524,6 +1654,140 @@ public class TestExecuteSqlSelect : BaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectSecondaryIndexRangeScan()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTableWithYearIndex();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT year FROM robots WHERE year >= 2001 AND year < 2005 ORDER BY year",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(4, result.Count);
+        Assert.AreEqual(2001, result[0].Row["year"].LongValue);
+        Assert.AreEqual(2002, result[1].Row["year"].LongValue);
+        Assert.AreEqual(2003, result[2].Row["year"].LongValue);
+        Assert.AreEqual(2004, result[3].Row["year"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectCompositeIndexEqualityScan()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTableWithCompositeIndex();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT id, year, enabled FROM robots WHERE year = 2000 AND enabled = false",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        ExecuteSQLTicket fullScanTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT id, year, enabled FROM robots",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> fullScanCursor) = await executor.ExecuteSQLQuery(fullScanTicket);
+        List<QueryResultRow> expected = await fullScanCursor
+            .Where(row => row.Row["year"].LongValue == 2000 && !row.Row["enabled"].BoolValue)
+            .ToListAsync();
+
+        Assert.AreEqual(expected.Count, result.Count);
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(expected[0].Row["id"].StrValue, result[0].Row["id"].StrValue);
+        Assert.AreEqual(2000, result[0].Row["year"].LongValue);
+        Assert.IsFalse(result[0].Row["enabled"].BoolValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectCompositeIndexPrefixRangeDoesNotLeakLaterPrefixValues()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTableWithCompositeIndex();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT year, enabled FROM robots WHERE year = 2023 AND enabled > false",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        ExecuteSQLTicket fullScanTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT year, enabled FROM robots",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> fullScanCursor) = await executor.ExecuteSQLQuery(fullScanTicket);
+        List<QueryResultRow> expected = await fullScanCursor
+            .Where(row => row.Row["year"].LongValue == 2023 && row.Row["enabled"].BoolValue)
+            .ToListAsync();
+
+        Assert.AreEqual(expected.Count, result.Count);
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(2023, result[0].Row["year"].LongValue);
+        Assert.IsTrue(result[0].Row["enabled"].BoolValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectNonUniqueStringIndexEqualityDoesNotScanSuffixKeys()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupNamedRobotsWithNameIndex();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT name FROM robots WHERE name = 'bob'",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        ExecuteSQLTicket fullScanTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT name FROM robots",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> fullScanCursor) = await executor.ExecuteSQLQuery(fullScanTicket);
+        List<QueryResultRow> expected = await fullScanCursor
+            .Where(row => row.Row["name"].StrValue == "bob")
+            .ToListAsync();
+
+        Assert.AreEqual(expected.Count, result.Count);
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual("bob", result[0].Row["name"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectAggregateCountWithAlias()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
@@ -1658,4 +1922,512 @@ public class TestExecuteSqlSelect : BaseTest
         List<QueryResultRow> result = await cursor.ToListAsync();
         Assert.IsEmpty(result);
     }
+
+    #region QP0.2 pending query feature acceptance fixtures
+
+    private sealed record AppUsersPostsFixture(
+        string DbName,
+        DatabaseDescriptor Database,
+        CommandExecutor Executor,
+        string UserAId,
+        string UserBId,
+        string UserCId,
+        string UserDId);
+
+    private async Task<AppUsersPostsFixture> SetupAppUsersAndPosts(bool indexPostsUserId = false)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        CreateTableTicket usersTicket = new(
+            databaseName: dbname,
+            tableName: "app_users",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("email", ColumnType.String, notNull: true),
+                new("role", ColumnType.String, notNull: true)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false
+        );
+
+        await executor.CreateTable(usersTicket);
+
+        CreateTableTicket postsTicket = new(
+            databaseName: dbname,
+            tableName: "posts",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("user_id", ColumnType.Id),
+                new("title", ColumnType.String, notNull: true),
+                new("published", ColumnType.Bool)
+            },
+            constraints: indexPostsUserId
+                ?
+                [
+                    new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                    new(ConstraintType.IndexMulti, "posts_user_id_idx", new ColumnIndexInfo[] { new("user_id", OrderType.Ascending) }),
+                ]
+                :
+                [
+                    new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                ],
+            ifNotExists: false
+        );
+
+        await executor.CreateTable(postsTicket);
+
+        string userAId = ObjectIdGenerator.Generate().ToString();
+        string userBId = ObjectIdGenerator.Generate().ToString();
+        string userCId = ObjectIdGenerator.Generate().ToString();
+        string userDId = ObjectIdGenerator.Generate().ToString();
+
+        await executor.Insert(new InsertTicket(
+            txnState,
+            dbname,
+            "app_users",
+            values: new()
+            {
+                new()
+                {
+                    { "id", new(ColumnType.Id, userAId) },
+                    { "email", new(ColumnType.String, "a@example.com") },
+                    { "role", new(ColumnType.String, "admin") },
+                },
+                new()
+                {
+                    { "id", new(ColumnType.Id, userBId) },
+                    { "email", new(ColumnType.String, "b@example.com") },
+                    { "role", new(ColumnType.String, "admin") },
+                },
+                new()
+                {
+                    { "id", new(ColumnType.Id, userCId) },
+                    { "email", new(ColumnType.String, "c@example.com") },
+                    { "role", new(ColumnType.String, "member") },
+                },
+                new()
+                {
+                    { "id", new(ColumnType.Id, userDId) },
+                    { "email", new(ColumnType.String, "d@example.com") },
+                    { "role", new(ColumnType.String, "member") },
+                },
+            }));
+
+        await executor.Insert(new InsertTicket(
+            txnState,
+            dbname,
+            "posts",
+            values: new()
+            {
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "user_id", new(ColumnType.Id, userAId) },
+                    { "title", new(ColumnType.String, "Post A") },
+                    { "published", new(ColumnType.Bool, true) },
+                },
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "user_id", new(ColumnType.Id, userAId) },
+                    { "title", new(ColumnType.String, "Draft") },
+                    { "published", new(ColumnType.Bool, false) },
+                },
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "user_id", new(ColumnType.Id, userBId) },
+                    { "title", new(ColumnType.String, "Post B") },
+                    { "published", new(ColumnType.Bool, true) },
+                },
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "user_id", new(ColumnType.Id, userCId) },
+                    { "title", new(ColumnType.String, "Post C") },
+                    { "published", new(ColumnType.Bool, false) },
+                },
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "user_id", new(ColumnType.Id, userDId) },
+                    { "title", new(ColumnType.String, "Post D") },
+                    { "published", new(ColumnType.Bool, true) },
+                },
+            }));
+
+        await database.Transactions.CommitAsync(txnState);
+
+        return new AppUsersPostsFixture(dbname, database, executor, userAId, userBId, userCId, userDId);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectGroupByOrderByGroupColumnNotInSelect()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT COUNT(*) AS cnt FROM app_users GROUP BY role ORDER BY role",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+
+        foreach (QueryResultRow row in result)
+        {
+            Assert.AreEqual(1, row.Row.Count);
+            Assert.IsTrue(row.Row.ContainsKey("cnt"));
+            Assert.IsFalse(row.Row.ContainsKey("role"));
+            Assert.AreEqual(2, row.Row["cnt"].LongValue);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectGroupByOrderByAggregateAlias()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT role, COUNT(*) AS cnt FROM app_users GROUP BY role ORDER BY cnt, role",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual("admin", result[0].Row["role"].StrValue);
+        Assert.AreEqual(2, result[0].Row["cnt"].LongValue);
+        Assert.AreEqual("member", result[1].Row["role"].StrValue);
+        Assert.AreEqual(2, result[1].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectGroupByOrderByAggregateExpression()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT role, COUNT(*) AS cnt FROM app_users GROUP BY role ORDER BY COUNT(*), role",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual("admin", result[0].Row["role"].StrValue);
+        Assert.AreEqual("member", result[1].Row["role"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectGroupByRoleOnly()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT role FROM app_users GROUP BY role ORDER BY role",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual("admin", result[0].Row["role"].StrValue);
+        Assert.AreEqual("member", result[1].Row["role"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectGroupByRoleCount()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT role, COUNT(*) AS cnt FROM app_users GROUP BY role ORDER BY role",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+
+        Assert.AreEqual("admin", result[0].Row["role"].StrValue);
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["cnt"].Type);
+        Assert.AreEqual(2, result[0].Row["cnt"].LongValue);
+
+        Assert.AreEqual("member", result[1].Row["role"].StrValue);
+        Assert.AreEqual(ColumnType.Integer64, result[1].Row["cnt"].Type);
+        Assert.AreEqual(2, result[1].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectGroupByEnabledSumAvg()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT enabled, SUM(year) AS total, AVG(year) AS average FROM robots GROUP BY enabled ORDER BY enabled",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+
+        Assert.AreEqual(false, result[0].Row["enabled"].BoolValue);
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["total"].Type);
+        Assert.AreEqual(ColumnType.Float64, result[0].Row["average"].Type);
+        Assert.Greater(result[0].Row["total"].LongValue, 0);
+        Assert.Greater(result[0].Row["average"].FloatValue, 0);
+
+        Assert.AreEqual(true, result[1].Row["enabled"].BoolValue);
+        Assert.Greater(result[1].Row["total"].LongValue, 0);
+        Assert.Greater(result[1].Row["average"].FloatValue, 0);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectGroupByCountNullHandling()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTableWithNulls();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT enabled, COUNT(*) AS all_rows, COUNT(year) AS non_null_years FROM robots GROUP BY enabled ORDER BY enabled",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+
+        foreach (QueryResultRow row in result)
+        {
+            Assert.Greater(row.Row["all_rows"].LongValue, 0);
+            Assert.AreEqual(0, row.Row["non_null_years"].LongValue);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectInnerJoinPending()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id ORDER BY u.email, p.title",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(5, result.Count);
+
+        Assert.AreEqual("a@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual("Draft", result[0].Row["title"].StrValue);
+
+        Assert.AreEqual("a@example.com", result[1].Row["email"].StrValue);
+        Assert.AreEqual("Post A", result[1].Row["title"].StrValue);
+
+        Assert.AreEqual("b@example.com", result[2].Row["email"].StrValue);
+        Assert.AreEqual("Post B", result[2].Row["title"].StrValue);
+
+        Assert.AreEqual("c@example.com", result[3].Row["email"].StrValue);
+        Assert.AreEqual("Post C", result[3].Row["title"].StrValue);
+
+        Assert.AreEqual("d@example.com", result[4].Row["email"].StrValue);
+        Assert.AreEqual("Post D", result[4].Row["title"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectInnerJoinWithWherePushdown()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id WHERE u.role = \"admin\" AND p.published = true ORDER BY u.email, p.title",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual("a@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual("Post A", result[0].Row["title"].StrValue);
+        Assert.AreEqual("b@example.com", result[1].Row["email"].StrValue);
+        Assert.AreEqual("Post B", result[1].Row["title"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectInnerJoinWithMixedOnAndWherePredicates()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id WHERE u.role = \"member\" ORDER BY u.email, p.title",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual("c@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual("Post C", result[0].Row["title"].StrValue);
+        Assert.AreEqual("d@example.com", result[1].Row["email"].StrValue);
+        Assert.AreEqual("Post D", result[1].Row["title"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectInnerJoinIndexedMatchesNestedLoop()
+    {
+        const string sql =
+            "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id ORDER BY u.email, p.title";
+
+        AppUsersPostsFixture nestedLoopFixture = await SetupAppUsersAndPosts(indexPostsUserId: false);
+        List<QueryResultRow> nestedLoopRows = await ExecuteJoinSelect(nestedLoopFixture, sql);
+
+        AppUsersPostsFixture indexedFixture = await SetupAppUsersAndPosts(indexPostsUserId: true);
+        List<QueryResultRow> indexedRows = await ExecuteJoinSelect(indexedFixture, sql);
+
+        Assert.AreEqual(5, nestedLoopRows.Count);
+        Assert.AreEqual(5, indexedRows.Count);
+
+        for (int i = 0; i < nestedLoopRows.Count; i++)
+        {
+            Assert.AreEqual(nestedLoopRows[i].Row["email"].StrValue, indexedRows[i].Row["email"].StrValue);
+            Assert.AreEqual(nestedLoopRows[i].Row["title"].StrValue, indexedRows[i].Row["title"].StrValue);
+        }
+    }
+
+    private static async Task<List<QueryResultRow>> ExecuteJoinSelect(AppUsersPostsFixture fixture, string sql)
+    {
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: sql,
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        return await cursor.ToListAsync();
+    }
+
+    [Test]
+    [Ignore("Pending QP5 - IN subquery")]
+    [NonParallelizable]
+    public async Task TestExecuteSelectInSubqueryPending()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT email FROM app_users WHERE id IN (SELECT user_id FROM posts WHERE published = true) ORDER BY email",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(3, result.Count);
+        Assert.AreEqual("a@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual("b@example.com", result[1].Row["email"].StrValue);
+        Assert.AreEqual("d@example.com", result[2].Row["email"].StrValue);
+    }
+
+    [Test]
+    [Ignore("Pending QP5 - EXISTS subquery")]
+    [NonParallelizable]
+    public async Task TestExecuteSelectExistsSubqueryPending()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT email FROM app_users WHERE EXISTS (SELECT * FROM posts WHERE posts.user_id = app_users.id) ORDER BY email",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(4, result.Count);
+        Assert.AreEqual("a@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual("b@example.com", result[1].Row["email"].StrValue);
+        Assert.AreEqual("c@example.com", result[2].Row["email"].StrValue);
+        Assert.AreEqual("d@example.com", result[3].Row["email"].StrValue);
+    }
+
+    #endregion
 }

@@ -11,6 +11,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -45,6 +46,9 @@ internal sealed class TableOpener
                                                    );
         return await openTableLazy;
     }
+
+    public ValueTask<TableDescriptor> Open(DatabaseDescriptor database, TableSource tableSource) =>
+        Open(database, tableSource.TableName);
 
     private Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
     {
