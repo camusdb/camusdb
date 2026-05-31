@@ -137,6 +137,34 @@ public sealed class TestJoinQueryPlanner
         Assert.IsNull(plan.ExecutionFilter);
     }
 
+    [Test]
+    public async Task Plan_PushesRequiredColumnsPerAlias()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
+            "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id WHERE u.role = \"admin\"");
+
+        QueryPlan plan = new JoinQueryPlanner().GetPlan(database, bound, ticket);
+
+        TableScanNode usersScan = FindScanForAlias(plan.Root, "u");
+
+        CollectionAssert.AreEquivalent(new[] { "email", "role", "id" }, plan.RequiredColumnsByAlias!["u"]);
+        CollectionAssert.AreEquivalent(new[] { "title", "user_id" }, plan.RequiredColumnsByAlias!["p"]);
+        CollectionAssert.AreEquivalent(new[] { "email", "role", "id" }, usersScan.RequiredColumns!);
+    }
+
+    [Test]
+    public async Task Plan_DerivedTableJoinAnalyzesRequiredColumnsWithoutDerivedAliasEntry()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
+            "SELECT u.email, d.post_count FROM (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d "
+            + "JOIN app_users u ON u.id = d.user_id");
+
+        QueryPlan plan = new JoinQueryPlanner().GetPlan(database, bound, ticket);
+
+        Assert.IsFalse(plan.RequiredColumnsByAlias!.ContainsKey("d"));
+        CollectionAssert.AreEquivalent(new[] { "email", "id" }, plan.RequiredColumnsByAlias["u"]);
+    }
+
     private static async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket)> BindJoinQuery(
         string sql,
         bool indexPostsUserId = false)

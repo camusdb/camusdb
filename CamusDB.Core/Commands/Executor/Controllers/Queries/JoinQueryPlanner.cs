@@ -46,6 +46,7 @@ internal sealed class JoinQueryPlanner
         };
 
         QueryPlanStepAdapter.PopulateLinearSteps(plan);
+        ProjectionPushdownPlanner.Apply(plan);
 
         return plan;
     }

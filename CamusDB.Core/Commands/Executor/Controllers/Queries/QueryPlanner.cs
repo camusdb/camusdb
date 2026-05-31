@@ -85,6 +85,7 @@ public sealed class QueryPlanner
 
         plan.Root = root;
         QueryPlanStepAdapter.PopulateLinearSteps(plan);
+        ProjectionPushdownPlanner.Apply(plan);
 
         return plan;
     }

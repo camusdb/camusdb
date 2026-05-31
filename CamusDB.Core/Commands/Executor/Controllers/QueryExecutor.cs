@@ -206,7 +206,11 @@ internal sealed class QueryExecutor
             yield break;
 
         ObjectIdValue resolvedRowId = rowId.Value;
-        Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, resolvedRowId, data);
+        Dictionary<string, ColumnValue> row = RowEncoder.Decode(
+            table.Schema,
+            resolvedRowId,
+            data,
+            plan.ScanRequiredColumns);
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(resolvedRowId, row);
@@ -248,7 +252,11 @@ internal sealed class QueryExecutor
             if (data is null || data.Length == 0)
                 continue;
 
-            Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
+            Dictionary<string, ColumnValue> row = RowEncoder.Decode(
+                table.Schema,
+                rowId,
+                data,
+                plan.ScanRequiredColumns);
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);

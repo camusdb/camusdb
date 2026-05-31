@@ -48,6 +48,12 @@ public sealed class QueryPlan
     internal Dictionary<BoundDerivedTableSource, List<Dictionary<string, ColumnValue>>> DerivedMaterializations { get; } =
         new();
 
+    /// <summary>Single-table scan column subset (QP6.1). Null means decode all columns.</summary>
+    public IReadOnlySet<string>? ScanRequiredColumns { get; internal set; }
+
+    /// <summary>Per-alias scan column subsets for join plans (QP6.1).</summary>
+    internal Dictionary<string, IReadOnlySet<string>>? RequiredColumnsByAlias { get; set; }
+
     public QueryPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
 	{
 		Database = database;

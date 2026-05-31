@@ -15,4 +15,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 public abstract class PhysicalPlanNode
 {
     public PhysicalPlanNode? Input { get; init; }
+
+    /// <summary>Columns that must be present in rows produced by this subtree (QP6.1). Null means all table columns.</summary>
+    public IReadOnlySet<string>? RequiredColumns { get; set; }
 }

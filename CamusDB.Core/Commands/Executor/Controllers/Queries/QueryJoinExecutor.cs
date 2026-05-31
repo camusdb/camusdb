@@ -92,7 +92,8 @@ internal sealed class QueryJoinExecutor
                 await foreach (QueryResultRow row in ScanBoundTable(
                     scanNode.BoundSource,
                     scanNode.ExecutionFilter,
-                    plan).ConfigureAwait(false))
+                    plan,
+                    scanNode.RequiredColumns).ConfigureAwait(false))
                     yield return row;
 
                 yield break;
@@ -267,7 +268,11 @@ internal sealed class QueryJoinExecutor
         if (data is null || data.Length == 0)
             return null;
 
-        Dictionary<string, ColumnValue> row = RowEncoder.Decode(source.Table.Schema, rowId, data);
+        Dictionary<string, ColumnValue> row = RowEncoder.Decode(
+            source.Table.Schema,
+            rowId,
+            data,
+            GetRequiredColumnsForAlias(plan, source.Alias));
 
         if (executionFilter is not null)
         {
@@ -328,17 +333,23 @@ internal sealed class QueryJoinExecutor
     private async IAsyncEnumerable<QueryResultRow> ScanBoundTable(
         BoundTableSource source,
         NodeAst? executionFilter,
-        QueryPlan plan)
+        QueryPlan plan,
+        IReadOnlySet<string>? requiredColumns = null)
     {
         TableDescriptor table = source.Table;
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
+        IReadOnlySet<string>? required = requiredColumns ?? GetRequiredColumnsForAlias(plan, source.Alias);
 
         await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(txId).ConfigureAwait(false))
         {
             if (data.Length == 0)
                 continue;
 
-            Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
+            Dictionary<string, ColumnValue> row = RowEncoder.Decode(
+                table.Schema,
+                rowId,
+                data,
+                required);
 
             if (executionFilter is not null)
             {
@@ -379,6 +390,14 @@ internal sealed class QueryJoinExecutor
             if (await queryFilterer.MeetWhereAsync(where, row.Row, plan.Ticket, plan.Database).ConfigureAwait(false))
                 yield return row;
         }
+    }
+
+    private static IReadOnlySet<string>? GetRequiredColumnsForAlias(QueryPlan plan, string alias)
+    {
+        if (plan.RequiredColumnsByAlias?.TryGetValue(alias, out IReadOnlySet<string>? required) == true)
+            return required;
+
+        return plan.ScanRequiredColumns;
     }
 
     private static ColumnType[] GetIndexColumnTypes(TableDescriptor table, TableIndexSchema index)

@@ -246,4 +246,29 @@ public sealed class TestRowEncoder
         Assert.AreEqual(false,  decoded["c"].BoolValue);
         Assert.AreEqual(3.14,   decoded["d"].FloatValue);
     }
+
+    [Test]
+    public void PartialDecode_ReturnsOnlyRequiredColumns()
+    {
+        TableSchema schema = MakeSchema(0,
+            Col("a", ColumnType.Integer64),
+            Col("b", ColumnType.String),
+            Col("c", ColumnType.Bool));
+        ObjectIdValue rowId = RowId();
+        Dictionary<string, ColumnValue> row = new()
+        {
+            ["a"] = new(ColumnType.Integer64, 1L),
+            ["b"] = new(ColumnType.String, "x"),
+            ["c"] = new(ColumnType.Bool, true),
+        };
+
+        byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+        HashSet<string> required = ["a", "c"];
+        Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes, required);
+
+        Assert.AreEqual(2, decoded.Count);
+        Assert.AreEqual(1L, decoded["a"].LongValue);
+        Assert.IsTrue(decoded["c"].BoolValue);
+        Assert.IsFalse(decoded.ContainsKey("b"));
+    }
 }

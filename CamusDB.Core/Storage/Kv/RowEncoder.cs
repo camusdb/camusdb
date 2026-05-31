@@ -101,7 +101,11 @@ public static class RowEncoder
         return buffer;
     }
 
-    public static Dictionary<string, ColumnValue> Decode(TableSchema schema, ObjectIdValue rowId, byte[] data)
+    public static Dictionary<string, ColumnValue> Decode(
+        TableSchema schema,
+        ObjectIdValue rowId,
+        byte[] data,
+        IReadOnlySet<string>? requiredColumns = null)
     {
         ArgumentNullException.ThrowIfNull(schema);
         ArgumentNullException.ThrowIfNull(data);
@@ -115,94 +119,154 @@ public static class RowEncoder
         Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
 
         List<TableColumnSchema> columns = schema.SchemaHistory![schemaVersion].Columns!;
+        bool decodeAll = requiredColumns is null;
 
-        Dictionary<string, ColumnValue> result = new(columns.Count);
+        Dictionary<string, ColumnValue> result = new(decodeAll ? columns.Count : requiredColumns!.Count);
 
         for (int i = 0; i < columns.Count; i++)
         {
             TableColumnSchema column = columns[i];
 
-            switch (column.Type)
-            {
-                case ColumnType.Id:
-                {
-                    int t = Serializator.ReadType(data, ref pointer);
-                    result.Add(column.Name, t switch
-                    {
-                        SerializatorTypes.TypeId =>
-                            new(ColumnType.Id, Serializator.ReadObjectId(data, ref pointer).ToString()),
-                        SerializatorTypes.TypeNull =>
-                            new(ColumnType.Null, ""),
-                        _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                    });
-                    break;
-                }
-
-                case ColumnType.Integer64:
-                {
-                    int t = Serializator.ReadType(data, ref pointer);
-                    result.Add(column.Name, t switch
-                    {
-                        SerializatorTypes.TypeInteger64 =>
-                            new(ColumnType.Integer64, Serializator.ReadInt64(data, ref pointer)),
-                        SerializatorTypes.TypeNull =>
-                            new(ColumnType.Null, 0L),
-                        _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                    });
-                    break;
-                }
-
-                case ColumnType.String:
-                {
-                    int t = Serializator.ReadType(data, ref pointer);
-                    result.Add(column.Name, t switch
-                    {
-                        SerializatorTypes.TypeString8 or
-                        SerializatorTypes.TypeString16 or
-                        SerializatorTypes.TypeString32 =>
-                            new(ColumnType.String, Serializator.ReadString(data, ref pointer)),
-                        SerializatorTypes.TypeNull =>
-                            new(ColumnType.Null, 0L),
-                        _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                    });
-                    break;
-                }
-
-                case ColumnType.Float64:
-                {
-                    int t = Serializator.ReadType(data, ref pointer);
-                    result.Add(column.Name, t switch
-                    {
-                        SerializatorTypes.TypeDouble =>
-                            new(ColumnType.Float64, Serializator.ReadDouble(data, ref pointer)),
-                        SerializatorTypes.TypeNull =>
-                            new(ColumnType.Null, 0L),
-                        _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                    });
-                    break;
-                }
-
-                case ColumnType.Bool:
-                {
-                    int t = Serializator.ReadType(data, ref pointer);
-                    result.Add(column.Name, t switch
-                    {
-                        // Bool value is in the low nibble of the same type byte (pointer-1 after ReadType)
-                        SerializatorTypes.TypeBool =>
-                            new(ColumnType.Bool, Serializator.ReadBool(data, ref pointer)),
-                        SerializatorTypes.TypeNull =>
-                            new(ColumnType.Null, 0L),
-                        _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                    });
-                    break;
-                }
-
-                default:
-                    throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + column.Type);
-            }
+            if (decodeAll || requiredColumns!.Contains(column.Name))
+                result.Add(column.Name, ReadColumnValue(column, data, ref pointer));
+            else
+                SkipColumnValue(column.Type, data, ref pointer);
         }
 
         return result;
+    }
+
+    private static ColumnValue ReadColumnValue(TableColumnSchema column, byte[] data, ref int pointer)
+    {
+        switch (column.Type)
+        {
+            case ColumnType.Id:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeId =>
+                        new(ColumnType.Id, Serializator.ReadObjectId(data, ref pointer).ToString()),
+                    SerializatorTypes.TypeNull =>
+                        new(ColumnType.Null, ""),
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Integer64:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeInteger64 =>
+                        new(ColumnType.Integer64, Serializator.ReadInt64(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        new(ColumnType.Null, 0L),
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.String:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeString8 or
+                    SerializatorTypes.TypeString16 or
+                    SerializatorTypes.TypeString32 =>
+                        new(ColumnType.String, Serializator.ReadString(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        new(ColumnType.Null, 0L),
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Float64:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeDouble =>
+                        new(ColumnType.Float64, Serializator.ReadDouble(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        new(ColumnType.Null, 0L),
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Bool:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeBool =>
+                        new(ColumnType.Bool, Serializator.ReadBool(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        new(ColumnType.Null, 0L),
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + column.Type);
+        }
+    }
+
+    private static void SkipColumnValue(ColumnType columnType, byte[] data, ref int pointer)
+    {
+        switch (columnType)
+        {
+            case ColumnType.Id:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeId)
+                    Serializator.ReadObjectId(data, ref pointer);
+                else if (t != SerializatorTypes.TypeNull)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
+            case ColumnType.Integer64:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeInteger64)
+                    Serializator.ReadInt64(data, ref pointer);
+                else if (t != SerializatorTypes.TypeNull)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
+            case ColumnType.String:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t is SerializatorTypes.TypeString8 or SerializatorTypes.TypeString16 or SerializatorTypes.TypeString32)
+                    Serializator.ReadString(data, ref pointer);
+                else if (t != SerializatorTypes.TypeNull)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
+            case ColumnType.Float64:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeDouble)
+                    Serializator.ReadDouble(data, ref pointer);
+                else if (t != SerializatorTypes.TypeNull)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
+            case ColumnType.Bool:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t is not (SerializatorTypes.TypeBool or SerializatorTypes.TypeNull))
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnType);
+        }
     }
 
     private static int CalculateBufferLength(TableSchema schema, Dictionary<string, ColumnValue> row)

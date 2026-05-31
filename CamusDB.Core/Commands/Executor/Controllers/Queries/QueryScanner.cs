@@ -39,7 +39,11 @@ internal sealed class QueryScanner
             if (data.Length == 0)
                 continue;
 
-            Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
+            Dictionary<string, ColumnValue> row = RowEncoder.Decode(
+                table.Schema,
+                rowId,
+                data,
+                plan.ScanRequiredColumns);
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);
@@ -76,7 +80,11 @@ internal sealed class QueryScanner
                 continue;
             }
 
-            Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
+            Dictionary<string, ColumnValue> row = RowEncoder.Decode(
+                table.Schema,
+                rowId,
+                data,
+                plan.ScanRequiredColumns);
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);

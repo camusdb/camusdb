@@ -31,7 +31,7 @@ namespace CamusDB.Core.Storage.Kv;
 ///     (rowId appended without separator; it is always exactly 24 lowercase hex chars)
 ///
 /// Routing constraint (T0.5):
-///   LocateAndGetByBucket routes via SimpleHash(prefix) while individual TrySet/Delete
+///   LocateAndScanRange routes via SimpleHash(prefix) while individual TrySet/Delete
 ///   route via InversePrefixedStaticHash(key, '/') = SimpleHash(key[..lastSlash]).
 ///   For rows: bucket prefix "{tableId}:r" → SimpleHash("{tableId}:r") matches writes.
 ///   For indexes: bucket prefix "{tableId}:i:{indexId}" → SimpleHash("{tableId}:i:{indexId}")
@@ -48,10 +48,11 @@ public sealed class KvTableStore
     private readonly IKahuna kahuna;
     private readonly string tableId;
 
-    private readonly string rowBucketPrefix;       // "{tableId}:r"  — used for LocateAndGetByBucket
+    private readonly string rowBucketPrefix;       // "{tableId}:r"  — bucket prefix for LocateAndScanRange
     private readonly string rowKeyPrefix;          // "{tableId}:r/" — prepended to rowIdHex
 
     private const int RowIdHexLength = 24;
+    private const int DefaultPageSize = 512;
     private const int MaxKahunaRetries = 32;
     private const int MaxRetryDelayMs   = 50;
 
@@ -99,34 +100,21 @@ public sealed class KvTableStore
         HLCTimestamp txId,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        KeyValueGetByBucketResult result;
-        int retries = 0;
-
-        do
-        {
-            result = await kahuna.LocateAndGetByBucket(
-                txId,
-                rowBucketPrefix,
-                KeyValueDurability.Persistent,
-                cancellationToken
-            ).ConfigureAwait(false);
-
-            if (result.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
-                await Task.Delay(RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
-        }
-        while (result.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
-
-        if (result.Type != KeyValueResponseType.Get)
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"ScanRows failed for bucket {rowBucketPrefix}: {result.Type}");
-
         int prefixLen = rowKeyPrefix.Length;
 
-        foreach ((string key, ReadOnlyKeyValueEntry entry) in result.Items)
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            txId,
+            rowBucketPrefix,
+            null, true,
+            null, true,
+            DefaultPageSize,
+            KeyValueDurability.Persistent,
+            cancellationToken).ConfigureAwait(false))
         {
             if (entry.Value is null)
                 continue;
 
-            // Key format: "{tableId}/r/{hex24}" — the hex suffix starts after the prefix.
+            // Key format: "{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
             ReadOnlySpan<char> hex = key.AsSpan(prefixLen);
             ObjectIdValue rowId = ObjectId.ToValue(hex.ToString());
 
@@ -215,45 +203,33 @@ public sealed class KvTableStore
     {
         string bucketPrefix = BuildIndexBucketPrefix(indexId);
         string keyPrefix    = bucketPrefix + "/";
-
-        KeyValueGetByBucketResult result;
-        int retries = 0;
-
-        do
-        {
-            result = await kahuna.LocateAndGetByBucket(
-                txId,
-                bucketPrefix,
-                KeyValueDurability.Persistent,
-                cancellationToken
-            ).ConfigureAwait(false);
-
-            if (result.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
-                await Task.Delay(RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
-        }
-        while (result.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
-
-        if (result.Type != KeyValueResponseType.Get)
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"ScanIndex failed for bucket {bucketPrefix}: {result.Type}");
+        int prefixLen = keyPrefix.Length;
 
         string? fromEncoded = from is not null ? KeyEncoder.Encode(from) : null;
         string? toEncoded   = to   is not null ? KeyEncoder.Encode(to)   : null;
 
-        int prefixLen = keyPrefix.Length;
+        // Push bounds into the scan. For non-unique indexes the stored key is
+        // {encodedKey}{rowIdHex24}, so the end key needs a high sentinel (￿) to
+        // include all possible rowId suffixes for the last encoded value.
+        string? startKey = fromEncoded is not null ? keyPrefix + fromEncoded : null;
+        string? endKey   = toEncoded   is not null
+            ? (unique ? keyPrefix + toEncoded : keyPrefix + toEncoded + "￿")
+            : null;
 
-        foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in result.Items)
+        await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            txId,
+            bucketPrefix,
+            startKey, fromInclusive,
+            endKey, toInclusive,
+            DefaultPageSize,
+            KeyValueDurability.Persistent,
+            cancellationToken).ConfigureAwait(false))
         {
             if (entry.Value is null)
                 continue;
 
-            // Optional: log here if we had a logger.
-            // Console.WriteLine($"ScanIndex Key: {kvKey}, Expected Prefix: {keyPrefix}");
-
-            // Strip the prefix to obtain the raw suffix.
-            if (!kvKey.StartsWith(keyPrefix))
-            {
+            if (!kvKey.StartsWith(keyPrefix, StringComparison.Ordinal))
                 continue;
-            }
 
             ReadOnlySpan<char> suffix = kvKey.AsSpan(prefixLen);
 
@@ -275,7 +251,7 @@ public sealed class KvTableStore
                 rowId = ObjectId.ToValue(suffix[^RowIdHexLength..].ToString());
             }
 
-            // Apply bounds filter.
+            // Defensive: startKey/endKey bounds should already have filtered these out.
             if (fromEncoded is not null)
             {
                 int cmp = string.CompareOrdinal(encodedKey, fromEncoded);
@@ -468,7 +444,7 @@ public sealed class KvTableStore
     private string BuildRowKey(ObjectIdValue rowId) => rowKeyPrefix + rowId.ToString();
 
     // Returns "{tableId}:i:{indexId}" — the bucket prefix (no trailing slash) used for
-    // LocateAndGetByBucket so that SimpleHash("{tableId}:i:{indexId}") matches the routing
+    // LocateAndScanRange so that SimpleHash("{tableId}:i:{indexId}") matches the routing
     // hash of keys "{tableId}:i:{indexId}/{...}".
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildIndexBucketPrefix(string indexId) => $"{tableId}:i:{indexId}";

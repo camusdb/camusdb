@@ -441,4 +441,57 @@ public class TestQueryPlanner
             new[] { QueryPlanStepType.RangeScanFromIndex, QueryPlanStepType.SortBy },
             StepTypes(plan));
     }
+
+    [Test]
+    public void PlanPushesRequiredColumnsForPartialSelect()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT id FROM robots");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsNotNull(plan.ScanRequiredColumns);
+        CollectionAssert.AreEquivalent(new[] { "id" }, plan.ScanRequiredColumns);
+        CollectionAssert.AreEquivalent(new[] { "id" }, ScanRoot(plan).RequiredColumns);
+    }
+
+    [Test]
+    public void PlanPushesRequiredColumnsIncludingFilterAndOrderBy()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT id FROM robots WHERE year = 2000 ORDER BY name");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        CollectionAssert.AreEquivalent(
+            new[] { "id", "year", "name" },
+            plan.ScanRequiredColumns!);
+    }
+
+    [Test]
+    public void PlanPushesAllColumnsForSelectStar()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsNull(plan.ScanRequiredColumns);
+        Assert.IsNull(ScanRoot(plan).RequiredColumns);
+    }
+
+    [Test]
+    public void PlanPushesRequiredColumnsForHavingAggregateAlias()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT role, COUNT(*) AS cnt FROM robots GROUP BY role HAVING cnt > 0 ORDER BY role");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        CollectionAssert.AreEquivalent(new[] { "role" }, plan.ScanRequiredColumns!);
+    }
+
+    [Test]
+    public void PlanPushesRequiredColumnsForGlobalAggregateHavingAlias()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT COUNT(*) AS x FROM robots HAVING x > 0");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsNotNull(plan.ScanRequiredColumns);
+        Assert.AreEqual(0, plan.ScanRequiredColumns.Count);
+    }
 }
