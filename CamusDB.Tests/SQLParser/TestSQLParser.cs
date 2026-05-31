@@ -1357,6 +1357,50 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSelectGroupByHaving()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT role, COUNT(*) AS x FROM app_users GROUP BY role HAVING x > 0");
+
+        Assert.AreEqual(NodeType.GroupBy, ast.extendedFive!.nodeType);
+        Assert.AreEqual(NodeType.Having, ast.extendedSix!.nodeType);
+        Assert.AreEqual(NodeType.ExprGreaterThan, ast.extendedSix.leftAst!.nodeType);
+        Assert.AreEqual("x", ast.extendedSix.leftAst.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSelectGroupByHavingGroupKey()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT role FROM app_users GROUP BY role HAVING role = 'admin'");
+
+        Assert.AreEqual(NodeType.Having, ast.extendedSix!.nodeType);
+        Assert.AreEqual(NodeType.ExprEquals, ast.extendedSix.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSelectAggregateOnlyHaving()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT COUNT(*) AS x FROM robots HAVING x > 0");
+
+        Assert.IsNull(ast.extendedFive);
+        Assert.AreEqual(NodeType.Having, ast.extendedSix!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSelectGroupByHavingOrderByLimit()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT role, COUNT(*) AS x FROM app_users WHERE enabled = true GROUP BY role HAVING x > 0 ORDER BY role LIMIT 10");
+
+        Assert.AreEqual(NodeType.ExprEquals, ast.extendedOne!.nodeType);
+        Assert.AreEqual(NodeType.GroupBy, ast.extendedFive!.nodeType);
+        Assert.AreEqual(NodeType.Having, ast.extendedSix!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.extendedTwo!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.extendedThree!.nodeType);
+    }
+
+    [Test]
     public void TestParseSelectInnerJoin()
     {
         NodeAst ast = SQLParserProcessor.Parse(
@@ -1505,6 +1549,20 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Select, ast.extendedOne!.rightAst!.nodeType);
         Assert.AreEqual(NodeType.TableReference, ast.extendedOne!.rightAst!.rightAst!.nodeType);
         Assert.AreEqual("posts", ast.extendedOne!.rightAst!.rightAst!.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSelectNotInSubquery()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT * FROM robots WHERE id NOT IN (SELECT robots_id FROM user_robots)");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.IsNotNull(ast.extendedOne);
+        Assert.AreEqual(NodeType.ExprNotInSubquery, ast.extendedOne!.nodeType);
+        Assert.AreEqual("id", ast.extendedOne!.leftAst!.yytext);
+        Assert.AreEqual(NodeType.Select, ast.extendedOne!.rightAst!.nodeType);
+        Assert.AreEqual("user_robots", ast.extendedOne!.rightAst!.rightAst!.leftAst!.yytext);
     }
 
     [Test]

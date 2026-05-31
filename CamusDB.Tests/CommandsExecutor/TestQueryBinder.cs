@@ -338,6 +338,94 @@ public class TestQueryBinder : BaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task BindAsync_GroupByHavingAggregateAlias_bindsSuccessfully()
+    {
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT name, COUNT(*) AS cnt FROM robots GROUP BY name HAVING cnt > 0"));
+
+        await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_GroupByHavingGroupKey_bindsSuccessfully()
+    {
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT name FROM robots GROUP BY name HAVING name = 'R2D2'"));
+
+        await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_AggregateOnlyHavingAlias_bindsSuccessfully()
+    {
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse("SELECT COUNT(*) AS x FROM robots HAVING x > 0"));
+
+        await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_HavingWithoutGroupByOrAggregate_throwsInvalidInput()
+    {
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse("SELECT name FROM robots HAVING name = 'R2D2'"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("HAVING", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_GroupByHavingNonGroupedColumn_throwsInvalidInput()
+    {
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT name, COUNT(*) FROM robots GROUP BY name HAVING year = 2000"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("HAVING", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_GroupByHavingUnknownAlias_throwsInvalidInput()
+    {
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT name, COUNT(*) AS cnt FROM robots GROUP BY name HAVING missing_alias > 0"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("HAVING", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task BindAsync_InnerJoinWithAliases_bindsSuccessfully()
     {
         (DatabaseDescriptor database, CatalogsManager catalogs) = await SetupUsersAndPostsTables();

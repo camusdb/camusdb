@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -15,13 +16,14 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Resolves uncorrelated scalar and IN subqueries in parsed SQL before binding and planning (QP5.2–QP5.3).
+/// Resolves uncorrelated scalar, IN, and NOT IN subqueries before binding and planning (QP5.2–QP5.3a).
 /// EXISTS subqueries are handled by <see cref="ExistsSubqueryPreparer"/> (QP5.4).
 /// </summary>
 internal sealed class SubqueryRewriter
 {
     private readonly ScalarSubqueryExecutor scalarExecutor;
     private readonly InSubqueryExecutor inExecutor;
+    private readonly SelectQueryCreator selectQueryCreator = new();
 
     public SubqueryRewriter(ScalarSubqueryExecutor scalarExecutor, InSubqueryExecutor inExecutor)
     {
@@ -70,31 +72,12 @@ internal sealed class SubqueryRewriter
 
         if (expr.nodeType == NodeType.ExprInSubquery)
         {
-            if (expr.leftAst is null || expr.rightAst is null)
-            {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Invalid IN subquery expression");
-            }
+            return await RewriteInSubqueryAsync(database, expr, ticket, negated: false).ConfigureAwait(false);
+        }
 
-            NodeAst lhs = await RewriteExpressionAsync(database, expr.leftAst, ticket).ConfigureAwait(false);
-
-            IReadOnlyList<ColumnValue> values = await inExecutor.ExecuteAsync(
-                database,
-                expr.rightAst,
-                ticket.TxnState,
-                ticket.Parameters).ConfigureAwait(false);
-
-            return new NodeAst(
-                NodeType.ExprInMembership,
-                lhs,
-                SubqueryValueListAst.Build(values),
-                extendedOne: null,
-                extendedTwo: null,
-                extendedThree: null,
-                extendedFour: null,
-                extendedFive: null,
-                yytext: null);
+        if (expr.nodeType == NodeType.ExprNotInSubquery)
+        {
+            return await RewriteInSubqueryAsync(database, expr, ticket, negated: true).ConfigureAwait(false);
         }
 
         NodeAst? left = expr.leftAst is not null
@@ -118,5 +101,33 @@ internal sealed class SubqueryRewriter
             expr.extendedFour,
             expr.extendedFive,
             expr.yytext);
+    }
+
+    private async Task<NodeAst> RewriteInSubqueryAsync(
+        DatabaseDescriptor database,
+        NodeAst expr,
+        ExecuteSQLTicket ticket,
+        bool negated)
+    {
+        if (expr.leftAst is null || expr.rightAst is null)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                negated ? "Invalid NOT IN subquery expression" : "Invalid IN subquery expression");
+        }
+
+        InSubqueryAnalyzer.EnsureUncorrelated(expr.rightAst, selectQueryCreator);
+
+        NodeAst lhs = await RewriteExpressionAsync(database, expr.leftAst, ticket).ConfigureAwait(false);
+
+        InSubqueryMaterialization materialization = await inExecutor.MaterializeAsync(
+            database,
+            expr.rightAst,
+            ticket.TxnState,
+            ticket.Parameters).ConfigureAwait(false);
+
+        return negated
+            ? SubqueryValueListAst.BuildNotInMembership(lhs, materialization)
+            : SubqueryValueListAst.BuildInMembership(lhs, materialization);
     }
 }

@@ -280,6 +280,11 @@ internal abstract class SQLExecutorBaseCreator
                     CamusDBErrorCodes.InvalidInternalOperation,
                     "IN subquery must be resolved before expression evaluation");
 
+            case NodeType.ExprNotInSubquery:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "NOT IN subquery must be resolved before expression evaluation");
+
             case NodeType.ExprInMembership:
                 {
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
@@ -287,6 +292,14 @@ internal abstract class SQLExecutorBaseCreator
                     return new ColumnValue(
                         ColumnType.Bool,
                         SubqueryValueListAst.ContainsValue(leftValue, expr.rightAst));
+                }
+
+            case NodeType.ExprNotInMembership:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    bool? result = SubqueryValueListAst.EvaluateNotInMembership(leftValue, expr);
+
+                    return new ColumnValue(ColumnType.Bool, result ?? false);
                 }
 
             case NodeType.ExprExistsSubquery:

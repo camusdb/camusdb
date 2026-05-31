@@ -55,6 +55,7 @@ internal static class QueryTicketAdapter
             offset: query.Offset,
             parameters: ticket.Parameters,
             groupBy: query.GroupBy,
+            having: query.Having?.Expression,
             rowNameResolver: rowNameResolver,
             analyzedWhere: analyzedWhere,
             existsSubqueries: existsSubqueries);

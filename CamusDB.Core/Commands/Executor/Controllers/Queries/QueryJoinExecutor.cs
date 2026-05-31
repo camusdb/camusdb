@@ -55,8 +55,10 @@ internal sealed class QueryJoinExecutor
             cursor = ApplyWhere(cursor, plan.ExecutionFilter, plan);
 
         return QueryPostScanPipeline.Apply(
+            plan.Database,
             ticket,
             cursor,
+            queryFilterer,
             querySorter,
             queryAggregator,
             queryProjector,

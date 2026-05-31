@@ -35,6 +35,15 @@ internal sealed class QueryFilterer
         return await MeetWhereAsync(filter, row, plan.Ticket, plan.Database).ConfigureAwait(false);
     }
 
+    internal async ValueTask<bool> MeetHavingAsync(
+        NodeAst having,
+        Dictionary<string, ColumnValue> row,
+        QueryTicket ticket)
+    {
+        ColumnValue evaluatedExpr = await EvaluateHavingAsync(having, row, ticket).ConfigureAwait(false);
+        return ToPredicateResult(evaluatedExpr);
+    }
+
     internal async ValueTask<bool> MeetWhereAsync(
         NodeAst where,
         Dictionary<string, ColumnValue> row,
@@ -44,6 +53,70 @@ internal sealed class QueryFilterer
         ColumnValue evaluatedExpr = await EvaluatePredicateAsync(where, row, ticket, database).ConfigureAwait(false);
 
         return ToPredicateResult(evaluatedExpr);
+    }
+
+    internal async IAsyncEnumerable<QueryResultRow> FilterHavingResultset(
+        DatabaseDescriptor database,
+        QueryTicket ticket,
+        IAsyncEnumerable<QueryResultRow> dataCursor)
+    {
+        if (ticket.Having is null)
+        {
+            await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
+                yield return resultRow;
+
+            yield break;
+        }
+
+        await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
+        {
+            if (await MeetHavingAsync(ticket.Having, resultRow.Row, ticket).ConfigureAwait(false))
+                yield return resultRow;
+        }
+    }
+
+    private ValueTask<ColumnValue> EvaluateHavingAsync(
+        NodeAst expr,
+        Dictionary<string, ColumnValue> row,
+        QueryTicket ticket)
+    {
+        if (expr.nodeType is NodeType.ExprAnd)
+        {
+            return EvaluateHavingAndAsync(expr, row, ticket);
+        }
+
+        if (expr.nodeType is NodeType.ExprOr)
+        {
+            return EvaluateHavingOrAsync(expr, row, ticket);
+        }
+
+        return ValueTask.FromResult(QueryHavingEvaluator.Evaluate(expr, row, ticket, ticket.Parameters));
+    }
+
+    private async ValueTask<ColumnValue> EvaluateHavingAndAsync(
+        NodeAst expr,
+        Dictionary<string, ColumnValue> row,
+        QueryTicket ticket)
+    {
+        ColumnValue leftValue = QueryHavingEvaluator.Evaluate(expr.leftAst!, row, ticket, ticket.Parameters);
+
+        if (!ToPredicateResult(leftValue))
+            return new ColumnValue(ColumnType.Bool, false);
+
+        return await EvaluateHavingAsync(expr.rightAst!, row, ticket).ConfigureAwait(false);
+    }
+
+    private async ValueTask<ColumnValue> EvaluateHavingOrAsync(
+        NodeAst expr,
+        Dictionary<string, ColumnValue> row,
+        QueryTicket ticket)
+    {
+        ColumnValue leftValue = QueryHavingEvaluator.Evaluate(expr.leftAst!, row, ticket, ticket.Parameters);
+
+        if (ToPredicateResult(leftValue))
+            return new ColumnValue(ColumnType.Bool, true);
+
+        return await EvaluateHavingAsync(expr.rightAst!, row, ticket).ConfigureAwait(false);
     }
 
     private async ValueTask<ColumnValue> EvaluatePredicateAsync(

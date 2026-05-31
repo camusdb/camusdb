@@ -18,6 +18,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// <param name="Projections">Selected expressions or <c>*</c>.</param>
 /// <param name="Where">Optional filter predicate.</param>
 /// <param name="GroupBy">Optional grouping expressions (QP3).</param>
+/// <param name="Having">Optional post-aggregate filter predicate (QP3.5).</param>
 /// <param name="OrderBy">Optional sort keys.</param>
 /// <param name="Limit">Optional limit expression AST.</param>
 /// <param name="Offset">Optional offset expression AST.</param>
@@ -26,6 +27,7 @@ public sealed record SelectQuery(
     IReadOnlyList<ProjectionItem> Projections,
     BoundPredicate? Where = null,
     IReadOnlyList<NodeAst>? GroupBy = null,
+    BoundPredicate? Having = null,
     IReadOnlyList<OrderByItem>? OrderBy = null,
     NodeAst? Limit = null,
     NodeAst? Offset = null);

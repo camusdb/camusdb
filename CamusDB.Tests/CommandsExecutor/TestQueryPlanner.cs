@@ -311,6 +311,45 @@ public class TestQueryPlanner
     }
 
     [Test]
+    public void PlanAddsHavingFilterAfterAggregateForGroupedQuery()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT role, COUNT(*) AS cnt FROM robots GROUP BY role HAVING cnt > 0 ORDER BY role");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                QueryPlanStepType.FullScanFromTableIndex,
+                QueryPlanStepType.Aggregate,
+                QueryPlanStepType.HavingFilter,
+                QueryPlanStepType.SortBy,
+                QueryPlanStepType.ReduceToProjections
+            },
+            StepTypes(plan));
+    }
+
+    [Test]
+    public void PlanAddsHavingFilterAfterGlobalAggregate()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT COUNT(*) AS x FROM robots HAVING x > 0");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                QueryPlanStepType.FullScanFromTableIndex,
+                QueryPlanStepType.Aggregate,
+                QueryPlanStepType.HavingFilter,
+                QueryPlanStepType.ReduceToProjections
+            },
+            StepTypes(plan));
+    }
+
+    [Test]
     public void PlanAddsProjectionStepForPartialSelect()
     {
         QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT id, name FROM robots WHERE year = 2000");

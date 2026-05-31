@@ -25,6 +25,9 @@ internal sealed class QueryAggregator
         if (ticket.GroupBy is { Count: > 0 })
             return AggregateGrouped(ticket, dataCursor);
 
+        if (QueryHavingWorkspace.NeedsExpandedGlobalAggregate(ticket))
+            return AggregateGlobalWorkspace(ticket, dataCursor);
+
         NodeAst funcCall = GetSingleAggregationFuncCall(ticket.Projection);
         QueryAggregationType aggregationType = GetAggregationType(funcCall);
 
@@ -44,7 +47,7 @@ internal sealed class QueryAggregator
         IAsyncEnumerable<QueryResultRow> dataCursor)
     {
         IReadOnlyList<NodeAst> groupBy = ticket.GroupBy!;
-        List<AnalyzedProjection> projections = AnalyzeGroupedOutput(ticket);
+        List<AnalyzedProjection> projections = AnalyzeGroupedWorkspace(ticket);
         Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
 
         await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
@@ -103,7 +106,7 @@ internal sealed class QueryAggregator
         return analyzed;
     }
 
-    private static List<AnalyzedProjection> AnalyzeGroupedOutput(QueryTicket ticket)
+    private static List<AnalyzedProjection> AnalyzeGroupedWorkspace(QueryTicket ticket)
     {
         List<AnalyzedProjection> projections = AnalyzeProjections(ticket.Projection!);
         HashSet<string> outputNames = new(StringComparer.Ordinal);
@@ -111,20 +114,44 @@ internal sealed class QueryAggregator
         foreach (AnalyzedProjection projection in projections)
             outputNames.Add(projection.OutputName);
 
-        if (ticket.OrderBy is null)
-            return projections;
-
-        foreach (QueryOrderBy orderClause in ticket.OrderBy)
+        if (ticket.OrderBy is not null)
         {
-            if (outputNames.Contains(orderClause.ColumnName))
-                continue;
+            foreach (QueryOrderBy orderClause in ticket.OrderBy)
+            {
+                if (outputNames.Contains(orderClause.ColumnName))
+                    continue;
 
-            NodeAst expression = ResolveHiddenSortExpression(ticket, orderClause.ColumnName);
-            projections.Add(new AnalyzedProjection(expression, orderClause.ColumnName, false, null));
-            outputNames.Add(orderClause.ColumnName);
+                NodeAst expression = ResolveHiddenSortExpression(ticket, orderClause.ColumnName);
+                projections.Add(new AnalyzedProjection(expression, orderClause.ColumnName, false, null));
+                outputNames.Add(orderClause.ColumnName);
+            }
         }
 
+        if (ticket.Having is not null)
+            QueryHavingWorkspace.AddHiddenProjections(ticket.Having, ticket, projections, outputNames);
+
         return projections;
+    }
+
+    private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalWorkspace(
+        QueryTicket ticket,
+        IAsyncEnumerable<QueryResultRow> dataCursor)
+    {
+        List<AnalyzedProjection> projections = AnalyzeProjections(ticket.Projection!);
+        HashSet<string> outputNames = new(StringComparer.Ordinal);
+
+        foreach (AnalyzedProjection projection in projections)
+            outputNames.Add(projection.OutputName);
+
+        if (ticket.Having is not null)
+            QueryHavingWorkspace.AddHiddenProjections(ticket.Having, ticket, projections, outputNames);
+
+        GroupAccumulator accumulator = new(projections);
+
+        await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
+            accumulator.AddRow(resultRow.Row, ticket);
+
+        yield return accumulator.ToResultRow();
     }
 
     private static NodeAst ResolveHiddenSortExpression(QueryTicket ticket, string columnName)
@@ -148,7 +175,7 @@ internal sealed class QueryAggregator
         return QueryProjectionResolver.GetOutputNameFromProjectionExpression(expression, index);
     }
 
-    private static NodeAst GetAggregateFuncCall(NodeAst expression)
+    internal static NodeAst GetAggregateFuncCall(NodeAst expression)
     {
         NodeAst target = QueryExpressionClassifier.UnwrapAlias(expression);
 
@@ -243,7 +270,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new() { { "0", new ColumnValue(ColumnType.Integer64, count) } });
+            new() { { GetGlobalAggregateOutputName(ticket, 0), new ColumnValue(ColumnType.Integer64, count) } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalSum(
@@ -286,7 +313,9 @@ internal sealed class QueryAggregator
                 ? new ColumnValue(ColumnType.Integer64, intSum)
                 : new ColumnValue(ColumnType.Float64, sum);
 
-        yield return new QueryResultRow(default(ObjectIdValue), new() { { "0", result } });
+        yield return new QueryResultRow(
+            default(ObjectIdValue),
+            new() { { GetGlobalAggregateOutputName(ticket, 0), result } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalAverage(
@@ -323,7 +352,9 @@ internal sealed class QueryAggregator
             ? new ColumnValue(ColumnType.Null, 0)
             : new ColumnValue(ColumnType.Float64, sum / count);
 
-        yield return new QueryResultRow(default(ObjectIdValue), new() { { "0", result } });
+        yield return new QueryResultRow(
+            default(ObjectIdValue),
+            new() { { GetGlobalAggregateOutputName(ticket, 0), result } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalMin(
@@ -343,7 +374,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new() { { "0", min ?? new ColumnValue(ColumnType.Null, 0) } });
+            new() { { GetGlobalAggregateOutputName(ticket, 0), min ?? new ColumnValue(ColumnType.Null, 0) } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalMax(
@@ -363,10 +394,18 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new() { { "0", max ?? new ColumnValue(ColumnType.Null, 0) } });
+            new() { { GetGlobalAggregateOutputName(ticket, 0), max ?? new ColumnValue(ColumnType.Null, 0) } });
     }
 
-    private readonly record struct AnalyzedProjection(
+    private static string GetGlobalAggregateOutputName(QueryTicket ticket, int index)
+    {
+        if (ticket.Projection is null || ticket.Projection.Count == 0)
+            return index.ToString();
+
+        return QueryProjectionResolver.GetOutputNameFromProjectionExpression(ticket.Projection[index], index);
+    }
+
+    internal readonly record struct AnalyzedProjection(
         NodeAst Expression,
         string OutputName,
         bool IsAggregate,

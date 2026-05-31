@@ -14,6 +14,7 @@ public enum QueryPlanStepType
     FullScanFromTableIndex,
     SortBy,
     Aggregate,
+    HavingFilter,
     ReduceToProjections,
     Limit,
     QueryFromIndex,

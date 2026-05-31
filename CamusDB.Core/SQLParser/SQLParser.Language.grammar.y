@@ -26,7 +26,7 @@
 %token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
-%token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT
+%token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING
 
 %%
 
@@ -47,9 +47,13 @@ stat    : select_stmt { $$.n = $1.n; }
         | rollback_stmt { $$.n = $1.n; } 
         ;
 
-select_stmt : TSELECT select_field_list TFROM select_table opt_where opt_group opt_order opt_limit opt_offset
-            { $$.n = new(NodeType.Select, $2.n, $4.n, $5.n, $7.n, $8.n, $9.n, $6.n, null); }
+select_stmt : TSELECT select_field_list TFROM select_table opt_where opt_group opt_having opt_order opt_limit opt_offset
+            { $$.n = new(NodeType.Select, $2.n, $4.n, $5.n, $8.n, $9.n, $10.n, $6.n, null, $7.n); }
             ;
+
+opt_having : THAVING condition { $$.n = new(NodeType.Having, $2.n, null, null, null, null, null, null, null); }
+           | { $$.n = null; }
+           ;
 
 query_expr : LPAREN select_stmt RPAREN { $$.n = $2.n; $$.s = $2.s; }
            ;
@@ -316,6 +320,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | is_null_expr { $$.n = $1.n; }
            | is_not_null_expr { $$.n = $1.n; }
            | in_subquery_expr { $$.n = $1.n; }
+           | not_in_subquery_expr { $$.n = $1.n; }
            | exists_subquery_expr { $$.n = $1.n; }
            | scalar_subquery_expr { $$.n = $1.n; }
            ;
@@ -367,6 +372,9 @@ is_not_null_expr : condition TIS TNOT TNULL { $$.n = new(NodeType.ExprIsNotNull,
 
 in_subquery_expr : condition TIN query_expr { $$.n = new(NodeType.ExprInSubquery, $1.n, $3.n, null, null, null, null, null, null); }
                  ;
+
+not_in_subquery_expr : condition TNOT TIN query_expr { $$.n = new(NodeType.ExprNotInSubquery, $1.n, $4.n, null, null, null, null, null, null); }
+                     ;
 
 exists_subquery_expr : TEXISTS query_expr { $$.n = new(NodeType.ExprExistsSubquery, $2.n, null, null, null, null, null, null, null); }
                      ;

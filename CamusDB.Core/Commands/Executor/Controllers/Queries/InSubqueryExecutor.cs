@@ -14,7 +14,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Materializes uncorrelated IN-subquery results into a value list (QP5.3).
+/// Materializes uncorrelated IN/NOT IN subquery results (QP5.3 / QP5.3a).
 /// </summary>
 internal sealed class InSubqueryExecutor
 {
@@ -25,7 +25,7 @@ internal sealed class InSubqueryExecutor
         this.queryExecutor = queryExecutor;
     }
 
-    public async Task<IReadOnlyList<ColumnValue>> ExecuteAsync(
+    public async Task<InSubqueryMaterialization> MaterializeAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,
         KvTransaction txnState,
@@ -37,11 +37,40 @@ internal sealed class InSubqueryExecutor
             txnState,
             parameters).ConfigureAwait(false);
 
+        if (rows.Count == 0)
+            return new InSubqueryMaterialization([], ContainsNull: false, IsEmpty: true);
+
         List<ColumnValue> values = new(rows.Count);
+        bool containsNull = false;
 
         foreach (QueryResultRow row in rows)
-            values.Add(SubqueryQueryExecutor.ExtractSingleColumnValue(row));
+        {
+            ColumnValue value = SubqueryQueryExecutor.ExtractSingleColumnValue(row);
 
-        return values;
+            if (value.Type == ColumnType.Null)
+            {
+                containsNull = true;
+                continue;
+            }
+
+            values.Add(value);
+        }
+
+        return new InSubqueryMaterialization(values, containsNull, IsEmpty: false);
+    }
+
+    public async Task<IReadOnlyList<ColumnValue>> ExecuteAsync(
+        DatabaseDescriptor database,
+        NodeAst selectAst,
+        KvTransaction txnState,
+        Dictionary<string, ColumnValue>? parameters)
+    {
+        InSubqueryMaterialization materialization = await MaterializeAsync(
+            database,
+            selectAst,
+            txnState,
+            parameters).ConfigureAwait(false);
+
+        return materialization.Values;
     }
 }

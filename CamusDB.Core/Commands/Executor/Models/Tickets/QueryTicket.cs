@@ -34,6 +34,8 @@ public sealed class QueryTicket
 
     public IReadOnlyList<NodeAst>? GroupBy { get; }
 
+    public NodeAst? Having { get; }
+
     public NodeAst? Limit { get; }
 
     public NodeAst? Offset { get; }
@@ -61,6 +63,7 @@ public sealed class QueryTicket
         NodeAst? offset,
         Dictionary<string, ColumnValue>? parameters,
         IReadOnlyList<NodeAst>? groupBy = null,
+        NodeAst? having = null,
         QueryRowNameResolver? rowNameResolver = null,
         PredicateAnalysis? analyzedWhere = null,
         ExistsSubqueryRegistry? existsSubqueries = null)
@@ -74,6 +77,7 @@ public sealed class QueryTicket
         Where = where;
         OrderBy = orderBy;
         GroupBy = groupBy;
+        Having = having;
         Limit = limit;
         Offset = offset;
         Parameters = parameters;

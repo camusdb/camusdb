@@ -2200,6 +2200,225 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectGroupByAndOrderByOrdinals()
+    {
+        RobotsUserRobotsFixture fixture = await SetupRobotsAndUserRobots();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT robots_id, COUNT(*) AS cnt FROM user_robots GROUP BY 1 ORDER BY 2 DESC",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual(2, result[0].Row["cnt"].LongValue);
+        Assert.AreEqual(1, result[1].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectGroupByHavingAggregateAlias()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT role, COUNT(*) AS cnt FROM app_users GROUP BY role HAVING cnt > 1 ORDER BY role",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual("admin", result[0].Row["role"].StrValue);
+        Assert.AreEqual(2, result[0].Row["cnt"].LongValue);
+        Assert.AreEqual("member", result[1].Row["role"].StrValue);
+        Assert.AreEqual(2, result[1].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectGroupByHavingAggregateExpression()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT role, COUNT(*) AS cnt FROM app_users GROUP BY role HAVING COUNT(*) > 1 ORDER BY role",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual(2, result[0].Row["cnt"].LongValue);
+        Assert.AreEqual(2, result[1].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectGroupByHavingGroupKey()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT role FROM app_users GROUP BY role HAVING role = 'admin' ORDER BY role",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual("admin", result[0].Row["role"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectGroupByHavingRunsAfterWhere()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT role, COUNT(*) AS cnt FROM app_users WHERE role = 'admin' GROUP BY role HAVING cnt > 0 ORDER BY role",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual("admin", result[0].Row["role"].StrValue);
+        Assert.AreEqual(2, result[0].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregateOnlyHavingAlias()
+    {
+        (_, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: database.Name,
+            tableName: "robots",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        await executor.Insert(new InsertTicket(
+            txnState,
+            database.Name,
+            "robots",
+            values: new()
+            {
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "name", new(ColumnType.String, "R2D2") },
+                },
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "name", new(ColumnType.String, "C3PO") },
+                },
+            }));
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: database.Name,
+            sql: "SELECT COUNT(*) AS x FROM robots HAVING x > 0",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(2, result[0].Row["x"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregateOnlyHavingExpression()
+    {
+        (_, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: database.Name,
+            tableName: "robots",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        await executor.Insert(new InsertTicket(
+            txnState,
+            database.Name,
+            "robots",
+            values: new()
+            {
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "name", new(ColumnType.String, "R2D2") },
+                },
+            }));
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: database.Name,
+            sql: "SELECT COUNT(*) AS x FROM robots HAVING COUNT(*) > 0",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(1, result[0].Row["x"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectGroupByEnabledSumAvg()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
@@ -2518,6 +2737,194 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
             txnState: txnState,
             database: fixture.DbName,
             sql: "SELECT email FROM app_users WHERE id IN (SELECT user_id, title FROM posts)",
+            parameters: null);
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+        {
+            _ = await fixture.Executor.ExecuteSQLQuery(ticket);
+        })!;
+
+        Assert.That(ex.Message, Does.Contain("exactly one column"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectNotInSubqueryExcludesMatchingRows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "blocked_robots",
+            columns: new ColumnInfo[]
+            {
+                new("robots_id", ColumnType.Id),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("robots_id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        await executor.Insert(new InsertTicket(
+            txnState,
+            dbname,
+            "blocked_robots",
+            values: new()
+            {
+                new() { { "robots_id", new(ColumnType.Id, objectsId[0]) } },
+                new() { { "robots_id", new(ColumnType.Id, objectsId[1]) } },
+            }));
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT id FROM robots WHERE id NOT IN (SELECT robots_id FROM blocked_robots) ORDER BY id",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(23, result.Count);
+        Assert.IsFalse(result.Any(row => row.Row["id"].StrValue == objectsId[0]));
+        Assert.IsFalse(result.Any(row => row.Row["id"].StrValue == objectsId[1]));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectNotInSubqueryEmptyReturnsAllRows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "blocked_robots",
+            columns: new ColumnInfo[]
+            {
+                new("robots_id", ColumnType.Id),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("robots_id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT COUNT(*) AS cnt FROM robots WHERE id NOT IN (SELECT robots_id FROM blocked_robots)",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(objectsId.Count, result[0].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectNotInSubqueryNullInSubqueryFiltersUnknownRows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "blocked_robots",
+            columns: new ColumnInfo[]
+            {
+                new("robots_id", ColumnType.Id),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("robots_id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        await executor.Insert(new InsertTicket(
+            txnState,
+            dbname,
+            "blocked_robots",
+            values: new()
+            {
+                new() { { "robots_id", new(ColumnType.Id, objectsId[0]) } },
+                new() { { "robots_id", new(ColumnType.Null, 0) } },
+            }));
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT COUNT(*) AS cnt FROM robots WHERE id NOT IN (SELECT robots_id FROM blocked_robots)",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(0, result[0].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectNotInSubqueryMatchingValueStillFilteredWhenSubqueryContainsNull()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> objectsId) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "blocked_robots",
+            columns: new ColumnInfo[]
+            {
+                new("robots_id", ColumnType.Id),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("robots_id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        await executor.Insert(new InsertTicket(
+            txnState,
+            dbname,
+            "blocked_robots",
+            values: new()
+            {
+                new() { { "robots_id", new(ColumnType.Id, objectsId[0]) } },
+                new() { { "robots_id", new(ColumnType.Null, 0) } },
+            }));
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT id FROM robots WHERE id NOT IN (SELECT robots_id FROM blocked_robots) AND id = @id",
+            parameters: new() { { "id", new(ColumnType.Id, objectsId[0]) } });
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.IsEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectNotInSubqueryMultipleColumnsThrows()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT email FROM app_users WHERE id NOT IN (SELECT user_id, title FROM posts)",
             parameters: null);
 
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>

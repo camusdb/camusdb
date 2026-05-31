@@ -30,14 +30,16 @@ internal sealed class SelectQueryCreator
         (QuerySource source, BoundPredicate? where) = CreateFromClause(ast.rightAst, ast.extendedOne);
         IReadOnlyList<ProjectionItem> projections = CreateProjections(ast.leftAst);
 
-        IReadOnlyList<OrderByItem>? orderBy = CreateOrderBy(ast.extendedTwo);
-        IReadOnlyList<NodeAst>? groupBy = CreateGroupBy(ast.extendedFive);
+        IReadOnlyList<OrderByItem>? orderBy = CreateOrderBy(ast.extendedTwo, projections);
+        IReadOnlyList<NodeAst>? groupBy = CreateGroupBy(ast.extendedFive, projections);
+        BoundPredicate? having = CreateHaving(ast.extendedSix);
 
         return new SelectQuery(
             Source: source,
             Projections: projections,
             Where: where,
             GroupBy: groupBy,
+            Having: having,
             OrderBy: orderBy,
             Limit: ast.extendedThree,
             Offset: ast.extendedFour);
@@ -165,7 +167,9 @@ internal sealed class SelectQueryCreator
         };
     }
 
-    private static IReadOnlyList<NodeAst>? CreateGroupBy(NodeAst? groupByAst)
+    private static IReadOnlyList<NodeAst>? CreateGroupBy(
+        NodeAst? groupByAst,
+        IReadOnlyList<ProjectionItem> projections)
     {
         if (groupByAst is null)
             return null;
@@ -174,7 +178,7 @@ internal sealed class SelectQueryCreator
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid GROUP BY clause");
 
         List<NodeAst> expressions = new();
-        CollectGroupByExpressions(groupByAst.leftAst, expressions);
+        CollectGroupByExpressions(groupByAst.leftAst, expressions, projections);
 
         if (expressions.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "GROUP BY requires at least one expression");
@@ -182,60 +186,124 @@ internal sealed class SelectQueryCreator
         return expressions;
     }
 
-    private static void CollectGroupByExpressions(NodeAst ast, List<NodeAst> expressions)
+    private static void CollectGroupByExpressions(
+        NodeAst ast,
+        List<NodeAst> expressions,
+        IReadOnlyList<ProjectionItem> projections)
     {
         if (ast.nodeType == NodeType.ExprList)
         {
             if (ast.leftAst is not null)
-                CollectGroupByExpressions(ast.leftAst, expressions);
+                CollectGroupByExpressions(ast.leftAst, expressions, projections);
 
             if (ast.rightAst is not null)
-                CollectGroupByExpressions(ast.rightAst, expressions);
+                CollectGroupByExpressions(ast.rightAst, expressions, projections);
 
             return;
         }
 
-        expressions.Add(ast);
+        NodeAst expression = ResolveSelectOrdinal(ast, projections, "GROUP BY");
+
+        if (QueryExpressionClassifier.IsAggregateProjection(expression))
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "GROUP BY ordinal cannot reference an aggregate projection");
+        }
+
+        expressions.Add(expression);
     }
 
-    private static IReadOnlyList<OrderByItem>? CreateOrderBy(NodeAst? orderByAst)
+    private static BoundPredicate? CreateHaving(NodeAst? havingAst)
+    {
+        if (havingAst is null)
+            return null;
+
+        if (havingAst.nodeType != NodeType.Having || havingAst.leftAst is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid HAVING clause");
+
+        return new BoundPredicate(havingAst.leftAst);
+    }
+
+    private static IReadOnlyList<OrderByItem>? CreateOrderBy(
+        NodeAst? orderByAst,
+        IReadOnlyList<ProjectionItem> projections)
     {
         if (orderByAst is null)
             return null;
 
         List<OrderByItem> orderItems = new();
-        CollectOrderByItems(orderByAst, orderItems);
+        CollectOrderByItems(orderByAst, orderItems, projections);
         return orderItems;
     }
 
-    private static void CollectOrderByItems(NodeAst orderByAst, List<OrderByItem> orderItems)
+    private static void CollectOrderByItems(
+        NodeAst orderByAst,
+        List<OrderByItem> orderItems,
+        IReadOnlyList<ProjectionItem> projections)
     {
         switch (orderByAst.nodeType)
         {
             case NodeType.Identifier:
-                orderItems.Add(new OrderByItem(orderByAst, OrderType.Ascending));
+            case NodeType.Integer:
+                orderItems.Add(new OrderByItem(
+                    ResolveSelectOrdinal(orderByAst, projections, "ORDER BY"),
+                    OrderType.Ascending));
                 return;
 
             case NodeType.SortAsc:
-                orderItems.Add(new OrderByItem(orderByAst.leftAst!, OrderType.Ascending));
+                orderItems.Add(new OrderByItem(
+                    ResolveSelectOrdinal(orderByAst.leftAst!, projections, "ORDER BY"),
+                    OrderType.Ascending));
                 return;
 
             case NodeType.SortDesc:
-                orderItems.Add(new OrderByItem(orderByAst.leftAst!, OrderType.Descending));
+                orderItems.Add(new OrderByItem(
+                    ResolveSelectOrdinal(orderByAst.leftAst!, projections, "ORDER BY"),
+                    OrderType.Descending));
                 return;
 
             case NodeType.IdentifierList:
                 if (orderByAst.leftAst is not null)
-                    CollectOrderByItems(orderByAst.leftAst, orderItems);
+                    CollectOrderByItems(orderByAst.leftAst, orderItems, projections);
 
                 if (orderByAst.rightAst is not null)
-                    CollectOrderByItems(orderByAst.rightAst, orderItems);
+                    CollectOrderByItems(orderByAst.rightAst, orderItems, projections);
 
                 return;
 
             default:
-                orderItems.Add(new OrderByItem(orderByAst, OrderType.Ascending));
+                orderItems.Add(new OrderByItem(
+                    ResolveSelectOrdinal(orderByAst, projections, "ORDER BY"),
+                    OrderType.Ascending));
                 return;
         }
+    }
+
+    private static NodeAst ResolveSelectOrdinal(
+        NodeAst expression,
+        IReadOnlyList<ProjectionItem> projections,
+        string clauseName)
+    {
+        if (expression.nodeType != NodeType.Integer)
+            return expression;
+
+        if (!int.TryParse(expression.yytext, out int ordinal) || ordinal < 1 || ordinal > projections.Count)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"{clauseName} position {expression.yytext} is out of range");
+        }
+
+        NodeAst projection = QueryExpressionClassifier.UnwrapAlias(projections[ordinal - 1].Expression);
+
+        if (projection.nodeType == NodeType.ExprAllFields)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"{clauseName} position {ordinal} cannot reference *");
+        }
+
+        return projection;
     }
 }

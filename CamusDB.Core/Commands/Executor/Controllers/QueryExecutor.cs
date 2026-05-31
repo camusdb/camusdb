@@ -105,6 +105,13 @@ internal sealed class QueryExecutor
                     plan.DataCursor = queryAggregator.AggregateResultset(plan.Ticket, plan.DataCursor);
                     break;
 
+                case QueryPlanStepType.HavingFilter:
+                    if (plan.DataCursor is null)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
+
+                    plan.DataCursor = queryFilterer.FilterHavingResultset(plan.Database, plan.Ticket, plan.DataCursor);
+                    break;
+
                 case QueryPlanStepType.Limit:
                     if (plan.DataCursor is null)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");

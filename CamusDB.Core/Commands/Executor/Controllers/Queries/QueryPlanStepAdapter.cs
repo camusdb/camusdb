@@ -77,6 +77,10 @@ internal static class QueryPlanStepAdapter
                 steps.Add(new QueryPlanStep(QueryPlanStepType.Aggregate));
                 return;
 
+            case HavingFilterNode:
+                steps.Add(new QueryPlanStep(QueryPlanStepType.HavingFilter));
+                return;
+
             case ProjectNode:
                 steps.Add(new QueryPlanStep(QueryPlanStepType.ReduceToProjections));
                 return;

@@ -237,6 +237,7 @@ internal sealed class QueryBinder
         }
 
         ValidateOrderBy(query, rowNames);
+        QueryPostAggregateScopeValidator.ValidateHaving(query, rowNames);
 
         ValidateProjectionAndGrouping(query);
     }

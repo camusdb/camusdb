@@ -197,6 +197,64 @@ public class TestSelectQueryCreator
     }
 
     [Test]
+    public void CreateSelectQuery_GroupByOrdinalResolvesProjectionExpression()
+    {
+        SelectQuery query = ParseSelectQuery("SELECT name, COUNT(*) FROM robots GROUP BY 1");
+
+        Assert.IsNotNull(query.GroupBy);
+        Assert.AreEqual(1, query.GroupBy!.Count);
+        Assert.AreEqual(NodeType.Identifier, query.GroupBy[0].nodeType);
+        Assert.AreEqual("name", query.GroupBy[0].yytext);
+    }
+
+    [Test]
+    public void CreateSelectQuery_OrderByOrdinalResolvesProjectionExpression()
+    {
+        SelectQuery query = ParseSelectQuery("SELECT name AS robot_name FROM robots ORDER BY 1 DESC");
+
+        Assert.IsNotNull(query.OrderBy);
+        Assert.AreEqual(1, query.OrderBy!.Count);
+        Assert.AreEqual(OrderType.Descending, query.OrderBy[0].Direction);
+        Assert.AreEqual(NodeType.Identifier, query.OrderBy[0].Expression.nodeType);
+        Assert.AreEqual("name", query.OrderBy[0].Expression.yytext);
+    }
+
+    [Test]
+    public void CreateSelectQuery_GroupByHaving()
+    {
+        SelectQuery query = ParseSelectQuery(
+            "SELECT role, COUNT(*) AS x FROM app_users GROUP BY role HAVING x > 0");
+
+        Assert.IsNotNull(query.GroupBy);
+        Assert.IsNotNull(query.Having);
+        Assert.AreEqual(NodeType.ExprGreaterThan, query.Having!.Expression.nodeType);
+    }
+
+    [Test]
+    public void CreateSelectQuery_AggregateOnlyHaving()
+    {
+        SelectQuery query = ParseSelectQuery("SELECT COUNT(*) AS x FROM robots HAVING x > 0");
+
+        Assert.IsNull(query.GroupBy);
+        Assert.IsNotNull(query.Having);
+    }
+
+    [Test]
+    public void QueryTicketAdapter_RoundTripsHaving()
+    {
+        SelectQuery query = ParseSelectQuery(
+            "SELECT role, COUNT(*) AS cnt FROM robots GROUP BY role HAVING cnt > 0");
+
+        KvTransaction txn = new(Kommander.Time.HLCTimestamp.Zero, "select-query-creator-test");
+        ExecuteSQLTicket ticket = new(txnState: txn, database: "db", sql: "", parameters: null);
+
+        QueryTicket legacyTicket = QueryTicketAdapter.ToQueryTicket(query, ticket);
+
+        Assert.IsNotNull(legacyTicket.Having);
+        Assert.AreEqual(NodeType.ExprGreaterThan, legacyTicket.Having!.nodeType);
+    }
+
+    [Test]
     public void QueryTicketAdapter_RoundTripsGroupBy()
     {
         SelectQuery query = ParseSelectQuery("SELECT name, COUNT(*) FROM robots GROUP BY name");

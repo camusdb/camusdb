@@ -56,15 +56,17 @@ internal sealed class QueryProjector
                     
                     case NodeType.Identifier:
                         projected[QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, i)] =
-                            EvalOrProjectExpr(ast, resultRow.Row, ticket);
+                            EvalOrProjectExpr(ast, resultRow.Row, i);
                         continue;
                     
                     case NodeType.ExprAlias:
-                        projected[ast.rightAst!.yytext ?? ""] = EvalOrProjectExpr(ast.leftAst!, resultRow.Row, ticket);
+                        projected[ast.rightAst!.yytext ?? ""] =
+                            EvalOrProjectExpr(ast, resultRow.Row, i);
                         break;
-                    
+
                     default:
-                        projected[i.ToString()] = EvalOrProjectExpr(ast, resultRow.Row, ticket);
+                        projected[QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, i)] =
+                            EvalOrProjectExpr(ast, resultRow.Row, i);
                         break;
                 }
             }
@@ -87,20 +89,14 @@ internal sealed class QueryProjector
         return columns;
     }
 
-    private static ColumnValue EvalOrProjectExpr(NodeAst ast, Dictionary<string, ColumnValue> row, QueryTicket ticket)
+    private static ColumnValue EvalOrProjectExpr(NodeAst ast, Dictionary<string, ColumnValue> row, int projectionIndex)
     {
-        if (ast.nodeType == NodeType.ExprFuncCall && IsAggregation(ast))
-            return row["0"];
-
-        return SqlExecutor.EvalExpr(ast, row, ticket.Parameters, ticket.RowNameResolver);
-    }    
-
-    private static bool IsAggregation(NodeAst nodeAst)
-    {
-        return nodeAst.leftAst!.yytext!.ToLowerInvariant() switch
+        if (QueryExpressionClassifier.IsAggregateProjection(ast))
         {
-            "count" or "max" or "min" or "sum" or "avg" or "distinct" => true,
-            _ => false,
-        };
+            string key = QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, projectionIndex);
+            return row[key];
+        }
+
+        return SqlExecutor.EvalExpr(ast, row, parameters: null, rowNameResolver: null);
     }
 }

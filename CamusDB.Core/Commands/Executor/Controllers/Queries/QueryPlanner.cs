@@ -48,6 +48,9 @@ public sealed class QueryPlanner
         {
             root = new AggregateNode(root);
 
+            if (ticket.Having is not null)
+                root = new HavingFilterNode(ticket.Having, root);
+
             if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
                 root = new SortNode(root);
 
@@ -68,7 +71,12 @@ public sealed class QueryPlanner
             if (ticket.Projection is not null && ticket.Projection.Count > 0)
             {
                 if (QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
+                {
                     root = new AggregateNode(root);
+
+                    if (ticket.Having is not null)
+                        root = new HavingFilterNode(ticket.Having, root);
+                }
 
                 if (!QueryPostScanPipeline.IsFullProjection(ticket.Projection))
                     root = new ProjectNode(root);
