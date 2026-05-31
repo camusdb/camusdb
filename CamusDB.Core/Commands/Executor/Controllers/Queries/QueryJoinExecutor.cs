@@ -27,6 +27,8 @@ internal sealed class QueryJoinExecutor
 
     private readonly QuerySorter querySorter = new();
 
+    private readonly QueryAggregator queryAggregator = new();
+
     private readonly QueryLimiter queryLimiter = new();
 
     private readonly QueryProjector queryProjector = new();
@@ -44,16 +46,13 @@ internal sealed class QueryJoinExecutor
         if (plan.ExecutionFilter is not null)
             cursor = ApplyWhere(cursor, plan.ExecutionFilter, plan.Ticket);
 
-        if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
-            cursor = querySorter.SortResultset(ticket, cursor);
-
-        if (ticket.Limit is not null || ticket.Offset is not null)
-            cursor = queryLimiter.LimitResultset(ticket, cursor);
-
-        if (ticket.Projection is not null && ticket.Projection.Count > 0)
-            cursor = queryProjector.ProjectResultset(ticket, cursor);
-
-        return cursor;
+        return QueryPostScanPipeline.Apply(
+            ticket,
+            cursor,
+            querySorter,
+            queryAggregator,
+            queryProjector,
+            queryLimiter);
     }
 
     private async IAsyncEnumerable<QueryResultRow> ExecuteJoinTree(

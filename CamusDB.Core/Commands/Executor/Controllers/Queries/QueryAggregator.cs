@@ -145,12 +145,7 @@ internal sealed class QueryAggregator
 
     private static string GetProjectionOutputName(NodeAst expression, int index)
     {
-        return expression.nodeType switch
-        {
-            NodeType.ExprAlias => expression.rightAst!.yytext!,
-            NodeType.Identifier => expression.yytext!,
-            _ => index.ToString(),
-        };
+        return QueryProjectionResolver.GetOutputNameFromProjectionExpression(expression, index);
     }
 
     private static NodeAst GetAggregateFuncCall(NodeAst expression)

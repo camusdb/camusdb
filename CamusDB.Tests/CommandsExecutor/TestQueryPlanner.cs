@@ -19,7 +19,7 @@ using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
-using CamusDB.Core.CommandsExecutor.Models.Predicates;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
 
@@ -58,122 +58,15 @@ public class TestQueryPlanner
         NodeAst ast = SQLParserProcessor.Parse(sql);
         Assert.AreEqual(NodeType.Select, ast.nodeType);
 
-        string tableName;
-        string? indexName = null;
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(ast);
 
-        if (ast.rightAst!.nodeType == NodeType.Identifier)
-        {
-            tableName = ast.rightAst.yytext!;
-        }
-        else if (ast.rightAst.nodeType == NodeType.IdentifierWithOpts)
-        {
-            tableName = ast.rightAst.leftAst!.yytext!;
-            if (ast.rightAst.rightAst!.yytext!.Equals("FORCE_INDEX", StringComparison.InvariantCultureIgnoreCase))
-            {
-                string forcedIndex = ast.rightAst.extendedOne!.yytext!;
-                indexName = forcedIndex == "pk" ? CamusDBConfig.PrimaryKeyInternalName : forcedIndex;
-            }
-        }
-        else
-        {
-            throw new InvalidOperationException("Unexpected table reference in SELECT AST");
-        }
-
-        return new QueryTicket(
+        ExecuteSQLTicket executeTicket = new(
             txnState: context!.Txn,
-            databaseName: QueryPlannerTestContext.DatabaseName,
-            tableName: tableName,
-            index: indexName,
-            projection: GetProjection(ast),
-            filters: null,
-            where: ast.extendedOne,
-            orderBy: GetOrderBy(ast),
-            limit: ast.extendedThree,
-            offset: ast.extendedFour,
-            parameters: parameters,
-            groupBy: GetGroupBy(ast),
-            analyzedWhere: PredicateAnalyzer.Analyze(ast.extendedOne, parameters)
-        );
-    }
+            database: QueryPlannerTestContext.DatabaseName,
+            sql: sql,
+            parameters: parameters);
 
-    private static IReadOnlyList<NodeAst>? GetGroupBy(NodeAst ast)
-    {
-        if (ast.extendedFive is null)
-            return null;
-
-        return new SelectQueryCreator().CreateSelectQuery(ast).GroupBy;
-    }
-
-    private static List<NodeAst>? GetProjection(NodeAst ast)
-    {
-        List<NodeAst> projectionList = new();
-        GetProjectionFields(ast.leftAst!, projectionList);
-        return projectionList;
-    }
-
-    private static void GetProjectionFields(NodeAst ast, List<NodeAst> projectionList)
-    {
-        if (ast.nodeType == NodeType.IdentifierList)
-        {
-            if (ast.leftAst is not null)
-                GetProjectionFields(ast.leftAst, projectionList);
-
-            if (ast.rightAst is not null)
-                GetProjectionFields(ast.rightAst, projectionList);
-
-            return;
-        }
-
-        projectionList.Add(ast);
-    }
-
-    private static List<QueryOrderBy>? GetOrderBy(NodeAst ast)
-    {
-        if (ast.extendedTwo is null)
-            return null;
-
-        List<QueryOrderBy> orderClauses = new();
-        List<(string, OrderType)> sortList = new();
-        GetSortList(ast.extendedTwo, sortList);
-
-        foreach ((string projectionName, OrderType type) in sortList)
-            orderClauses.Add(new QueryOrderBy(projectionName, type));
-
-        return orderClauses;
-    }
-
-    private static void GetSortList(NodeAst orderByAst, List<(string, OrderType)> sortList)
-    {
-        if (orderByAst.nodeType == NodeType.Identifier)
-        {
-            sortList.Add((orderByAst.yytext ?? "", OrderType.Ascending));
-            return;
-        }
-
-        if (orderByAst.nodeType == NodeType.SortAsc)
-        {
-            sortList.Add((orderByAst.leftAst!.yytext ?? "", OrderType.Ascending));
-            return;
-        }
-
-        if (orderByAst.nodeType == NodeType.SortDesc)
-        {
-            sortList.Add((orderByAst.leftAst!.yytext ?? "", OrderType.Descending));
-            return;
-        }
-
-        if (orderByAst.nodeType == NodeType.IdentifierList)
-        {
-            if (orderByAst.leftAst is not null)
-                GetSortList(orderByAst.leftAst, sortList);
-
-            if (orderByAst.rightAst is not null)
-                GetSortList(orderByAst.rightAst, sortList);
-
-            return;
-        }
-
-        throw new InvalidOperationException("Invalid order by clause");
+        return QueryTicketAdapter.ToQueryTicket(query, executeTicket);
     }
 
     private static QueryPlanStepType[] StepTypes(QueryPlan plan) =>

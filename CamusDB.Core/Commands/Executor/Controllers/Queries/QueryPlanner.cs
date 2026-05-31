@@ -51,7 +51,7 @@ public sealed class QueryPlanner
             if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
                 root = new SortNode(root);
 
-            if (ticket.Projection is not null && ticket.Projection.Count > 0 && !IsFullProjection(ticket.Projection))
+            if (ticket.Projection is not null && ticket.Projection.Count > 0 && !QueryPostScanPipeline.IsFullProjection(ticket.Projection))
                 root = new ProjectNode(root);
 
             if (ticket.Limit is not null || ticket.Offset is not null)
@@ -67,10 +67,10 @@ public sealed class QueryPlanner
 
             if (ticket.Projection is not null && ticket.Projection.Count > 0)
             {
-                if (HasAggregation(ticket.Projection, ticket))
+                if (QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
                     root = new AggregateNode(root);
 
-                if (!IsFullProjection(ticket.Projection))
+                if (!QueryPostScanPipeline.IsFullProjection(ticket.Projection))
                     root = new ProjectNode(root);
             }
         }
@@ -139,48 +139,6 @@ public sealed class QueryPlanner
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"Cannot convert plan step to scan node: {step.Type}");
         }
-    }
-
-    private static bool IsFullProjection(List<NodeAst> projection)
-    {
-        return projection is [{ nodeType: NodeType.ExprAllFields }];
-    }
-
-    private static bool HasAggregation(List<NodeAst> projection, QueryTicket ticket)
-    {
-        foreach (NodeAst nodeAst in projection)
-        {
-            switch (nodeAst.nodeType)
-            {
-                case NodeType.ExprFuncCall:
-                    return CheckIfSupportedAggregation(nodeAst, projection, ticket);
-                
-                case NodeType.ExprAlias:
-                    return CheckIfSupportedAggregation(nodeAst.leftAst!, projection, ticket);
-            }
-        }
-
-        return false;
-    }
-
-    private static bool CheckIfSupportedAggregation(NodeAst nodeAst, List<NodeAst> projection, QueryTicket ticket)
-    {
-        switch (nodeAst.leftAst!.yytext!.ToLowerInvariant())
-        {
-            case "count":
-            case "max":
-            case "min":
-            case "sum":
-            case "avg":
-            case "distinct":
-
-                if (projection.Count > 1 && ticket.GroupBy is not { Count: > 0 })
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Aggregations cannot be accompanied by other projections or expressions.");
-
-                return true;
-        }
-
-        return false;
     }
 }
 

@@ -2343,6 +2343,53 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectInnerJoinCountStar()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT COUNT(*) AS cnt FROM app_users u JOIN posts p ON p.user_id = u.id",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(5, result[0].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectInnerJoinGroupByRoleCount()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT u.role, COUNT(*) AS cnt FROM app_users u JOIN posts p ON p.user_id = u.id GROUP BY u.role ORDER BY u.role",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual("admin", result[0].Row["role"].StrValue);
+        Assert.AreEqual(3, result[0].Row["cnt"].LongValue);
+        Assert.AreEqual("member", result[1].Row["role"].StrValue);
+        Assert.AreEqual(2, result[1].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectInnerJoinIndexedMatchesNestedLoop()
     {
         const string sql =

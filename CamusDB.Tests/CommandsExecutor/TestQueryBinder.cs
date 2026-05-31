@@ -430,6 +430,23 @@ public class TestQueryBinder : BaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task BindAsync_InnerJoinOnReferencesFutureTable_throwsInvalidInput()
+    {
+        (DatabaseDescriptor database, CatalogsManager catalogs) = await SetupUsersAndPostsTables();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT u.email FROM app_users u JOIN posts p ON p.user_id = c.id JOIN app_users c ON c.id = p.user_id"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("Unknown alias 'c'", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task BindAsync_InnerJoinUnknownTable_throws()
     {
         (DatabaseDescriptor database, CatalogsManager catalogs) = await SetupUsersAndPostsTables();

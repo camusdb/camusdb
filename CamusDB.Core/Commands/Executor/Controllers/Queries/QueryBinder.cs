@@ -81,14 +81,17 @@ internal sealed class QueryBinder
         }
     }
 
-    private static void ValidateJoinPredicates(QuerySource source, IReadOnlyList<BoundTableSource> sources)
+    private static void ValidateJoinPredicates(QuerySource source, IReadOnlyList<BoundTableSource> allSources)
     {
         switch (source)
         {
             case JoinSource joinSource:
-                ValidateJoinPredicates(joinSource.Left, sources);
-                ValidateJoinPredicates(joinSource.Right, sources);
-                ValidateExpression(joinSource.OnPredicate, new QueryRowNameResolver(sources));
+                ValidateJoinPredicates(joinSource.Left, allSources);
+
+                List<BoundTableSource> inScope = new();
+                CollectBoundSourcesFromSubtree(joinSource.Left, allSources, inScope);
+                CollectBoundSourcesFromSubtree(joinSource.Right, allSources, inScope);
+                ValidateExpression(joinSource.OnPredicate, new QueryRowNameResolver(inScope));
                 return;
 
             case TableSource:
@@ -99,6 +102,53 @@ internal sealed class QueryBinder
                     CamusDBErrorCodes.InvalidInput,
                     $"Unsupported query source: {source.GetType().Name}");
         }
+    }
+
+    private static void CollectBoundSourcesFromSubtree(
+        QuerySource source,
+        IReadOnlyList<BoundTableSource> allSources,
+        List<BoundTableSource> output)
+    {
+        switch (source)
+        {
+            case TableSource tableSource:
+            {
+                string alias = tableSource.Alias ?? tableSource.TableName;
+                output.Add(FindBoundSource(allSources, tableSource.TableName, alias));
+                return;
+            }
+
+            case JoinSource joinSource:
+                CollectBoundSourcesFromSubtree(joinSource.Left, allSources, output);
+                CollectBoundSourcesFromSubtree(joinSource.Right, allSources, output);
+                return;
+
+            case DerivedTableSource:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Derived table sources are not supported yet");
+
+            default:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Unsupported query source: {source.GetType().Name}");
+        }
+    }
+
+    private static BoundTableSource FindBoundSource(
+        IReadOnlyList<BoundTableSource> sources,
+        string tableName,
+        string alias)
+    {
+        foreach (BoundTableSource source in sources)
+        {
+            if (source.Source.TableName == tableName && source.Alias == alias)
+                return source;
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Bound source not found for table '{tableName}' alias '{alias}'");
     }
 
     private static void ValidateQuery(SelectQuery query, QueryRowNameResolver rowNames)
