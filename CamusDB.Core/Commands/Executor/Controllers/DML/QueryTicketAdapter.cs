@@ -50,7 +50,11 @@ internal static class QueryTicketAdapter
             projection: query.Projections.Select(item => item.Expression).ToList(),
             filters: null,
             where: where,
-            orderBy: ToQueryOrderBy(query.OrderBy, query.Projections, query.GroupBy, query.GroupBy is { Count: > 0 }),
+            orderBy: ToQueryOrderBy(
+                query.OrderBy,
+                query.Projections,
+                query.GroupBy,
+                SortAfterProjection(query)),
             limit: query.Limit,
             offset: query.Offset,
             parameters: ticket.Parameters,
@@ -156,4 +160,11 @@ internal static class QueryTicketAdapter
 
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid order by clause");
     }
+
+    private static bool SortAfterProjection(SelectQuery query) =>
+        query.GroupBy is { Count: > 0 }
+        || (query.IsDistinct && !IsFullProjection(query.Projections));
+
+    private static bool IsFullProjection(IReadOnlyList<ProjectionItem> projections) =>
+        projections is [{ Expression.nodeType: NodeType.ExprAllFields }];
 }

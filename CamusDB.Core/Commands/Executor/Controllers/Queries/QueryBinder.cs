@@ -271,7 +271,8 @@ internal sealed class QueryBinder
         if (query.OrderBy is null)
             return;
 
-        bool sortAfterProjection = query.GroupBy is { Count: > 0 };
+        bool sortAfterProjection = query.GroupBy is { Count: > 0 }
+            || (query.IsDistinct && !IsFullProjection(query.Projections));
 
         foreach (OrderByItem orderBy in query.OrderBy)
         {
@@ -295,6 +296,9 @@ internal sealed class QueryBinder
             ValidateExpression(orderBy.Expression, rowNames);
         }
     }
+
+    private static bool IsFullProjection(IReadOnlyList<ProjectionItem> projections) =>
+        projections is [{ Expression.nodeType: NodeType.ExprAllFields }];
 
     private static void ValidateProjectionAndGrouping(SelectQuery query)
     {

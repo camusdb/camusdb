@@ -408,6 +408,46 @@ public class TestQueryBinder : BaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task BindAsync_SelectDistinctOrderByNonProjectedColumn_throwsInvalidInput()
+    {
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse("SELECT DISTINCT name FROM robots ORDER BY year"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("ORDER BY", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_SelectDistinctOrderByProjectedColumn_bindsSuccessfully()
+    {
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse("SELECT DISTINCT name FROM robots ORDER BY name"));
+
+        await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_SelectDistinctStarOrderByTableColumn_bindsSuccessfully()
+    {
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse("SELECT DISTINCT * FROM robots ORDER BY year"));
+
+        await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task BindAsync_HavingWithoutGroupByOrAggregate_throwsInvalidInput()
     {
         (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();

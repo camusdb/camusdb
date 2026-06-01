@@ -3520,6 +3520,50 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectDistinctOrderByNonProjectedColumn_throwsInvalidInput()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDistinctDupItems();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT DISTINCT code FROM dup_items ORDER BY note",
+            parameters: null);
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await executor.ExecuteSQLQuery(ticket))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("ORDER BY", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectDistinctOrderByProjectedColumn()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDistinctDupItems();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT DISTINCT code FROM dup_items ORDER BY code",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(3, result.Count);
+        Assert.AreEqual("A", result[0].Row["code"].StrValue);
+        Assert.AreEqual("B", result[1].Row["code"].StrValue);
+        Assert.AreEqual("C", result[2].Row["code"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectDistinctStarRemovesExactDuplicates()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();

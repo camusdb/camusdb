@@ -698,4 +698,23 @@ public class TestQueryPlanner
 
         Assert.IsNull(plan.ScanRowLimit);
     }
+
+    [Test]
+    public void PlanDistinctWithOrderByAlwaysIncludesSortAfterDistinct()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT DISTINCT id FROM robots WHERE id = @id ORDER BY id",
+            new() { { "@id", new ColumnValue(ColumnType.Id, QueryPlannerTestContext.SampleRowId) } });
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                QueryPlanStepType.QueryFromIndex,
+                QueryPlanStepType.ReduceToProjections,
+                QueryPlanStepType.Distinct,
+                QueryPlanStepType.SortBy,
+            },
+            StepTypes(plan));
+    }
 }

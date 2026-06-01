@@ -83,7 +83,7 @@ public sealed class QueryPlanner
 
                 root = new DistinctNode(root);
 
-                if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0 && !scanSatisfiesOrderBy)
+                if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
                     root = new SortNode(root);
 
                 if (ticket.Limit is not null || ticket.Offset is not null)
