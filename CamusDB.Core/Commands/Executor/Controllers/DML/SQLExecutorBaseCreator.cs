@@ -154,6 +154,20 @@ internal abstract class SQLExecutorBaseCreator
                     return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) >= 0);
                 }
 
+            case NodeType.ExprBetween:
+                {
+                    ColumnValue subject = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue low = EvalExpr(expr.extendedOne!, row, parameters, rowNameResolver);
+                    ColumnValue high = EvalExpr(expr.extendedTwo!, row, parameters, rowNameResolver);
+
+                    if (subject.Type == ColumnType.Null || low.Type == ColumnType.Null || high.Type == ColumnType.Null)
+                        return new ColumnValue(ColumnType.Bool, false);
+
+                    return new ColumnValue(
+                        ColumnType.Bool,
+                        subject.CompareTo(low) >= 0 && subject.CompareTo(high) <= 0);
+                }
+
             case NodeType.ExprOr:
                 {
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);

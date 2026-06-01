@@ -137,64 +137,47 @@ internal sealed class RowInserter
         InsertTicket ticket = state.Ticket;
         KvTransaction tx = ticket.TxnState;
 
+        // Build every row + index entry for the whole ticket, then write them in a single
+        // batched pass (one AcquireMany + one SetMany) instead of an acquire+set per key.
+        List<KvTableStore.RowWrite> writes = new(ticket.Values.Count);
+
         foreach (Dictionary<string, ColumnValue> values in ticket.Values)
         {
             ObjectIdValue rowId = ObjectIdGenerator.Generate();
 
-            byte[] rowBuffer = RowEncoder.Encode(table.Schema, values, rowId);
+            KvTableStore.RowWrite write = new()
+            {
+                RowId = rowId,
+                RowData = RowEncoder.Encode(table.Schema, values, rowId)
+            };
 
-            await table.Store.InsertRow(tx, rowId, rowBuffer).ConfigureAwait(false);
+            foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
+            {
+                TableIndexSchema index = kv.Value;
 
-            await UpdateUniqueIndexes(table, tx, rowId, values).ConfigureAwait(false);
+                if (index.Type == IndexType.Unique)
+                {
+                    CompositeColumnValue uniqueKeyValue = GetColumnValue(values, index.Columns);
+                    write.IndexEntries.Add(new(index.Name, uniqueKeyValue, Unique: true));
+                }
+                else if (index.Type == IndexType.Multi)
+                {
+                    CompositeColumnValue multiKeyValue = GetColumnValue(values, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
+                    write.IndexEntries.Add(new(index.Name, multiKeyValue, Unique: false));
+                }
+            }
 
-            await UpdateMultiIndexes(table, tx, rowId, values).ConfigureAwait(false);
-
-            logger.LogInformation("Row with rowid {RowId} inserted", rowId);
-
-            state.InsertedRows++;
+            writes.Add(write);
         }
+
+        await table.Store.WriteRowsBatch(tx, writes).ConfigureAwait(false);
+
+        state.InsertedRows += writes.Count;
+
+        if (logger.IsEnabled(LogLevel.Debug))
+            logger.LogDebug("Inserted {Count} row(s) in a batched write", writes.Count);
 
         return FluxAction.Continue;
-    }
-
-    private static async Task UpdateUniqueIndexes(
-        TableDescriptor table,
-        KvTransaction tx,
-        ObjectIdValue rowId,
-        Dictionary<string, ColumnValue> values
-    )
-    {
-        foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
-        {
-            TableIndexSchema index = kv.Value;
-
-            if (index.Type != IndexType.Unique)
-                continue;
-
-            CompositeColumnValue uniqueKeyValue = GetColumnValue(values, index.Columns);
-
-            await table.Store.PutIndexEntry(tx, index.Name, uniqueKeyValue, rowId, unique: true).ConfigureAwait(false);
-        }
-    }
-
-    private static async Task UpdateMultiIndexes(
-        TableDescriptor table,
-        KvTransaction tx,
-        ObjectIdValue rowId,
-        Dictionary<string, ColumnValue> values
-    )
-    {
-        foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
-        {
-            TableIndexSchema index = kv.Value;
-
-            if (index.Type != IndexType.Multi)
-                continue;
-
-            CompositeColumnValue multiKeyValue = GetColumnValue(values, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
-
-            await table.Store.PutIndexEntry(tx, index.Name, multiKeyValue, rowId, unique: false).ConfigureAwait(false);
-        }
     }
 
     private async Task<int> InsertInternal(FluxMachine<InsertFluxSteps, InsertFluxState> machine, InsertFluxState state)

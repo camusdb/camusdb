@@ -57,6 +57,9 @@ internal static class QueryHavingEvaluator
             case NodeType.ExprGreaterEqualsThan:
                 return Compare(row, ticket, parameters, expression, static (left, right) => left.CompareTo(right) >= 0);
 
+            case NodeType.ExprBetween:
+                return SqlExecutor.EvalExpr(expression, row, parameters, rowNameResolver: null);
+
             case NodeType.ExprOr:
             {
                 ColumnValue leftValue = Evaluate(expression.leftAst!, row, ticket, parameters);

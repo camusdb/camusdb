@@ -307,6 +307,186 @@ public sealed class KvTableStore
         tx.TrackModified(kvKey, KeyValueDurability.Persistent);
     }
 
+    // -----------------------------------------------------------------------
+    // Batched write path (mass insert)
+    // -----------------------------------------------------------------------
+
+    /// <summary>A single row plus its secondary-index entries, to be written as part of a batch.</summary>
+    public sealed class RowWrite
+    {
+        public required ObjectIdValue RowId { get; init; }
+        public required byte[] RowData { get; init; }
+        public List<IndexWrite> IndexEntries { get; } = [];
+    }
+
+    /// <summary>One secondary-index entry for a row in a batch write.</summary>
+    public readonly record struct IndexWrite(string IndexId, CompositeColumnValue Key, bool Unique);
+
+    /// <summary>
+    /// Writes many rows (and their index entries) using two Kahuna round-trips for the whole
+    /// batch — one <see cref="IKahuna.LocateAndTryAcquireManyExclusiveLocks"/> and one
+    /// <see cref="IKahuna.LocateAndTrySetManyKeyValue"/> — instead of an acquire+set per key.
+    ///
+    /// Preserves the per-key semantics of <see cref="WriteRow"/> / <see cref="PutIndexEntry"/>:
+    /// unique index entries use <c>SetIfNotExists</c> and a <c>NotSet</c> result raises a
+    /// duplicate-key error. All keys in a batch are distinct; a repeated <em>unique</em> key
+    /// means a duplicate unique value within the same insert and is rejected up-front.
+    /// </summary>
+    public async Task WriteRowsBatch(KvTransaction tx, IReadOnlyList<RowWrite> rows, CancellationToken cancellationToken = default)
+    {
+        if (rows.Count == 0)
+            return;
+
+        List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys = [];
+        List<KahunaSetKeyValueRequestItem> setItems = [];
+        Dictionary<string, bool> uniqueByKey = new();
+        HashSet<string> seenUnique = [];
+
+        void AddWrite(string key, byte[] value, bool unique)
+        {
+            lockKeys.Add((key, 0, KeyValueDurability.Persistent));
+            uniqueByKey[key] = unique;
+            setItems.Add(new KahunaSetKeyValueRequestItem
+            {
+                TransactionId = tx.TransactionId,
+                Key = key,
+                Value = value,
+                CompareValue = null,
+                CompareRevision = -1,
+                Flags = unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set,
+                ExpiresMs = 0,
+                Durability = KeyValueDurability.Persistent
+            });
+        }
+
+        foreach (RowWrite row in rows)
+        {
+            AddWrite(BuildRowKey(row.RowId), row.RowData, unique: false);
+
+            foreach (IndexWrite ix in row.IndexEntries)
+            {
+                string kvKey = ix.Unique
+                    ? BuildUniqueIndexKey(ix.IndexId, ix.Key)
+                    : BuildNonUniqueIndexKey(ix.IndexId, ix.Key, row.RowId);
+
+                if (ix.Unique && !seenUnique.Add(kvKey))
+                    throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{ix.IndexId}'");
+
+                AddWrite(kvKey, Encoding.UTF8.GetBytes(row.RowId.ToString()), ix.Unique);
+            }
+        }
+
+        // Phase 1 — acquire every lock for the batch in one round-trip (retrying only transients).
+        await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
+
+        // Phase 2 — set every value for the batch in one round-trip (retrying only transients).
+        await SetManyWithRetry(setItems, uniqueByKey, cancellationToken).ConfigureAwait(false);
+
+        // Track locks + modified keys for the 2PC commit.
+        foreach ((string key, int _, KeyValueDurability durability) in lockKeys)
+        {
+            tx.TrackLock(key, durability);
+            tx.TrackModified(key, KeyValueDurability.Persistent);
+        }
+    }
+
+    private async Task AcquireManyWithRetry(
+        KvTransaction tx,
+        List<(string key, int expiresMs, KeyValueDurability durability)> keys,
+        CancellationToken ct)
+    {
+        List<(string, int, KeyValueDurability)> pending = new(keys);
+        int retries = 0;
+
+        while (pending.Count > 0)
+        {
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses =
+                await kahuna.LocateAndTryAcquireManyExclusiveLocks(tx.TransactionId, pending, ct).ConfigureAwait(false);
+
+            List<(string, int, KeyValueDurability)> retry = [];
+            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in responses)
+            {
+                if (type == KeyValueResponseType.Locked)
+                    continue;
+
+                // Re-acquiring keys already held by this transaction is idempotent, so retrying
+                // only the transient ones is safe and avoids re-walking the whole list.
+                if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                {
+                    retry.Add((key, 0, durability));
+                    continue;
+                }
+
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {type}");
+            }
+
+            if (retry.Count == 0)
+                return;
+
+            if (++retries >= MaxKahunaRetries)
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire {retry.Count} lock(s) after {MaxKahunaRetries} retries");
+
+            await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+            pending = retry;
+        }
+    }
+
+    private async Task SetManyWithRetry(
+        List<KahunaSetKeyValueRequestItem> items,
+        Dictionary<string, bool> uniqueByKey,
+        CancellationToken ct)
+    {
+        List<KahunaSetKeyValueRequestItem> pending = new(items);
+        int retries = 0;
+
+        while (pending.Count > 0)
+        {
+            List<KahunaSetKeyValueResponseItem> responses =
+                await kahuna.LocateAndTrySetManyKeyValue(pending, ct).ConfigureAwait(false);
+
+            // Only rebuilt if a transient response forces a retry. Re-sending an already-Set
+            // unique key would falsely report a duplicate (its MVCC entry now exists), so we
+            // resend only the keys that came back MustRetry/WaitingForReplication.
+            List<KahunaSetKeyValueRequestItem> retry = [];
+            Dictionary<string, KahunaSetKeyValueRequestItem>? byKey = null;
+
+            foreach (KahunaSetKeyValueResponseItem resp in responses)
+            {
+                string key = resp.Key ?? "";
+
+                switch (resp.Type)
+                {
+                    case KeyValueResponseType.Set:
+                        break;
+
+                    case KeyValueResponseType.NotSet:
+                        if (uniqueByKey.TryGetValue(key, out bool unique) && unique)
+                            throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{key}'");
+                        break; // non-unique NotSet mirrors the per-row path and is acceptable
+
+                    case KeyValueResponseType.MustRetry:
+                    case KeyValueResponseType.WaitingForReplication:
+                        byKey ??= pending.ToDictionary(i => i.Key!, i => i);
+                        if (byKey.TryGetValue(key, out KahunaSetKeyValueRequestItem? item))
+                            retry.Add(item);
+                        break;
+
+                    default:
+                        throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch set failed for key {key}: {resp.Type}");
+                }
+            }
+
+            if (retry.Count == 0)
+                return;
+
+            if (++retries >= MaxKahunaRetries)
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch set failed for {retry.Count} key(s) after {MaxKahunaRetries} retries");
+
+            await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+            pending = retry;
+        }
+    }
+
     /// <summary>
     /// Removes a secondary index entry. No-ops silently if the entry does not exist.
     /// </summary>

@@ -106,6 +106,14 @@ internal static class QueryHavingWorkspace
                     || (expression.rightAst is not null
                         && ContainsHiddenExpression(expression.rightAst, ticket, outputNames, insideAggregate));
 
+            case NodeType.ExprBetween:
+                return (expression.leftAst is not null
+                        && ContainsHiddenExpression(expression.leftAst, ticket, outputNames, insideAggregate))
+                    || (expression.extendedOne is not null
+                        && ContainsHiddenExpression(expression.extendedOne, ticket, outputNames, insideAggregate))
+                    || (expression.extendedTwo is not null
+                        && ContainsHiddenExpression(expression.extendedTwo, ticket, outputNames, insideAggregate));
+
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
                 return expression.leftAst is not null
@@ -198,6 +206,18 @@ internal static class QueryHavingWorkspace
 
                 if (expression.rightAst is not null)
                     CollectHiddenExpressions(expression.rightAst, ticket, projections, outputNames, insideAggregate);
+
+                return;
+
+            case NodeType.ExprBetween:
+                if (expression.leftAst is not null)
+                    CollectHiddenExpressions(expression.leftAst, ticket, projections, outputNames, insideAggregate);
+
+                if (expression.extendedOne is not null)
+                    CollectHiddenExpressions(expression.extendedOne, ticket, projections, outputNames, insideAggregate);
+
+                if (expression.extendedTwo is not null)
+                    CollectHiddenExpressions(expression.extendedTwo, ticket, projections, outputNames, insideAggregate);
 
                 return;
 

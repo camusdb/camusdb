@@ -286,6 +286,18 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSimpleSelectWhereBetween()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT year FROM robots WHERE year BETWEEN 2001 AND 2004");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.ExprBetween, ast.extendedOne!.nodeType);
+        Assert.AreEqual("year", ast.extendedOne!.leftAst!.yytext);
+        Assert.AreEqual("2001", ast.extendedOne!.extendedOne!.yytext);
+        Assert.AreEqual("2004", ast.extendedOne!.extendedTwo!.yytext);
+    }
+
+    [Test]
     public void TestParseSimpleSelectOrderBy()
     {
         NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table ORDER BY xx");

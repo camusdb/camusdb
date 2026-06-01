@@ -179,6 +179,23 @@ public class TestQueryPlanner
     }
 
     [Test]
+    public void PlanUsesSecondaryIndexRangeScanForBetween()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year BETWEEN 2001 AND 2004");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("year_idx", plan.Steps[0].Index!.Name);
+        Assert.AreEqual(2001, plan.Steps[0].FromBound!.Values[0].LongValue);
+        Assert.IsTrue(plan.Steps[0].FromInclusive);
+        Assert.AreEqual(2004, plan.Steps[0].ToBound!.Values[0].LongValue);
+        Assert.IsTrue(plan.Steps[0].ToInclusive);
+        Assert.IsNull(plan.ExecutionFilter);
+    }
+
+    [Test]
     public void PlanUsesSecondaryIndexRangeScanForLowerBoundOnly()
     {
         QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE year > 2020");

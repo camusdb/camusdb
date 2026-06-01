@@ -27,6 +27,7 @@ public enum NodeType
     ExprGreaterThan,
     ExprGreaterEqualsThan,
     ExprLessEqualsThan,
+    ExprBetween,
     ExprOr,
     ExprAnd,
     ExprAdd,

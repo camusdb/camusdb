@@ -116,6 +116,37 @@ public class TestPredicateAnalyzer
     }
 
     [Test]
+    public void Analyze_BetweenExpandsToInclusiveRangeComparisons()
+    {
+        NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE year BETWEEN 2001 AND 2004").extendedOne!;
+        PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
+
+        Assert.AreEqual(2, analysis.IndexableComparisons.Count);
+        Assert.AreEqual(">=", analysis.IndexableComparisons[0].Operator);
+        Assert.AreEqual(2001, analysis.IndexableComparisons[0].Constant.LongValue);
+        Assert.AreEqual("<=", analysis.IndexableComparisons[1].Operator);
+        Assert.AreEqual(2004, analysis.IndexableComparisons[1].Constant.LongValue);
+        Assert.AreEqual(0, analysis.ResidualConjuncts.Count);
+    }
+
+    [Test]
+    public void BuildExecutionFilter_BetweenRangeIndexScan_omitsAbsorbedBounds()
+    {
+        NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE year BETWEEN 2001 AND 2004").extendedOne!;
+        PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
+
+        QueryPlanStep rangeStep = new(
+            QueryPlanStepType.RangeScanFromIndex,
+            new("year_idx", ["year"], IndexType.Multi),
+            new CompositeColumnValue(new[] { new ColumnValue(ColumnType.Integer64, 2001) }),
+            fromInclusive: true,
+            new CompositeColumnValue(new[] { new ColumnValue(ColumnType.Integer64, 2004) }),
+            toInclusive: true);
+
+        Assert.IsNull(PredicateAnalyzer.BuildExecutionFilter(analysis, rangeStep, context!.Table));
+    }
+
+    [Test]
     public void BuildExecutionFilter_PointRangeScan_omitsMatchingEqualityOnly()
     {
         NodeAst where = SQLParserProcessor.Parse(

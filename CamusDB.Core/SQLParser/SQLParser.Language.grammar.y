@@ -15,7 +15,7 @@
 %left TOR
 %left TAND
 %left TLIKE TILIKE
-%left TEQUALS TNOTEQUALS
+%left TEQUALS TNOTEQUALS TBETWEEN
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
 %left TMULT
@@ -26,7 +26,7 @@
 %token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
-%token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING
+%token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TBETWEEN
 
 %%
 
@@ -305,6 +305,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | greater_than_expr { $$.n = $1.n; }
            | less_equals_than_expr { $$.n = $1.n; }
            | greater_equals_than_expr { $$.n = $1.n; }
+           | between_expr { $$.n = $1.n; }
            | and_expr { $$.n = $1.n; }
            | or_expr { $$.n = $1.n; }
            | add_expr { $$.n = $1.n; }
@@ -348,6 +349,9 @@ greater_equals_than_expr : condition TGREATERTHANEQUALS condition { $$.n = new(N
 
 less_equals_than_expr : condition TLESSTHANEQUALS condition { $$.n = new(NodeType.ExprLessEqualsThan, $1.n, $3.n, null, null, null, null, null, null); }
                       ;
+
+between_expr : condition TBETWEEN condition TAND condition { $$.n = new(NodeType.ExprBetween, $1.n, null, $3.n, $5.n, null, null, null, null); }
+             ;
 
 add_expr  : condition TADD condition { $$.n = new(NodeType.ExprAdd, $1.n, $3.n, null, null, null, null, null, null); }
           ;

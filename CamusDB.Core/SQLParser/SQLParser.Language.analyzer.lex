@@ -11,6 +11,7 @@ TFrom           (F|f)(R|r)(O|o)(M|m)
 TWhere          (W|w)(H|h)(E|e)(R|r)(E|e)
 TOrder          (O|o)(R|r)(D|d)(E|e)(R|r)
 TBy             (B|b)(Y|y)
+TBetween         (B|b)(E|e)(T|t)(W|w)(E|e)(E|e)(N|n)
 TAnd            (A|a)(N|n)(D|d)
 TOr             (O|o)(R|r)
 TOn             (O|o)(N|n)
@@ -261,6 +262,8 @@ TDot            \.
 {TMinus} { return (int)Token.TMINUS; }
 
 {TComma} { return (int)Token.TCOMMA; }
+
+{TBetween} { return (int)Token.TBETWEEN; }
 
 {TAnd} { return (int)Token.TAND; }
 

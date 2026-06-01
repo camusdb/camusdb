@@ -1655,6 +1655,32 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectBetweenPredicateExactRows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT year FROM robots WHERE year BETWEEN 2001 AND 2004 ORDER BY year",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(4, result.Count);
+        Assert.AreEqual(2001, result[0].Row["year"].LongValue);
+        Assert.AreEqual(2002, result[1].Row["year"].LongValue);
+        Assert.AreEqual(2003, result[2].Row["year"].LongValue);
+        Assert.AreEqual(2004, result[3].Row["year"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectSecondaryIndexRangeScan()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTableWithYearIndex();

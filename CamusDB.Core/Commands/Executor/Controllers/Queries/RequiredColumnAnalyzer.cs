@@ -113,7 +113,7 @@ internal static class RequiredColumnAnalyzer
     }
 
     private static bool RequiresAllColumns(List<NodeAst>? projection) =>
-        projection is [{ nodeType: NodeType.ExprAllFields }];
+        projection is null || projection is [{ nodeType: NodeType.ExprAllFields }];
 
     private static void CollectFromProjections(
         List<NodeAst>? projection,
@@ -503,6 +503,39 @@ internal static class RequiredColumnAnalyzer
 
                 return;
 
+            case NodeType.ExprBetween:
+                if (expression.leftAst is not null)
+                {
+                    CollectFromPostAggregateExpression(
+                        expression.leftAst,
+                        ticket,
+                        rowNames,
+                        required,
+                        insideAggregate);
+                }
+
+                if (expression.extendedOne is not null)
+                {
+                    CollectFromPostAggregateExpression(
+                        expression.extendedOne,
+                        ticket,
+                        rowNames,
+                        required,
+                        insideAggregate);
+                }
+
+                if (expression.extendedTwo is not null)
+                {
+                    CollectFromPostAggregateExpression(
+                        expression.extendedTwo,
+                        ticket,
+                        rowNames,
+                        required,
+                        insideAggregate);
+                }
+
+                return;
+
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
                 if (expression.leftAst is not null)
@@ -662,6 +695,42 @@ internal static class RequiredColumnAnalyzer
                 {
                     CollectFromPostAggregateExpressionForAlias(
                         expression.rightAst,
+                        ticket,
+                        rowNames,
+                        alias,
+                        required,
+                        insideAggregate);
+                }
+
+                return;
+
+            case NodeType.ExprBetween:
+                if (expression.leftAst is not null)
+                {
+                    CollectFromPostAggregateExpressionForAlias(
+                        expression.leftAst,
+                        ticket,
+                        rowNames,
+                        alias,
+                        required,
+                        insideAggregate);
+                }
+
+                if (expression.extendedOne is not null)
+                {
+                    CollectFromPostAggregateExpressionForAlias(
+                        expression.extendedOne,
+                        ticket,
+                        rowNames,
+                        alias,
+                        required,
+                        insideAggregate);
+                }
+
+                if (expression.extendedTwo is not null)
+                {
+                    CollectFromPostAggregateExpressionForAlias(
+                        expression.extendedTwo,
                         ticket,
                         rowNames,
                         alias,

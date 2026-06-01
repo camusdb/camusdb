@@ -33,6 +33,12 @@ public static class PredicateAnalyzer
 
         foreach (NodeAst conjunct in conjuncts)
         {
+            if (TryAnalyzeBetween(conjunct, parameters, out List<AnalyzedComparison>? betweenComparisons))
+            {
+                indexable.AddRange(betweenComparisons!);
+                continue;
+            }
+
             if (TryAnalyzeColumnConstantComparison(conjunct, parameters, out AnalyzedComparison? comparison))
                 indexable.Add(comparison!);
             else if (TryAnalyzeColumnColumnComparison(conjunct, out AnalyzedColumnComparison? columnComparison))
@@ -161,6 +167,58 @@ public static class PredicateAnalyzer
 
         conjuncts.Add(node);
     }
+
+    private static bool TryAnalyzeBetween(
+        NodeAst conjunct,
+        Dictionary<string, ColumnValue>? parameters,
+        out List<AnalyzedComparison>? comparisons)
+    {
+        comparisons = null;
+
+        if (conjunct.nodeType != NodeType.ExprBetween)
+            return false;
+
+        if (conjunct.leftAst?.nodeType != NodeType.Identifier || conjunct.leftAst.yytext is null)
+            return false;
+
+        if (conjunct.extendedOne is null || conjunct.extendedTwo is null)
+            return false;
+
+        if (!TryGetConstant(conjunct.extendedOne, parameters, out ColumnValue? low) || low is null)
+            return false;
+
+        if (!TryGetConstant(conjunct.extendedTwo, parameters, out ColumnValue? high) || high is null)
+            return false;
+
+        string columnName = conjunct.leftAst.yytext;
+        comparisons =
+        [
+            new AnalyzedComparison(
+                columnName,
+                ">=",
+                low,
+                BuildComparisonConjunct(conjunct.leftAst, conjunct.extendedOne, NodeType.ExprGreaterEqualsThan)),
+            new AnalyzedComparison(
+                columnName,
+                "<=",
+                high,
+                BuildComparisonConjunct(conjunct.leftAst, conjunct.extendedTwo, NodeType.ExprLessEqualsThan)),
+        ];
+
+        return true;
+    }
+
+    private static NodeAst BuildComparisonConjunct(NodeAst column, NodeAst constant, NodeType nodeType) =>
+        new(
+            nodeType,
+            column,
+            constant,
+            extendedOne: null,
+            extendedTwo: null,
+            extendedThree: null,
+            extendedFour: null,
+            extendedFive: null,
+            yytext: null);
 
     private static bool TryAnalyzeColumnConstantComparison(
         NodeAst conjunct,

@@ -20,7 +20,6 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Transactions;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
