@@ -882,4 +882,50 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
         table = await executor.OpenTable(openTableTicket);
         Assert.True(table.Indexes.ContainsKey("~pk"));
     }
+
+    /// <summary>
+    /// Regression: "ALTER TABLE ... ADD PRIMARY KEY (col)" via the SQL string path.
+    /// The ADD PRIMARY KEY grammar has no index-name token, so the column list lands in
+    /// rightAst (not extendedOne like the named ADD INDEX / ADD UNIQUE forms). Reading the
+    /// wrong slot previously threw "Invalid alter index operation: No columns". The ticket-based
+    /// AddPrimaryKey tests above bypass the parser, so this exercises ExecuteDDLSQL end to end.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSqlAddPrimaryKey()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager _) = await SetupEmptyTable();
+
+        // Drop the primary key the table was created with, so we can re-add it via SQL.
+        KvTransaction dropTx = await database.Transactions.BeginAsync();
+        Assert.True(await executor.AlterIndex(new AlterIndexTicket(
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "~pk",
+            columns: Array.Empty<ColumnIndexInfo>(),
+            operation: AlterIndexOperation.DropPrimaryKey
+        )));
+        await database.Transactions.CommitAsync(dropTx);
+
+        OpenTableTicket openTableTicket = new(databaseName: dbname, tableName: "robots");
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+        Assert.False(table.Indexes.ContainsKey("~pk"));
+
+        // Re-add the primary key through the SQL parser path (the previously broken branch).
+        KvTransaction addTx = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket addPkTicket = new(
+            txnState: addTx,
+            database: dbname,
+            sql: "ALTER TABLE robots ADD PRIMARY KEY (id)",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(addPkTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        table = await executor.OpenTable(openTableTicket);
+        Assert.True(table.Indexes.ContainsKey("~pk"));
+        Assert.AreEqual(IndexType.Unique, table.Indexes["~pk"].Type);
+        Assert.Contains("id", table.Indexes["~pk"].Columns);
+    }
 }

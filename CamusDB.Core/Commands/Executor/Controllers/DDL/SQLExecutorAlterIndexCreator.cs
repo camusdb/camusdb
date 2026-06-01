@@ -60,8 +60,10 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
 
         if (ast.nodeType == NodeType.AlterTableAddPrimaryKey)
         {
+            // ADD PRIMARY KEY has no index-name token, so the grammar puts the column list in
+            // rightAst (not extendedOne like the named ADD INDEX / ADD UNIQUE forms).
             List<ColumnIndexInfo> indexColumns = new();
-            GetColumns(ast.extendedOne, indexColumns);
+            GetColumns(ast.rightAst, indexColumns);
 
             return new(
                 ticket.DatabaseName,
