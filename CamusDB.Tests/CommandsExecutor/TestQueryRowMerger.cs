@@ -16,6 +16,7 @@ using NUnit.Framework;
 namespace CamusDB.Tests.CommandsExecutor;
 
 [TestFixture]
+[NonParallelizable]
 public sealed class TestQueryRowMerger
 {
     [Test]

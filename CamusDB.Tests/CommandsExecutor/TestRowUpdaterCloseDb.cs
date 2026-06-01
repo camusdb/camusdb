@@ -25,6 +25,7 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
+[NonParallelizable]
 public sealed class TestRowUpdaterCloseDb : BaseTest
 {    
     private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()

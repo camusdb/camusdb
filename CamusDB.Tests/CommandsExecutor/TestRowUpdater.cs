@@ -26,6 +26,7 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
+[NonParallelizable]
 public sealed class TestRowUpdater : SharedNodeBaseTest
 {
     private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()

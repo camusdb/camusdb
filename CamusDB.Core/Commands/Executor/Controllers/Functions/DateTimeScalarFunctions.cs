@@ -60,6 +60,34 @@ internal static class DateTimeScalarFunctions
         RegisterTernary(registry, "date_diff", EvaluateDateDiff, _ => ColumnType.Integer64);
         RegisterBinary(registry, "date_part", EvaluateDatePart, _ => ColumnType.Integer64);
         RegisterBinary(registry, "date_trunc", EvaluateDateTrunc, _ => ColumnType.String);
+
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = "unix_timestamp",
+            MinArity = 0,
+            MaxArity = 1,
+            IsVolatile = true,
+            Evaluator = EvaluateUnixTimestamp,
+            InferReturnType = _ => ColumnType.Integer64,
+        });
+
+        RegisterUnary(registry, "from_unixtime", EvaluateFromUnixtime, _ => ColumnType.String);
+    }
+
+    private static void RegisterUnary(
+        ScalarFunctionRegistry registry,
+        string name,
+        ScalarFunctionEvaluatorDelegate evaluator,
+        ScalarReturnTypeInferenceDelegate inferReturnType)
+    {
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = name,
+            MinArity = 1,
+            MaxArity = 1,
+            Evaluator = evaluator,
+            InferReturnType = inferReturnType,
+        });
     }
 
     private static void RegisterBinary(
@@ -180,6 +208,40 @@ internal static class DateTimeScalarFunctions
         DateTimeOffset truncated = TruncateUtc(value, unit);
 
         return new ColumnValue(ColumnType.String, FormatUtc(truncated));
+    }
+
+    private static ColumnValue EvaluateUnixTimestamp(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        if (arguments.Count == 0)
+            return new ColumnValue(ColumnType.Integer64, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        RequireString(calledName, 0, arguments[0]);
+
+        DateTimeOffset value = ParseDateTimeValue(calledName, arguments[0].StrValue!);
+        return new ColumnValue(ColumnType.Integer64, value.ToUnixTimeSeconds());
+    }
+
+    private static ColumnValue EvaluateFromUnixtime(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        ScalarFunctionArguments.RequireNumeric(calledName, 0, arguments[0]);
+
+        double seconds = ScalarFunctionArguments.ToDouble(arguments[0]);
+
+        try
+        {
+            DateTimeOffset value = DateTimeOffset.UnixEpoch.AddSeconds(seconds);
+            return new ColumnValue(ColumnType.String, FormatUtc(value));
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            throw InvalidUnixTimestamp(calledName, seconds);
+        }
     }
 
     private static DateTimeOffset ApplyDateAdd(string calledName, DateTimeOffset value, long amount, DateTimeUnit unit)
@@ -351,6 +413,11 @@ internal static class DateTimeScalarFunctions
         => new(
             CamusDBErrorCodes.InvalidInput,
             $"Function '{calledName}' expects a supported date/time unit but received '{unit}'");
+
+    private static CamusDBException InvalidUnixTimestamp(string calledName, double seconds)
+        => new(
+            CamusDBErrorCodes.InvalidInput,
+            $"Function '{calledName}' unix timestamp out of range: {seconds.ToString(CultureInfo.InvariantCulture)}");
 
     private static void RequireString(string calledName, int argumentIndex, ColumnValue argument)
         => ScalarFunctionArguments.RequireString(calledName, argumentIndex, argument);

@@ -32,6 +32,7 @@ namespace CamusDB.Tests.Storage;
 ///   4. Disposes cleanly via IAsyncDisposable.
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestEmbeddedKahuna
 {
     [Test]

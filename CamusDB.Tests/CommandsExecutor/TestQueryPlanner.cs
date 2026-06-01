@@ -29,6 +29,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Documents current single-table planner behavior via <see cref="QueryPlanStepType"/> assertions.
 /// These tests call <see cref="QueryPlanner.GetPlan"/> only; they do not execute scans.
 /// </summary>
+[NonParallelizable]
 public class TestQueryPlanner
 {
     private static QueryPlannerTestContext? context;

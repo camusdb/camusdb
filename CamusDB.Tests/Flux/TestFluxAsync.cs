@@ -16,6 +16,7 @@ using CamusDB.Core.Flux.Models;
 
 namespace CamusDB.Tests.Flux;
 
+[NonParallelizable]
 internal sealed class TestFluxAsync
 {
     private async Task<FluxAction> CallStepAsync(TestFluxState state)

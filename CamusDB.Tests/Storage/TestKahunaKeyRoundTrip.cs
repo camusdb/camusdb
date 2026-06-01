@@ -38,6 +38,7 @@ namespace CamusDB.Tests.Storage;
 ///      storage intact (point-read returns the exact key that was inserted).
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestKahunaKeyRoundTrip
 {
     private static EmbeddedKahunaNode CreateNode() =>

@@ -28,6 +28,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// hypothesis is that committed index entries are not visible to a later transaction's point
 /// lookup on persistent storage (breaking update/delete-by-id and unique-key enforcement).
 /// </summary>
+[NonParallelizable]
 internal sealed class TestPersistentIndexLookup : BaseTest
 {
     private const string Id = "1e8921c8-58ed-483e-b4f2-c0f43cbc6c22";

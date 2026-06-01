@@ -19,6 +19,7 @@ using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
+[NonParallelizable]
 public class TestSelectQueryCreator
 {
     private static SelectQuery ParseSelectQuery(string sql)

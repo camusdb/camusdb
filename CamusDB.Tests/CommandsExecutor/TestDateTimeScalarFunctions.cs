@@ -24,6 +24,7 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
+[NonParallelizable]
 public class TestDateTimeScalarFunctions : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupBasicTable()
@@ -429,5 +430,103 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
 
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
         StringAssert.Contains("expects a UTC date/time string with an explicit offset", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task UnixTimestamp_WithoutArgument_ReturnsCurrentUtcSeconds()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupBasicTable();
+
+        List<QueryResultRow> result = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT unix_timestamp() FROM robots LIMIT 1");
+
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["0"].Type);
+        long seconds = result[0].Row["0"].LongValue;
+        long expected = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        Assert.That(seconds, Is.EqualTo(expected).Within(2));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task UnixTimestamp_ConvertsDateTimeStringToUtcSeconds()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupBasicTable();
+
+        List<QueryResultRow> timestamp = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT unix_timestamp(\"2024-06-15T10:30:00Z\") FROM robots LIMIT 1");
+        List<QueryResultRow> dateOnly = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT unix_timestamp(\"2024-06-15\") FROM robots LIMIT 1");
+
+        Assert.AreEqual(1718447400, timestamp[0].Row["0"].LongValue);
+        Assert.AreEqual(
+            new DateTimeOffset(2024, 6, 15, 0, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds(),
+            dateOnly[0].Row["0"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task FromUnixtime_ConvertsSecondsToIso8601UtcString()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupBasicTable();
+
+        List<QueryResultRow> epoch = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT from_unixtime(0) FROM robots LIMIT 1");
+        List<QueryResultRow> value = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT from_unixtime(1718447400) FROM robots LIMIT 1");
+
+        Assert.AreEqual("1970-01-01T00:00:00.0000000+00:00", epoch[0].Row["0"].StrValue);
+        Assert.AreEqual("2024-06-15T10:30:00.0000000+00:00", value[0].Row["0"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task UnixTimestampAndFromUnixtime_RoundTrip()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupBasicTable();
+
+        List<QueryResultRow> result = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT from_unixtime(unix_timestamp(\"2024-06-15T10:30:00+00:00\")) FROM robots LIMIT 1");
+
+        Assert.AreEqual("2024-06-15T10:30:00.0000000+00:00", result[0].Row["0"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task UnixTimestampFunctions_NullArgument_ReturnsNull()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupBasicTable();
+
+        List<QueryResultRow> toSeconds = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT unix_timestamp(NULL) FROM robots LIMIT 1");
+        List<QueryResultRow> fromSeconds = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT from_unixtime(NULL) FROM robots LIMIT 1");
+
+        Assert.AreEqual(ColumnType.Null, toSeconds[0].Row["0"].Type);
+        Assert.AreEqual(ColumnType.Null, fromSeconds[0].Row["0"].Type);
     }
 }

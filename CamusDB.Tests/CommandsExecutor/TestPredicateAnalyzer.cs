@@ -22,6 +22,7 @@ using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
+[NonParallelizable]
 public class TestPredicateAnalyzer
 {
     private static QueryPlannerTestContext? context;
