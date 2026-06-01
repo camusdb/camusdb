@@ -1594,5 +1594,36 @@ public class TestSQLParser
         Assert.AreEqual("app_users.id", ast.extendedOne!.leftAst!.extendedOne!.rightAst!.yytext);
     }
 
+    [Test]
+    public void TestParseCastAsString()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT CAST(name AS string) FROM robots");
+
+        Assert.AreEqual(NodeType.ExprCast, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.leftAst!.nodeType);
+        Assert.AreEqual("name", ast.leftAst!.leftAst!.yytext);
+        Assert.AreEqual(NodeType.TypeString, ast.leftAst!.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseCastAsFloat64()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT CAST(1 AS float64) FROM robots");
+
+        Assert.AreEqual(NodeType.ExprCast, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Integer, ast.leftAst!.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.TypeFloat64, ast.leftAst!.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseNestedCast()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT CAST(CAST(1 AS string) AS int64) FROM robots");
+
+        Assert.AreEqual(NodeType.ExprCast, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.ExprCast, ast.leftAst!.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.TypeInteger64, ast.leftAst!.rightAst!.nodeType);
+    }
+
     #endregion
 }

@@ -233,10 +233,18 @@ public sealed class TestCursorStreamingBenchmark : SharedNodeBaseTest
             (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
                 await executor.ExecuteSQLQuery(ticket);
 
+            // Sample RETAINED working set (forceFullCollection: true) at intervals rather than
+            // every row: GC.GetTotalMemory(false) captures transient allocation churn, which
+            // grows with rows even for a streaming scan and made this assertion flaky. A forced
+            // collection measures live objects only, which for a page-bounded scan stays flat.
+            int seen = 0;
             await foreach (QueryResultRow _ in cursor)
             {
-                long now = GC.GetTotalMemory(forceFullCollection: false);
-                if (now > peak) peak = now;
+                if (++seen % 256 == 0)
+                {
+                    long now = GC.GetTotalMemory(forceFullCollection: true);
+                    if (now > peak) peak = now;
+                }
             }
 
             await database.Transactions.CommitAsync(tx);

@@ -1311,6 +1311,38 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteSelectProjectionWithSingleTableAlias()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT r.id, r.name FROM robots r",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        Assert.AreEqual(25, result.Count);
+
+        foreach (QueryResultRow row in result)
+        {
+            Assert.True(row.Row.ContainsKey("id"));
+            Assert.AreEqual(24, row.Row["id"].StrValue!.Length);
+
+            Assert.True(row.Row.ContainsKey("name"));
+            Assert.False(row.Row.ContainsKey("year"));
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSelectProjection2()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();

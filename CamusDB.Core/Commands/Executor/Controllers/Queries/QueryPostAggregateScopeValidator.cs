@@ -82,6 +82,12 @@ internal static class QueryPostAggregateScopeValidator
 
                 return;
 
+            case NodeType.ExprCast:
+                if (expression.leftAst is not null)
+                    ValidatePostAggregateExpression(expression.leftAst, query, rowNames, insideAggregate);
+
+                return;
+
             case NodeType.ExprArgumentList:
                 if (expression.leftAst is not null)
                     ValidatePostAggregateExpression(expression.leftAst, query, rowNames, insideAggregate);

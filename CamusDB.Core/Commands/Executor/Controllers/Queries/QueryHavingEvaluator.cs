@@ -39,6 +39,9 @@ internal static class QueryHavingEvaluator
 
                 return SqlExecutor.EvalExpr(expression, row, parameters, rowNameResolver: null);
 
+            case NodeType.ExprCast:
+                return SqlExecutor.EvalExpr(expression, row, parameters, rowNameResolver: null);
+
             case NodeType.ExprEquals:
                 return Compare(row, ticket, parameters, expression, static (left, right) => left.CompareTo(right) == 0);
 

@@ -251,21 +251,30 @@ public sealed class KvTableStore
                 rowId = ObjectId.ToValue(suffix[^RowIdHexLength..].ToString());
             }
 
-            // Defensive: startKey/endKey bounds should already have filtered these out.
-            if (fromEncoded is not null)
+            CompositeColumnValue decodedKey = KeyEncoder.Decode(encodedKey, keyTypes);
+
+            // Bounds filter on the DECODED value, compared as a PREFIX (trailing columns of
+            // decodedKey are ignored). This is correct for both shapes that carry extra trailing
+            // columns beyond the bound:
+            //   • non-unique single-column index: stored Encode([value, rowId]); a raw encoded
+            //     string compare dropped value==upperBound (Encode([v,rowId]) > Encode([v])),
+            //   • composite index with a prefix bound (e.g. year=2023 AND enabled>false): a
+            //     length-tiebreaking compare leaked/!dropped later prefix values.
+            // This in-range check is load-bearing: when the planner absorbs the predicate into
+            // the scan it is not re-applied by the executor.
+            if (from is not null)
             {
-                int cmp = string.CompareOrdinal(encodedKey, fromEncoded);
+                int cmp = ComparePrefix(decodedKey, from);
                 if (fromInclusive ? cmp < 0 : cmp <= 0)
                     continue;
             }
-            if (toEncoded is not null)
+            if (to is not null)
             {
-                int cmp = string.CompareOrdinal(encodedKey, toEncoded);
+                int cmp = ComparePrefix(decodedKey, to);
                 if (toInclusive ? cmp > 0 : cmp >= 0)
                     continue;
             }
 
-            CompositeColumnValue decodedKey = KeyEncoder.Decode(encodedKey, keyTypes);
             yield return (decodedKey, rowId);
         }
     }
@@ -618,6 +627,28 @@ public sealed class KvTableStore
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
 
         return (type, endpoint, durability);
+    }
+
+    /// <summary>
+    /// Compares <paramref name="key"/> against <paramref name="bound"/> over the bound's columns
+    /// only, ignoring any trailing columns in <paramref name="key"/> (the appended rowId on a
+    /// non-unique index, or lower-significance columns when the bound is a composite prefix).
+    /// Returns &lt;0 / 0 / &gt;0 like <see cref="IComparable{T}.CompareTo"/>.
+    /// </summary>
+    private static int ComparePrefix(CompositeColumnValue key, CompositeColumnValue bound)
+    {
+        int n = Math.Min(key.Values.Length, bound.Values.Length);
+
+        for (int i = 0; i < n; i++)
+        {
+            int cmp = key.Values[i].CompareTo(bound.Values[i]);
+            if (cmp != 0)
+                return cmp;
+        }
+
+        // Every bound column matched: equal for range purposes (prefix match); trailing
+        // columns in `key` do not push it outside an inclusive bound.
+        return 0;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

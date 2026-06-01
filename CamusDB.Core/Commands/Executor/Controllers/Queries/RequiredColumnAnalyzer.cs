@@ -445,6 +445,19 @@ internal static class RequiredColumnAnalyzer
 
                 return;
 
+            case NodeType.ExprCast:
+                if (expression.leftAst is not null)
+                {
+                    CollectFromPostAggregateExpression(
+                        expression.leftAst,
+                        ticket,
+                        rowNames,
+                        required,
+                        insideAggregate);
+                }
+
+                return;
+
             case NodeType.ExprArgumentList:
                 if (expression.leftAst is not null)
                 {
@@ -633,6 +646,20 @@ internal static class RequiredColumnAnalyzer
                 {
                     CollectFromPostAggregateExpressionForAlias(
                         expression.rightAst,
+                        ticket,
+                        rowNames,
+                        alias,
+                        required,
+                        insideAggregate);
+                }
+
+                return;
+
+            case NodeType.ExprCast:
+                if (expression.leftAst is not null)
+                {
+                    CollectFromPostAggregateExpressionForAlias(
+                        expression.leftAst,
                         ticket,
                         rowNames,
                         alias,

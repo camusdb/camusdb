@@ -97,6 +97,12 @@ internal static class QueryExpressionWalker
 
                 return;
 
+            case NodeType.ExprCast:
+                if (expr.leftAst is not null)
+                    CollectColumnReferences(expr.leftAst, identifiers);
+
+                return;
+
             case NodeType.ExprArgumentList:
                 if (expr.leftAst is not null)
                     CollectColumnReferences(expr.leftAst, identifiers);

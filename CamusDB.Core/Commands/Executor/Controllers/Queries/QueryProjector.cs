@@ -56,17 +56,17 @@ internal sealed class QueryProjector
                     
                     case NodeType.Identifier:
                         projected[QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, i)] =
-                            EvalOrProjectExpr(ast, resultRow.Row, i);
+                            EvalOrProjectExpr(ticket, ast, resultRow.Row, i);
                         continue;
                     
                     case NodeType.ExprAlias:
                         projected[ast.rightAst!.yytext ?? ""] =
-                            EvalOrProjectExpr(ast, resultRow.Row, i);
+                            EvalOrProjectExpr(ticket, ast, resultRow.Row, i);
                         break;
 
                     default:
                         projected[QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, i)] =
-                            EvalOrProjectExpr(ast, resultRow.Row, i);
+                            EvalOrProjectExpr(ticket, ast, resultRow.Row, i);
                         break;
                 }
             }
@@ -89,7 +89,11 @@ internal sealed class QueryProjector
         return columns;
     }
 
-    private static ColumnValue EvalOrProjectExpr(NodeAst ast, Dictionary<string, ColumnValue> row, int projectionIndex)
+    private static ColumnValue EvalOrProjectExpr(
+        QueryTicket ticket,
+        NodeAst ast,
+        Dictionary<string, ColumnValue> row,
+        int projectionIndex)
     {
         if (QueryExpressionClassifier.IsAggregateProjection(ast))
         {
@@ -97,6 +101,10 @@ internal sealed class QueryProjector
             return row[key];
         }
 
-        return SqlExecutor.EvalExpr(ast, row, parameters: null, rowNameResolver: null);
+        return SqlExecutor.EvalExpr(
+            QueryExpressionClassifier.UnwrapAlias(ast),
+            row,
+            ticket.Parameters,
+            ticket.RowNameResolver);
     }
 }

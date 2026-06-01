@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
@@ -45,7 +46,20 @@ internal static class DerivedTableSchemaBuilder
         }
 
         if (target.nodeType == NodeType.ExprFuncCall)
-            return InferAggregateType(target, innerBound, innerResolver);
+        {
+            if (QueryExpressionClassifier.IsAggregateProjection(target))
+                return InferAggregateType(target, innerBound, innerResolver);
+
+            string funcName = target.leftAst!.yytext!.ToLowerInvariant();
+
+            if (ScalarFunctionEvaluator.IsRegisteredScalarFunction(funcName))
+                return ScalarFunctionEvaluator.InferReturnType(funcName, []);
+
+            return ColumnType.String;
+        }
+
+        if (target.nodeType == NodeType.ExprCast)
+            return CastScalarFunctions.InferCastReturnType(target.rightAst!);
 
         return ColumnType.String;
     }

@@ -9,9 +9,9 @@
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
-using CamusDB.Core.Util.ObjectIds;
 using System.Text.RegularExpressions;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
@@ -224,28 +224,12 @@ internal abstract class SQLExecutorBaseCreator
                 }
 
             case NodeType.ExprFuncCall:
+                return ScalarFunctionEvaluator.Evaluate(expr, row, parameters, rowNameResolver, EvalExpr);
+
+            case NodeType.ExprCast:
                 {
-                    string funcCall = expr.leftAst!.yytext!.ToLowerInvariant();
-
-                    switch (funcCall)
-                    {
-                        case "gen_id":
-                            string myId = ObjectIdGenerator.Generate().ToString();                            
-                            return new ColumnValue(ColumnType.Id, myId);
-
-                        case "str_id":
-                            List<ColumnValue> argumentList = [];
-
-                            GetArgumentList(expr.rightAst!, row, parameters, argumentList, rowNameResolver);
-
-                            return new ColumnValue(ColumnType.Id, argumentList.FirstOrDefault()!.StrValue ?? "");
-
-                        case "now":
-                            return new ColumnValue(ColumnType.String, DateTime.UtcNow.ToString());
-
-                        default:
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Function not found '" + funcCall + "'");
-                    }
+                    ColumnValue input = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    return CastScalarFunctions.CastExpression("cast", input, expr.rightAst!);
                 }
 
             case NodeType.ExprIsNull:
@@ -329,27 +313,6 @@ internal abstract class SQLExecutorBaseCreator
             default:
                 throw new CamusDBException(CamusDBErrorCodes.UnknownType, $"ERROR {expr.nodeType}");
         }
-    }
-
-    private static void GetArgumentList(
-        NodeAst argumentAst,
-        Dictionary<string, ColumnValue> row,
-        Dictionary<string, ColumnValue>? parameters,
-        List<ColumnValue> argumentList,
-        QueryRowNameResolver? rowNameResolver)
-    {
-        if (argumentAst.nodeType == NodeType.ExprArgumentList)
-        {
-            if (argumentAst.leftAst != null)
-                GetArgumentList(argumentAst.leftAst, row, parameters, argumentList, rowNameResolver);
-
-            if (argumentAst.rightAst != null)
-                GetArgumentList(argumentAst.rightAst, row, parameters, argumentList, rowNameResolver);
-
-            return;
-        }
-
-        argumentList.Add(EvalExpr(argumentAst, row, parameters, rowNameResolver));
     }
 
     private static bool Like(string text, string pattern)

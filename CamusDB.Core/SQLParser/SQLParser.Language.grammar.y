@@ -23,7 +23,7 @@
 %token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
 %token TTRUE TFALSE TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
-%token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL
+%token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL TCAST TINTEGER TDOUBLE
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TBETWEEN
@@ -254,6 +254,12 @@ field_type : TTYPE_OBJECT_ID { $$.n = new(NodeType.TypeObjectId, null, null, nul
            | TTYPE_BOOL { $$.n = new(NodeType.TypeBool, null, null, null, null, null, null, null, null); } 
            ;
 
+cast_target_type : field_type { $$.n = $1.n; $$.s = $1.s; }
+                 | TINTEGER { $$.n = new(NodeType.TypeInteger64, null, null, null, null, null, null, null, null); }
+                 | TDOUBLE { $$.n = new(NodeType.TypeFloat64, null, null, null, null, null, null, null, null); }
+                 | TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $$.s.ToLowerInvariant()); }
+                 ;
+
 update_list : update_list TCOMMA update_item { $$.n = new(NodeType.UpdateList, $1.n, $3.n, null, null, null, null, null, null); }
 		    | update_item { $$.n = $1.n; $$.s = $1.s; }
 		    ;
@@ -316,6 +322,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | simple_expr { $$.n = $1.n; }
            | group_paren_expr { $$.n = $1.n; }
            | fcall_expr { $$.n = $1.n; }
+           | cast_expr { $$.n = $1.n; }
            | projection_all { $$.n = $1.n; }
            | use_default_expr { $$.n = $1.n; }
            | is_null_expr { $$.n = $1.n; }
@@ -389,6 +396,9 @@ scalar_subquery_expr : query_expr { $$.n = new(NodeType.ExprScalarSubquery, $1.n
 fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, null, null, null, null, null, null, null); }
            | identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, $3.n, null, null, null, null, null, null); }
            ;
+
+cast_expr : TCAST LPAREN condition TAS cast_target_type RPAREN { $$.n = new(NodeType.ExprCast, $3.n, $5.n, null, null, null, null, null, null); }
+          ;
 
 fcall_argument_list  : fcall_argument_list TCOMMA fcall_argument_item { $$.n = new(NodeType.ExprArgumentList, $1.n, $3.n, null, null, null, null, null, null); }
                      | fcall_argument_item { $$.n = $1.n; $$.s = $1.s; }

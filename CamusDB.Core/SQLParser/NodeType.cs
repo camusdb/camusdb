@@ -35,6 +35,7 @@ public enum NodeType
     ExprMult,
     ExprAllFields,
     ExprFuncCall,
+    ExprCast,
     ExprArgumentList,
     ExprAlias,
     ExprLike,
