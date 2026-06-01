@@ -98,8 +98,13 @@ public sealed class KvTableStore
     /// </summary>
     public async IAsyncEnumerable<(ObjectIdValue rowId, byte[] data)> ScanRows(
         HLCTimestamp txId,
+        long? maxRows = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        if (maxRows is <= 0)
+            yield break;
+
+        long emitted = 0;
         int prefixLen = rowKeyPrefix.Length;
 
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
@@ -118,7 +123,11 @@ public sealed class KvTableStore
             ReadOnlySpan<char> hex = key.AsSpan(prefixLen);
             ObjectIdValue rowId = ObjectId.ToValue(hex.ToString());
 
+            if (maxRows is not null && emitted >= maxRows.Value)
+                yield break;
+
             yield return (rowId, entry.Value);
+            emitted++;
         }
     }
 
@@ -199,8 +208,13 @@ public sealed class KvTableStore
         bool unique,
         bool fromInclusive = true,
         bool toInclusive = true,
+        long? maxRows = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        if (maxRows is <= 0)
+            yield break;
+
+        long emitted = 0;
         string bucketPrefix = BuildIndexBucketPrefix(indexId);
         string keyPrefix    = bucketPrefix + "/";
         int prefixLen = keyPrefix.Length;
@@ -275,7 +289,11 @@ public sealed class KvTableStore
                     continue;
             }
 
+            if (maxRows is not null && emitted >= maxRows.Value)
+                yield break;
+
             yield return (decodedKey, rowId);
+            emitted++;
         }
     }
 

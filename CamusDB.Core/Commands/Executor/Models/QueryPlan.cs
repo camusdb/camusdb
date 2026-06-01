@@ -54,6 +54,12 @@ public sealed class QueryPlan
     /// <summary>Per-alias scan column subsets for join plans (QP6.1).</summary>
     internal Dictionary<string, IReadOnlySet<string>>? RequiredColumnsByAlias { get; set; }
 
+    /// <summary>
+    /// Optional scan-level row cap for LIMIT pushdown (QP6.3).
+    /// When set, scan operators may stop after emitting this many rows.
+    /// </summary>
+    public long? ScanRowLimit { get; internal set; }
+
     public QueryPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
 	{
 		Database = database;

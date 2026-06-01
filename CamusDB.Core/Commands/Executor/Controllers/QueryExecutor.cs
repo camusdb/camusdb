@@ -246,7 +246,15 @@ internal sealed class QueryExecutor
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
-            txId, index.Name, keyTypes, fromBound, toBound, unique, fromInclusive, toInclusive))
+            txId,
+            index.Name,
+            keyTypes,
+            fromBound,
+            toBound,
+            unique,
+            fromInclusive,
+            toInclusive,
+            maxRows: plan.ScanRowLimit))
         {
             byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
             if (data is null || data.Length == 0)

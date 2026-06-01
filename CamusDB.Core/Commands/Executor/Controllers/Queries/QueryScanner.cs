@@ -34,7 +34,7 @@ internal sealed class QueryScanner
         TableDescriptor table = plan.Table;
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(txId))
+        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(txId, maxRows: plan.ScanRowLimit))
         {
             if (data.Length == 0)
                 continue;
@@ -71,7 +71,16 @@ internal sealed class QueryScanner
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         bool unique = index.Type == IndexType.Unique;
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(txId, index.Name, keyTypes, null, null, unique))
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+            txId,
+            index.Name,
+            keyTypes,
+            null,
+            null,
+            unique,
+            fromInclusive: true,
+            toInclusive: true,
+            maxRows: plan.ScanRowLimit))
         {
             byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
             if (data is null || data.Length == 0)

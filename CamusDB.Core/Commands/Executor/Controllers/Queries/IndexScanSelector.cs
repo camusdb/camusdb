@@ -197,22 +197,27 @@ internal static class IndexScanSelector
         if (orderBy is null || orderBy.Count == 0)
             return null;
 
-        QueryOrderBy firstOrderBy = orderBy[0];
-        if (firstOrderBy.Type != OrderType.Ascending)
+        if (!IsAscendingOrderBy(orderBy))
             return null;
 
         TableIndexSchema? bestIndex = null;
+        int bestMatchLength = 0;
         int bestColumnCount = int.MaxValue;
 
         foreach (TableIndexSchema index in table.Indexes.Values)
         {
-            if (index.Columns[0] != firstOrderBy.ColumnName)
+            int matchLength = MatchOrderByPrefixLength(index, orderBy);
+            if (matchLength == 0)
                 continue;
 
-            if (index.Columns.Length >= bestColumnCount)
+            if (matchLength < bestMatchLength)
+                continue;
+
+            if (matchLength == bestMatchLength && index.Columns.Length >= bestColumnCount)
                 continue;
 
             bestIndex = index;
+            bestMatchLength = matchLength;
             bestColumnCount = index.Columns.Length;
         }
 
@@ -226,6 +231,55 @@ internal static class IndexScanSelector
             fromInclusive: true,
             toBound: null,
             toInclusive: true);
+    }
+
+    internal static bool ScanSatisfiesOrderBy(
+        TableDescriptor table,
+        QueryPlanStep scanStep,
+        IReadOnlyList<QueryOrderBy>? orderBy)
+    {
+        if (orderBy is null || orderBy.Count == 0)
+            return true;
+
+        if (!IsAscendingOrderBy(orderBy))
+            return false;
+
+        return scanStep.Type switch
+        {
+            QueryPlanStepType.QueryFromIndex => true,
+            QueryPlanStepType.RangeScanFromIndex => scanStep.Index is not null
+                && MatchOrderByPrefixLength(scanStep.Index, orderBy) >= orderBy.Count,
+            QueryPlanStepType.FullScanFromIndex => scanStep.Index is not null
+                && MatchOrderByPrefixLength(scanStep.Index, orderBy) >= orderBy.Count,
+            _ => false
+        };
+    }
+
+    private static bool IsAscendingOrderBy(IReadOnlyList<QueryOrderBy> orderBy)
+    {
+        for (int i = 0; i < orderBy.Count; i++)
+        {
+            if (orderBy[i].Type != OrderType.Ascending)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static int MatchOrderByPrefixLength(TableIndexSchema index, IReadOnlyList<QueryOrderBy> orderBy)
+    {
+        int max = Math.Min(index.Columns.Length, orderBy.Count);
+        int matched = 0;
+
+        for (int i = 0; i < max; i++)
+        {
+            if (!string.Equals(index.Columns[i], orderBy[i].ColumnName, StringComparison.Ordinal))
+                break;
+
+            matched++;
+        }
+
+        return matched;
     }
 
     private static bool TryGetEquality(

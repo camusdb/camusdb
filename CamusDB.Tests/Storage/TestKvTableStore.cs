@@ -249,6 +249,30 @@ public sealed class TestKvTableStore
     }
 
     [Test]
+    public async Task ScanRows_RespectsMaxRows()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("t7-max");
+        await using EmbeddedKahuna __ = node;
+
+        TableSchema schema = MakeSchema(Col("n", ColumnType.Integer64));
+        ObjectIdValue[] ids = [new(1, 0, 0), new(2, 0, 0), new(3, 0, 0)];
+
+        KvTransaction tx = await BeginTransaction(node.Kahuna, "t7-max-insert");
+        foreach (ObjectIdValue id in ids)
+        {
+            byte[] data = RowEncoder.Encode(schema, new() { ["n"] = new(ColumnType.Integer64, (long)id.a) }, id);
+            await store.InsertRow(tx, id, data);
+        }
+        await CommitTransaction(node.Kahuna, tx);
+
+        List<ObjectIdValue> scannedIds = [];
+        await foreach ((ObjectIdValue rowId, _) in store.ScanRows(HLCTimestamp.Zero, maxRows: 2))
+            scannedIds.Add(rowId);
+
+        Assert.AreEqual(2, scannedIds.Count);
+    }
+
+    [Test]
     public async Task InsertRow_TracksModifiedAndLockKeys()
     {
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("t8");

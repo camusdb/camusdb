@@ -36,6 +36,9 @@ public sealed class QueryPlanner
 
         (PhysicalPlanNode scanNode, QueryPlanStep? scanStep) = BuildScanNode(table, ticket, analysis);
         plan.ExecutionFilter = PredicateAnalyzer.BuildExecutionFilter(analysis, scanStep, table);
+        bool scanSatisfiesOrderBy = scanStep is not null
+            && IndexScanSelector.ScanSatisfiesOrderBy(table, scanStep.Value, ticket.OrderBy);
+        plan.ScanRowLimit = TryComputeScanRowLimit(ticket, plan.ExecutionFilter, scanSatisfiesOrderBy);
 
         PhysicalPlanNode root = scanNode;
 
@@ -62,7 +65,7 @@ public sealed class QueryPlanner
         }
         else
         {
-            if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
+            if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0 && !scanSatisfiesOrderBy)
                 root = new SortNode(root);
 
             if (ticket.Limit is not null || ticket.Offset is not null)
@@ -88,6 +91,54 @@ public sealed class QueryPlanner
         ProjectionPushdownPlanner.Apply(plan);
 
         return plan;
+    }
+
+    private static long? TryComputeScanRowLimit(
+        QueryTicket ticket,
+        NodeAst? executionFilter,
+        bool scanSatisfiesOrderBy)
+    {
+        if (ticket.Limit is null)
+            return null;
+
+        if (ticket.GroupBy is { Count: > 0 } || ticket.Having is not null)
+            return null;
+
+        if (QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
+            return null;
+
+        if (executionFilter is not null)
+            return null;
+
+        if (ticket.OrderBy is { Count: > 0 } && !scanSatisfiesOrderBy)
+            return null;
+
+        ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new(), ticket.Parameters);
+        if (limit.Type != ColumnType.Integer64)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Limit is not Integer64");
+
+        long scanLimit = limit.LongValue;
+
+        if (ticket.Offset is not null)
+        {
+            ColumnValue offset = SqlExecutor.EvalExpr(ticket.Offset, new(), ticket.Parameters);
+            if (offset.Type != ColumnType.Integer64)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Offset is not Integer64");
+
+            try
+            {
+                scanLimit = checked(scanLimit + offset.LongValue);
+            }
+            catch (OverflowException)
+            {
+                scanLimit = long.MaxValue;
+            }
+        }
+
+        if (scanLimit <= 0)
+            return 0;
+
+        return scanLimit;
     }
 
     private static (PhysicalPlanNode ScanNode, QueryPlanStep? ScanStep) BuildScanNode(

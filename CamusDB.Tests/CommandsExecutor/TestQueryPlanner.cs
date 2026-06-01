@@ -97,6 +97,16 @@ public class TestQueryPlanner
         return node;
     }
 
+    private static TableDescriptor CreateYearPrimaryKeyTable()
+    {
+        TableDescriptor source = context!.Table;
+        TableDescriptor table = new(source.Id + "-year-pk", source.Name, source.Schema, source.Store);
+        table.Indexes.Add(
+            CamusDBConfig.PrimaryKeyInternalName,
+            new TableIndexSchema(CamusDBConfig.PrimaryKeyInternalName, ["year"], IndexType.Unique));
+        return table;
+    }
+
     [Test]
     public void PlanUsesFullTableScanWhenNoPredicate()
     {
@@ -222,7 +232,7 @@ public class TestQueryPlanner
     }
 
     [Test]
-    public void PlanAddsSortAndLimitStepsInCurrentOrder()
+    public void PlanElidesSortWhenRangeScanMatchesOrderBy()
     {
         QueryTicket ticket = CreateQueryTicketFromSelectSql(
             "SELECT * FROM robots WHERE year >= 2020 ORDER BY year LIMIT 5");
@@ -233,7 +243,6 @@ public class TestQueryPlanner
             new[]
             {
                 QueryPlanStepType.RangeScanFromIndex,
-                QueryPlanStepType.SortBy,
                 QueryPlanStepType.Limit
             },
             StepTypes(plan));
@@ -241,10 +250,10 @@ public class TestQueryPlanner
             new[]
             {
                 typeof(IndexRangeScanNode),
-                typeof(SortNode),
                 typeof(LimitNode)
             },
             PhysicalNodeTypes(plan));
+        Assert.AreEqual(5, plan.ScanRowLimit);
     }
 
     [Test]
@@ -455,8 +464,130 @@ public class TestQueryPlanner
         Assert.IsNull(plan.Steps[0].FromBound);
         Assert.IsNull(plan.Steps[0].ToBound);
         CollectionAssert.AreEqual(
+            new[] { QueryPlanStepType.RangeScanFromIndex },
+            StepTypes(plan));
+        Assert.IsNull(plan.ScanRowLimit);
+    }
+
+    [Test]
+    public void ScanSatisfiesOrderBy_TableScanDoesNotSatisfyOrderById()
+    {
+        QueryPlanStep tableScanStep = new(QueryPlanStepType.FullScanFromTableIndex);
+        List<QueryOrderBy> orderBy = [new("id", OrderType.Ascending)];
+
+        Assert.IsFalse(IndexScanSelector.ScanSatisfiesOrderBy(context!.Table, tableScanStep, orderBy));
+    }
+
+    [Test]
+    public void PlanElidesSortWhenOrderByIdMatchesPrimaryKeyIndex()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT id FROM robots ORDER BY id LIMIT 1");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, plan.Steps[0].Index!.Name);
+        CollectionAssert.AreEqual(
+            new[] { QueryPlanStepType.RangeScanFromIndex, QueryPlanStepType.Limit, QueryPlanStepType.ReduceToProjections },
+            StepTypes(plan));
+        Assert.AreEqual(1, plan.ScanRowLimit);
+    }
+
+    [Test]
+    public void PlanKeepsSortWhenOrderByIdWithoutMatchingIndex()
+    {
+        TableDescriptor table = CreateYearPrimaryKeyTable();
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT id FROM robots ORDER BY id LIMIT 1");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.FullScanFromTableIndex, plan.Steps[0].Type);
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                QueryPlanStepType.FullScanFromTableIndex,
+                QueryPlanStepType.SortBy,
+                QueryPlanStepType.Limit,
+                QueryPlanStepType.ReduceToProjections,
+            },
+            StepTypes(plan));
+        Assert.IsNull(plan.ScanRowLimit);
+    }
+
+    [Test]
+    public void PlanElidesSortWhenCompositeIndexMatchesOrderBy()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots ORDER BY year, enabled");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("year_enabled_idx", plan.Steps[0].Index!.Name);
+        CollectionAssert.AreEqual(
+            new[] { QueryPlanStepType.RangeScanFromIndex },
+            StepTypes(plan));
+    }
+
+    [Test]
+    public void PlanKeepsSortWhenOnlyIndexPrefixMatchesOrderBy()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots ORDER BY year, name");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("year_idx", plan.Steps[0].Index!.Name);
+        CollectionAssert.AreEqual(
             new[] { QueryPlanStepType.RangeScanFromIndex, QueryPlanStepType.SortBy },
             StepTypes(plan));
+    }
+
+    [Test]
+    public void PlanKeepsSortWhenOrderByIsDescending()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots ORDER BY year DESC");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.FullScanFromTableIndex, plan.Steps[0].Type);
+        CollectionAssert.AreEqual(
+            new[] { QueryPlanStepType.FullScanFromTableIndex, QueryPlanStepType.SortBy },
+            StepTypes(plan));
+        Assert.IsNull(plan.ScanRowLimit);
+    }
+
+    [Test]
+    public void PlanPushesLimitForSimpleTableScan()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots LIMIT 3");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(3, plan.ScanRowLimit);
+    }
+
+    [Test]
+    public void PlanPushesLimitIncludingOffsetForSimpleTableScan()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots LIMIT 2 OFFSET 5");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(7, plan.ScanRowLimit);
+    }
+
+    [Test]
+    public void PlanDoesNotPushLimitWhenResidualFilterExists()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2000 OR year = 2001 LIMIT 2");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsNotNull(plan.ExecutionFilter);
+        Assert.IsNull(plan.ScanRowLimit);
+    }
+
+    [Test]
+    public void PlanDoesNotPushLimitForAggregateQueries()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT COUNT(*) FROM robots LIMIT 1");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsNull(plan.ScanRowLimit);
     }
 
     [Test]

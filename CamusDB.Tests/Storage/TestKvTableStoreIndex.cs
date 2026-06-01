@@ -325,6 +325,32 @@ public sealed class TestKvTableStoreIndex
     }
 
     [Test]
+    public async Task ScanIndex_RespectsMaxRows()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("s6-max");
+        await using EmbeddedKahuna __ = node;
+
+        ColumnType[] keyTypes = [ColumnType.Integer64];
+
+        long[] ages = [10L, 20L, 30L];
+        KvTransaction tx = await BeginTransaction(node.Kahuna, "s6-max-put");
+        for (int i = 0; i < ages.Length; i++)
+            await store.PutIndexEntry(tx, "idx_age",
+                CV(new ColumnValue(ColumnType.Integer64, ages[i])),
+                new ObjectIdValue(i + 1, 0, 0), unique: true);
+        await CommitTransaction(node.Kahuna, tx);
+
+        List<long> scannedAges = [];
+        await foreach ((CompositeColumnValue key, ObjectIdValue _) in
+            store.ScanIndex(HLCTimestamp.Zero, "idx_age", keyTypes, null, null, unique: true, maxRows: 2))
+        {
+            scannedAges.Add(key.Values[0].LongValue);
+        }
+
+        CollectionAssert.AreEqual(new long[] { 10L, 20L }, scannedAges);
+    }
+
+    [Test]
     public async Task ScanIndex_NonUnique_SameKeyMultipleRowIds()
     {
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("s7");
