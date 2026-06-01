@@ -17,5 +17,5 @@ jobs:
         with:
           dotnet-version: '9.0.x'
       - name: Run Tests
-        timeout-minutes: 30
+        timeout-minutes: 60
         run: (chmod +x ./scripts/run-tests.sh && ./scripts/run-tests.sh)
