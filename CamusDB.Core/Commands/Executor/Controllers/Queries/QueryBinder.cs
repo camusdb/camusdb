@@ -239,7 +239,31 @@ internal sealed class QueryBinder
         ValidateOrderBy(query, rowNames);
         QueryPostAggregateScopeValidator.ValidateHaving(query, rowNames);
 
+        ValidateDistinct(query);
         ValidateProjectionAndGrouping(query);
+    }
+
+    private static void ValidateDistinct(SelectQuery query)
+    {
+        if (!query.IsDistinct)
+            return;
+
+        if (query.GroupBy is { Count: > 0 })
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "SELECT DISTINCT with GROUP BY is not supported");
+        }
+
+        foreach (ProjectionItem projection in query.Projections)
+        {
+            if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression))
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "SELECT DISTINCT cannot be used with aggregate projections");
+            }
+        }
     }
 
     private static void ValidateOrderBy(SelectQuery query, QueryRowNameResolver rowNames)

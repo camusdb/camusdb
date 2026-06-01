@@ -3368,5 +3368,175 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
         Assert.IsTrue(result[0].Row.ContainsKey("uid"));
     }
 
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupDistinctDupItems()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        CreateTableTicket tableTicket = new(
+            databaseName: dbname,
+            tableName: "dup_items",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("code", ColumnType.String, notNull: true),
+                new("note", ColumnType.String),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false);
+
+        await executor.CreateTable(tableTicket);
+
+        (string id, string code, string? note)[] rows =
+        [
+            (ObjectIdGenerator.Generate().ToString(), "A", null),
+            (ObjectIdGenerator.Generate().ToString(), "A", null),
+            (ObjectIdGenerator.Generate().ToString(), "A", "x"),
+            (ObjectIdGenerator.Generate().ToString(), "B", null),
+            (ObjectIdGenerator.Generate().ToString(), "C", null),
+            (ObjectIdGenerator.Generate().ToString(), "C", null),
+        ];
+
+        foreach ((string id, string code, string? note) row in rows)
+        {
+            Dictionary<string, ColumnValue> values = new()
+            {
+                { "id", new(ColumnType.Id, row.id) },
+                { "code", new(ColumnType.String, row.code) },
+                {
+                    "note",
+                    row.note is not null
+                        ? new(ColumnType.String, row.note)
+                        : new ColumnValue(ColumnType.Null, 0)
+                },
+            };
+
+            await executor.Insert(new InsertTicket(txnState, dbname, "dup_items", new List<Dictionary<string, ColumnValue>> { values }));
+        }
+
+        await database.Transactions.CommitAsync(txnState);
+
+        return (dbname, database, executor);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectDistinctSingleColumn()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDistinctDupItems();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT DISTINCT code FROM dup_items ORDER BY code",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(3, result.Count);
+        Assert.AreEqual("A", result[0].Row["code"].StrValue);
+        Assert.AreEqual("B", result[1].Row["code"].StrValue);
+        Assert.AreEqual("C", result[2].Row["code"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectDistinctMultiColumnTuple()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDistinctDupItems();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT DISTINCT code, note FROM dup_items ORDER BY code, note",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(4, result.Count);
+        Assert.AreEqual("A", result[0].Row["code"].StrValue);
+        Assert.AreEqual(ColumnType.Null, result[0].Row["note"].Type);
+        Assert.AreEqual("A", result[1].Row["code"].StrValue);
+        Assert.AreEqual("x", result[1].Row["note"].StrValue);
+        Assert.AreEqual("B", result[2].Row["code"].StrValue);
+        Assert.AreEqual(ColumnType.Null, result[2].Row["note"].Type);
+        Assert.AreEqual("C", result[3].Row["code"].StrValue);
+        Assert.AreEqual(ColumnType.Null, result[3].Row["note"].Type);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectDistinctNullDuplicates()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDistinctDupItems();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT DISTINCT code, note FROM dup_items WHERE code = \"A\" ORDER BY note",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual(ColumnType.Null, result[0].Row["note"].Type);
+        Assert.AreEqual("x", result[1].Row["note"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectDistinctOrderByLimitAfterDedup()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDistinctDupItems();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT DISTINCT code FROM dup_items ORDER BY code LIMIT 2",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual("A", result[0].Row["code"].StrValue);
+        Assert.AreEqual("B", result[1].Row["code"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectDistinctStarRemovesExactDuplicates()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT DISTINCT enabled FROM robots",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+    }
+
     #endregion
 }

@@ -58,7 +58,8 @@ internal static class QueryTicketAdapter
             having: query.Having?.Expression,
             rowNameResolver: rowNameResolver,
             analyzedWhere: analyzedWhere,
-            existsSubqueries: existsSubqueries);
+            existsSubqueries: existsSubqueries,
+            isDistinct: query.IsDistinct);
     }
 
     /// <summary>

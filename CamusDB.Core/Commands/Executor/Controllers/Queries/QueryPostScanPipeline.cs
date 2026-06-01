@@ -14,7 +14,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Applies aggregate, sort, project, and limit operators after row production (scan or join).
+/// Applies aggregate, sort, project, distinct, and limit operators after row production (scan or join).
 /// Ordering matches <see cref="QueryPlanner"/>.
 /// </summary>
 internal static class QueryPostScanPipeline
@@ -27,6 +27,7 @@ internal static class QueryPostScanPipeline
         QuerySorter querySorter,
         QueryAggregator queryAggregator,
         QueryProjector queryProjector,
+        QueryDistincter queryDistincter,
         QueryLimiter queryLimiter)
     {
         bool hasGroupBy = ticket.GroupBy is { Count: > 0 };
@@ -46,6 +47,39 @@ internal static class QueryPostScanPipeline
 
             if (ticket.Limit is not null || ticket.Offset is not null)
                 cursor = queryLimiter.LimitResultset(ticket, cursor);
+
+            return cursor;
+        }
+
+        if (ticket.IsDistinct)
+        {
+            if (ticket.Projection is not null && ticket.Projection.Count > 0)
+            {
+                if (HasAggregation(ticket.Projection, ticket))
+                {
+                    cursor = queryAggregator.AggregateResultset(ticket, cursor);
+                    cursor = queryFilterer.FilterHavingResultset(database, ticket, cursor);
+                    havingApplied = true;
+                }
+
+                if (!IsFullProjection(ticket.Projection))
+                    cursor = queryProjector.ProjectResultset(ticket, cursor);
+            }
+
+            cursor = queryDistincter.DistinctResultset(ticket, cursor);
+
+            if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
+                cursor = querySorter.SortResultset(ticket, cursor);
+
+            if (ticket.Limit is not null || ticket.Offset is not null)
+                cursor = queryLimiter.LimitResultset(ticket, cursor);
+
+            if (!havingApplied)
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "HAVING requires GROUP BY or an aggregate projection");
+            }
 
             return cursor;
         }

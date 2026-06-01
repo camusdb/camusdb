@@ -36,6 +36,8 @@ internal sealed class QueryExecutor
 
     private readonly QueryLimiter queryLimiter = new();
 
+    private readonly QueryDistincter queryDistincter = new();
+
     private readonly QueryJoinExecutor queryJoinExecutor;
 
     private readonly QueryScanner queryScanner;
@@ -96,6 +98,13 @@ internal sealed class QueryExecutor
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
                     plan.DataCursor = queryProjector.ProjectResultset(plan.Ticket, plan.DataCursor);
+                    break;
+
+                case QueryPlanStepType.Distinct:
+                    if (plan.DataCursor is null)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
+
+                    plan.DataCursor = queryDistincter.DistinctResultset(plan.Ticket, plan.DataCursor);
                     break;
 
                 case QueryPlanStepType.Aggregate:

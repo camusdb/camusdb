@@ -298,6 +298,47 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSelectDistinct()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT DISTINCT code FROM teams");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual("1", ast.yytext);
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("code", ast.leftAst.yytext);
+        Assert.AreEqual("teams", SelectFromTableName(ast));
+    }
+
+    [Test]
+    public void TestParseSelectDistinctMultiColumnWithOrderBy()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT DISTINCT code, name FROM teams ORDER BY code");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual("1", ast.yytext);
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.extendedTwo!.nodeType);
+        Assert.AreEqual("code", ast.extendedTwo.yytext);
+    }
+
+    [Test]
+    public void TestParseSelectWithoutDistinctHasNullFlag()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT code FROM teams");
+
+        Assert.IsNull(ast.yytext);
+    }
+
+    [Test]
+    public void TestParseCountDistinctFunction_throwsParseError()
+    {
+        CamusDBException exception = Assert.Throws<CamusDBException>(
+            () => SQLParserProcessor.Parse("SELECT COUNT(DISTINCT code) FROM teams"))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.SqlSyntaxError, exception.Code);
+    }
+
+    [Test]
     public void TestParseSimpleSelectOrderBy()
     {
         NodeAst ast = SQLParserProcessor.Parse("SELECT some_field, another_field FROM some_table ORDER BY xx");

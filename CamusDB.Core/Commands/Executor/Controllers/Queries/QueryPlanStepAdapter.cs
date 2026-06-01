@@ -85,6 +85,10 @@ internal static class QueryPlanStepAdapter
                 steps.Add(new QueryPlanStep(QueryPlanStepType.ReduceToProjections));
                 return;
 
+            case DistinctNode:
+                steps.Add(new QueryPlanStep(QueryPlanStepType.Distinct));
+                return;
+
             default:
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,

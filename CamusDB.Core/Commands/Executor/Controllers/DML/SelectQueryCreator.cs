@@ -42,7 +42,8 @@ internal sealed class SelectQueryCreator
             Having: having,
             OrderBy: orderBy,
             Limit: ast.extendedThree,
-            Offset: ast.extendedFour);
+            Offset: ast.extendedFour,
+            IsDistinct: ast.yytext is not null);
     }
 
     private (QuerySource Source, BoundPredicate? Where) CreateFromClause(NodeAst fromAst, NodeAst? whereAst)

@@ -376,6 +376,38 @@ public class TestQueryBinder : BaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task BindAsync_SelectDistinctWithGroupBy_throwsInvalidInput()
+    {
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse("SELECT DISTINCT name FROM robots GROUP BY name"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("DISTINCT", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_SelectDistinctWithAggregateProjection_throwsInvalidInput()
+    {
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse("SELECT DISTINCT COUNT(*) FROM robots"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("DISTINCT", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task BindAsync_HavingWithoutGroupByOrAggregate_throwsInvalidInput()
     {
         (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();

@@ -49,6 +49,7 @@ TOffset         (O|o)(F|f)(F|f)(S|s)(E|e)(T|t)
 TAs 		    (A|a)(S|s)
 TGroup 		    (G|g)(R|r)(O|o)(U|u)(P|p)
 THaving         (H|h)(A|a)(V|v)(I|i)(N|n)(G|g)
+TDistinct       (D|d)(I|i)(S|s)(T|t)(I|i)(N|n)(C|c)(T|t)
 TJoin           (J|j)(O|o)(I|i)(N|n)
 TInner          (I|i)(N|n)(N|n)(E|e)(R|r)
 TShow 		    (S|s)(H|h)(O|o)(W|w)
@@ -225,6 +226,8 @@ TDot            \.
 
 {TGroup} { return (int)Token.TGROUP; }
 {THaving} { return (int)Token.THAVING; }
+
+{TDistinct} { return (int)Token.TDISTINCT; }
 
 {TJoin} { return (int)Token.TJOIN; }
 

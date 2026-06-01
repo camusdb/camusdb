@@ -16,6 +16,7 @@ public enum QueryPlanStepType
     Aggregate,
     HavingFilter,
     ReduceToProjections,
+    Distinct,
     Limit,
     QueryFromIndex,
     RangeScanFromIndex

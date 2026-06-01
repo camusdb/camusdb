@@ -658,4 +658,139 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
 
         await database.Transactions.CommitAsync(txnState);
     }
+
+    /// <summary>
+    /// Regression: a STRING primary key (and a STRING UNIQUE key) must reject a duplicate inserted
+    /// in a separate, already-committed transaction. Mirrors the reported `teams` table:
+    ///   CREATE TABLE teams (id STRING NOT NULL, code STRING NOT NULL, ..., PRIMARY KEY (id), UNIQUE KEY (code))
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteInsertDuplicateStringPrimaryKeyAcrossTransactions()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        ExecuteSQLTicket createTicket = new(
+            txnState: await database.Transactions.BeginAsync(),
+            database: dbname,
+            sql: "CREATE TABLE teams (id STRING NOT NULL PRIMARY KEY, code STRING NOT NULL, name STRING NOT NULL)",
+            parameters: null
+        );
+        ExecuteDDLSQLResult ddl = await executor.ExecuteDDLSQL(createTicket);
+        Assert.IsTrue(ddl.Success);
+
+        const string sql = "INSERT INTO teams (id, code, name) VALUES (\"1e8921c8-58ed-483e-b4f2-c0f43cbc6c22\", \"BEL\", \"Belgium\")";
+
+        // First insert (own transaction) — succeeds.
+        KvTransaction tx1 = await database.Transactions.BeginAsync();
+        ExecuteNonSQLResult r1 = await executor.ExecuteNonSQLQuery(new(tx1, dbname, sql, null));
+        Assert.AreEqual(1, r1.ModifiedRows);
+        await database.Transactions.CommitAsync(tx1);
+
+        // Second insert with the SAME primary key (separate transaction) — must be rejected.
+        KvTransaction tx2 = await database.Transactions.BeginAsync();
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ExecuteNonSQLQuery(new(tx2, dbname, sql, null)));
+        Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, ex!.Code);
+
+        // And the table must still contain exactly one row.
+        KvTransaction tx3 = await database.Transactions.BeginAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(tx3, dbname, "SELECT id FROM teams", null));
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        Assert.AreEqual(1, rows.Count);
+        await database.Transactions.CommitAsync(tx3);
+    }
+
+    /// <summary>
+    /// Regression: two CONCURRENT transactions inserting the same primary key must not both
+    /// commit. Exactly one must win; the table must end with a single row. This reproduces the
+    /// realistic web-app race (e.g. two simultaneous requests with the same id).
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteInsertDuplicatePrimaryKeyConcurrent()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        ExecuteDDLSQLResult ddl = await executor.ExecuteDDLSQL(new(
+            await database.Transactions.BeginAsync(),
+            dbname,
+            "CREATE TABLE teams (id STRING NOT NULL PRIMARY KEY, code STRING NOT NULL, name STRING NOT NULL)",
+            null));
+        Assert.IsTrue(ddl.Success);
+
+        const string sql = "INSERT INTO teams (id, code, name) VALUES (\"1e8921c8-58ed-483e-b4f2-c0f43cbc6c22\", \"BEL\", \"Belgium\")";
+
+        async Task<bool> TryInsert()
+        {
+            KvTransaction tx = await database.Transactions.BeginAsync();
+            try
+            {
+                await executor.ExecuteNonSQLQuery(new(tx, dbname, sql, null));
+                await database.Transactions.CommitAsync(tx);
+                return true;
+            }
+            catch (CamusDBException)
+            {
+                return false;
+            }
+        }
+
+        bool[] results = await Task.WhenAll(TryInsert(), TryInsert());
+        int succeeded = results.Count(ok => ok);
+
+        // Verify how many rows actually landed.
+        KvTransaction txq = await database.Transactions.BeginAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txq, dbname, "SELECT id FROM teams", null));
+        int rowCount = (await cursor.ToListAsync()).Count;
+        await database.Transactions.CommitAsync(txq);
+
+        Assert.AreEqual(1, rowCount, $"Expected exactly 1 row after concurrent duplicate inserts, found {rowCount}");
+        Assert.AreEqual(1, succeeded, $"Expected exactly 1 insert to succeed, {succeeded} did");
+    }
+
+    /// <summary>
+    /// Regression: after an in-place UPDATE, a subsequent full scan must return the row exactly
+    /// once with the NEW value — not the pre-update version plus the post-update version.
+    /// Mirrors the reported `teams` symptom (one physical row shown twice: name_es null + Belgica).
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestFullScanAfterUpdateReturnsRowOnce()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        ExecuteDDLSQLResult ddl = await executor.ExecuteDDLSQL(new(
+            await database.Transactions.BeginAsync(),
+            dbname,
+            "CREATE TABLE teams (id STRING NOT NULL PRIMARY KEY, code STRING NOT NULL, name STRING NOT NULL, name_es STRING NULL)",
+            null));
+        Assert.IsTrue(ddl.Success);
+
+        const string id = "1e8921c8-58ed-483e-b4f2-c0f43cbc6c22";
+
+        // Insert (name_es null), each statement in its own committed transaction (like the CLI).
+        KvTransaction txIns = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(txIns, dbname,
+            $"INSERT INTO teams (id, code, name, name_es) VALUES (\"{id}\", \"BEL\", \"Belgium\", null)", null));
+        await database.Transactions.CommitAsync(txIns);
+
+        // Update name_es in place.
+        KvTransaction txUpd = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(txUpd, dbname,
+            $"UPDATE teams SET name_es = \"Belgica\" WHERE id = \"{id}\"", null));
+        await database.Transactions.CommitAsync(txUpd);
+
+        // Full scan — must be exactly one row, carrying the updated value.
+        KvTransaction txScan = await database.Transactions.BeginAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txScan, dbname, "SELECT id, name_es FROM teams", null));
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        await database.Transactions.CommitAsync(txScan);
+
+        Assert.AreEqual(1, rows.Count, $"Full scan after update must return 1 row, got {rows.Count}");
+        Assert.AreEqual("Belgica", rows[0].Row["name_es"].StrValue);
+    }
 }

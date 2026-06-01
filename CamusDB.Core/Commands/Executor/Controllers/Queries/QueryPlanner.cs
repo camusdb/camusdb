@@ -65,24 +65,51 @@ public sealed class QueryPlanner
         }
         else
         {
-            if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0 && !scanSatisfiesOrderBy)
-                root = new SortNode(root);
-
-            if (ticket.Limit is not null || ticket.Offset is not null)
-                root = new LimitNode(root);
-
-            if (ticket.Projection is not null && ticket.Projection.Count > 0)
+            if (ticket.IsDistinct)
             {
-                if (QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
+                if (ticket.Projection is not null && ticket.Projection.Count > 0)
                 {
-                    root = new AggregateNode(root);
+                    if (QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
+                    {
+                        root = new AggregateNode(root);
 
-                    if (ticket.Having is not null)
-                        root = new HavingFilterNode(ticket.Having, root);
+                        if (ticket.Having is not null)
+                            root = new HavingFilterNode(ticket.Having, root);
+                    }
+
+                    if (!QueryPostScanPipeline.IsFullProjection(ticket.Projection))
+                        root = new ProjectNode(root);
                 }
 
-                if (!QueryPostScanPipeline.IsFullProjection(ticket.Projection))
-                    root = new ProjectNode(root);
+                root = new DistinctNode(root);
+
+                if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0 && !scanSatisfiesOrderBy)
+                    root = new SortNode(root);
+
+                if (ticket.Limit is not null || ticket.Offset is not null)
+                    root = new LimitNode(root);
+            }
+            else
+            {
+                if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0 && !scanSatisfiesOrderBy)
+                    root = new SortNode(root);
+
+                if (ticket.Limit is not null || ticket.Offset is not null)
+                    root = new LimitNode(root);
+
+                if (ticket.Projection is not null && ticket.Projection.Count > 0)
+                {
+                    if (QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
+                    {
+                        root = new AggregateNode(root);
+
+                        if (ticket.Having is not null)
+                            root = new HavingFilterNode(ticket.Having, root);
+                    }
+
+                    if (!QueryPostScanPipeline.IsFullProjection(ticket.Projection))
+                        root = new ProjectNode(root);
+                }
             }
         }
 
@@ -101,10 +128,13 @@ public sealed class QueryPlanner
         if (ticket.Limit is null)
             return null;
 
+        if (ticket.IsDistinct)
+            return null;
+
         if (ticket.GroupBy is { Count: > 0 } || ticket.Having is not null)
             return null;
 
-        if (QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
+        if (ticket.Projection is { Count: > 0 } && QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
             return null;
 
         if (executionFilter is not null)

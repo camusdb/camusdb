@@ -642,4 +642,60 @@ public class TestQueryPlanner
         Assert.IsNotNull(plan.ScanRequiredColumns);
         Assert.AreEqual(0, plan.ScanRequiredColumns.Count);
     }
+
+    [Test]
+    public void PlanDistinctQueryUsesProjectDistinctSortLimitOrder()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT DISTINCT enabled FROM robots ORDER BY enabled LIMIT 2");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                QueryPlanStepType.FullScanFromTableIndex,
+                QueryPlanStepType.ReduceToProjections,
+                QueryPlanStepType.Distinct,
+                QueryPlanStepType.SortBy,
+                QueryPlanStepType.Limit,
+            },
+            StepTypes(plan));
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                typeof(TableScanNode),
+                typeof(ProjectNode),
+                typeof(DistinctNode),
+                typeof(SortNode),
+                typeof(LimitNode),
+            },
+            PhysicalNodeTypes(plan));
+        Assert.IsNull(plan.ScanRowLimit);
+    }
+
+    [Test]
+    public void PlanDistinctStarUsesDistinctWithoutProject()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT DISTINCT * FROM robots LIMIT 5");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                QueryPlanStepType.FullScanFromTableIndex,
+                QueryPlanStepType.Distinct,
+                QueryPlanStepType.Limit,
+            },
+            StepTypes(plan));
+        Assert.IsNull(plan.ScanRowLimit);
+    }
+
+    [Test]
+    public void PlanDoesNotPushLimitForDistinctQueries()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT DISTINCT enabled FROM robots LIMIT 3");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsNull(plan.ScanRowLimit);
+    }
 }

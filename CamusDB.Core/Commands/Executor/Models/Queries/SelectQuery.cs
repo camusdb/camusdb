@@ -22,6 +22,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// <param name="OrderBy">Optional sort keys.</param>
 /// <param name="Limit">Optional limit expression AST.</param>
 /// <param name="Offset">Optional offset expression AST.</param>
+/// <param name="IsDistinct">When true, duplicate output rows are eliminated after projection (QP3.6).</param>
 public sealed record SelectQuery(
     QuerySource Source,
     IReadOnlyList<ProjectionItem> Projections,
@@ -30,4 +31,5 @@ public sealed record SelectQuery(
     BoundPredicate? Having = null,
     IReadOnlyList<OrderByItem>? OrderBy = null,
     NodeAst? Limit = null,
-    NodeAst? Offset = null);
+    NodeAst? Offset = null,
+    bool IsDistinct = false);

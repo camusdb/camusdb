@@ -40,6 +40,9 @@ public sealed class QueryTicket
 
     public NodeAst? Offset { get; }
 
+    /// <summary>When true, duplicate projected rows are eliminated (QP3.6).</summary>
+    public bool IsDistinct { get; }
+
     public Dictionary<string, ColumnValue>? Parameters { get; }
 
     public QueryRowNameResolver? RowNameResolver { get; }
@@ -66,7 +69,8 @@ public sealed class QueryTicket
         NodeAst? having = null,
         QueryRowNameResolver? rowNameResolver = null,
         PredicateAnalysis? analyzedWhere = null,
-        ExistsSubqueryRegistry? existsSubqueries = null)
+        ExistsSubqueryRegistry? existsSubqueries = null,
+        bool isDistinct = false)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -80,6 +84,7 @@ public sealed class QueryTicket
         Having = having;
         Limit = limit;
         Offset = offset;
+        IsDistinct = isDistinct;
         Parameters = parameters;
         RowNameResolver = rowNameResolver;
         AnalyzedWhere = analyzedWhere;

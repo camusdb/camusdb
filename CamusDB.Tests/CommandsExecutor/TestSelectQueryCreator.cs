@@ -47,6 +47,17 @@ public class TestSelectQueryCreator
         Assert.IsNull(query.OrderBy);
         Assert.IsNull(query.Limit);
         Assert.IsNull(query.Offset);
+        Assert.IsFalse(query.IsDistinct);
+    }
+
+    [Test]
+    public void CreateSelectQuery_DistinctFlag()
+    {
+        SelectQuery query = ParseSelectQuery("SELECT DISTINCT code FROM teams");
+
+        Assert.IsTrue(query.IsDistinct);
+        Assert.AreEqual(1, query.Projections.Count);
+        Assert.AreEqual("code", query.Projections[0].OutputName);
     }
 
     [Test]

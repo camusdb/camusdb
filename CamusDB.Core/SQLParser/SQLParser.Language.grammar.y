@@ -26,7 +26,7 @@
 %token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL TCAST TINTEGER TDOUBLE
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
-%token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TBETWEEN
+%token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN
 
 %%
 
@@ -47,8 +47,12 @@ stat    : select_stmt { $$.n = $1.n; }
         | rollback_stmt { $$.n = $1.n; } 
         ;
 
-select_stmt : TSELECT select_field_list TFROM select_table opt_where opt_group opt_having opt_order opt_limit opt_offset
-            { $$.n = new(NodeType.Select, $2.n, $4.n, $5.n, $8.n, $9.n, $10.n, $6.n, null, $7.n); }
+opt_distinct : TDISTINCT { $$.s = "1"; }
+             | { $$.s = null; }
+             ;
+
+select_stmt : TSELECT opt_distinct select_field_list TFROM select_table opt_where opt_group opt_having opt_order opt_limit opt_offset
+            { $$.n = new(NodeType.Select, $3.n, $5.n, $6.n, $9.n, $10.n, $11.n, $7.n, $2.s, $8.n); }
             ;
 
 opt_having : THAVING condition { $$.n = new(NodeType.Having, $2.n, null, null, null, null, null, null, null); }

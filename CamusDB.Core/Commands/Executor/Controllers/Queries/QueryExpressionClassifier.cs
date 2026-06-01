@@ -31,7 +31,7 @@ internal static class QueryExpressionClassifier
 
         return target.leftAst.yytext.ToLowerInvariant() switch
         {
-            "count" or "max" or "min" or "sum" or "avg" or "distinct" => true,
+            "count" or "max" or "min" or "sum" or "avg" => true,
             _ => false,
         };
     }

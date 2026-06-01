@@ -35,6 +35,8 @@ internal sealed class QueryJoinExecutor
 
     private readonly QueryProjector queryProjector = new();
 
+    private readonly QueryDistincter queryDistincter = new();
+
     public QueryJoinExecutor(QueryExecutor queryExecutor)
     {
         this.queryExecutor = queryExecutor;
@@ -62,6 +64,7 @@ internal sealed class QueryJoinExecutor
             querySorter,
             queryAggregator,
             queryProjector,
+            queryDistincter,
             queryLimiter);
     }
 

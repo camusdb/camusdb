@@ -110,9 +110,9 @@ internal sealed class SchemaQuerier
 
         createTableSql.Append("CREATE TABLE `" + table.Name + "` (");
 
-        int i = 0;
         var columns = table.Schema.Columns!;
 
+        int i = 0;
         foreach (TableColumnSchema column in columns)
         {
             createTableSql.Append(' ');
@@ -123,12 +123,25 @@ internal sealed class SchemaQuerier
             createTableSql.Append(GetSQLType(column.Type));
             createTableSql.Append(' ');
             createTableSql.Append(GetSQLConstraint(column));
-
-            if ((++i) != columns.Count)
-                createTableSql.Append(',');
-
-            //createTableSql.Append('\n');
+            createTableSql.Append(',');
+            i++;
         }
+
+        foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
+        {
+            string cols = string.Join(", ", kv.Value.Columns.Select(c => "`" + c + "`"));
+
+            if (kv.Key == CamusDBConfig.PrimaryKeyInternalName)
+                createTableSql.Append(" PRIMARY KEY (" + cols + "),");
+            else if (kv.Value.Type == IndexType.Unique)
+                createTableSql.Append(" UNIQUE KEY `" + kv.Key + "` (" + cols + "),");
+            else
+                createTableSql.Append(" KEY `" + kv.Key + "` (" + cols + "),");
+        }
+
+        // Remove trailing comma and close
+        if (createTableSql[^1] == ',')
+            createTableSql.Length--;
 
         createTableSql.Append(");");
 
