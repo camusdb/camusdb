@@ -13,6 +13,7 @@ using Kommander.Communication.Grpc;
 using Kommander.Discovery;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kommander.Data;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.Storage.Kv;
@@ -29,6 +30,8 @@ namespace CamusDB.Core.Storage.Kv;
 /// </summary>
 public sealed class EmbeddedKahuna : IAsyncDisposable
 {
+    public const string SchemaChangeLogType = "SchemaChange";
+
     private readonly EmbeddedKahunaNode node;
 
     /// <summary>
@@ -128,9 +131,125 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// </summary>
     public Task FlushAsync() => node.FlushAsync();
 
+    public int SchemaLogPartition(string db)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(db);
+
+        int partitionId = Raft.GetPrefixPartitionKey($"{db}/meta");
+        if (partitionId == 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Schema log partition for database '{db}' resolved to reserved partition 0"
+            );
+
+        return partitionId;
+    }
+
+    public async Task<SchemaReplicationResult> ReplicateSchemaChangeAsync(
+        string db,
+        byte[] entry,
+        CancellationToken cancellationToken = default
+    )
+    {
+        int partitionId = SchemaLogPartition(db);
+        string leader = await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+
+        if (!await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+            return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: leader);
+
+        RaftReplicationResult proposal = await Raft.ReplicateLogs(
+            partitionId,
+            SchemaChangeLogType,
+            entry,
+            autoCommit: false,
+            cancellationToken: cancellationToken
+        ).ConfigureAwait(false);
+
+        if (!proposal.Success)
+            return new(ToOutcome(proposal.Status), partitionId, proposal.LogIndex, leader, proposal.Status.ToString());
+
+        (bool committed, RaftOperationStatus status, long commitLogId) =
+            await Raft.CommitLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
+
+        if (committed && status == RaftOperationStatus.Success)
+            return new(SchemaReplicationOutcome.Committed, partitionId, commitLogId, leader, status.ToString());
+
+        await Raft.RollbackLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
+        return new(ToOutcome(status), partitionId, proposal.LogIndex, leader, status.ToString());
+    }
+
+    public IDisposable RegisterSchemaApply(
+        Func<int, byte[], Task<bool>> onApply,
+        Func<int, byte[], Task<bool>> onRestore
+    )
+    {
+        ArgumentNullException.ThrowIfNull(onApply);
+        ArgumentNullException.ThrowIfNull(onRestore);
+
+        Func<int, RaftLog, Task<bool>> applyHandler = (partitionId, log) =>
+        {
+            if (log.LogType != SchemaChangeLogType)
+                return Task.FromResult(true);
+
+            return onApply(partitionId, log.LogData ?? []);
+        };
+
+        Func<int, RaftLog, Task<bool>> restoreHandler = (partitionId, log) =>
+        {
+            if (log.LogType != SchemaChangeLogType)
+                return Task.FromResult(true);
+
+            return onRestore(partitionId, log.LogData ?? []);
+        };
+
+        Raft.OnReplicationReceived += applyHandler;
+        Raft.OnLogRestored += restoreHandler;
+
+        return new SchemaApplySubscription(Raft, applyHandler, restoreHandler);
+    }
+
     public ValueTask DisposeAsync() => node.DisposeAsync();
 
     // -----------------------------------------------------------------------
+
+    private static SchemaReplicationOutcome ToOutcome(RaftOperationStatus status)
+    {
+        return status switch
+        {
+            RaftOperationStatus.NodeIsNotLeader or RaftOperationStatus.LeaderInOldTerm => SchemaReplicationOutcome.NotLeader,
+            RaftOperationStatus.ProposalTimeout => SchemaReplicationOutcome.Timeout,
+            _ => SchemaReplicationOutcome.Failed
+        };
+    }
+
+    private sealed class SchemaApplySubscription : IDisposable
+    {
+        private readonly IRaft raft;
+        private readonly Func<int, RaftLog, Task<bool>> applyHandler;
+        private readonly Func<int, RaftLog, Task<bool>> restoreHandler;
+        private bool disposed;
+
+        public SchemaApplySubscription(
+            IRaft raft,
+            Func<int, RaftLog, Task<bool>> applyHandler,
+            Func<int, RaftLog, Task<bool>> restoreHandler
+        )
+        {
+            this.raft = raft;
+            this.applyHandler = applyHandler;
+            this.restoreHandler = restoreHandler;
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+                return;
+
+            disposed = true;
+            raft.OnReplicationReceived -= applyHandler;
+            raft.OnLogRestored -= restoreHandler;
+        }
+    }
 
     private static EmbeddedKahunaOptions DefaultOptions() => new()
     {

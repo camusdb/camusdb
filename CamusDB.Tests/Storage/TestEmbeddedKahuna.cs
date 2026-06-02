@@ -7,15 +7,23 @@
  */
 
 using System.Text;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 
 using NUnit.Framework;
 
 using Kahuna;
+using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
+using Kommander;
+using Kommander.Communication.Memory;
+using Kommander.Discovery;
 using Kommander.Time;
 
 using CamusDB.Core.Storage.Kv;
@@ -140,5 +148,131 @@ public sealed class TestEmbeddedKahuna
         string leader = await kahuna.WaitForLeaderAsync("any/key", CancellationToken.None);
 
         Assert.IsFalse(string.IsNullOrEmpty(leader), "Leader node name must not be empty");
+    }
+
+    [Test]
+    public async Task SchemaReplication_LeaderCommitsFollowerReturnsNotLeaderAndApplyRuns()
+    {
+        string db = $"db_{Guid.NewGuid():N}";
+        byte[] payload = Encoding.UTF8.GetBytes("schema-change-1");
+
+        InMemoryCommunication raftCommunication = new();
+        MemoryInterNodeCommmunication interNode = new();
+
+        EmbeddedKahuna node1 = CreateClusterNode("node1", 1, 9101, [new("localhost:9102"), new("localhost:9103")], raftCommunication, interNode);
+        EmbeddedKahuna node2 = CreateClusterNode("node2", 2, 9102, [new("localhost:9101"), new("localhost:9103")], raftCommunication, interNode);
+        EmbeddedKahuna node3 = CreateClusterNode("node3", 3, 9103, [new("localhost:9101"), new("localhost:9102")], raftCommunication, interNode);
+        EmbeddedKahuna[] nodes = [node1, node2, node3];
+
+        try
+        {
+            raftCommunication.SetNodes(nodes.ToDictionary(x => x.Raft.GetLocalEndpoint(), x => x.Raft));
+            interNode.SetNodes(nodes.ToDictionary(x => x.Raft.GetLocalEndpoint(), x => x.Kahuna));
+
+            ConcurrentBag<(string node, int partition, string data)> applied = [];
+
+            foreach (EmbeddedKahuna node in nodes)
+            {
+                string nodeName = node.Raft.GetLocalNodeName();
+                node.RegisterSchemaApply(
+                    (partition, bytes) =>
+                    {
+                        applied.Add((nodeName, partition, Encoding.UTF8.GetString(bytes)));
+                        return Task.FromResult(true);
+                    },
+                    (_, _) => Task.FromResult(true)
+                );
+            }
+
+            foreach (EmbeddedKahuna node in nodes)
+                await node.Raft.UpdateNodes();
+
+            await Task.WhenAll(nodes.Select(x => x.StartAsync(CancellationToken.None)))
+                .WaitAsync(TimeSpan.FromSeconds(10));
+
+            int partitionId = node1.SchemaLogPartition(db);
+            await node1.Raft.WaitForLeader(partitionId, CancellationToken.None);
+
+            EmbeddedKahuna leader = await WaitForLeaderNode(nodes, partitionId);
+            EmbeddedKahuna follower = nodes.First(x => x != leader);
+
+            SchemaReplicationResult followerResult = await follower.ReplicateSchemaChangeAsync(db, payload, CancellationToken.None);
+            Assert.AreEqual(SchemaReplicationOutcome.NotLeader, followerResult.Outcome);
+
+            SchemaReplicationResult result = await leader.ReplicateSchemaChangeAsync(db, payload, CancellationToken.None);
+            Assert.AreEqual(SchemaReplicationOutcome.Committed, result.Outcome);
+            Assert.AreEqual(partitionId, result.PartitionId);
+
+            await WaitUntilAsync(() => applied.Count > 0, TimeSpan.FromSeconds(5));
+
+            foreach ((_, int partition, string data) in applied)
+            {
+                Assert.AreEqual(partitionId, partition);
+                Assert.AreEqual("schema-change-1", data);
+            }
+        }
+        finally
+        {
+            foreach (EmbeddedKahuna node in nodes)
+                await node.DisposeAsync();
+        }
+    }
+
+    private static EmbeddedKahuna CreateClusterNode(
+        string nodeName,
+        int nodeId,
+        int port,
+        List<RaftNode> peers,
+        InMemoryCommunication raftCommunication,
+        MemoryInterNodeCommmunication interNode)
+    {
+        return new(
+            new EmbeddedKahunaOptions
+            {
+                NodeName = nodeName,
+                NodeId = nodeId,
+                Host = "localhost",
+                Port = port,
+                Storage = "memory",
+                WalStorage = "memory",
+                InitialPartitions = 3
+            },
+            interNode,
+            raftCommunication,
+            new StaticDiscovery(peers)
+        );
+    }
+
+    private static async Task<EmbeddedKahuna> WaitForLeaderNode(EmbeddedKahuna[] nodes, int partitionId)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            foreach (EmbeddedKahuna node in nodes)
+            {
+                if (await node.Raft.AmILeaderQuick(partitionId))
+                    return node;
+            }
+
+            await Task.Delay(25);
+        }
+
+        throw new AssertionException($"No leader found for partition {partitionId}");
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        DateTime deadline = DateTime.UtcNow.Add(timeout);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition())
+                return;
+
+            await Task.Delay(25);
+        }
+
+        Assert.Fail("Timed out waiting for condition");
     }
 }

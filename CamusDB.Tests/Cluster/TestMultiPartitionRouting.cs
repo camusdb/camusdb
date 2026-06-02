@@ -17,7 +17,10 @@ using NUnit.Framework;
 using Microsoft.Extensions.Logging;
 
 using Kahuna;
+using Kahuna.Server.KeyValues;
+using Kahuna.Shared.KeyValue;
 using Kommander;
+using Kommander.Time;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs;
@@ -28,6 +31,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Serializer;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
@@ -117,6 +121,15 @@ public sealed class TestMultiPartitionRouting
         return (dbname, executor);
     }
 
+    private static (string dbname, CommandExecutor executor) CreateStandaloneExecutor()
+    {
+        string dbname = Guid.NewGuid().ToString("n");
+        CommandValidator validator = new();
+        CatalogsManager catalogsManager = new(logger);
+        CommandExecutor executor = new(validator, catalogsManager, logger, loggerFactory: sharedLoggerFactory);
+        return (dbname, executor);
+    }
+
     private static async Task CleanupAsync(string dbname, CommandExecutor executor)
     {
         try { await executor.CloseDatabase(new CloseDatabaseTicket(dbname)); } catch { }
@@ -127,6 +140,23 @@ public sealed class TestMultiPartitionRouting
                 Directory.Delete(dataPath, recursive: true);
         }
         catch { }
+    }
+
+    private static async Task SetRawMetaValue(DatabaseDescriptor database, string key, byte[] value)
+    {
+        (KeyValueResponseType type, _, _) = await database.Kahuna.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero,
+            key,
+            value,
+            null,
+            -1,
+            KeyValueFlags.Set,
+            0,
+            KeyValueDurability.Persistent,
+            CancellationToken.None
+        );
+
+        Assert.AreEqual(KeyValueResponseType.Set, type);
     }
 
     // -----------------------------------------------------------------------
@@ -434,14 +464,180 @@ public sealed class TestMultiPartitionRouting
             await database.Transactions.CommitAsync(txn);
 
             Assert.IsTrue(database.Schema.Tables.ContainsKey("robots"));
+            Assert.AreEqual(1, database.Schema.SchemaVersion);
+
+            await executor.AlterTable(new AlterTableTicket(
+                databaseName: dbname,
+                tableName: "robots",
+                column: new ColumnInfo("enabled", ColumnType.Bool),
+                operation: AlterTableOperation.AddColumn
+            ));
+
+            Assert.AreEqual(2, database.Schema.SchemaVersion);
 
             await executor.CloseDatabase(new CloseDatabaseTicket(dbname));
 
             DatabaseDescriptor reopened = await executor.OpenDatabase(dbname);
             Assert.IsTrue(reopened.Schema.Tables.ContainsKey("robots"),
                 "Schema must survive close/reopen on the shared cluster node");
-            Assert.AreEqual(2, reopened.Schema.Tables["robots"].Columns!.Count,
-                "Table must retain id and name columns after reopen");
+            Assert.AreEqual(3, reopened.Schema.Tables["robots"].Columns!.Count,
+                "Table must retain id, name, and enabled columns after reopen");
+            Assert.AreEqual(2, reopened.Schema.SchemaVersion,
+                "Database schema version must survive close/reopen");
+            Assert.IsNull(reopened.Schema.Tables["robots"].SchemaHistory,
+                "Per-object table metadata should not eagerly load schema history");
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
+    [Test]
+    public async Task LegacyMetaSchemaBlob_MigratesToPerObjectKeys()
+    {
+        (string dbname, CommandExecutor executor) = CreateStandaloneExecutor();
+
+        try
+        {
+            DatabaseDescriptor database = await executor.CreateDatabase(
+                new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+            List<TableColumnSchema> version0Columns =
+            [
+                new("id-col", "id", ColumnType.Id, true, null),
+                new("name-col", "name", ColumnType.String, false, null)
+            ];
+
+            Dictionary<string, TableSchema> legacyTables = new()
+            {
+                ["robots"] = new()
+                {
+                    Id = "legacy-table-id",
+                    Name = "robots",
+                    Version = 4,
+                    Columns = version0Columns,
+                    SchemaHistory = [new() { Version = 4, Columns = version0Columns }]
+                }
+            };
+
+            await SetRawMetaValue(database, $"{dbname}/meta/schema", Serializator.Serialize(legacyTables));
+
+            await executor.CloseDatabase(new CloseDatabaseTicket(dbname));
+
+            DatabaseDescriptor reopened = await executor.OpenDatabase(dbname);
+
+            Assert.AreEqual(4, reopened.Schema.SchemaVersion);
+            Assert.True(reopened.Schema.Tables.ContainsKey("robots"));
+            Assert.AreEqual("legacy-table-id", reopened.Schema.Tables["robots"].Id);
+
+            (KeyValueResponseType legacyType, _) = await reopened.Kahuna.Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero,
+                $"{dbname}/meta/schema",
+                -1,
+                KeyValueDurability.Persistent,
+                CancellationToken.None
+            );
+            Assert.AreEqual(KeyValueResponseType.DoesNotExist, legacyType);
+
+            (KeyValueResponseType tableType, ReadOnlyKeyValueEntry? tableEntry) = await reopened.Kahuna.Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero,
+                $"{dbname}/meta/table/legacy-table-id",
+                -1,
+                KeyValueDurability.Persistent,
+                CancellationToken.None
+            );
+            Assert.AreEqual(KeyValueResponseType.Get, tableType);
+            Assert.NotNull(tableEntry?.Value);
+            Assert.AreEqual((byte)'{', tableEntry!.Value![0], "Migrated per-object table metadata should be UTF-8 JSON");
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
+    [Test]
+    public async Task OldVersionRowRead_LoadsSchemaHistoryLazilyAfterReopen()
+    {
+        (string dbname, CommandExecutor executor) = CreateExecutor();
+
+        try
+        {
+            DatabaseDescriptor database = await executor.CreateDatabase(
+                new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: "robots",
+                columns:
+                [
+                    new ColumnInfo("id", ColumnType.Id),
+                    new ColumnInfo("name", ColumnType.String)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+
+            TableSchema version0Schema = new()
+            {
+                Id = database.Schema.Tables["robots"].Id,
+                Name = "robots",
+                Version = 0,
+                Columns = new(database.Schema.Tables["robots"].Columns!),
+                SchemaHistory = [new() { Version = 0, Columns = new(database.Schema.Tables["robots"].Columns!) }]
+            };
+
+            await executor.AlterTable(new AlterTableTicket(
+                databaseName: dbname,
+                tableName: "robots",
+                column: new ColumnInfo("enabled", ColumnType.Bool),
+                operation: AlterTableOperation.AddColumn
+            ));
+
+            KvTransaction txn = await database.Transactions.BeginAsync();
+            KvTableStore seedStore = new(database.Kahuna.Kahuna, version0Schema.Id!);
+            ObjectIdValue seededRowId = ObjectIdGenerator.Generate();
+            await seedStore.InsertRow(
+                txn,
+                seededRowId,
+                RowEncoder.Encode(
+                    version0Schema,
+                    new()
+                    {
+                        ["id"] = new(ColumnType.Id, seededRowId.ToString()),
+                        ["name"] = new(ColumnType.String, "bender")
+                    },
+                    seededRowId
+                )
+            );
+            await database.Transactions.CommitAsync(txn);
+
+            await executor.CloseDatabase(new CloseDatabaseTicket(dbname));
+
+            DatabaseDescriptor reopened = await executor.OpenDatabase(dbname);
+            TableSchema reopenedTable = reopened.Schema.Tables["robots"];
+            Assert.IsNull(reopenedTable.SchemaHistory);
+
+            txn = await reopened.Transactions.BeginAsync();
+            KvTableStore store = new(reopened.Kahuna.Kahuna, reopenedTable.Id!);
+            List<Dictionary<string, ColumnValue>> rows = new();
+
+            await foreach ((ObjectIdValue rowId, byte[] data) in store.ScanRows(txn.TransactionId))
+                rows.Add(await RowEncoder.DecodeAsync(reopenedTable, txn.TransactionId, rowId, data));
+
+            await reopened.Transactions.CommitAsync(txn);
+
+            Assert.AreEqual(1, rows.Count);
+            Assert.True(rows[0].ContainsKey("name"));
+            Assert.False(rows[0].ContainsKey("enabled"), "Old-version row should decode with the pre-alter column layout");
+            Assert.NotNull(reopenedTable.SchemaHistory);
+            Assert.AreEqual(1, reopenedTable.SchemaHistory!.Count, "Old-version decode should fetch and cache exactly one history entry");
+            Assert.AreEqual(0, reopenedTable.SchemaHistory[0].Version);
         }
         finally
         {

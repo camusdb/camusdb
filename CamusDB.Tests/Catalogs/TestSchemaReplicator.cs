@@ -1,0 +1,329 @@
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+using CamusDB.Core;
+using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Serializer;
+using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.Transactions;
+
+using Microsoft.Extensions.Logging;
+
+using Nito.AsyncEx;
+
+using NUnit.Framework;
+
+namespace CamusDB.Tests.Catalogs;
+
+[TestFixture]
+[NonParallelizable]
+public sealed class TestSchemaReplicator
+{
+    private static readonly ILoggerFactory LoggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(b =>
+        b.AddFilter("Camus", LogLevel.Warning));
+
+    [Test]
+    public async Task ApplyAsync_ReplayedEntryIsNoOp()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+        byte[] bytes = Serializator.Serialize(CreateTableEntry(db, 0, 1));
+
+        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
+        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
+
+        Assert.AreEqual(1, database.Schema.SchemaVersion);
+        Assert.AreEqual(1, database.Schema.Tables.Count);
+        Assert.True(database.Schema.Tables.ContainsKey("robots"));
+    }
+
+    [Test]
+    public async Task ApplyAsync_OutOfOrderEntryThrows()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+        byte[] bytes = Serializator.Serialize(CreateTableEntry(db, 2, 3));
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() => replicator.ApplyAsync(database, partitionId, bytes));
+
+        Assert.NotNull(ex);
+        Assert.That(ex!.Message, Does.Contain("out of order"));
+        Assert.AreEqual(0, database.Schema.SchemaVersion);
+        Assert.AreEqual(0, database.Schema.Tables.Count);
+    }
+
+    [Test]
+    public async Task ApplyAsync_IgnoresEntriesForOtherDatabases()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+        byte[] bytes = Serializator.Serialize(CreateTableEntry("other_db", 0, 1));
+
+        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
+
+        Assert.AreEqual(0, database.Schema.SchemaVersion);
+        Assert.AreEqual(0, database.Schema.Tables.Count);
+    }
+
+    [Test]
+    public async Task ApplyAsync_LeaderPersistsCheckpoint()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        CatalogsManager catalogs = CreateCatalogs();
+        SchemaReplicator replicator = CreateReplicator(catalogs);
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+        await database.Kahuna.Raft.WaitForLeader(partitionId, CancellationToken.None);
+
+        byte[] bytes = Serializator.Serialize(CreateTableEntry(db, 0, 1));
+
+        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
+
+        DatabaseDescriptor reopened = CreateDescriptor(db, kahuna);
+        await catalogs.LoadMetaAsync(reopened);
+
+        Assert.AreEqual(1, reopened.Schema.SchemaVersion);
+        Assert.True(reopened.Schema.Tables.ContainsKey("robots"));
+        Assert.AreEqual(1, reopened.Schema.Tables.Count);
+    }
+
+    [Test]
+    public async Task ApplyAsync_LeaderCheckpointFailureDoesNotAdvanceMemoryOrFailCallback()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+        await database.Kahuna.Raft.WaitForLeader(partitionId, CancellationToken.None);
+
+        database.Schema.Tables["robots"] = new()
+        {
+            Id = null,
+            Name = "robots",
+            Version = 0,
+            Columns = [new("id-col", "id", ColumnType.Id, true, null)],
+            SchemaHistory = [new() { Version = 0, Columns = [new("id-col", "id", ColumnType.Id, true, null)] }]
+        };
+
+        byte[] bytes = Serializator.Serialize(AddColumnEntry(db, 0, 1));
+
+        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
+
+        Assert.AreEqual(0, database.Schema.SchemaVersion);
+        Assert.AreEqual(0, database.Schema.Tables["robots"].Version);
+        Assert.AreEqual(1, database.Schema.Tables["robots"].Columns!.Count);
+    }
+
+    [Test]
+    public async Task RestoreAsync_AppliesInMemoryWithoutCheckpointPersist()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+
+        database.Schema.Tables["robots"] = new()
+        {
+            Id = null,
+            Name = "robots",
+            Version = 0,
+            Columns = [new("id-col", "id", ColumnType.Id, true, null)],
+            SchemaHistory = [new() { Version = 0, Columns = [new("id-col", "id", ColumnType.Id, true, null)] }]
+        };
+
+        byte[] bytes = Serializator.Serialize(AddColumnEntry(db, 0, 1));
+
+        Assert.True(await replicator.RestoreAsync(database, bytes));
+
+        Assert.AreEqual(1, database.Schema.SchemaVersion);
+        Assert.AreEqual(1, database.Schema.Tables["robots"].Version);
+        Assert.AreEqual(2, database.Schema.Tables["robots"].Columns!.Count);
+    }
+
+    [Test]
+    public async Task RestoreAsync_OutOfOrderEntryIsSkippedWithoutFailingOpen()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        byte[] bytes = Serializator.Serialize(CreateTableEntry(db, 2, 3));
+
+        Assert.True(await replicator.RestoreAsync(database, bytes));
+
+        Assert.AreEqual(0, database.Schema.SchemaVersion);
+        Assert.AreEqual(0, database.Schema.Tables.Count);
+    }
+
+    [Test]
+    public async Task DatabaseDescriptor_DisposesSchemaReplicationSubscriptionBeforeSchema()
+    {
+        await using EmbeddedKahuna kahuna = new();
+
+        string db = $"db_{Guid.NewGuid():N}";
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        CountingSubscription first = new(() => Assert.DoesNotThrow(() => ProbeSchemaSemaphore(database)));
+        CountingSubscription second = new(() => Assert.DoesNotThrow(() => ProbeSchemaSemaphore(database)));
+
+        database.SetSchemaReplicationSubscription(first);
+        database.SetSchemaReplicationSubscription(second);
+
+        Assert.AreEqual(1, first.DisposeCount);
+        Assert.AreEqual(0, second.DisposeCount);
+
+        database.Dispose();
+
+        Assert.AreEqual(1, second.DisposeCount);
+    }
+
+    private static void ProbeSchemaSemaphore(DatabaseDescriptor database)
+    {
+        if (database.Schema.Semaphore.Wait(0))
+            database.Schema.Semaphore.Release();
+    }
+
+    private static SchemaReplicator CreateReplicator(CatalogsManager? catalogs = null)
+    {
+        ILogger<ICamusDB> logger = LoggerFactory.CreateLogger<ICamusDB>();
+        return new(catalogs ?? new CatalogsManager(logger), logger);
+    }
+
+    private static CatalogsManager CreateCatalogs()
+    {
+        ILogger<ICamusDB> logger = LoggerFactory.CreateLogger<ICamusDB>();
+        return new(logger);
+    }
+
+    private static DatabaseDescriptor CreateDescriptor(string db, EmbeddedKahuna kahuna)
+    {
+        return new(
+            name: db,
+            kahuna: kahuna,
+            transactions: new KvTransactionsManager(kahuna.Kahuna),
+            tableDescriptors: new ConcurrentDictionary<string, AsyncLazy<TableDescriptor>>(),
+            ownsKahuna: false
+        );
+    }
+
+    private static string NextSchemaLogDatabaseName(EmbeddedKahuna kahuna)
+    {
+        for (int i = 0; i < 100; i++)
+        {
+            string db = $"db_{Guid.NewGuid():N}";
+            try
+            {
+                _ = kahuna.SchemaLogPartition(db);
+                return db;
+            }
+            catch (CamusDBException)
+            {
+            }
+        }
+
+        throw new AssertionException("Could not generate a database name whose schema log partition is not reserved");
+    }
+
+    private static SchemaChangeLogEntry CreateTableEntry(string db, long fromVersion, long toVersion)
+    {
+        return new()
+        {
+            Database = db,
+            FromVersion = fromVersion,
+            ToVersion = toVersion,
+            Op = SchemaOp.CreateTable,
+            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            {
+                TableName = "robots",
+                Columns =
+                [
+                    new()
+                    {
+                        Name = "id",
+                        Type = ColumnType.Id,
+                        NotNull = true
+                    },
+                    new()
+                    {
+                        Name = "name",
+                        Type = ColumnType.String
+                    }
+                ]
+            })
+        };
+    }
+
+    private static SchemaChangeLogEntry AddColumnEntry(string db, long fromVersion, long toVersion)
+    {
+        return new()
+        {
+            Database = db,
+            FromVersion = fromVersion,
+            ToVersion = toVersion,
+            Op = SchemaOp.AddColumn,
+            Payload = Serializator.Serialize(new SchemaAlterColumnPayload
+            {
+                TableName = "robots",
+                Column = new()
+                {
+                    Name = "name",
+                    Type = ColumnType.String
+                }
+            })
+        };
+    }
+
+    private sealed class CountingSubscription : IDisposable
+    {
+        private readonly Action onDispose;
+
+        public int DisposeCount { get; private set; }
+
+        public CountingSubscription(Action onDispose)
+        {
+            this.onDispose = onDispose;
+        }
+
+        public void Dispose()
+        {
+            DisposeCount++;
+            onDispose();
+        }
+    }
+}

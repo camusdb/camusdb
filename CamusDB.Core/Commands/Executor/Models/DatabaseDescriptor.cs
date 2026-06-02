@@ -35,6 +35,8 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> TableDescriptors { get; }
 
+    private IDisposable? schemaReplicationSubscription;
+
     public DatabaseDescriptor(
         string name,
         EmbeddedKahuna kahuna,
@@ -50,8 +52,19 @@ public sealed record DatabaseDescriptor : IDisposable
         TableDescriptors = tableDescriptors;
     }
 
+    public void SetSchemaReplicationSubscription(IDisposable subscription)
+    {
+        ArgumentNullException.ThrowIfNull(subscription);
+
+        IDisposable? previous = Interlocked.Exchange(ref schemaReplicationSubscription, subscription);
+        previous?.Dispose();
+    }
+
     public void Dispose()
     {
+        IDisposable? subscription = Interlocked.Exchange(ref schemaReplicationSubscription, null);
+        subscription?.Dispose();
+
         Schema?.Dispose();
         SystemSchemaSemaphore?.Dispose();
     }

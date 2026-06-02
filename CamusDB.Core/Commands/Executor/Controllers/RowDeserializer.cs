@@ -42,7 +42,7 @@ internal sealed class RowDeserializer
         Serializator.ReadType(data, ref pointer); // row id type
         Serializator.ReadObjectId(data, ref pointer); // row id
 
-        List<TableColumnSchema> columns = tableSchema.SchemaHistory![schemaVersion].Columns!;
+        List<TableColumnSchema> columns = tableSchema.GetSchemaHistory(schemaVersion).Columns!;
 
         Dictionary<string, ColumnValue> columnValues = new(columns.Count + 1)
         {

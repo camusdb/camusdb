@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.Util.ObjectIds;
+using Kommander.Time;
 
 namespace CamusDB.Core.Storage.Kv;
 
@@ -118,7 +119,38 @@ public static class RowEncoder
         Serializator.ReadType(data, ref pointer);                    // rowId type marker
         Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
 
-        List<TableColumnSchema> columns = schema.SchemaHistory![schemaVersion].Columns!;
+        List<TableColumnSchema> columns = schema.GetSchemaHistory(schemaVersion).Columns!;
+        return DecodeColumns(columns, data, ref pointer, requiredColumns);
+    }
+
+    public static async ValueTask<Dictionary<string, ColumnValue>> DecodeAsync(
+        TableSchema schema,
+        HLCTimestamp txId,
+        ObjectIdValue rowId,
+        byte[] data,
+        IReadOnlySet<string>? requiredColumns = null)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+        ArgumentNullException.ThrowIfNull(data);
+
+        int pointer = 0;
+
+        Serializator.ReadType(data, ref pointer);                    // schema type marker
+        int schemaVersion = Serializator.ReadInt32(data, ref pointer);
+
+        Serializator.ReadType(data, ref pointer);                    // rowId type marker
+        Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
+
+        List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
+        return DecodeColumns(columns, data, ref pointer, requiredColumns);
+    }
+
+    private static Dictionary<string, ColumnValue> DecodeColumns(
+        List<TableColumnSchema> columns,
+        byte[] data,
+        ref int pointer,
+        IReadOnlySet<string>? requiredColumns)
+    {
         bool decodeAll = requiredColumns is null;
 
         Dictionary<string, ColumnValue> result = new(decodeAll ? columns.Count : requiredColumns!.Count);

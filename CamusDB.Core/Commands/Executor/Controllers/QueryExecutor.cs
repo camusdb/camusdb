@@ -215,11 +215,12 @@ internal sealed class QueryExecutor
             yield break;
 
         ObjectIdValue resolvedRowId = rowId.Value;
-        Dictionary<string, ColumnValue> row = RowEncoder.Decode(
+        Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
             table.Schema,
+            txId,
             resolvedRowId,
             data,
-            plan.ScanRequiredColumns);
+            plan.ScanRequiredColumns).ConfigureAwait(false);
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(resolvedRowId, row);
@@ -269,11 +270,12 @@ internal sealed class QueryExecutor
             if (data is null || data.Length == 0)
                 continue;
 
-            Dictionary<string, ColumnValue> row = RowEncoder.Decode(
+            Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
                 table.Schema,
+                txId,
                 rowId,
                 data,
-                plan.ScanRequiredColumns);
+                plan.ScanRequiredColumns).ConfigureAwait(false);
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);
@@ -305,7 +307,7 @@ internal sealed class QueryExecutor
         if (data is null || data.Length == 0)
             yield break;
 
-        yield return RowEncoder.Decode(table.Schema, rowId.Value, data);
+        yield return await RowEncoder.DecodeAsync(table.Schema, txId, rowId.Value, data).ConfigureAwait(false);
     }
 
     private static ColumnType[] GetIndexColumnTypes(TableDescriptor table, TableIndexSchema index)

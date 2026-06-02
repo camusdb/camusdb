@@ -271,11 +271,12 @@ internal sealed class QueryJoinExecutor
         if (data is null || data.Length == 0)
             return null;
 
-        Dictionary<string, ColumnValue> row = RowEncoder.Decode(
+        Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
             source.Table.Schema,
+            plan.Ticket.TxnState.TransactionId,
             rowId,
             data,
-            GetRequiredColumnsForAlias(plan, source.Alias));
+            GetRequiredColumnsForAlias(plan, source.Alias)).ConfigureAwait(false);
 
         if (executionFilter is not null)
         {
@@ -348,11 +349,12 @@ internal sealed class QueryJoinExecutor
             if (data.Length == 0)
                 continue;
 
-            Dictionary<string, ColumnValue> row = RowEncoder.Decode(
+            Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
                 table.Schema,
+                txId,
                 rowId,
                 data,
-                required);
+                required).ConfigureAwait(false);
 
             if (executionFilter is not null)
             {

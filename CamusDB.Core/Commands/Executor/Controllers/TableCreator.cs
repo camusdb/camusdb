@@ -42,6 +42,7 @@ internal sealed class TableCreator
         TableSchema tableSchema = await catalogs.CreateTable(database, ticket, tx).ConfigureAwait(false);
 
         RegisterTableObject(database, tableSchema);
+        await catalogs.PersistSystemMetaAsync(database, tx).ConfigureAwait(false);
 
         await AddConstraints(queryExecutor, tableOpener, tableIndexAlterer, database, ticket, tx).ConfigureAwait(false);
 

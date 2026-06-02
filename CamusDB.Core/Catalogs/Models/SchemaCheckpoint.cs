@@ -6,20 +6,13 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Catalogs.Models;
+namespace CamusDB.Core.Catalogs.Models;
 
-namespace CamusDB.Core.CommandsExecutor.Models;
-
-public sealed class Schema : IDisposable
+public sealed class SchemaCheckpoint
 {
+    public int FormatVersion { get; set; } = 1;
+
     public long SchemaVersion { get; set; }
 
     public Dictionary<string, TableSchema> Tables { get; set; } = new();
-
-    public SemaphoreSlim Semaphore { get; } = new(1, 1);
-
-    public void Dispose()
-    {
-        Semaphore?.Dispose();
-    }
 }

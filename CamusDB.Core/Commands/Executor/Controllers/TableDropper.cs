@@ -60,12 +60,19 @@ internal sealed class TableDropper
 
         await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
 
+        string tableId = table.Id;
+
         try
         {
             await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
 
             if (database.Schema.Tables.Remove(ticket.TableName))
+            {
+                database.Schema.SchemaVersion++;
                 logger.LogInformation("Removed table {TableName} from database schema", ticket.TableName);
+            }
+
+            await catalogs.PersistDroppedTableAsync(database, tableId, tx).ConfigureAwait(false);
         }
         finally
         {
