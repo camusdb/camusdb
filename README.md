@@ -12,10 +12,12 @@ CamusDB is an open-source NewSQL distributed database written in C# on .NET 9. I
 
 Features
 --------
-- **SQL dialect** — SELECT, INSERT, UPDATE, DELETE, CREATE/DROP/ALTER TABLE, transactions (BEGIN / COMMIT / ROLLBACK), parameterized placeholders, and case-insensitive identifier handling.
-- **Aggregation** — COUNT, SUM, AVG, MIN, MAX with GROUP BY.
-- **Filtering and ordering** — WHERE clauses with =, !=, <, >, <=, >=, AND, OR, LIKE, ILIKE, IS NULL, IN; ORDER BY (ASC/DESC); LIMIT and OFFSET.
-- **Indexes** — PRIMARY KEY, UNIQUE indexes, and multi-column indexes; ALTER TABLE ADD/DROP INDEX.
+- **SQL dialect** — SELECT, INSERT, UPDATE, DELETE, CREATE/DROP/ALTER TABLE, transactions (BEGIN / COMMIT / ROLLBACK), parameterized placeholders, table aliases, derived tables, simple inner joins, comma joins, row-level DISTINCT, and case-insensitive identifier handling.
+- **Aggregation** — COUNT, SUM, AVG, MIN, MAX with GROUP BY and HAVING filters.
+- **Filtering and ordering** — WHERE clauses with =, !=, <, >, <=, >=, AND, OR, LIKE, ILIKE, BETWEEN, IS NULL, IN, NOT IN, scalar subqueries, and EXISTS subqueries; ORDER BY (ASC/DESC), projection aliases, ordinal references, LIMIT, and OFFSET.
+- **Scalar functions** — string, math, date/time, cast, object id, and JSON helpers including `json_valid`, `json_type`, `json_extract`, `json_value`, `json_array_length`, and `json_contains`.
+- **Query planning** — rule-based physical planning for table scans, index scans, joins, aggregation, distinct, sorting, and limits, including predicate pushdown and index nested-loop joins for eligible equi-joins.
+- **Indexes** — PRIMARY KEY, inline UNIQUE column constraints, UNIQUE indexes, multi-column indexes, CREATE INDEX IF NOT EXISTS, CREATE UNIQUE INDEX IF NOT EXISTS, and ALTER TABLE ADD/DROP INDEX.
 - **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, ALTER TABLE ADD/DROP COLUMN.
 - **ACID transactions** — pessimistic locking with read-committed isolation; cross-partition writes use two-phase commit (2PC).
 - **Multi-node cluster** — Raft consensus (via Kommander) partitions data across nodes; each partition elects its own leader. Nodes join a cluster with `--mode=cluster` and a static peer list.
@@ -30,6 +32,47 @@ Column Types
 - `float64`
 - `bool`
 - `objectId`
+
+SQL examples
+------------
+```sql
+CREATE TABLE IF NOT EXISTS app_users (
+  id STRING PRIMARY KEY NOT NULL,
+  email STRING UNIQUE NOT NULL,
+  display_name STRING NOT NULL,
+  password_hash STRING NOT NULL,
+  role STRING NOT NULL,
+  created_at_utc STRING NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS app_users_email_idx ON app_users (email);
+
+SELECT DISTINCT role FROM app_users ORDER BY role;
+
+SELECT role, COUNT(*) AS users
+FROM app_users
+GROUP BY role
+HAVING users > 0
+ORDER BY 2 DESC;
+
+SELECT r.id, r.name, ur.amount
+FROM robots r
+JOIN user_robots ur ON r.id = ur.robots_id;
+
+SELECT r.id, r.name, ur.amount
+FROM robots r, user_robots ur
+WHERE r.id = ur.robots_id;
+
+SELECT *
+FROM robots
+WHERE id NOT IN (SELECT robots_id FROM user_robots);
+
+SELECT json_value(payload, "$.name")
+FROM robots
+WHERE json_valid(payload) = true;
+```
+
+`SELECT DISTINCT` is row-level distinct. Aggregate-level distinct such as `COUNT(DISTINCT code)` is not supported yet.
 
 Running a cluster
 -----------------
@@ -68,8 +111,9 @@ Architecture
 The engine is structured as a pipeline of composable operators:
 
 - **SQL Parser** — LALR(1) parser (GPLEX/GPPG) that produces an AST. Identifiers are normalized to lowercase at parse time.
-- **Query planner** — selects index scans or full table scans based on available indexes and the WHERE predicate.
-- **Query operators** — `QueryScanner`, `QueryFilterer`, `QuerySorter`, `QueryLimiter`, `QueryProjector`, and `QueryAggregator` form a push-based execution pipeline.
+- **Query planner** — builds a physical plan tree from the bound SELECT model, choosing table scans, index scans, index lookup scans, nested-loop joins, index nested-loop joins, aggregate nodes, distinct nodes, sort nodes, and limit nodes based on query shape and available indexes.
+- **Query binder** — resolves table aliases, derived table output columns, projection aliases, ordinal GROUP BY/ORDER BY references, aggregate scope, HAVING scope, and subquery scope before execution.
+- **Query operators** — `QueryScanner`, `QueryFilterer`, `QuerySorter`, `QueryLimiter`, `QueryProjector`, `QueryAggregator`, `QueryDistincter`, and `QueryJoinExecutor` execute the plan while keeping filtering, sorting, aggregation, projection, and limiting storage-agnostic.
 - **Storage layer** — row data and index entries are stored in an embedded Kahuna KV node. `KvTableStore` maps table rows and index entries onto Kahuna keys using a prefix layout that keeps all rows of a table on the same Raft partition.
 - **Transaction layer** — `KvTransactionsManager` coordinates BEGIN/COMMIT/ROLLBACK via Kahuna's transaction API; cross-partition writes go through Kahuna's 2PC protocol.
 - **Catalog** — table and index descriptors are kept in memory and persisted through the KV layer.
