@@ -50,14 +50,19 @@ public sealed class SchemaReplicator
         await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (entry.ToVersion <= database.Schema.SchemaVersion)
-                return true;
-
             if (entry.FromVersion != database.Schema.SchemaVersion)
+            {
+                if (entry.ToVersion <= database.Schema.SchemaVersion && WasSchemaDeltaApplied(database.Schema, entry))
+                    return true;
+
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"Schema change for database '{database.Name}' is out of order: expected from-version {database.Schema.SchemaVersion}, got {entry.FromVersion}"
                 );
+            }
+
+            if (entry.ToVersion <= database.Schema.SchemaVersion)
+                return true;
 
             bool isLeader = await database.Kahuna.Raft.AmILeader(partitionId, CancellationToken.None).ConfigureAwait(false);
 
@@ -83,8 +88,7 @@ public sealed class SchemaReplicator
                     return true;
                 }
 
-                database.Schema.Tables = stagedSchema.Tables;
-                database.Schema.SchemaVersion = stagedSchema.SchemaVersion;
+                CatalogsManager.ApplySchemaDelta(database.Schema, entry);
             }
             else
             {
@@ -187,7 +191,36 @@ public sealed class SchemaReplicator
         return entry;
     }
 
-    private static Schema CloneSchema(Schema schema)
+    private static bool WasSchemaDeltaApplied(Schema schema, SchemaChangeLogEntry entry)
+    {
+        return entry.Op switch
+        {
+            SchemaOp.CreateTable => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
+            SchemaOp.DropTable => !schema.Tables.ContainsKey(DecodePayload<SchemaDropTablePayload>(entry).TableName),
+            SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
+            SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
+            _ => schema.SchemaVersion >= entry.ToVersion
+        };
+    }
+
+    private static bool HasColumn(Schema schema, SchemaAlterColumnPayload payload)
+    {
+        return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
+               table.Columns is not null &&
+               table.Columns.Any(column => column.Name == payload.Column.Name);
+    }
+
+    private static T DecodePayload<T>(SchemaChangeLogEntry entry) where T : new()
+    {
+        T payload = Serializator.Unserialize<T>(entry.Payload);
+
+        if (payload is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid payload for schema operation '{entry.Op}'");
+
+        return payload;
+    }
+
+    internal static Schema CloneSchema(Schema schema)
     {
         Schema clone = new()
         {

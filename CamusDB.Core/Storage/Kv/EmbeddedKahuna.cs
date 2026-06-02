@@ -34,6 +34,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
     private readonly EmbeddedKahunaNode node;
 
+    private readonly object schemaSubscriptionsSync = new();
+    private readonly List<SchemaApplySubscription> schemaSubscriptions = new();
+
     /// <summary>
     /// The Kahuna KV API. Used by KvTableStore and the transaction layer.
     /// </summary>
@@ -172,7 +175,10 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             await Raft.CommitLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
 
         if (committed && status == RaftOperationStatus.Success)
+        {
+            await InvokeLocalSchemaApplyAsync(partitionId, entry).ConfigureAwait(false);
             return new(SchemaReplicationOutcome.Committed, partitionId, commitLogId, leader, status.ToString());
+        }
 
         await Raft.RollbackLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
         return new(ToOutcome(status), partitionId, proposal.LogIndex, leader, status.ToString());
@@ -205,7 +211,11 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         Raft.OnReplicationReceived += applyHandler;
         Raft.OnLogRestored += restoreHandler;
 
-        return new SchemaApplySubscription(Raft, applyHandler, restoreHandler);
+        SchemaApplySubscription subscription = new(this, Raft, applyHandler, restoreHandler);
+        lock (schemaSubscriptionsSync)
+            schemaSubscriptions.Add(subscription);
+
+        return subscription;
     }
 
     public ValueTask DisposeAsync() => node.DisposeAsync();
@@ -222,23 +232,45 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         };
     }
 
+    private async Task InvokeLocalSchemaApplyAsync(int partitionId, byte[] entry)
+    {
+        List<SchemaApplySubscription> subscriptions;
+        lock (schemaSubscriptionsSync)
+            subscriptions = [.. schemaSubscriptions];
+
+        foreach (SchemaApplySubscription subscription in subscriptions)
+            await subscription.Apply(partitionId, entry).ConfigureAwait(false);
+    }
+
+    private void RemoveSchemaSubscription(SchemaApplySubscription subscription)
+    {
+        lock (schemaSubscriptionsSync)
+            schemaSubscriptions.Remove(subscription);
+    }
+
     private sealed class SchemaApplySubscription : IDisposable
     {
+        private readonly EmbeddedKahuna owner;
         private readonly IRaft raft;
         private readonly Func<int, RaftLog, Task<bool>> applyHandler;
         private readonly Func<int, RaftLog, Task<bool>> restoreHandler;
         private bool disposed;
 
         public SchemaApplySubscription(
+            EmbeddedKahuna owner,
             IRaft raft,
             Func<int, RaftLog, Task<bool>> applyHandler,
             Func<int, RaftLog, Task<bool>> restoreHandler
         )
         {
+            this.owner = owner;
             this.raft = raft;
             this.applyHandler = applyHandler;
             this.restoreHandler = restoreHandler;
         }
+
+        public Task<bool> Apply(int partitionId, byte[] entry)
+            => applyHandler(partitionId, new() { LogType = SchemaChangeLogType, LogData = entry });
 
         public void Dispose()
         {
@@ -246,6 +278,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
                 return;
 
             disposed = true;
+            owner.RemoveSchemaSubscription(this);
             raft.OnReplicationReceived -= applyHandler;
             raft.OnLogRestored -= restoreHandler;
         }

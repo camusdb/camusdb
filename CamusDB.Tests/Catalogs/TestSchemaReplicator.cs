@@ -75,6 +75,56 @@ public sealed class TestSchemaReplicator
     }
 
     [Test]
+    public async Task ApplyAsync_SameTargetVersionDifferentDeltaThrowsStaleVersion()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+
+        Assert.True(await replicator.ApplyAsync(
+            database,
+            partitionId,
+            Serializator.Serialize(CreateTableEntry(db, 0, 1, "robots_a"))
+        ));
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() => replicator.ApplyAsync(
+            database,
+            partitionId,
+            Serializator.Serialize(CreateTableEntry(db, 0, 1, "robots_b"))
+        ));
+
+        Assert.NotNull(ex);
+        Assert.That(ex!.Message, Does.Contain("out of order"));
+        Assert.True(database.Schema.Tables.ContainsKey("robots_a"));
+        Assert.False(database.Schema.Tables.ContainsKey("robots_b"));
+        Assert.AreEqual(1, database.Schema.SchemaVersion);
+    }
+
+    [Test]
+    public async Task ApplyAsync_ReplayedSameTargetVersionSameDeltaIsNoOp()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+        byte[] bytes = Serializator.Serialize(CreateTableEntry(db, 0, 1, "robots_a"));
+
+        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
+        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
+
+        Assert.True(database.Schema.Tables.ContainsKey("robots_a"));
+        Assert.AreEqual(1, database.Schema.Tables.Count);
+        Assert.AreEqual(1, database.Schema.SchemaVersion);
+    }
+
+    [Test]
     public async Task ApplyAsync_IgnoresEntriesForOtherDatabases()
     {
         await using EmbeddedKahuna kahuna = new();
@@ -260,7 +310,7 @@ public sealed class TestSchemaReplicator
         throw new AssertionException("Could not generate a database name whose schema log partition is not reserved");
     }
 
-    private static SchemaChangeLogEntry CreateTableEntry(string db, long fromVersion, long toVersion)
+    private static SchemaChangeLogEntry CreateTableEntry(string db, long fromVersion, long toVersion, string tableName = "robots")
     {
         return new()
         {
@@ -270,7 +320,7 @@ public sealed class TestSchemaReplicator
             Op = SchemaOp.CreateTable,
             Payload = Serializator.Serialize(new SchemaCreateTablePayload
             {
-                TableName = "robots",
+                TableName = tableName,
                 Columns =
                 [
                     new()

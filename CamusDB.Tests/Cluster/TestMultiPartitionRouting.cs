@@ -114,11 +114,16 @@ public sealed class TestMultiPartitionRouting
     private (string dbname, CommandExecutor executor) CreateExecutor()
     {
         string dbname = Guid.NewGuid().ToString("n");
+        return (dbname, CreateExecutorForDb());
+    }
+
+    private CommandExecutor CreateExecutorForDb()
+    {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
         CommandExecutor executor = new(validator, catalogsManager, logger,
             loggerFactory: sharedLoggerFactory, clusterNode: sharedNode!);
-        return (dbname, executor);
+        return executor;
     }
 
     private static (string dbname, CommandExecutor executor) CreateStandaloneExecutor()
@@ -486,6 +491,82 @@ public sealed class TestMultiPartitionRouting
                 "Database schema version must survive close/reopen");
             Assert.IsNull(reopened.Schema.Tables["robots"].SchemaHistory,
                 "Per-object table metadata should not eagerly load schema history");
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
+    [Test]
+    public async Task ClusterCreateTable_ReplicatedSchemaVisibleOnSecondOpenDescriptor()
+    {
+        (string dbname, CommandExecutor executorA) = CreateExecutor();
+        CommandExecutor executorB = CreateExecutorForDb();
+
+        try
+        {
+            await executorA.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
+            DatabaseDescriptor databaseB = await executorB.OpenDatabase(dbname);
+
+            await executorA.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: "robots",
+                columns:
+                [
+                    new ColumnInfo("id", ColumnType.Id),
+                    new ColumnInfo("name", ColumnType.String, notNull: true)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+
+            TableDescriptor tableB = await executorB.OpenTable(new OpenTableTicket(dbname, "robots"));
+
+            Assert.AreEqual("robots", tableB.Name);
+            Assert.True(databaseB.Schema.Tables.ContainsKey("robots"));
+            Assert.AreEqual(1, databaseB.Schema.SchemaVersion);
+            Assert.AreEqual(2, tableB.Schema.Columns!.Count);
+
+            await executorA.AlterTable(new AlterTableTicket(
+                databaseName: dbname,
+                tableName: "robots",
+                column: new ColumnInfo("enabled", ColumnType.Bool),
+                operation: AlterTableOperation.AddColumn
+            ));
+
+            Assert.AreEqual(2, databaseB.Schema.SchemaVersion);
+            Assert.AreEqual(3, tableB.Schema.Columns!.Count);
+            Assert.AreEqual("enabled", tableB.Schema.Columns[2].Name);
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executorA);
+            await CleanupAsync(dbname, executorB);
+        }
+    }
+
+    [Test]
+    public async Task ClusterConcurrentCreateTables_BothApplyWithDistinctVersions()
+    {
+        (string dbname, CommandExecutor executor) = CreateExecutor();
+
+        try
+        {
+            DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+            Task createA = executor.CreateTable(CreateSimpleTableTicket(dbname, "robots_a"));
+            Task createB = executor.CreateTable(CreateSimpleTableTicket(dbname, "robots_b"));
+
+            await Task.WhenAll(createA, createB);
+
+            Assert.True(database.Schema.Tables.ContainsKey("robots_a"));
+            Assert.True(database.Schema.Tables.ContainsKey("robots_b"));
+            Assert.AreEqual(2, database.Schema.SchemaVersion);
         }
         finally
         {
@@ -882,5 +963,24 @@ public sealed class TestMultiPartitionRouting
 
         await database.Transactions.CommitAsync(txn);
         return database;
+    }
+
+    private static CreateTableTicket CreateSimpleTableTicket(string dbname, string tableName)
+    {
+        return new(
+            databaseName: dbname,
+            tableName: tableName,
+            columns:
+            [
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("name", ColumnType.String)
+            ],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        );
     }
 }

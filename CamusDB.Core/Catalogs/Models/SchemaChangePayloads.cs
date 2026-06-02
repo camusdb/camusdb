@@ -12,6 +12,8 @@ namespace CamusDB.Core.Catalogs.Models;
 
 public sealed class SchemaCreateTablePayload
 {
+    public string? TableId { get; set; }
+
     public string TableName { get; set; } = "";
 
     public SchemaColumnPayload[] Columns { get; set; } = [];
@@ -26,6 +28,8 @@ public sealed class SchemaAlterColumnPayload
 
 public sealed class SchemaColumnPayload
 {
+    public string? Id { get; set; }
+
     public string Name { get; set; } = "";
 
     public ColumnType Type { get; set; }

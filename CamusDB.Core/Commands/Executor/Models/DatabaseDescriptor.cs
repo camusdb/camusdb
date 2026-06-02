@@ -27,6 +27,8 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public KvTransactionsManager Transactions { get; }
 
+    public SemaphoreSlim SchemaDdlSemaphore { get; } = new(1, 1);
+
     public SemaphoreSlim SystemSchemaSemaphore { get; } = new(1, 1);
 
     public Schema Schema { get; } = new();
@@ -66,6 +68,7 @@ public sealed record DatabaseDescriptor : IDisposable
         subscription?.Dispose();
 
         Schema?.Dispose();
+        SchemaDdlSemaphore?.Dispose();
         SystemSchemaSemaphore?.Dispose();
     }
 }

@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
 using Kahuna;
@@ -43,23 +44,14 @@ public sealed class CatalogsManager
     /// <exception cref="CamusDBException"></exception>
     public async Task<TableSchema> CreateTable(DatabaseDescriptor database, CreateTableTicket ticket, KvTransaction tx)
     {
+        if (!database.OwnsKahuna)
+            return await CreateTableReplicatedAsync(database, ticket, tx).ConfigureAwait(false);
+
         try
         {
             await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
 
-            SchemaChangeLogEntry entry = new()
-            {
-                Ts = tx.TransactionId,
-                Database = database.Name,
-                FromVersion = database.Schema.SchemaVersion,
-                ToVersion = database.Schema.SchemaVersion + 1,
-                Op = SchemaOp.CreateTable,
-                Payload = Serializator.Serialize(new SchemaCreateTablePayload
-                {
-                    TableName = ticket.TableName,
-                    Columns = ticket.Columns.Select(SchemaColumnPayload.FromColumnInfo).ToArray()
-                })
-            };
+            SchemaChangeLogEntry entry = CreateTableEntry(database, ticket, tx);
 
             TableSchema tableSchema = ApplySchemaDelta(database.Schema, entry) ?? throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
@@ -87,30 +79,14 @@ public sealed class CatalogsManager
     /// <exception cref="CamusDBException"></exception>
     public async Task<TableSchema> AlterTable(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)
     {
+        if (!database.OwnsKahuna)
+            return await AlterTableReplicatedAsync(database, ticket, tx).ConfigureAwait(false);
+
         try
         {
             await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
 
-            SchemaOp op = ticket.Operation switch
-            {
-                AlterTableOperation.AddColumn => SchemaOp.AddColumn,
-                AlterTableOperation.DropColumn => SchemaOp.DropColumn,
-                _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown alter table operation '{ticket.Operation}'")
-            };
-
-            SchemaChangeLogEntry entry = new()
-            {
-                Ts = tx.TransactionId,
-                Database = database.Name,
-                FromVersion = database.Schema.SchemaVersion,
-                ToVersion = database.Schema.SchemaVersion + 1,
-                Op = op,
-                Payload = Serializator.Serialize(new SchemaAlterColumnPayload
-                {
-                    TableName = ticket.TableName,
-                    Column = SchemaColumnPayload.FromColumnInfo(ticket.Column)
-                })
-            };
+            SchemaChangeLogEntry entry = AlterTableEntry(database, ticket, tx);
 
             TableSchema tableSchema = ApplySchemaDelta(database.Schema, entry) ?? throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
@@ -120,6 +96,28 @@ public sealed class CatalogsManager
             await PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
 
             logger.LogInformation("Modifed table {TableName} schema", ticket.TableName);
+
+            return tableSchema;
+        }
+        finally
+        {
+            database.Schema.Semaphore.Release();
+        }
+    }
+
+    public async Task<TableSchema?> DropTableSchema(DatabaseDescriptor database, string tableName, string tableId, KvTransaction tx)
+    {
+        if (!database.OwnsKahuna)
+            return await DropTableReplicatedAsync(database, tableName, tx).ConfigureAwait(false);
+
+        try
+        {
+            await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+
+            SchemaChangeLogEntry entry = DropTableEntry(database, tableName, tx);
+            TableSchema? tableSchema = ApplySchemaDelta(database.Schema, entry);
+
+            await PersistDroppedTableAsync(database, tableId, tx).ConfigureAwait(false);
 
             return tableSchema;
         }
@@ -153,6 +151,178 @@ public sealed class CatalogsManager
     public bool TableExists(DatabaseDescriptor database, string tableName)
     {
         return database.Schema.Tables.ContainsKey(tableName);
+    }
+
+    private async Task<TableSchema> CreateTableReplicatedAsync(DatabaseDescriptor database, CreateTableTicket ticket, KvTransaction tx)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            entry = CreateTableEntry(database, ticket, tx);
+            ValidateSchemaDelta(database.Schema, entry);
+        }
+        finally
+        {
+            database.Schema.Semaphore.Release();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        return GetTableSchema(database, ticket.TableName);
+    }
+
+    private async Task<TableSchema> AlterTableReplicatedAsync(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            entry = AlterTableEntry(database, ticket, tx);
+            ValidateSchemaDelta(database.Schema, entry);
+        }
+        finally
+        {
+            database.Schema.Semaphore.Release();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        return GetTableSchema(database, ticket.TableName);
+    }
+
+    private async Task<TableSchema?> DropTableReplicatedAsync(DatabaseDescriptor database, string tableName, KvTransaction tx)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            entry = DropTableEntry(database, tableName, tx);
+            ValidateSchemaDelta(database.Schema, entry);
+        }
+        finally
+        {
+            database.Schema.Semaphore.Release();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        return null;
+    }
+
+    private static SchemaChangeLogEntry CreateTableEntry(DatabaseDescriptor database, CreateTableTicket ticket, KvTransaction tx)
+    {
+        return new()
+        {
+            Ts = tx.TransactionId,
+            Database = database.Name,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.CreateTable,
+            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            {
+                TableId = ObjectIdGenerator.Generate().ToString(),
+                TableName = ticket.TableName,
+                Columns = ticket.Columns.Select(column =>
+                {
+                    SchemaColumnPayload payload = SchemaColumnPayload.FromColumnInfo(column);
+                    payload.Id = ObjectIdGenerator.Generate().ToString();
+                    return payload;
+                }).ToArray()
+            })
+        };
+    }
+
+    private static SchemaChangeLogEntry AlterTableEntry(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)
+    {
+        SchemaOp op = ticket.Operation switch
+        {
+            AlterTableOperation.AddColumn => SchemaOp.AddColumn,
+            AlterTableOperation.DropColumn => SchemaOp.DropColumn,
+            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown alter table operation '{ticket.Operation}'")
+        };
+
+        SchemaColumnPayload column = SchemaColumnPayload.FromColumnInfo(ticket.Column);
+        if (op == SchemaOp.AddColumn)
+            column.Id = ObjectIdGenerator.Generate().ToString();
+
+        return new()
+        {
+            Ts = tx.TransactionId,
+            Database = database.Name,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = op,
+            Payload = Serializator.Serialize(new SchemaAlterColumnPayload
+            {
+                TableName = ticket.TableName,
+                Column = column
+            })
+        };
+    }
+
+    private static SchemaChangeLogEntry DropTableEntry(DatabaseDescriptor database, string tableName, KvTransaction tx)
+    {
+        return new()
+        {
+            Ts = tx.TransactionId,
+            Database = database.Name,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.DropTable,
+            Payload = Serializator.Serialize(new SchemaDropTablePayload { TableName = tableName })
+        };
+    }
+
+    private async Task ReplicateAndWaitLocalApplyAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
+    {
+        byte[] bytes = Serializator.Serialize(entry);
+        SchemaReplicationResult result = await database.Kahuna.ReplicateSchemaChangeAsync(database.Name, bytes, CancellationToken.None).ConfigureAwait(false);
+
+        if (result.Outcome != SchemaReplicationOutcome.Committed)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Schema change '{entry.Op}' for database '{database.Name}' was not committed: {result.Outcome} {result.Status}"
+            );
+
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (database.Schema.SchemaVersion >= entry.ToVersion && WasSchemaDeltaApplied(database.Schema, entry))
+                return;
+
+            await Task.Delay(25).ConfigureAwait(false);
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Timed out waiting for local schema apply for database '{database.Name}' version {entry.ToVersion}"
+        );
+    }
+
+    private static void ValidateSchemaDelta(Schema schema, SchemaChangeLogEntry entry)
+    {
+        Schema clone = SchemaReplicator.CloneSchema(schema);
+        ApplySchemaDelta(clone, entry);
+    }
+
+    private static bool WasSchemaDeltaApplied(Schema schema, SchemaChangeLogEntry entry)
+    {
+        return entry.Op switch
+        {
+            SchemaOp.CreateTable => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
+            SchemaOp.DropTable => !schema.Tables.ContainsKey(DecodePayload<SchemaDropTablePayload>(entry).TableName),
+            SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
+            SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
+            _ => schema.SchemaVersion >= entry.ToVersion
+        };
+    }
+
+    private static bool HasColumn(Schema schema, SchemaAlterColumnPayload payload)
+    {
+        return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
+               table.Columns is not null &&
+               table.Columns.Any(column => column.Name == payload.Column.Name);
     }
 
     public static TableSchema? ApplySchemaDelta(Schema schema, SchemaChangeLogEntry entry)
@@ -189,7 +359,7 @@ public sealed class CatalogsManager
 
         TableSchema tableSchema = new()
         {
-            Id = ObjectIdGenerator.Generate().ToString(),
+            Id = string.IsNullOrWhiteSpace(payload.TableId) ? ObjectIdGenerator.Generate().ToString() : payload.TableId,
             Version = 0,
             Name = payload.TableName,
             Columns = new(payload.Columns.Length),
@@ -200,7 +370,7 @@ public sealed class CatalogsManager
         {
             tableSchema.Columns.Add(
                 new TableColumnSchema(
-                    id: ObjectIdGenerator.Generate().ToString(),
+                    id: string.IsNullOrWhiteSpace(column.Id) ? ObjectIdGenerator.Generate().ToString() : column.Id,
                     name: column.Name,
                     type: column.Type,
                     notNull: column.NotNull,
@@ -283,7 +453,7 @@ public sealed class CatalogsManager
 
         tableColumns.Add(
             new TableColumnSchema(
-                id: ObjectIdGenerator.Generate().ToString(),
+                id: string.IsNullOrWhiteSpace(newColumn.Id) ? ObjectIdGenerator.Generate().ToString() : newColumn.Id,
                 name: newColumn.Name,
                 type: newColumn.Type,
                 notNull: newColumn.NotNull,

@@ -62,22 +62,9 @@ internal sealed class TableDropper
 
         string tableId = table.Id;
 
-        try
-        {
-            await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
-
-            if (database.Schema.Tables.Remove(ticket.TableName))
-            {
-                database.Schema.SchemaVersion++;
-                logger.LogInformation("Removed table {TableName} from database schema", ticket.TableName);
-            }
-
-            await catalogs.PersistDroppedTableAsync(database, tableId, tx).ConfigureAwait(false);
-        }
-        finally
-        {
-            database.Schema.Semaphore.Release();
-        }
+        TableSchema? droppedSchema = await catalogs.DropTableSchema(database, ticket.TableName, tableId, tx).ConfigureAwait(false);
+        if (droppedSchema is not null || !database.OwnsKahuna)
+            logger.LogInformation("Removed table {TableName} from database schema", ticket.TableName);
 
         try
         {

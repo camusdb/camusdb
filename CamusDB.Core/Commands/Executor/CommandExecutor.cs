@@ -153,6 +153,9 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     private async Task<T> ExecuteDdlInTransaction<T>(DatabaseDescriptor database, Func<KvTransaction, Task<T>> action)
     {
+        if (!database.OwnsKahuna)
+            await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+
         KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
         try
         {
@@ -164,6 +167,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
             throw;
+        }
+        finally
+        {
+            if (!database.OwnsKahuna)
+                database.SchemaDdlSemaphore.Release();
         }
     }
 
