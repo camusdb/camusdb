@@ -481,7 +481,8 @@ public sealed class CatalogsManager
             Columns = tableSchema.Columns,
         };
 
-        tableSchema.SchemaHistory!.Add(schemaHistory);
+        tableSchema.SchemaHistory ??= [];
+        tableSchema.SchemaHistory.Add(schemaHistory);
 
         return tableSchema;
     }

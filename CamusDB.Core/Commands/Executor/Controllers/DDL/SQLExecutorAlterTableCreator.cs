@@ -10,7 +10,6 @@ using CamusDB.Core.SQLParser;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.Util.Time;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
@@ -28,12 +27,25 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing column name");
 
         if (ast.nodeType == NodeType.AlterTableAddColumn)
+        {
+            ColumnValue? defaultValue = null;
+            bool notNull = false;
+
+            if (ast.extendedTwo is not null)
+            {
+                List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
+                GetColumnConstraintList(ast.extendedTwo, constraintTypes);
+                defaultValue = GetDefaultFromConstraints(constraintTypes);
+                notNull = constraintTypes.Any(x => x.type == ColumnConstraintType.NotNull);
+            }
+
             return new(
                 ticket.DatabaseName,
                 tableName,
                 AlterTableOperation.AddColumn,
-                new ColumnInfo(ast.rightAst!.yytext!, GetColumnType(ast.extendedOne!))
+                new ColumnInfo(ast.rightAst!.yytext!, GetColumnType(ast.extendedOne!), notNull, defaultValue)
             );
+        }
 
         return new(
             ticket.DatabaseName,

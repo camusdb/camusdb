@@ -146,14 +146,14 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             {
                 List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
 
-                GetCreateTableItemConstraintList(fieldList.extendedOne, constraintTypes);
+                GetColumnConstraintList(fieldList.extendedOne, constraintTypes);
 
                 allFieldLists.Add(
                     new ColumnInfo(
                         name: fieldList.leftAst.yytext! ?? "",
                         type: GetColumnType(fieldList.rightAst),
                         notNull: constraintTypes.Any(x => x.type == ColumnConstraintType.NotNull),
-                        defaultValue: GetDefaultValue(constraintTypes)
+                        defaultValue: GetDefaultFromConstraints(constraintTypes)
                     )
                 );
 
@@ -186,23 +186,6 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
     /// </summary>
     /// <param name="constraintTypes"></param>
     /// <returns></returns>
-    private static ColumnValue? GetDefaultValue(List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes)
-    {
-        foreach ((ColumnConstraintType type, ColumnValue? value) in constraintTypes)
-        {
-            if (type == ColumnConstraintType.Default)
-                return value;
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// Get the column type as a ColumnType enum value
-    /// </summary>
-    /// <param name="nodeAst"></param>
-    /// <returns></returns>
-    /// <exception cref="CamusDBException"></exception>
     private static ColumnType GetColumnType(NodeAst nodeAst)
     {
         if (nodeAst.nodeType == NodeType.TypeInteger64)
@@ -223,58 +206,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown field type: " + nodeAst.nodeType);
     }
 
-    /// <summary>
-    /// Creates a list of table field constraints
-    /// </summary>
-    /// <param name="constraintsList"></param>
-    /// <param name="constraintTypes"></param>
-    /// <exception cref="CamusDBException"></exception>
-    private static void GetCreateTableItemConstraintList(NodeAst constraintsList, List<(ColumnConstraintType, ColumnValue?)> constraintTypes)
-    {
-        if (constraintsList.nodeType == NodeType.ConstraintNotNull)
-        {
-            constraintTypes.Add((ColumnConstraintType.NotNull, null));
-            return;
-        }
 
-        if (constraintsList.nodeType == NodeType.ConstraintNull)
-        {
-            constraintTypes.Add((ColumnConstraintType.Null, null));
-            return;
-        }
-
-        if (constraintsList.nodeType == NodeType.ConstraintPrimaryKey)
-        {
-            constraintTypes.Add((ColumnConstraintType.PrimaryKey, null));
-            constraintTypes.Add((ColumnConstraintType.NotNull, null));
-            return;
-        }
-
-        if (constraintsList.nodeType == NodeType.ConstraintUnique)
-        {
-            constraintTypes.Add((ColumnConstraintType.Unique, null));
-            return;
-        }
-
-        if (constraintsList.nodeType == NodeType.ConstraintDefault)
-        {
-            constraintTypes.Add((ColumnConstraintType.Default, SqlExecutor.EvalExpr(constraintsList.leftAst!, new(), null)));
-            return;
-        }
-
-        if (constraintsList.nodeType == NodeType.CreateTableFieldConstraintList)
-        {
-            if (constraintsList.leftAst != null)
-                GetCreateTableItemConstraintList(constraintsList.leftAst, constraintTypes);
-
-            if (constraintsList.rightAst != null)
-                GetCreateTableItemConstraintList(constraintsList.rightAst, constraintTypes);
-
-            return;
-        }
-
-        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid constraint type found: " + constraintsList.nodeType);
-    }
 
     private static void GetCreateTableConstraintFromFieldList(NodeAst fieldList, List<ConstraintInfo> constraintInfos)
     {
@@ -290,7 +222,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             {
                 List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
 
-                GetCreateTableItemConstraintList(fieldList.extendedOne, constraintTypes);
+                GetColumnConstraintList(fieldList.extendedOne, constraintTypes);
 
                 foreach ((ColumnConstraintType type, ColumnValue? _) in constraintTypes)
                 {

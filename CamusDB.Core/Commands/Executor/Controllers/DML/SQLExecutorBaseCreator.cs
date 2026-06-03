@@ -315,6 +315,64 @@ internal abstract class SQLExecutorBaseCreator
         }
     }
 
+    protected static void GetColumnConstraintList(NodeAst constraintsList, List<(ColumnConstraintType, ColumnValue?)> constraintTypes)
+    {
+        if (constraintsList.nodeType == NodeType.ConstraintNotNull)
+        {
+            constraintTypes.Add((ColumnConstraintType.NotNull, null));
+            return;
+        }
+
+        if (constraintsList.nodeType == NodeType.ConstraintNull)
+        {
+            constraintTypes.Add((ColumnConstraintType.Null, null));
+            return;
+        }
+
+        if (constraintsList.nodeType == NodeType.ConstraintPrimaryKey)
+        {
+            constraintTypes.Add((ColumnConstraintType.PrimaryKey, null));
+            constraintTypes.Add((ColumnConstraintType.NotNull, null));
+            return;
+        }
+
+        if (constraintsList.nodeType == NodeType.ConstraintUnique)
+        {
+            constraintTypes.Add((ColumnConstraintType.Unique, null));
+            return;
+        }
+
+        if (constraintsList.nodeType == NodeType.ConstraintDefault)
+        {
+            constraintTypes.Add((ColumnConstraintType.Default, EvalExpr(constraintsList.leftAst!, new(), null)));
+            return;
+        }
+
+        if (constraintsList.nodeType == NodeType.CreateTableFieldConstraintList)
+        {
+            if (constraintsList.leftAst != null)
+                GetColumnConstraintList(constraintsList.leftAst, constraintTypes);
+
+            if (constraintsList.rightAst != null)
+                GetColumnConstraintList(constraintsList.rightAst, constraintTypes);
+
+            return;
+        }
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid constraint type found: " + constraintsList.nodeType);
+    }
+
+    protected static ColumnValue? GetDefaultFromConstraints(List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes)
+    {
+        foreach ((ColumnConstraintType type, ColumnValue? value) in constraintTypes)
+        {
+            if (type == ColumnConstraintType.Default)
+                return value;
+        }
+
+        return null;
+    }
+
     private static bool Like(string text, string pattern)
     {
         // Escape all regex special characters

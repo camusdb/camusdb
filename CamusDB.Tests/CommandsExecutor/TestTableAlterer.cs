@@ -916,6 +916,64 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
     /// </summary>
     [Test]
     [NonParallelizable]
+    public async Task TestAddColumnWithDefaultValue()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupEmptyTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        AlterTableTicket alterTableTicket = new(
+            databaseName: dbname,
+            tableName: "robots",
+            operation: AlterTableOperation.AddColumn,
+            new("score", ColumnType.Integer64, notNull: false, defaultValue: new(ColumnType.Integer64, 42L))
+        );
+
+        await executor.AlterTable(alterTableTicket);
+
+        await database.Transactions.CommitAsync(txnState);
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
+
+        TableColumnSchema? scoreColumn = tableSchema.Columns!.FirstOrDefault(c => c.Name == "score");
+        Assert.IsNotNull(scoreColumn);
+        Assert.AreEqual(ColumnType.Integer64, scoreColumn!.Type);
+        Assert.IsNotNull(scoreColumn.DefaultValue);
+        Assert.AreEqual(ColumnType.Integer64, scoreColumn.DefaultValue!.Type);
+        Assert.AreEqual(42L, scoreColumn.DefaultValue.LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSqlAddColumnWithDefaultValue()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupEmptyTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket sqlTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "ALTER TABLE robots ADD COLUMN enabled2 bool DEFAULT (true)",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(sqlTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        await database.Transactions.CommitAsync(txnState);
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
+
+        TableColumnSchema? col = tableSchema.Columns!.FirstOrDefault(c => c.Name == "enabled2");
+        Assert.IsNotNull(col);
+        Assert.AreEqual(ColumnType.Bool, col!.Type);
+        Assert.IsNotNull(col.DefaultValue, "DEFAULT (true) was not stored in the schema");
+        Assert.AreEqual(ColumnType.Bool, col.DefaultValue!.Type);
+        Assert.IsTrue(col.DefaultValue.BoolValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteSqlAddPrimaryKey()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager _) = await SetupEmptyTable();
