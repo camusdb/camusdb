@@ -119,6 +119,11 @@ The engine is structured as a pipeline of composable operators:
 - **Catalog** — table and index descriptors are kept in memory and persisted through the KV layer.
 - **Cluster mode** — a process-level Kahuna node is shared across all databases, wired with real gRPC inter-node and Raft transports (`GrpcCommunication` + `StaticDiscovery`). Standalone mode creates a per-database node with the embedded in-process transport.
 
+Query Planner
+-------------
+
+See [docs/query-planner.md](docs/query-planner.md) for a full developer reference: pipeline stages, physical plan nodes, predicate analysis, index scan selection, join execution, optimization passes, file map, and a checklist for adding new SQL features.
+
 ## Requirements
 - .NET 9 (SDK 9.0.100)
 - Docker (optional, for cluster setup)
