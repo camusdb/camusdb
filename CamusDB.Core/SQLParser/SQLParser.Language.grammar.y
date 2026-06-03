@@ -97,10 +97,12 @@ insert_batch_list : insert_batch_list TCOMMA insert_values { $$.n = new(NodeType
 insert_values : LPAREN values_list RPAREN { $$.n = $2.n; $$.s = $2.s; }
              ;
 
-update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, null, null, null, null, null); }
+update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition opt_limit
+            { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, $7.n, null, null, null, null); }
 		    ;
 
-delete_stmt : TDELETE TFROM any_identifier TWHERE condition { $$.n = new(NodeType.Delete, $3.n, $5.n, null, null, null, null, null, null); }
+delete_stmt : TDELETE TFROM any_identifier TWHERE condition opt_limit
+            { $$.n = new(NodeType.Delete, $3.n, $5.n, $6.n, null, null, null, null, null); }
 			;
 
 begin_stmt : TBEGIN { $$.n = new(NodeType.Begin, null, null, null, null, null, null, null, null); }

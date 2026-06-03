@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -44,8 +45,17 @@ internal sealed class UpdateValidator : ValidatorBase
                             CamusDBErrorCodes.InvalidInput,
                             $"Invalid id value for field '{columnValue.Key}'"
                         );
-                    break;                
+                    break;
             }
+        }
+
+        if (ticket.Limit is { nodeType: NodeType.Integer } limitNode)
+        {
+            if (!long.TryParse(limitNode.yytext, out long limitValue) || limitValue < 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "LIMIT must be a non-negative integer"
+                );
         }
     }
 }

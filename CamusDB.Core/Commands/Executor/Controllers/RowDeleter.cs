@@ -80,7 +80,7 @@ internal sealed class RowDeleter
             filters: ticket.Filters,
             where: ticket.Where,
             orderBy: null,
-            limit: null,
+            limit: ticket.Limit,
             offset: null,
             parameters: ticket.Parameters
         );

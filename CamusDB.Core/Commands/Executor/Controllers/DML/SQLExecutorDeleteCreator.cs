@@ -26,7 +26,8 @@ internal sealed class SQLExecutorDeletereator : SQLExecutorBaseCreator
             tableName: tableName,
             where: ast.rightAst,
             filters: null,
-            parameters: ticket.Parameters
+            parameters: ticket.Parameters,
+            limit: ast.extendedOne
         );
     }    
 }

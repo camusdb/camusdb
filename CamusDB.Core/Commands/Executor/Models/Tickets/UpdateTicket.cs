@@ -29,6 +29,8 @@ public sealed class UpdateTicket
 
     public Dictionary<string, ColumnValue>? Parameters { get; }
 
+    public NodeAst? Limit { get; }
+
     public UpdateTicket(
         KvTransaction txnState,
         string databaseName,
@@ -37,7 +39,8 @@ public sealed class UpdateTicket
         Dictionary<string, NodeAst>? exprValues,
         NodeAst? where,
         List<QueryFilter>? filters,
-        Dictionary<string, ColumnValue>? parameters
+        Dictionary<string, ColumnValue>? parameters,
+        NodeAst? limit = null
     )
     {
         TxnState = txnState;
@@ -48,5 +51,6 @@ public sealed class UpdateTicket
         Where = where;
         Filters = filters;
         Parameters = parameters;
+        Limit = limit;
     }
 }

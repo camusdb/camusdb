@@ -25,13 +25,16 @@ public readonly struct DeleteTicket
 
     public Dictionary<string, ColumnValue>? Parameters { get; }
 
+    public NodeAst? Limit { get; }
+
     public DeleteTicket(
         KvTransaction txnState,
         string databaseName,
         string tableName,
         NodeAst? where,
         List<QueryFilter>? filters,
-        Dictionary<string, ColumnValue>? parameters = null
+        Dictionary<string, ColumnValue>? parameters = null,
+        NodeAst? limit = null
     )
     {
         TxnState = txnState;
@@ -40,5 +43,6 @@ public readonly struct DeleteTicket
         Where = where;
         Filters = filters;
         Parameters = parameters;
+        Limit = limit;
     }
 }

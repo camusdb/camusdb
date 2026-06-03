@@ -235,6 +235,35 @@ public static class RowEncoder
                 SkipColumnValue(column.Type, data, ref pointer);
         }
 
+        // Columns added after this row was written are absent from the byte stream.
+        // Inject their default value (or a typed null) so callers see consistent output.
+        if (currentColumns is not null)
+        {
+            foreach (TableColumnSchema current in currentColumns)
+            {
+                if (result.ContainsKey(current.Name))
+                    continue;
+
+                if (FindCurrentColumn(current, columns) is not null)
+                    continue; // present in row schema — was filtered by visibility or requiredColumns, not a new column
+
+                bool visible = visibility switch
+                {
+                    ColumnVisibility.PublicOnly => SchemaElementStateRules.IsReadable(current),
+                    ColumnVisibility.Writable => SchemaElementStateRules.IsWritable(current),
+                    _ => false
+                };
+
+                if (!visible)
+                    continue;
+
+                if (!decodeAll && !requiredColumns!.Contains(current.Name))
+                    continue;
+
+                result[current.Name] = current.DefaultValue ?? new(ColumnType.Null, 0L);
+            }
+        }
+
         return result;
     }
 

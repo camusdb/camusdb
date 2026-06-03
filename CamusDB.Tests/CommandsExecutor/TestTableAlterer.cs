@@ -916,6 +916,106 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
     /// </summary>
     [Test]
     [NonParallelizable]
+    public async Task TestExistingRowsReturnDefaultValueAfterAddColumn()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager _, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        AlterTableTicket alterTableTicket = new(
+            databaseName: dbname,
+            tableName: "robots",
+            operation: AlterTableOperation.AddColumn,
+            new("score", ColumnType.Integer64, notNull: false, defaultValue: new(ColumnType.Integer64, 99L))
+        );
+
+        await executor.AlterTable(alterTableTicket);
+
+        await database.Transactions.CommitAsync(txnState);
+
+        txnState = await database.Transactions.BeginAsync();
+
+        QueryTicket queryTicket = new(
+            txnState: txnState,
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            projection: null,
+            where: null,
+            filters: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+        {
+            Assert.IsTrue(row.Row.ContainsKey("score"), "score column missing from old row");
+            Assert.AreEqual(ColumnType.Integer64, row.Row["score"].Type, "old row should return default type, not Null");
+            Assert.AreEqual(99L, row.Row["score"].LongValue, "old row should return default value 99");
+        }
+
+        await database.Transactions.CommitAsync(txnState);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExistingRowsReturnDefaultValueAfterAddColumnViaSql()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager _, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket sqlTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "ALTER TABLE robots ADD COLUMN active bool DEFAULT (true)",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(sqlTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        await database.Transactions.CommitAsync(txnState);
+
+        txnState = await database.Transactions.BeginAsync();
+
+        QueryTicket queryTicket = new(
+            txnState: txnState,
+            databaseName: dbname,
+            tableName: "robots",
+            index: null,
+            projection: null,
+            where: null,
+            filters: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
+
+        List<QueryResultRow> result = await cursor.ToListAsync();
+        Assert.IsNotEmpty(result);
+
+        foreach (QueryResultRow row in result)
+        {
+            Assert.IsTrue(row.Row.ContainsKey("active"), "active column missing from old row");
+            Assert.AreEqual(ColumnType.Bool, row.Row["active"].Type, "old row should return default type, not Null");
+            Assert.IsTrue(row.Row["active"].BoolValue, "old row should return default value true");
+        }
+
+        await database.Transactions.CommitAsync(txnState);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestAddColumnWithDefaultValue()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupEmptyTable();

@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsValidator.Validators;
@@ -25,5 +26,14 @@ internal sealed class DeleteValidator : ValidatorBase
                 CamusDBErrorCodes.InvalidInput,
                 "Table name is required"
             );
+
+        if (ticket.Limit is { nodeType: NodeType.Integer } limitNode)
+        {
+            if (!long.TryParse(limitNode.yytext, out long limitValue) || limitValue < 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "LIMIT must be a non-negative integer"
+                );
+        }
     }
 }

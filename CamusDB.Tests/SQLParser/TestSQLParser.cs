@@ -1667,4 +1667,64 @@ public class TestSQLParser
     }
 
     #endregion
+
+    #region DELETE/UPDATE LIMIT parsing
+
+    [Test]
+    public void TestParseDeleteWithLimit()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("DELETE FROM teams WHERE code = 'BEL' LIMIT 1");
+
+        Assert.AreEqual(NodeType.Delete, ast.nodeType);
+        Assert.AreEqual("teams", ast.leftAst!.yytext);
+        Assert.IsNotNull(ast.rightAst);
+        Assert.IsNotNull(ast.extendedOne, "limit node must land in extendedOne");
+        Assert.AreEqual(NodeType.Integer, ast.extendedOne!.nodeType);
+        Assert.AreEqual("1", ast.extendedOne!.yytext);
+    }
+
+    [Test]
+    public void TestParseDeleteWithLimitNoLimit()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("DELETE FROM teams WHERE code = 'BEL'");
+
+        Assert.AreEqual(NodeType.Delete, ast.nodeType);
+        Assert.IsNull(ast.extendedOne, "opt_limit must be null when absent");
+    }
+
+    [Test]
+    public void TestParseUpdateWithLimit()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("UPDATE teams SET score = 0 WHERE code = 'BEL' LIMIT 2");
+
+        Assert.AreEqual(NodeType.Update, ast.nodeType);
+        Assert.AreEqual("teams", ast.leftAst!.yytext);
+        Assert.IsNotNull(ast.extendedOne, "where node must land in extendedOne");
+        Assert.IsNotNull(ast.extendedTwo, "limit node must land in extendedTwo");
+        Assert.AreEqual(NodeType.Integer, ast.extendedTwo!.nodeType);
+        Assert.AreEqual("2", ast.extendedTwo!.yytext);
+    }
+
+    [Test]
+    public void TestParseUpdateWithLimitNoLimit()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("UPDATE teams SET score = 0 WHERE code = 'BEL'");
+
+        Assert.AreEqual(NodeType.Update, ast.nodeType);
+        Assert.IsNotNull(ast.extendedOne);
+        Assert.IsNull(ast.extendedTwo, "opt_limit must be null when absent");
+    }
+
+    [Test]
+    public void TestParseDeleteWithParameterizedLimit()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("DELETE FROM teams WHERE code = 'BEL' LIMIT @max");
+
+        Assert.AreEqual(NodeType.Delete, ast.nodeType);
+        Assert.IsNotNull(ast.extendedOne);
+        Assert.AreEqual(NodeType.Placeholder, ast.extendedOne!.nodeType);
+        Assert.AreEqual("@max", ast.extendedOne!.yytext);
+    }
+
+    #endregion
 }

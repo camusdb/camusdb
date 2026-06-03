@@ -37,7 +37,8 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
             exprValues: values,
             where: ast.extendedOne,
             filters: null,
-            parameters: ticket.Parameters
+            parameters: ticket.Parameters,
+            limit: ast.extendedTwo
         );
     }
 
