@@ -132,7 +132,14 @@ public static class RowEncoder
         Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
 
         List<TableColumnSchema> columns = schema.GetSchemaHistory(schemaVersion).Columns!;
-        return DecodeColumns(columns, schema.Columns, data, ref pointer, requiredColumns, ColumnVisibility.PublicOnly);
+        return DecodeColumns(
+            columns,
+            schema.Columns,
+            data,
+            ref pointer,
+            requiredColumns,
+            ColumnVisibility.PublicOnly,
+            injectMissingCurrentColumns: false);
     }
 
     public static async ValueTask<Dictionary<string, ColumnValue>> DecodeAsync(
@@ -158,7 +165,14 @@ public static class RowEncoder
         List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
             ? columns
             : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
-        return DecodeColumns(columns, visibilityColumns, data, ref pointer, requiredColumns, ColumnVisibility.PublicOnly);
+        return DecodeColumns(
+            columns,
+            visibilityColumns,
+            data,
+            ref pointer,
+            requiredColumns,
+            ColumnVisibility.PublicOnly,
+            injectMissingCurrentColumns: visibilitySchemaVersion is not null);
     }
 
     public static async ValueTask<Dictionary<string, ColumnValue>> DecodeWritableAsync(
@@ -184,7 +198,14 @@ public static class RowEncoder
         List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
             ? columns
             : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
-        return DecodeColumns(columns, visibilityColumns, data, ref pointer, requiredColumns, ColumnVisibility.Writable);
+        return DecodeColumns(
+            columns,
+            visibilityColumns,
+            data,
+            ref pointer,
+            requiredColumns,
+            ColumnVisibility.Writable,
+            injectMissingCurrentColumns: visibilitySchemaVersion is not null);
     }
 
     private static async ValueTask<List<TableColumnSchema>?> GetVisibilityColumnsAsync(
@@ -208,7 +229,8 @@ public static class RowEncoder
         byte[] data,
         ref int pointer,
         IReadOnlySet<string>? requiredColumns,
-        ColumnVisibility visibility)
+        ColumnVisibility visibility,
+        bool injectMissingCurrentColumns)
     {
         bool decodeAll = requiredColumns is null;
 
@@ -232,7 +254,7 @@ public static class RowEncoder
 
         // Columns added after this row was written are absent from the byte stream.
         // Inject their default value (or a typed null) so callers see consistent output.
-        if (currentColumns is not null)
+        if (injectMissingCurrentColumns && currentColumns is not null)
         {
             foreach (TableColumnSchema current in currentColumns)
             {

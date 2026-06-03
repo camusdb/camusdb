@@ -199,6 +199,7 @@ public sealed class TestCursorStreamingBenchmark : SharedNodeBaseTest
     // the whole table is buffered). A page-bounded scan stays roughly flat.
 
     [Test]
+    [Explicit("Benchmark-style retained-heap check; can hang CI when forced GC interacts with Kahuna background threads after prior fixtures.")]
     public async Task TestFullScanMemoryBoundedByPageSize()
     {
         (string dbnameSmall, DatabaseDescriptor dbSmall, CommandExecutor exSmall) =

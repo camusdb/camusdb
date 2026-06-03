@@ -283,6 +283,8 @@ public sealed class TestSchemaDdlForwarding
 
     private sealed class ClusterHarness : IAsyncDisposable
     {
+        private static int nextPortBase = 9300;
+
         private ClusterHarness(EmbeddedKahuna[] nodes)
         {
             Nodes = nodes;
@@ -295,9 +297,14 @@ public sealed class TestSchemaDdlForwarding
             InMemoryCommunication raftCommunication = new();
             MemoryInterNodeCommmunication interNode = new();
 
-            EmbeddedKahuna node1 = CreateClusterNode("node1", 1, 9301, [new("localhost:9302"), new("localhost:9303")], raftCommunication, interNode);
-            EmbeddedKahuna node2 = CreateClusterNode("node2", 2, 9302, [new("localhost:9301"), new("localhost:9303")], raftCommunication, interNode);
-            EmbeddedKahuna node3 = CreateClusterNode("node3", 3, 9303, [new("localhost:9301"), new("localhost:9302")], raftCommunication, interNode);
+            int portBase = Interlocked.Add(ref nextPortBase, 10);
+            int port1 = portBase + 1;
+            int port2 = portBase + 2;
+            int port3 = portBase + 3;
+
+            EmbeddedKahuna node1 = CreateClusterNode("node1", 1, port1, [new($"localhost:{port2}"), new($"localhost:{port3}")], raftCommunication, interNode);
+            EmbeddedKahuna node2 = CreateClusterNode("node2", 2, port2, [new($"localhost:{port1}"), new($"localhost:{port3}")], raftCommunication, interNode);
+            EmbeddedKahuna node3 = CreateClusterNode("node3", 3, port3, [new($"localhost:{port1}"), new($"localhost:{port2}")], raftCommunication, interNode);
             EmbeddedKahuna[] nodes = [node1, node2, node3];
 
             raftCommunication.SetNodes(nodes.ToDictionary(node => node.Raft.GetLocalEndpoint(), node => node.Raft));
