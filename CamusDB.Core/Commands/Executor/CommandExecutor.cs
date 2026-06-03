@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
@@ -271,7 +272,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         return await TryForwardDdlAsync(
             database,
-            (leader, ct) => schemaDdlForwarder!.ForwardCreateTableAsync(leader, ticket, ct)
+            (leader, ct) => schemaDdlForwarder!.ForwardCreateTableAsync(leader, ticket, ct),
+            () => ForwardedCreateTableApplied(database, ticket)
         ).ConfigureAwait(false);
     }
 
@@ -279,7 +281,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         return await TryForwardDdlAsync(
             database,
-            (leader, ct) => schemaDdlForwarder!.ForwardAlterTableAsync(leader, ticket, ct)
+            (leader, ct) => schemaDdlForwarder!.ForwardAlterTableAsync(leader, ticket, ct),
+            () => ForwardedAlterTableApplied(database, ticket)
         ).ConfigureAwait(false);
     }
 
@@ -287,7 +290,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         return await TryForwardDdlAsync(
             database,
-            (leader, ct) => schemaDdlForwarder!.ForwardAlterIndexAsync(leader, ticket, ct)
+            (leader, ct) => schemaDdlForwarder!.ForwardAlterIndexAsync(leader, ticket, ct),
+            () => ForwardedAlterIndexApplied(database, ticket)
         ).ConfigureAwait(false);
     }
 
@@ -295,13 +299,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         return await TryForwardDdlAsync(
             database,
-            (leader, ct) => schemaDdlForwarder!.ForwardDropTableAsync(leader, ticket, ct)
+            (leader, ct) => schemaDdlForwarder!.ForwardDropTableAsync(leader, ticket, ct),
+            () => ForwardedDropTableApplied(database, ticket)
         ).ConfigureAwait(false);
     }
 
     private async Task<bool?> TryForwardDdlAsync(
         DatabaseDescriptor database,
-        Func<string, CancellationToken, Task<bool?>> forward
+        Func<string, CancellationToken, Task<bool?>> forward,
+        Func<bool> wasApplied
     )
     {
         if (database.OwnsKahuna)
@@ -331,7 +337,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 if (result is not null)
                 {
                     if (result.Value)
-                        await WaitForForwardedSchemaApplyAsync(database, fromVersion).ConfigureAwait(false);
+                        await WaitForForwardedSchemaApplyAsync(database, fromVersion, wasApplied).ConfigureAwait(false);
 
                     return result;
                 }
@@ -348,11 +354,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         );
     }
 
-    private static async Task WaitForForwardedSchemaApplyAsync(DatabaseDescriptor database, long fromVersion)
+    private static async Task WaitForForwardedSchemaApplyAsync(DatabaseDescriptor database, long fromVersion, Func<bool> wasApplied)
     {
         for (int attempt = 0; attempt < 200; attempt++)
         {
-            if (database.Schema.SchemaVersion > fromVersion)
+            if (database.Schema.SchemaVersion > fromVersion && wasApplied())
                 return;
 
             await Task.Delay(25).ConfigureAwait(false);
@@ -362,6 +368,45 @@ public sealed class CommandExecutor : IAsyncDisposable
             CamusDBErrorCodes.InvalidInternalOperation,
             $"Timed out waiting for forwarded schema apply for database '{database.Name}' after version {fromVersion}"
         );
+    }
+
+    private static bool ForwardedCreateTableApplied(DatabaseDescriptor database, CreateTableTicket ticket)
+    {
+        return database.Schema.Tables.ContainsKey(ticket.TableName);
+    }
+
+    private static bool ForwardedAlterTableApplied(DatabaseDescriptor database, AlterTableTicket ticket)
+    {
+        if (!database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema))
+            return false;
+
+        bool hasColumn = tableSchema.Columns?.Any(column => column.Name == ticket.Column.Name) == true;
+        return ticket.Operation switch
+        {
+            AlterTableOperation.AddColumn => hasColumn,
+            AlterTableOperation.DropColumn => !hasColumn,
+            _ => false
+        };
+    }
+
+    private static bool ForwardedAlterIndexApplied(DatabaseDescriptor database, AlterIndexTicket ticket)
+    {
+        bool existsInSystem = database.SystemSchema.Indexes.Values.Any(index =>
+            string.Equals(index.Name, ticket.IndexName, StringComparison.Ordinal)
+        );
+
+        return ticket.Operation switch
+        {
+            AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey => existsInSystem,
+            AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey => !existsInSystem,
+            _ => false
+        };
+    }
+
+    private static bool ForwardedDropTableApplied(DatabaseDescriptor database, DropTableTicket ticket)
+    {
+        return !database.Schema.Tables.ContainsKey(ticket.TableName)
+            && !database.TableDescriptors.ContainsKey(ticket.TableName);
     }
 
     public async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(ExecuteSQLTicket ticket)
