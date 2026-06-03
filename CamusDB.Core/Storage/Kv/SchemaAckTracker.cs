@@ -7,6 +7,19 @@
 
 namespace CamusDB.Core.Storage.Kv;
 
+/// <summary>
+/// Tracks, per database and per node, the highest schema version each live member has applied
+/// ("acked"), plus a last-seen timestamp. This is the data behind the <b>two-version
+/// invariant</b>: a DDL proposer waits via <see cref="WaitForAllLiveAsync"/> until every live
+/// node has acked the previous version before proposing the next, so the cluster never spans
+/// more than two adjacent schema versions. See <c>docs/distributed-schema-architecture.md</c> §6.2.
+///
+/// With no real heartbeat at this layer, the default live-node lease is infinite (a registered
+/// node never expires by elapsed time) — correctness over liveness. The lease parameter is a
+/// hook for future heartbeat integration. This tracker is process-global/<c>static</c> only to
+/// support the in-process multi-node test harness; it is not a multi-process ack transport
+/// (replacing it with real membership is a DS10/DS11 carry-forward).
+/// </summary>
 internal sealed class SchemaAckTracker
 {
     private readonly object sync = new();

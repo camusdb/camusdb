@@ -10,6 +10,12 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.Catalogs.Models;
 
+/// <summary>
+/// In-memory view of an index as seen from a <c>TableDescriptor</c>. Carries an online
+/// <see cref="State"/> so DML/reads can honor a half-built index during a backfill (DS9).
+/// The durable form is <c>DatabaseIndexObject</c> in <c>SystemSchema</c>; this is the
+/// name/column/type/state projection used at query and write time.
+/// </summary>
 public sealed class TableIndexSchema
 {
     /// <summary>

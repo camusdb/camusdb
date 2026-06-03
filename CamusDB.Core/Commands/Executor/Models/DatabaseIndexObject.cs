@@ -11,7 +11,13 @@ using CamusDB.Core.Catalogs.Models;
 namespace CamusDB.Core.CommandsExecutor.Models;
 
 /// <summary>
-/// Represents an index object in a database.
+/// Durable metadata for an index, stored in <c>SystemSchema</c> (the <c>{db}/meta/system</c>
+/// blob) rather than in the replicated schema log. Keyed by an immutable <see cref="Id"/> and
+/// referencing columns by id (<see cref="ColumnIds"/>) so renames don't touch it. During an
+/// online build it carries the backfill checkpoint (<see cref="StartOffset"/>, the last
+/// completed rowId) and the element <see cref="State"/>; the index flips to
+/// <see cref="SchemaElementState.Public"/> only once the backfill completes. See
+/// <c>docs/distributed-schema-architecture.md</c> §7.3 / §8.
 /// </summary>
 public sealed record DatabaseIndexObject
 {

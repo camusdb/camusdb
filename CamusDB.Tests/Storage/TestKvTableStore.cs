@@ -273,7 +273,7 @@ public sealed class TestKvTableStore
         ];
 
         KvTransaction tx = await BeginTransaction(node.Kahuna, "t7-resume-insert");
-        foreach (ObjectIdValue id in ids.Reverse())
+        foreach (ObjectIdValue id in Enumerable.Reverse(ids))
         {
             byte[] data = RowEncoder.Encode(schema, new() { ["n"] = new(ColumnType.Integer64, 1L) }, id);
             await store.InsertRow(tx, id, data);

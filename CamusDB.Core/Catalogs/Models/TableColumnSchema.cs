@@ -10,6 +10,12 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.Catalogs.Models;
 
+/// <summary>
+/// One column of a table. The immutable <c>Id</c> (not the mutable <c>Name</c>) is what row
+/// bytes and renames key off of — see <c>RowEncoder</c> and the architecture doc §7.4. The
+/// online <c>State</c> drives read/write visibility via <see cref="SchemaElementStateRules"/>.
+/// Past layouts are retained in <c>TableSchema.SchemaHistory</c> so old rows still decode.
+/// </summary>
 public sealed class TableColumnSchema
 {
     /// <summary>

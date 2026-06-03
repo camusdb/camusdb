@@ -13,6 +13,19 @@ using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.Catalogs;
 
+/// <summary>
+/// Bridges Kahuna/Kommander's replication callbacks to the catalog. <see cref="Register"/>
+/// subscribes a database to its schema-log partition; from then on every committed
+/// <see cref="SchemaChangeLogEntry"/> arrives at <see cref="ApplyAsync"/> (live replication)
+/// or <see cref="RestoreAsync"/> (log recovery on open).
+///
+/// <see cref="ApplyAsync"/> enforces ordering/idempotency (skip already-applied versions,
+/// throw on gaps) and, on the leader, stages the change on a clone and persists the
+/// per-object checkpoint <i>before</i> mutating live in-memory schema, so a persist failure
+/// neither advances the version nor records an ack. Acks (per node, per database) are
+/// recorded only after a delta is actually applied — they drive the two-version invariant
+/// gate in <see cref="SchemaAckTracker"/>. See <c>docs/distributed-schema-architecture.md</c> §6.
+/// </summary>
 public sealed class SchemaReplicator
 {
     private readonly CatalogsManager catalogs;
