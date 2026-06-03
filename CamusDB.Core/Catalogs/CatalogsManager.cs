@@ -223,12 +223,12 @@ public sealed class CatalogsManager
             {
                 TableId = ObjectIdGenerator.Generate().ToString(),
                 TableName = ticket.TableName,
-                Columns = ticket.Columns.Select(column =>
+                Columns = [.. ticket.Columns.Select(column =>
                 {
                     SchemaColumnPayload payload = SchemaColumnPayload.FromColumnInfo(column);
                     payload.Id = ObjectIdGenerator.Generate().ToString();
                     return payload;
-                }).ToArray()
+                })]
             })
         };
     }

@@ -8,6 +8,7 @@
 
 using System.Text;
 using System.Text.Json;
+using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 
 using CamusDB.Core.Serializer.Models;
@@ -103,9 +104,7 @@ public sealed class Serializator
     public static void WriteInt16(byte[] buffer, int number, ref int pointer)
     {
         short number16 = Convert.ToInt16(number);
-        byte[] byteArray = BitConverter.GetBytes(number16);
-        buffer[pointer + 0] = byteArray[0];
-        buffer[pointer + 1] = byteArray[1];
+        BinaryPrimitives.WriteInt16LittleEndian(buffer.AsSpan(pointer), number16);
         pointer += 2;
     }
 
@@ -149,15 +148,7 @@ public sealed class Serializator
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteDouble(byte[] buffer, double number, ref int pointer)
     {
-        byte[] byteArray = BitConverter.GetBytes(number);
-        buffer[pointer + 0] = byteArray[0];
-        buffer[pointer + 1] = byteArray[1];
-        buffer[pointer + 2] = byteArray[2];
-        buffer[pointer + 3] = byteArray[3];
-        buffer[pointer + 4] = byteArray[4];
-        buffer[pointer + 5] = byteArray[5];
-        buffer[pointer + 6] = byteArray[6];
-        buffer[pointer + 7] = byteArray[7];
+        BinaryPrimitives.WriteDoubleLittleEndian(buffer.AsSpan(pointer), number);
         pointer += 8;
     }
 
@@ -186,17 +177,16 @@ public sealed class Serializator
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteString(byte[] buffer, string str, ref int pointer)
     {
-        byte[] bytes = Encoding.Unicode.GetBytes(str);
+        // Encode the UTF-16 string straight into the destination buffer (no intermediate array),
+        // reserving 4 bytes for the length prefix that we backfill afterwards.
+        int length = Encoding.Unicode.GetBytes(str, buffer.AsSpan(pointer + 4));
 
-        int length = bytes.Length;
         buffer[pointer + 0] = (byte)((length >> 0) & 0xff);
         buffer[pointer + 1] = (byte)((length >> 8) & 0xff);
         buffer[pointer + 2] = (byte)((length >> 16) & 0xff);
         buffer[pointer + 3] = (byte)((length >> 24) & 0xff);
-        pointer += 4;
 
-        Buffer.BlockCopy(bytes, 0, buffer, pointer, bytes.Length);
-        pointer += bytes.Length;
+        pointer += 4 + length;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -235,21 +225,21 @@ public sealed class Serializator
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static short ReadInt16(byte[] buffer, ref int pointer)
     {
-        short number = BitConverter.ToInt16(buffer, pointer);
+        short number = BinaryPrimitives.ReadInt16LittleEndian(buffer.AsSpan(pointer));
         pointer += 2;
         return number;
     }
 
     public static float ReadFloat(byte[] buffer, ref int pointer)
     {
-        float number = BitConverter.ToSingle(buffer, pointer);
+        float number = BinaryPrimitives.ReadSingleLittleEndian(buffer.AsSpan(pointer));
         pointer += 4;
         return number;
     }
 
     public static double ReadDouble(byte[] buffer, ref int pointer)
     {
-        double number = BitConverter.ToDouble(buffer, pointer);
+        double number = BinaryPrimitives.ReadDoubleLittleEndian(buffer.AsSpan(pointer));
         pointer += 8;
         return number;
     }
@@ -310,10 +300,7 @@ public sealed class Serializator
         if (length == 0)
             return "";
 
-        byte[] bytes = new byte[length];
-        Buffer.BlockCopy(buffer, pointer, bytes, 0, length);
-
-        string str = Encoding.Unicode.GetString(bytes);
+        string str = Encoding.Unicode.GetString(buffer.AsSpan(pointer, length));
         pointer += length;
         return str;
     }

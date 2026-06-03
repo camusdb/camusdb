@@ -210,6 +210,51 @@ public class TestSerializer
     }
 
     [Test]
+    [TestCase(0d)]
+    [TestCase(1d)]
+    [TestCase(-1d)]
+    [TestCase(3.14159265358979d)]
+    [TestCase(-2048.5d)]
+    [TestCase(double.MinValue)]
+    [TestCase(double.MaxValue)]
+    [TestCase(double.Epsilon)]
+    public void TestSerializeDouble(double writeValue)
+    {
+        byte[] buffer = new byte[SerializatorTypeSizes.TypeDouble];
+
+        int pointer = 0;
+        Serializator.WriteDouble(buffer, writeValue, ref pointer);
+        Assert.AreEqual(pointer, SerializatorTypeSizes.TypeDouble);
+
+        pointer = 0;
+        double readValue = Serializator.ReadDouble(buffer, ref pointer);
+        Assert.AreEqual(pointer, SerializatorTypeSizes.TypeDouble);
+        Assert.AreEqual(readValue, writeValue);
+    }
+
+    [Test]
+    [TestCase(0f)]
+    [TestCase(1f)]
+    [TestCase(-1f)]
+    [TestCase(3.14159f)]
+    [TestCase(-2048.5f)]
+    [TestCase(float.MinValue)]
+    [TestCase(float.MaxValue)]
+    [TestCase(float.Epsilon)]
+    public void TestSerializeFloat(float writeValue)
+    {
+        // ReadFloat consumes 4 little-endian bytes; there is no matching writer in
+        // Serializator, so we lay the bytes down directly to exercise the read path.
+        byte[] buffer = new byte[SerializatorTypeSizes.TypeInteger32];
+        System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(buffer, writeValue);
+
+        int pointer = 0;
+        float readValue = Serializator.ReadFloat(buffer, ref pointer);
+        Assert.AreEqual(pointer, SerializatorTypeSizes.TypeInteger32);
+        Assert.AreEqual(readValue, writeValue);
+    }
+
+    [Test]
     [TestCase(1639931684, -1154155741, -743207513)]
     public void TestSerializeObjectId(int a, int b, int c)
     {
