@@ -32,6 +32,8 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 {
     public const string SchemaChangeLogType = "SchemaChange";
 
+    private static readonly SchemaAckTracker SchemaAcks = new();
+
     private readonly EmbeddedKahunaNode node;
 
     private readonly object schemaSubscriptionsSync = new();
@@ -47,6 +49,17 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// The Raft consensus handle. Exposed for partition/leader queries and HLC clock access.
     /// </summary>
     public IRaft Raft => node.Raft;
+
+    /// <summary>
+    /// Maximum time replicated DDL waits for live schema-apply acknowledgements.
+    /// </summary>
+    public TimeSpan SchemaAckWaitTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Live-node expiry used by the schema ack gate. The default is non-expiring because
+    /// this layer does not yet receive real heartbeat/membership failure signals.
+    /// </summary>
+    public TimeSpan SchemaAckLiveNodeLease { get; set; } = Timeout.InfiniteTimeSpan;
 
     /// <summary>
     /// Constructs the embedded engine with the provided options.
@@ -207,6 +220,38 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
         string lastLeader = await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
         return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: lastLeader);
+    }
+
+    public void RegisterLocalSchemaAckNode(string db)
+    {
+        SchemaAcks.Register(db, Raft.GetLocalNodeName());
+    }
+
+    public void UnregisterLocalSchemaAckNode(string db)
+    {
+        SchemaAcks.Unregister(db, Raft.GetLocalNodeName());
+    }
+
+    public void RecordLocalSchemaApplied(string db, long schemaVersion)
+    {
+        SchemaAcks.RecordApplied(db, Raft.GetLocalNodeName(), schemaVersion);
+    }
+
+    public Task<bool> WaitForSchemaAcksAsync(
+        string db,
+        long schemaVersion,
+        TimeSpan timeout,
+        TimeSpan? liveNodeLease = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        return SchemaAcks.WaitForAllLiveAsync(
+            db,
+            schemaVersion,
+            timeout,
+            liveNodeLease ?? SchemaAckLiveNodeLease,
+            cancellationToken
+        );
     }
 
     public IDisposable RegisterSchemaApply(

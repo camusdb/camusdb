@@ -276,6 +276,8 @@ public sealed class CatalogsManager
 
     private async Task ReplicateAndWaitLocalApplyAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
+        await WaitForPreviousVersionAcksAsync(database, entry).ConfigureAwait(false);
+
         byte[] bytes = Serializator.Serialize(entry);
         SchemaReplicationResult result = await database.Kahuna.ReplicateSchemaChangeAsync(database.Name, bytes, CancellationToken.None).ConfigureAwait(false);
 
@@ -289,14 +291,50 @@ public sealed class CatalogsManager
         while (DateTime.UtcNow < deadline)
         {
             if (database.Schema.SchemaVersion >= entry.ToVersion && WasSchemaDeltaApplied(database.Schema, entry))
-                return;
+                break;
 
             await Task.Delay(25).ConfigureAwait(false);
+        }
+
+        if (database.Schema.SchemaVersion >= entry.ToVersion && WasSchemaDeltaApplied(database.Schema, entry))
+        {
+            bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
+                database.Name,
+                entry.ToVersion,
+                database.Kahuna.SchemaAckWaitTimeout,
+                cancellationToken: CancellationToken.None
+            ).ConfigureAwait(false);
+
+            if (acked)
+                return;
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Timed out waiting for live schema apply acknowledgements for database '{database.Name}' version {entry.ToVersion}"
+            );
         }
 
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
             $"Timed out waiting for local schema apply for database '{database.Name}' version {entry.ToVersion}"
+        );
+    }
+
+    private static async Task WaitForPreviousVersionAcksAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
+    {
+        bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
+            database.Name,
+            entry.FromVersion,
+            database.Kahuna.SchemaAckWaitTimeout,
+            cancellationToken: CancellationToken.None
+        ).ConfigureAwait(false);
+
+        if (acked)
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Timed out waiting for live schema apply acknowledgements before proposing schema change '{entry.Op}' for database '{database.Name}' from version {entry.FromVersion}"
         );
     }
 

@@ -126,6 +126,60 @@ public sealed class TestSchemaReplicator
     }
 
     [Test]
+    public async Task ApplyAsync_RecordsSchemaAckAfterSuccessfulApply()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+
+        database.Kahuna.RegisterLocalSchemaAckNode(db);
+
+        Assert.True(await replicator.ApplyAsync(
+            database,
+            partitionId,
+            Serializator.Serialize(CreateTableEntry(db, 0, 1))
+        ));
+
+        bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
+            db,
+            1,
+            TimeSpan.FromMilliseconds(100),
+            TimeSpan.FromMinutes(1),
+            CancellationToken.None
+        );
+
+        Assert.IsTrue(acked);
+    }
+
+    [Test]
+    public async Task Register_RecordsLoadedSchemaVersionAck()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        database.Schema.SchemaVersion = 4;
+
+        SchemaReplicator replicator = CreateReplicator();
+        replicator.Register(database);
+
+        bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
+            db,
+            4,
+            TimeSpan.FromMilliseconds(100),
+            TimeSpan.FromMinutes(1),
+            CancellationToken.None
+        );
+
+        Assert.IsTrue(acked);
+    }
+
+    [Test]
     public async Task ApplyAsync_IgnoresEntriesForOtherDatabases()
     {
         await using EmbeddedKahuna kahuna = new();

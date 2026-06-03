@@ -286,6 +286,91 @@ public sealed class TestEmbeddedKahuna
         }
     }
 
+    [Test]
+    public async Task SchemaAckGate_WaitsForEveryLiveNode()
+    {
+        string db = $"db_{Guid.NewGuid():N}";
+
+        await using EmbeddedKahuna node1 = CreateUnstartedNode("ack-node1", 9301);
+        await using EmbeddedKahuna node2 = CreateUnstartedNode("ack-node2", 9302);
+
+        node1.RegisterLocalSchemaAckNode(db);
+        node2.RegisterLocalSchemaAckNode(db);
+
+        node1.RecordLocalSchemaApplied(db, 1);
+
+        bool beforeFollowerAck = await node1.WaitForSchemaAcksAsync(
+            db,
+            1,
+            TimeSpan.FromMilliseconds(100),
+            TimeSpan.FromMinutes(1),
+            CancellationToken.None
+        );
+
+        Assert.IsFalse(beforeFollowerAck);
+
+        node2.RecordLocalSchemaApplied(db, 1);
+
+        bool afterFollowerAck = await node1.WaitForSchemaAcksAsync(
+            db,
+            1,
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromMinutes(1),
+            CancellationToken.None
+        );
+
+        Assert.IsTrue(afterFollowerAck);
+    }
+
+    [Test]
+    public async Task SchemaAckGate_ExpiredNodeDoesNotBlockProgress()
+    {
+        string db = $"db_{Guid.NewGuid():N}";
+
+        await using EmbeddedKahuna node1 = CreateUnstartedNode("lease-node1", 9401);
+        await using EmbeddedKahuna node2 = CreateUnstartedNode("lease-node2", 9402);
+
+        node1.RegisterLocalSchemaAckNode(db);
+        node2.RegisterLocalSchemaAckNode(db);
+        node1.RecordLocalSchemaApplied(db, 2);
+
+        await Task.Delay(50);
+
+        bool acked = await node1.WaitForSchemaAcksAsync(
+            db,
+            2,
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromMilliseconds(10),
+            CancellationToken.None
+        );
+
+        Assert.IsTrue(acked);
+    }
+
+    [Test]
+    public async Task SchemaAckGate_UnregisteringLastNodeDropsDatabaseState()
+    {
+        string db = $"db_{Guid.NewGuid():N}";
+
+        await using EmbeddedKahuna node = CreateUnstartedNode("cleanup-node", 9501);
+
+        node.RegisterLocalSchemaAckNode(db);
+        node.RecordLocalSchemaApplied(db, 3);
+        node.UnregisterLocalSchemaAckNode(db);
+
+        node.RegisterLocalSchemaAckNode(db);
+
+        bool inheritedOldAck = await node.WaitForSchemaAcksAsync(
+            db,
+            3,
+            TimeSpan.FromMilliseconds(100),
+            TimeSpan.FromMinutes(1),
+            CancellationToken.None
+        );
+
+        Assert.IsFalse(inheritedOldAck);
+    }
+
     private static EmbeddedKahuna CreateClusterNode(
         string nodeName,
         int nodeId,
@@ -308,6 +393,22 @@ public sealed class TestEmbeddedKahuna
             interNode,
             raftCommunication,
             new StaticDiscovery(peers)
+        );
+    }
+
+    private static EmbeddedKahuna CreateUnstartedNode(string nodeName, int port)
+    {
+        return new(
+            new EmbeddedKahunaOptions
+            {
+                NodeName = nodeName,
+                NodeId = port,
+                Host = "localhost",
+                Port = port,
+                Storage = "memory",
+                WalStorage = "memory",
+                InitialPartitions = 1
+            }
         );
     }
 

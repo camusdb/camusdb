@@ -29,6 +29,9 @@ public sealed class SchemaReplicator
     {
         ArgumentNullException.ThrowIfNull(database);
 
+        database.Kahuna.RegisterLocalSchemaAckNode(database.Name);
+        database.Kahuna.RecordLocalSchemaApplied(database.Name, database.Schema.SchemaVersion);
+
         IDisposable subscription = database.Kahuna.RegisterSchemaApply(
             (partitionId, bytes) => ApplyAsync(database, partitionId, bytes),
             (_, bytes) => RestoreAsync(database, bytes)
@@ -53,7 +56,10 @@ public sealed class SchemaReplicator
             if (entry.FromVersion != database.Schema.SchemaVersion)
             {
                 if (entry.ToVersion <= database.Schema.SchemaVersion && WasSchemaDeltaApplied(database.Schema, entry))
+                {
+                    database.Kahuna.RecordLocalSchemaApplied(database.Name, entry.ToVersion);
                     return true;
+                }
 
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
@@ -62,7 +68,10 @@ public sealed class SchemaReplicator
             }
 
             if (entry.ToVersion <= database.Schema.SchemaVersion)
+            {
+                database.Kahuna.RecordLocalSchemaApplied(database.Name, entry.ToVersion);
                 return true;
+            }
 
             bool isLeader = await database.Kahuna.Raft.AmILeader(partitionId, CancellationToken.None).ConfigureAwait(false);
 
@@ -105,6 +114,8 @@ public sealed class SchemaReplicator
                 entry.ToVersion
             );
 
+            database.Kahuna.RecordLocalSchemaApplied(database.Name, entry.ToVersion);
+
             return true;
         }
         finally
@@ -137,7 +148,10 @@ public sealed class SchemaReplicator
         try
         {
             if (entry.ToVersion <= database.Schema.SchemaVersion)
+            {
+                database.Kahuna.RecordLocalSchemaApplied(database.Name, entry.ToVersion);
                 return true;
+            }
 
             if (entry.FromVersion != database.Schema.SchemaVersion)
             {
@@ -161,6 +175,8 @@ public sealed class SchemaReplicator
                 entry.FromVersion,
                 entry.ToVersion
             );
+
+            database.Kahuna.RecordLocalSchemaApplied(database.Name, entry.ToVersion);
 
             return true;
         }
