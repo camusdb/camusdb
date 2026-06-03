@@ -36,6 +36,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
     private readonly object schemaSubscriptionsSync = new();
     private readonly List<SchemaApplySubscription> schemaSubscriptions = new();
+    private ISchemaReplicationForwarder? schemaReplicationForwarder;
 
     /// <summary>
     /// The Kahuna KV API. Used by KvTableStore and the transaction layer.
@@ -148,6 +149,27 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         return partitionId;
     }
 
+    /// <summary>
+    /// Installs the internal raw-entry forwarder used by in-memory cluster tests.
+    /// Production DDL forwarding must use the command-layer ticket forwarder.
+    /// </summary>
+    internal void SetSchemaReplicationForwarder(ISchemaReplicationForwarder? forwarder)
+    {
+        schemaReplicationForwarder = forwarder;
+    }
+
+    public async ValueTask<bool> AmISchemaLeaderAsync(string db, CancellationToken cancellationToken = default)
+    {
+        int partitionId = SchemaLogPartition(db);
+        return await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<string> WaitForSchemaLeaderAsync(string db, CancellationToken cancellationToken = default)
+    {
+        int partitionId = SchemaLogPartition(db);
+        return await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<SchemaReplicationResult> ReplicateSchemaChangeAsync(
         string db,
         byte[] entry,
@@ -155,33 +177,36 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     )
     {
         int partitionId = SchemaLogPartition(db);
-        string leader = await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
 
-        if (!await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
-            return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: leader);
-
-        RaftReplicationResult proposal = await Raft.ReplicateLogs(
-            partitionId,
-            SchemaChangeLogType,
-            entry,
-            autoCommit: false,
-            cancellationToken: cancellationToken
-        ).ConfigureAwait(false);
-
-        if (!proposal.Success)
-            return new(ToOutcome(proposal.Status), partitionId, proposal.LogIndex, leader, proposal.Status.ToString());
-
-        (bool committed, RaftOperationStatus status, long commitLogId) =
-            await Raft.CommitLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
-
-        if (committed && status == RaftOperationStatus.Success)
+        for (int attempt = 0; attempt < 3; attempt++)
         {
-            await InvokeLocalSchemaApplyAsync(partitionId, entry).ConfigureAwait(false);
-            return new(SchemaReplicationOutcome.Committed, partitionId, commitLogId, leader, status.ToString());
+            string leader = await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+
+            if (await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+                return await ReplicateSchemaChangeAsLeaderAsync(db, partitionId, leader, entry, cancellationToken).ConfigureAwait(false);
+
+            ISchemaReplicationForwarder? forwarder = schemaReplicationForwarder;
+            if (forwarder is null)
+                return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: leader);
+
+            SchemaReplicationResult? forwarded =
+                await forwarder.ForwardSchemaChangeAsync(leader, db, entry, cancellationToken).ConfigureAwait(false);
+
+            if (forwarded is null)
+                return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: leader);
+
+            if (forwarded.Outcome == SchemaReplicationOutcome.Committed)
+            {
+                await InvokeLocalSchemaApplyAsync(partitionId, entry).ConfigureAwait(false);
+                return forwarded;
+            }
+
+            if (forwarded.Outcome != SchemaReplicationOutcome.NotLeader)
+                return forwarded;
         }
 
-        await Raft.RollbackLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
-        return new(ToOutcome(status), partitionId, proposal.LogIndex, leader, status.ToString());
+        string lastLeader = await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: lastLeader);
     }
 
     public IDisposable RegisterSchemaApply(
@@ -230,6 +255,38 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             RaftOperationStatus.ProposalTimeout => SchemaReplicationOutcome.Timeout,
             _ => SchemaReplicationOutcome.Failed
         };
+    }
+
+    private async Task<SchemaReplicationResult> ReplicateSchemaChangeAsLeaderAsync(
+        string db,
+        int partitionId,
+        string leader,
+        byte[] entry,
+        CancellationToken cancellationToken
+    )
+    {
+        RaftReplicationResult proposal = await Raft.ReplicateLogs(
+            partitionId,
+            SchemaChangeLogType,
+            entry,
+            autoCommit: false,
+            cancellationToken: cancellationToken
+        ).ConfigureAwait(false);
+
+        if (!proposal.Success)
+            return new(ToOutcome(proposal.Status), partitionId, proposal.LogIndex, leader, proposal.Status.ToString());
+
+        (bool committed, RaftOperationStatus status, long commitLogId) =
+            await Raft.CommitLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
+
+        if (committed && status == RaftOperationStatus.Success)
+        {
+            await InvokeLocalSchemaApplyAsync(partitionId, entry).ConfigureAwait(false);
+            return new(SchemaReplicationOutcome.Committed, partitionId, commitLogId, leader, status.ToString());
+        }
+
+        await Raft.RollbackLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
+        return new(ToOutcome(status), partitionId, proposal.LogIndex, leader, status.ToString());
     }
 
     private async Task InvokeLocalSchemaApplyAsync(int partitionId, byte[] entry)

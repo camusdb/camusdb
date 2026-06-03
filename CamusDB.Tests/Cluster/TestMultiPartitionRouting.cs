@@ -164,6 +164,46 @@ public sealed class TestMultiPartitionRouting
         Assert.AreEqual(KeyValueResponseType.Set, type);
     }
 
+    [Test]
+    public async Task LoadMetaAsync_InvalidatesOpenTableDescriptorCache()
+    {
+        (string dbname, CommandExecutor executor) = CreateExecutor();
+
+        try
+        {
+            DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: "robots",
+                columns:
+                [
+                    new ColumnInfo("id", ColumnType.Id),
+                    new ColumnInfo("name", ColumnType.String)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+
+            _ = await executor.OpenTable(new OpenTableTicket(dbname, "robots"));
+
+            Assert.AreEqual(1, database.TableDescriptors.Count);
+
+            CatalogsManager catalogs = new(logger);
+            await catalogs.LoadMetaAsync(database);
+
+            Assert.AreEqual(0, database.TableDescriptors.Count);
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executor);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Test 1 — Partition routing invariant
     // -----------------------------------------------------------------------

@@ -218,6 +218,74 @@ public sealed class TestEmbeddedKahuna
         }
     }
 
+    [Test]
+    public async Task SchemaReplication_FollowerForwardsToLeaderAndAppliesLocally()
+    {
+        string db = $"db_{Guid.NewGuid():N}";
+        byte[] payload = Encoding.UTF8.GetBytes("schema-change-forwarded");
+
+        InMemoryCommunication raftCommunication = new();
+        MemoryInterNodeCommmunication interNode = new();
+
+        EmbeddedKahuna node1 = CreateClusterNode("node1", 1, 9201, [new("localhost:9202"), new("localhost:9203")], raftCommunication, interNode);
+        EmbeddedKahuna node2 = CreateClusterNode("node2", 2, 9202, [new("localhost:9201"), new("localhost:9203")], raftCommunication, interNode);
+        EmbeddedKahuna node3 = CreateClusterNode("node3", 3, 9203, [new("localhost:9201"), new("localhost:9202")], raftCommunication, interNode);
+        EmbeddedKahuna[] nodes = [node1, node2, node3];
+
+        try
+        {
+            raftCommunication.SetNodes(nodes.ToDictionary(x => x.Raft.GetLocalEndpoint(), x => x.Raft));
+            interNode.SetNodes(nodes.ToDictionary(x => x.Raft.GetLocalEndpoint(), x => x.Kahuna));
+
+            InMemorySchemaReplicationForwarder forwarder = new(nodes);
+            foreach (EmbeddedKahuna node in nodes)
+                node.SetSchemaReplicationForwarder(forwarder);
+
+            ConcurrentBag<(string node, int partition, string data)> applied = [];
+
+            foreach (EmbeddedKahuna node in nodes)
+            {
+                string nodeName = node.Raft.GetLocalNodeName();
+                node.RegisterSchemaApply(
+                    (partition, bytes) =>
+                    {
+                        applied.Add((nodeName, partition, Encoding.UTF8.GetString(bytes)));
+                        return Task.FromResult(true);
+                    },
+                    (_, _) => Task.FromResult(true)
+                );
+            }
+
+            foreach (EmbeddedKahuna node in nodes)
+                await node.Raft.UpdateNodes();
+
+            await Task.WhenAll(nodes.Select(x => x.StartAsync(CancellationToken.None)))
+                .WaitAsync(TimeSpan.FromSeconds(10));
+
+            int partitionId = node1.SchemaLogPartition(db);
+            await node1.Raft.WaitForLeader(partitionId, CancellationToken.None);
+
+            EmbeddedKahuna leader = await WaitForLeaderNode(nodes, partitionId);
+            EmbeddedKahuna follower = nodes.First(x => x != leader);
+            string followerName = follower.Raft.GetLocalNodeName();
+
+            SchemaReplicationResult result = await follower.ReplicateSchemaChangeAsync(db, payload, CancellationToken.None);
+
+            Assert.AreEqual(SchemaReplicationOutcome.Committed, result.Outcome);
+            Assert.AreEqual(partitionId, result.PartitionId);
+
+            await WaitUntilAsync(
+                () => applied.Any(x => x.node == followerName && x.data == "schema-change-forwarded"),
+                TimeSpan.FromSeconds(5)
+            );
+        }
+        finally
+        {
+            foreach (EmbeddedKahuna node in nodes)
+                await node.DisposeAsync();
+        }
+    }
+
     private static EmbeddedKahuna CreateClusterNode(
         string nodeName,
         int nodeId,
@@ -274,5 +342,43 @@ public sealed class TestEmbeddedKahuna
         }
 
         Assert.Fail("Timed out waiting for condition");
+    }
+
+    private sealed class InMemorySchemaReplicationForwarder : ISchemaReplicationForwarder
+    {
+        private readonly Dictionary<string, EmbeddedKahuna> nodes;
+
+        public InMemorySchemaReplicationForwarder(IEnumerable<EmbeddedKahuna> nodes)
+        {
+            this.nodes = new();
+
+            foreach (EmbeddedKahuna node in nodes)
+            {
+                this.nodes[node.Raft.GetLocalNodeName()] = node;
+                this.nodes[node.Raft.GetLocalEndpoint()] = node;
+            }
+        }
+
+        public Task<SchemaReplicationResult?> ForwardSchemaChangeAsync(
+            string leader,
+            string db,
+            byte[] entry,
+            CancellationToken cancellationToken
+        )
+        {
+            return nodes.TryGetValue(leader, out EmbeddedKahuna? node)
+                ? ForwardToNode(node, db, entry, cancellationToken)
+                : Task.FromResult<SchemaReplicationResult?>(null);
+        }
+
+        private static async Task<SchemaReplicationResult?> ForwardToNode(
+            EmbeddedKahuna node,
+            string db,
+            byte[] entry,
+            CancellationToken cancellationToken
+        )
+        {
+            return await node.ReplicateSchemaChangeAsync(db, entry, cancellationToken);
+        }
     }
 }

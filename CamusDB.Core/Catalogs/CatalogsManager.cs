@@ -558,10 +558,14 @@ public sealed class CatalogsManager
 
     /// <summary>
     /// Loads <c>Schema.Tables</c> and <c>SystemSchema</c> from Kahuna KV into the
-    /// in-memory descriptor. Called once at database open time.
+    /// in-memory descriptor.
     /// </summary>
     public async Task LoadMetaAsync(DatabaseDescriptor database)
     {
+        // Reloading metadata replaces TableSchema instances. Any open table
+        // descriptors that captured the old references must be rebuilt.
+        database.TableDescriptors.Clear();
+
         KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
 
         try
@@ -615,6 +619,7 @@ public sealed class CatalogsManager
         finally
         {
             await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            database.TableDescriptors.Clear();
         }
     }
 

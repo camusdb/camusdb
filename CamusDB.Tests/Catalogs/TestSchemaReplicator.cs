@@ -198,6 +198,40 @@ public sealed class TestSchemaReplicator
     }
 
     [Test]
+    public async Task ApplyAsync_DropTableInvalidatesOpenDescriptorCache()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+
+        Assert.True(await replicator.ApplyAsync(
+            database,
+            partitionId,
+            Serializator.Serialize(CreateTableEntry(db, 0, 1))
+        ));
+
+        TableSchema tableSchema = database.Schema.Tables["robots"];
+        database.TableDescriptors["robots"] = new AsyncLazy<TableDescriptor>(() => Task.FromResult(
+            new TableDescriptor(tableSchema.Id!, tableSchema.Name!, tableSchema, new KvTableStore(kahuna.Kahuna, tableSchema.Id!))
+        ));
+
+        Assert.AreEqual(1, database.TableDescriptors.Count);
+
+        Assert.True(await replicator.ApplyAsync(
+            database,
+            partitionId,
+            Serializator.Serialize(DropTableEntry(db, 1, 2))
+        ));
+
+        Assert.AreEqual(0, database.TableDescriptors.Count);
+        Assert.False(database.Schema.Tables.ContainsKey("robots"));
+    }
+
+    [Test]
     public async Task RestoreAsync_AppliesInMemoryWithoutCheckpointPersist()
     {
         await using EmbeddedKahuna kahuna = new();
@@ -356,6 +390,18 @@ public sealed class TestSchemaReplicator
                     Type = ColumnType.String
                 }
             })
+        };
+    }
+
+    private static SchemaChangeLogEntry DropTableEntry(string db, long fromVersion, long toVersion)
+    {
+        return new()
+        {
+            Database = db,
+            FromVersion = fromVersion,
+            ToVersion = toVersion,
+            Op = SchemaOp.DropTable,
+            Payload = Serializator.Serialize(new SchemaDropTablePayload { TableName = "robots" })
         };
     }
 

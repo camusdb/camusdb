@@ -73,6 +73,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly CommandValidator validator;
 
+    private readonly ISchemaDdlForwarder? schemaDdlForwarder;
+
     /// <summary>
     /// Initializes the commands executor
     /// </summary>
@@ -81,11 +83,18 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <param name="logger"></param>
     /// <param name="loggerFactory">Optional factory forwarded to the embedded Kahuna node so its internal logs are visible.</param>
     /// <param name="clusterNode">Process-level Kahuna node shared across all databases in cluster mode; null in standalone mode.</param>
-    public CommandExecutor(CommandValidator validator, CatalogsManager catalogs, ILogger<ICamusDB> logger, ILoggerFactory? loggerFactory = null, EmbeddedKahuna? clusterNode = null)
+    public CommandExecutor(
+        CommandValidator validator,
+        CatalogsManager catalogs,
+        ILogger<ICamusDB> logger,
+        ILoggerFactory? loggerFactory = null,
+        EmbeddedKahuna? clusterNode = null,
+        ISchemaDdlForwarder? schemaDdlForwarder = null)
     {
         this.validator = validator;
         this.catalogs = catalogs;
         this.logger = logger;
+        this.schemaDdlForwarder = schemaDdlForwarder;
 
         databaseDescriptors = new();
         databaseOpener = new(this, databaseDescriptors, catalogs, logger, clusterNode, loggerFactory);
@@ -181,6 +190,10 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
+        bool? forwarded = await TryForwardCreateTableAsync(database, ticket).ConfigureAwait(false);
+        if (forwarded is not null)
+            return new CreateTableResult(database, forwarded.Value);
+
         return await ExecuteDdlInTransaction(database, async tx =>
         {
             bool result = await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, ticket, tx).ConfigureAwait(false);
@@ -193,6 +206,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+
+        bool? forwarded = await TryForwardAlterTableAsync(database, ticket).ConfigureAwait(false);
+        if (forwarded is not null)
+            return forwarded.Value;
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
@@ -207,6 +224,10 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
+        bool? forwarded = await TryForwardAlterIndexAsync(database, ticket).ConfigureAwait(false);
+        if (forwarded is not null)
+            return forwarded.Value;
+
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
         return await ExecuteDdlInTransaction(database, tx =>
@@ -219,6 +240,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+
+        bool? forwarded = await TryForwardDropTableAsync(database, ticket).ConfigureAwait(false);
+        if (forwarded is not null)
+            return forwarded.Value;
 
         if (ticket.IfExists && !catalogs.TableExists(database, ticket.TableName))
             return false;
@@ -242,6 +267,103 @@ public sealed class CommandExecutor : IAsyncDisposable
         return await tableOpener.Open(descriptor, ticket.TableName).ConfigureAwait(false);
     }
 
+    private async Task<bool?> TryForwardCreateTableAsync(DatabaseDescriptor database, CreateTableTicket ticket)
+    {
+        return await TryForwardDdlAsync(
+            database,
+            (leader, ct) => schemaDdlForwarder!.ForwardCreateTableAsync(leader, ticket, ct)
+        ).ConfigureAwait(false);
+    }
+
+    private async Task<bool?> TryForwardAlterTableAsync(DatabaseDescriptor database, AlterTableTicket ticket)
+    {
+        return await TryForwardDdlAsync(
+            database,
+            (leader, ct) => schemaDdlForwarder!.ForwardAlterTableAsync(leader, ticket, ct)
+        ).ConfigureAwait(false);
+    }
+
+    private async Task<bool?> TryForwardAlterIndexAsync(DatabaseDescriptor database, AlterIndexTicket ticket)
+    {
+        return await TryForwardDdlAsync(
+            database,
+            (leader, ct) => schemaDdlForwarder!.ForwardAlterIndexAsync(leader, ticket, ct)
+        ).ConfigureAwait(false);
+    }
+
+    private async Task<bool?> TryForwardDropTableAsync(DatabaseDescriptor database, DropTableTicket ticket)
+    {
+        return await TryForwardDdlAsync(
+            database,
+            (leader, ct) => schemaDdlForwarder!.ForwardDropTableAsync(leader, ticket, ct)
+        ).ConfigureAwait(false);
+    }
+
+    private async Task<bool?> TryForwardDdlAsync(
+        DatabaseDescriptor database,
+        Func<string, CancellationToken, Task<bool?>> forward
+    )
+    {
+        if (database.OwnsKahuna)
+            return null;
+
+        if (await database.Kahuna.AmISchemaLeaderAsync(database.Name, CancellationToken.None).ConfigureAwait(false))
+            return null;
+
+        if (schemaDdlForwarder is null)
+        {
+            string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Name, CancellationToken.None).ConfigureAwait(false);
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"DDL must be executed by schema leader '{leader}' for database '{database.Name}'"
+            );
+        }
+
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            long fromVersion = database.Schema.SchemaVersion;
+
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Name, CancellationToken.None).ConfigureAwait(false);
+                bool? result = await forward(leader, CancellationToken.None).ConfigureAwait(false);
+                if (result is not null)
+                {
+                    if (result.Value)
+                        await WaitForForwardedSchemaApplyAsync(database, fromVersion).ConfigureAwait(false);
+
+                    return result;
+                }
+            }
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Failed to forward DDL to schema leader for database '{database.Name}'"
+        );
+    }
+
+    private static async Task WaitForForwardedSchemaApplyAsync(DatabaseDescriptor database, long fromVersion)
+    {
+        for (int attempt = 0; attempt < 200; attempt++)
+        {
+            if (database.Schema.SchemaVersion > fromVersion)
+                return;
+
+            await Task.Delay(25).ConfigureAwait(false);
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Timed out waiting for forwarded schema apply for database '{database.Name}' after version {fromVersion}"
+        );
+    }
+
     public async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(ExecuteSQLTicket ticket)
     {
         validator.Validate(ticket);
@@ -258,6 +380,10 @@ public sealed class CommandExecutor : IAsyncDisposable
                     CreateTableTicket createTableTicket = sqlExecutor.CreateCreateTableTicket(ticket, ast);
                     validator.Validate(createTableTicket);
 
+                    bool? forwarded = await TryForwardCreateTableAsync(database, createTableTicket).ConfigureAwait(false);
+                    if (forwarded is not null)
+                        return new ExecuteDDLSQLResult(database, forwarded.Value);
+
                     return await ExecuteDdlInTransaction(database, async tx =>
                     {
                         bool ok = await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, createTableTicket, tx).ConfigureAwait(false);
@@ -270,6 +396,10 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     AlterTableTicket alterTableTicket = sqlExecutor.CreateAlterTableTicket(ticket, ast);
                     validator.Validate(alterTableTicket);
+
+                    bool? forwarded = await TryForwardAlterTableAsync(database, alterTableTicket).ConfigureAwait(false);
+                    if (forwarded is not null)
+                        return new ExecuteDDLSQLResult(database, forwarded.Value);
 
                     TableDescriptor table = await tableOpener.Open(database, alterTableTicket.TableName).ConfigureAwait(false);
 
@@ -291,6 +421,10 @@ public sealed class CommandExecutor : IAsyncDisposable
                     AlterIndexTicket alterIndexTicket = sqlExecutor.CreateAlterIndexTicket(ticket, ast);
                     validator.Validate(alterIndexTicket);
 
+                    bool? forwarded = await TryForwardAlterIndexAsync(database, alterIndexTicket).ConfigureAwait(false);
+                    if (forwarded is not null)
+                        return new ExecuteDDLSQLResult(database, forwarded.Value);
+
                     TableDescriptor table = await tableOpener.Open(database, alterIndexTicket.TableName).ConfigureAwait(false);
 
                     return await ExecuteDdlInTransaction(database, async tx =>
@@ -305,6 +439,10 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     DropTableTicket dropTableTicket = sqlExecutor.CreateDropTableTicket(ticket, ast);
                     validator.Validate(dropTableTicket);
+
+                    bool? forwarded = await TryForwardDropTableAsync(database, dropTableTicket).ConfigureAwait(false);
+                    if (forwarded is not null)
+                        return new ExecuteDDLSQLResult(database, forwarded.Value);
 
                     if (dropTableTicket.IfExists && !catalogs.TableExists(database, dropTableTicket.TableName))
                         return new(database, false);

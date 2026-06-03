@@ -88,11 +88,13 @@ public sealed class SchemaReplicator
                     return true;
                 }
 
-                CatalogsManager.ApplySchemaDelta(database.Schema, entry);
+                TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, entry);
+                InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
             }
             else
             {
-                CatalogsManager.ApplySchemaDelta(database.Schema, entry);
+                TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, entry);
+                InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
             }
 
             logger.LogInformation(
@@ -109,6 +111,16 @@ public sealed class SchemaReplicator
         {
             database.Schema.Semaphore.Release();
         }
+    }
+
+    private static void InvalidateAppliedTableDescriptor(
+        DatabaseDescriptor database,
+        SchemaChangeLogEntry entry,
+        TableSchema? tableSchema
+    )
+    {
+        if (entry.Op == SchemaOp.DropTable && tableSchema?.Name is not null)
+            database.TableDescriptors.TryRemove(tableSchema.Name, out _);
     }
 
     public async Task<bool> RestoreAsync(DatabaseDescriptor database, byte[] bytes)
