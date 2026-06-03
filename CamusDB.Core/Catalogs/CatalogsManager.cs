@@ -363,7 +363,7 @@ public sealed class CatalogsManager
             Version = 0,
             Name = payload.TableName,
             Columns = new(payload.Columns.Length),
-            SchemaHistory = new()
+            SchemaHistory = []
         };
 
         foreach (SchemaColumnPayload column in payload.Columns)

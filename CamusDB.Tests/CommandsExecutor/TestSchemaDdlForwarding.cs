@@ -109,6 +109,7 @@ public sealed class TestSchemaDdlForwarding
         {
             DatabaseDescriptor followerDatabase = await followerExecutor.OpenDatabase(db);
             forwarder.Database = followerDatabase;
+            forwarder.EmitUnrelatedVersionBumpBeforeAlterApply = true;
 
             SeedRobotsTable(followerDatabase);
 
@@ -129,7 +130,7 @@ public sealed class TestSchemaDdlForwarding
             Assert.True(altered);
             Assert.AreEqual(1, forwarder.AlterTableCalls);
             Assert.AreSame(openBeforeAlter, openAfterAlter);
-            Assert.AreEqual(2, followerDatabase.Schema.SchemaVersion);
+            Assert.AreEqual(3, followerDatabase.Schema.SchemaVersion);
             Assert.AreEqual(3, openBeforeAlter.Schema.Columns!.Count);
             Assert.True(openBeforeAlter.Schema.Columns.Any(column => column.Name == "year"));
             Assert.AreEqual(1, followerDatabase.TableDescriptors.Count);
@@ -223,6 +224,8 @@ public sealed class TestSchemaDdlForwarding
 
         public DatabaseDescriptor? Database { get; set; }
 
+        public bool EmitUnrelatedVersionBumpBeforeAlterApply { get; set; }
+
         public Task<bool?> ForwardCreateTableAsync(string leader, CreateTableTicket ticket, CancellationToken cancellationToken)
         {
             CreateTableCalls++;
@@ -236,6 +239,21 @@ public sealed class TestSchemaDdlForwarding
 
             _ = Task.Run(async () =>
             {
+                if (EmitUnrelatedVersionBumpBeforeAlterApply)
+                {
+                    await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+                    await database.Schema.Semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+                    try
+                    {
+                        database.Schema.SchemaVersion++;
+                    }
+                    finally
+                    {
+                        database.Schema.Semaphore.Release();
+                    }
+                }
+
                 await Task.Delay(50, cancellationToken).ConfigureAwait(false);
                 await database.Schema.Semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
 

@@ -41,8 +41,8 @@ namespace CamusDB.Core.Transactions;
 public sealed class KvTransactionsManager
 {
     private readonly IKahuna kahuna;
-    private readonly object activeSync = new();
-    private readonly List<KvTransaction> activeTransactions = new();
+    private readonly Lock activeSync = new();
+    private readonly List<KvTransaction> activeTransactions = [];
 
     public KvTransactionsManager(IKahuna kahuna)
     {
@@ -58,7 +58,7 @@ public sealed class KvTransactionsManager
     {
         List<KvTransaction> snapshot;
         lock (activeSync)
-            snapshot = activeTransactions.ToList();
+            snapshot = [.. activeTransactions];
 
         foreach (KvTransaction tx in snapshot)
         {
