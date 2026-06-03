@@ -39,7 +39,7 @@ Two big consequences flow from this model and are worth internalizing before rea
 |---|---|---|
 | SQL / executor | `CommandExecutor` | Entry point for DDL & DML. Owns the DDL transaction, schema-version *pinning*, and follower→leader *forwarding*. |
 | Catalog | `CatalogsManager` | Builds deltas, validates them, applies them (`ApplySchemaDelta`), persists per-object metadata, loads metadata on open. |
-| Replication glue | `SchemaReplicator` | Bridges Kahuna's apply/restore callbacks to `CatalogsManager`. Owns the leader-stages-then-applies dance and ack recording. |
+| Replication glue | `SchemaReplicator` | Bridges Kahuna's apply/restore callbacks to `CatalogsManager`. Applies committed deltas in-memory (never persists from the callback) and records acks. |
 | KV / consensus | `EmbeddedKahuna` | Routes schema deltas to a Raft partition, replicates+commits them, fans them out to local subscribers, tracks per-node acks. |
 | Liveness | `SchemaAckTracker` | Per-database, per-node "last applied version" map; powers the two-version invariant gate. |
 | Models | `SchemaChangeLogEntry`, `SchemaOp`, `SchemaElementState`, `TableSchema`, `TableColumnSchema`, `TableIndexSchema`, `DatabaseIndexObject` | The serialized delta, the operation kinds, the online-state enum, and the in-memory/persisted shapes. |
@@ -225,26 +225,30 @@ under Schema.Semaphore:
   if entry.ToVersion <= current SchemaVersion:
       record ack(ToVersion); return true            // idempotent skip
 
-  isLeader = AmILeader(partition)
-  if isLeader:
-      staged = Clone(schema); ApplySchemaDelta(staged, entry)   // stage
-      PersistCheckpointAsync(staged, ...)                        // durable FIRST
-          └─ on failure: log and return true WITHOUT advancing or acking
-      ApplySchemaDelta(database.Schema, entry)                   // then mutate in place
-  else:
-      ApplySchemaDelta(database.Schema, entry)                   // followers mutate in place
-
-  InvalidateAppliedTableDescriptor(...)   // drop cached descriptor on DropTable
+  ApplySchemaDelta(database.Schema, entry)          // mutate in place — leader AND follower
+  InvalidateAppliedTableDescriptor(...)             // drop cached descriptor on DropTable
   record ack(ToVersion)
 ```
 
-Why leaders stage-then-apply: the leader persists the checkpoint on a *clone* before
-mutating live state, so a persistence failure leaves in-memory schema untouched and does
-**not** advance the version or record an ack. Followers apply in place because their
-persistence happens through the normal committed-log replay machinery.
+**`ApplyAsync` never persists.** It runs inside the schema partition's commit pipeline
+(it is invoked from `InvokeLocalSchemaApplyAsync`, which the leader's
+`ReplicateSchemaChangeAsLeaderAsync` awaits right after `CommitLogs`, and from followers'
+`OnReplicationReceived`). Issuing the checkpoint's KV writes from here re-enters the *same*
+Raft partition and deadlocks (`ProposalTimeout`). So apply is identical on every node:
+mutate in-memory, invalidate descriptor, ack.
+
+**The proposer persists the checkpoint** in `ReplicateAndWaitLocalApplyAsync`, *after*
+`ReplicateSchemaChangeAsync` returns and local apply is observed — i.e. outside the partition
+pipeline. Persist uses its own KV transaction with bounded retry; on exhaustion it throws a
+typed `CamusDBException`. This inverts the older "persist-before-advance" ordering: in-memory
+now advances first (in the apply callback) and the checkpoint is written just after. That is
+safe because the **committed schema log is the source of truth** and the KV checkpoint is a
+load-time optimization — a node whose checkpoint write fails is not divergent, it rebuilds
+from the committed log. (Making schema-log replay authoritative on restart, and a richer
+persist-failure policy, is Workstream F in the completion plan.)
 
 `RestoreAsync` (log recovery) is a separate, simpler path: it applies in version order and
-logs+skips out-of-order entries; it does not do the leader check or the staged persist.
+logs+skips out-of-order entries; it likewise only mutates in-memory.
 
 **Idempotency keys to remember:**
 - `WasSchemaDeltaApplied(schema, entry)` checks the *effect* (table present? column present?)
@@ -462,9 +466,13 @@ SELECTs don't run the commit-time validation step (they have a consistent snapsh
 
 ## 10. Failure handling & compensation
 
-- **Persist-failure on leader apply:** logged; the version is **not** advanced and no ack is
-  recorded, so the cluster stays consistent and the proposer's spin-wait eventually times
-  out rather than reporting a phantom success.
+- **Checkpoint persist-failure:** the schema delta is already committed in Raft and applied
+  in-memory cluster-wide. The proposer's `PersistSchemaCheckpointWithRetryAsync` retries the
+  KV write with bounded backoff; on exhaustion it throws a typed `CamusDBException`. Because
+  the committed schema log is the source of truth, a failed checkpoint is not divergence — it
+  is a stale load-time cache that the committed log reconciles. (Wiring schema-log replay to
+  be authoritative on restart, plus a richer policy — retry / step-down / mark-unhealthy — is
+  Workstream F.)
 - **Out-of-order / gap on apply:** thrown (apply) or logged+skipped (restore). A gap means a
   node is missing a delta; restore replays in order.
 - **DDL transaction abort (`ExecuteDdlInTransaction`):** rolls back the KV transaction, then
@@ -498,10 +506,11 @@ Node A (schema leader)
         2. ReplicateSchemaChangeAsync:
              Raft propose (partition = hash("mydb/meta"), not 0)
              Raft commit (quorum)
-             InvokeLocalSchemaApply on A  → ApplyAsync: stage+persist, mutate, ack v8
-           (B and C receive via OnReplicationReceived → ApplyAsync → persist/mutate/ack v8)
+             InvokeLocalSchemaApply on A  → ApplyAsync: mutate in-memory, ack v8 (no persist)
+           (B and C receive via OnReplicationReceived → ApplyAsync → mutate in-memory, ack v8)
         3. spin until A.SchemaVersion >= 8 && column age present ✔
-        4. WaitForSchemaAcks(8): A, B, C all acked v8 ✔
+        4. persist checkpoint (A, proposer context — outside the partition pipeline)
+        5. WaitForSchemaAcks(8): A, B, C all acked v8 ✔
     commit tx, release semaphore
   return success → forwarded back to B → back to client
 ```
@@ -520,8 +529,9 @@ the v7 layout but are read with v8 visibility: `age` reads as absent/null until 
    proposer and reused verbatim on apply.
 3. **Apply mutates the existing `TableSchema` instance in place** (`Version++`). Pinning and
    query visibility depend on this identity.
-4. **Acks are recorded only after a delta is actually applied** (and after a successful
-   persist on the leader path).
+4. **Acks are recorded only after a delta is actually applied in-memory.** Checkpoint
+   persistence happens separately, in the proposer context — never from the apply callback
+   (it would re-enter the schema partition and deadlock).
 5. **The two-version gate is checked *before proposing*** the next change.
 6. **Row bytes are positional and ID-keyed.** Names are metadata; renames never rewrite data.
 7. **Decode layout = row's version; decode visibility = current/pinned version.**
@@ -533,11 +543,6 @@ the v7 layout but are read with v8 visibility: `age` reads as absent/null until 
 
 ## 13. Where to look next
 
-- Task-by-task status, acceptance criteria, and outstanding carry-forwards:
-  [`distributed-schema-changes-tasks.md`](./distributed-schema-changes-tasks.md)
-  (DS0–DS12; DS0–DS9 are implemented foundations, DS5R/DS10/DS11/DS12 remain).
-- Design rationale and the CockroachDB/Yugabyte comparison:
-  [`distributed-schema-changes-plan.md`](./distributed-schema-changes-plan.md).
 - Tests that double as executable documentation:
   - `CamusDB.Tests/Storage/TestRowEncoder.cs` — positional encode/decode, visibility,
     history layout, drop+re-add identity.

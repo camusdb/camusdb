@@ -278,6 +278,12 @@ public sealed class CatalogsManager
     {
         await WaitForPreviousVersionAcksAsync(database, entry).ConfigureAwait(false);
 
+        // For DropTable the table is removed from the in-memory schema during apply, so capture
+        // its immutable id now (the checkpoint delete needs it once the table is gone).
+        string? droppedTableId = entry.Op == SchemaOp.DropTable
+            ? ResolveTableId(database, DecodePayload<SchemaDropTablePayload>(entry).TableName)
+            : null;
+
         byte[] bytes = Serializator.Serialize(entry);
         SchemaReplicationResult result = await database.Kahuna.ReplicateSchemaChangeAsync(database.Name, bytes, CancellationToken.None).ConfigureAwait(false);
 
@@ -296,29 +302,107 @@ public sealed class CatalogsManager
             await Task.Delay(25).ConfigureAwait(false);
         }
 
-        if (database.Schema.SchemaVersion >= entry.ToVersion && WasSchemaDeltaApplied(database.Schema, entry))
-        {
-            bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
-                database.Name,
-                entry.ToVersion,
-                database.Kahuna.SchemaAckWaitTimeout,
-                cancellationToken: CancellationToken.None
-            ).ConfigureAwait(false);
+        if (database.Schema.SchemaVersion < entry.ToVersion || !WasSchemaDeltaApplied(database.Schema, entry))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Timed out waiting for local schema apply for database '{database.Name}' version {entry.ToVersion}"
+            );
 
-            if (acked)
-                return;
+        // Persist the durable KV checkpoint from this proposer context — NOT from the schema
+        // apply callback, which runs inside the schema partition's commit pipeline and would
+        // deadlock when its KV writes re-enter the same partition. The committed schema log is
+        // already the source of truth; the checkpoint is a load-time optimization, so on a
+        // persist failure we retry and then surface a typed error.
+        await PersistSchemaCheckpointWithRetryAsync(database, entry, droppedTableId).ConfigureAwait(false);
 
+        bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
+            database.Name,
+            entry.ToVersion,
+            database.Kahuna.SchemaAckWaitTimeout,
+            cancellationToken: CancellationToken.None
+        ).ConfigureAwait(false);
+
+        if (!acked)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Timed out waiting for live schema apply acknowledgements for database '{database.Name}' version {entry.ToVersion}"
             );
-        }
-
-        throw new CamusDBException(
-            CamusDBErrorCodes.InvalidInternalOperation,
-            $"Timed out waiting for local schema apply for database '{database.Name}' version {entry.ToVersion}"
-        );
     }
+
+    private static string? ResolveTableId(DatabaseDescriptor database, string tableName)
+        => database.Schema.Tables.TryGetValue(tableName, out TableSchema? table) ? table.Id : null;
+
+    private async Task PersistSchemaCheckpointWithRetryAsync(
+        DatabaseDescriptor database,
+        SchemaChangeLogEntry entry,
+        string? droppedTableId
+    )
+    {
+        const int maxAttempts = 3;
+
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await PersistSchemaCheckpointAsync(database, entry, droppedTableId).ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex) when (attempt < maxAttempts)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Schema checkpoint persist attempt {Attempt} failed for database {DbName} version {Version}; retrying",
+                    attempt,
+                    database.Name,
+                    entry.ToVersion
+                );
+
+                await Task.Delay(50 * attempt).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task PersistSchemaCheckpointAsync(
+        DatabaseDescriptor database,
+        SchemaChangeLogEntry entry,
+        string? droppedTableId
+    )
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+
+        try
+        {
+            if (entry.Op == SchemaOp.DropTable)
+            {
+                if (droppedTableId is not null)
+                    await PersistDroppedTableAsync(database, droppedTableId, entry.ToVersion, tx).ConfigureAwait(false);
+            }
+            else
+            {
+                string tableName = GetEntryTableName(entry);
+                if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema))
+                    await PersistSchemaTableAsync(database, tableSchema, entry.ToVersion, tx).ConfigureAwait(false);
+            }
+
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    private static string GetEntryTableName(SchemaChangeLogEntry entry) => entry.Op switch
+    {
+        SchemaOp.CreateTable => DecodePayload<SchemaCreateTablePayload>(entry).TableName,
+        SchemaOp.AddColumn or SchemaOp.DropColumn => DecodePayload<SchemaAlterColumnPayload>(entry).TableName,
+        SchemaOp.SetElementState => DecodePayload<SchemaElementStatePayload>(entry).TableName,
+        SchemaOp.DropTable => DecodePayload<SchemaDropTablePayload>(entry).TableName,
+        _ => throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Cannot resolve table name for schema operation '{entry.Op}'"
+        )
+    };
 
     private static async Task WaitForPreviousVersionAcksAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {

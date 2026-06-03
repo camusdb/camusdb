@@ -281,7 +281,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             if (log.LogType != SchemaChangeLogType)
                 return Task.FromResult(true);
 
-            return onApply(partitionId, log.LogData ?? []);
+            return Task.Run(() => onApply(partitionId, log.LogData ?? []));
         };
 
         Func<int, RaftLog, Task<bool>> restoreHandler = (partitionId, log) =>
@@ -289,7 +289,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             if (log.LogType != SchemaChangeLogType)
                 return Task.FromResult(true);
 
-            return onRestore(partitionId, log.LogData ?? []);
+            return Task.Run(() => onRestore(partitionId, log.LogData ?? []));
         };
 
         Raft.OnReplicationReceived += applyHandler;
@@ -341,6 +341,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         if (committed && status == RaftOperationStatus.Success)
         {
             await InvokeLocalSchemaApplyAsync(partitionId, entry).ConfigureAwait(false);
+
             return new(SchemaReplicationOutcome.Committed, partitionId, commitLogId, leader, status.ToString());
         }
 

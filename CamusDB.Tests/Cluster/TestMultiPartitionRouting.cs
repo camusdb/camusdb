@@ -615,6 +615,90 @@ public sealed class TestMultiPartitionRouting
     }
 
     [Test]
+    public async Task ClusterDropTable_InvalidatesOpenDescriptorWithoutReopen()
+    {
+        (string dbname, CommandExecutor executorA) = CreateExecutor();
+        CommandExecutor executorB = CreateExecutorForDb();
+
+        try
+        {
+            await executorA.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
+            DatabaseDescriptor databaseB = await executorB.OpenDatabase(dbname);
+
+            await executorA.CreateTable(CreateSimpleTableTicket(dbname, "robots"));
+
+            TableDescriptor tableB = await executorB.OpenTable(new OpenTableTicket(dbname, "robots"));
+            Assert.AreEqual("robots", tableB.Name);
+            Assert.True(databaseB.TableDescriptors.ContainsKey("robots"));
+
+            Assert.True(await executorA.DropTable(new DropTableTicket(dbname, "robots", ifExists: false)));
+
+            Assert.False(databaseB.Schema.Tables.ContainsKey("robots"));
+            Assert.False(databaseB.TableDescriptors.ContainsKey("robots"));
+            Assert.ThrowsAsync<CamusDBException>(() => executorB.OpenTable(new OpenTableTicket(dbname, "robots")));
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executorA);
+            await CleanupAsync(dbname, executorB);
+        }
+    }
+
+    [Test]
+    public async Task ClusterDmlAfterAlterColumn_WritesThroughSecondOpenDescriptor()
+    {
+        (string dbname, CommandExecutor executorA) = CreateExecutor();
+        CommandExecutor executorB = CreateExecutorForDb();
+
+        try
+        {
+            await executorA.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
+            DatabaseDescriptor databaseB = await executorB.OpenDatabase(dbname);
+
+            await executorA.CreateTable(CreateSimpleTableTicket(dbname, "robots"));
+            TableDescriptor tableB = await executorB.OpenTable(new OpenTableTicket(dbname, "robots"));
+            Assert.AreEqual(2, tableB.Schema.Columns!.Count);
+
+            Assert.True(await executorA.AlterTable(new AlterTableTicket(
+                databaseName: dbname,
+                tableName: "robots",
+                column: new ColumnInfo("enabled", ColumnType.Bool),
+                operation: AlterTableOperation.AddColumn
+            )));
+
+            Assert.AreEqual(3, tableB.Schema.Columns!.Count);
+            Assert.AreEqual("enabled", tableB.Schema.Columns[2].Name);
+
+            KvTransaction tx = await databaseB.Transactions.BeginAsync();
+            string rowId = ObjectIdGenerator.Generate().ToString();
+
+            await executorB.Insert(new InsertTicket(
+                tx,
+                dbname,
+                "robots",
+                [
+                    new()
+                    {
+                        ["id"] = new(ColumnType.Id, rowId),
+                        ["name"] = new(ColumnType.String, "bender"),
+                        ["enabled"] = new(ColumnType.Bool, true)
+                    }
+                ]
+            ));
+
+            await databaseB.Transactions.CommitAsync(tx);
+
+            Assert.AreEqual(1, await QueryCountAsync(executorA, dbname, "SELECT id FROM robots WHERE enabled = true"));
+            Assert.AreEqual(1, await QueryCountAsync(executorB, dbname, "SELECT id FROM robots WHERE enabled = true"));
+        }
+        finally
+        {
+            await CleanupAsync(dbname, executorA);
+            await CleanupAsync(dbname, executorB);
+        }
+    }
+
+    [Test]
     public async Task LegacyMetaSchemaBlob_MigratesToPerObjectKeys()
     {
         (string dbname, CommandExecutor executor) = CreateStandaloneExecutor();
@@ -1022,5 +1106,32 @@ public sealed class TestMultiPartitionRouting
             ],
             ifNotExists: false
         );
+    }
+
+    private static async Task<int> QueryCountAsync(CommandExecutor executor, string dbname, string sql)
+    {
+        DatabaseDescriptor database = await executor.OpenDatabase(dbname);
+        KvTransaction tx = await database.Transactions.BeginAsync();
+
+        try
+        {
+            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                tx,
+                dbname,
+                sql,
+                parameters: null
+            ));
+
+            int count = 0;
+            await foreach (QueryResultRow _ in cursor)
+                count++;
+
+            await database.Transactions.CommitAsync(tx);
+            return count;
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx);
+        }
     }
 }

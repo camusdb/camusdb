@@ -20,11 +20,14 @@ namespace CamusDB.Core.Catalogs;
 /// or <see cref="RestoreAsync"/> (log recovery on open).
 ///
 /// <see cref="ApplyAsync"/> enforces ordering/idempotency (skip already-applied versions,
-/// throw on gaps) and, on the leader, stages the change on a clone and persists the
-/// per-object checkpoint <i>before</i> mutating live in-memory schema, so a persist failure
-/// neither advances the version nor records an ack. Acks (per node, per database) are
-/// recorded only after a delta is actually applied — they drive the two-version invariant
-/// gate in <see cref="SchemaAckTracker"/>. See <c>docs/distributed-schema-architecture.md</c> §6.
+/// throw on gaps) and mutates the in-memory schema on every node. It does <b>not</b> persist
+/// the durable KV checkpoint: doing so from inside this commit-pipeline callback re-enters the
+/// same Raft partition and deadlocks. The proposer persists the checkpoint after the
+/// replication round-trip returns (<c>CatalogsManager.ReplicateAndWaitLocalApplyAsync</c>);
+/// the committed schema log is the source of truth and the checkpoint is a load-time
+/// optimization. Acks (per node, per database) are recorded only after a delta is actually
+/// applied — they drive the two-version invariant gate in <see cref="SchemaAckTracker"/>.
+/// See <c>docs/distributed-schema-architecture.md</c> §6.
 /// </summary>
 public sealed class SchemaReplicator
 {
@@ -86,38 +89,16 @@ public sealed class SchemaReplicator
                 return true;
             }
 
-            bool isLeader = await database.Kahuna.Raft.AmILeader(partitionId, CancellationToken.None).ConfigureAwait(false);
-
-            if (isLeader)
-            {
-                Schema stagedSchema = CloneSchema(database.Schema);
-                TableSchema? stagedTableSchema = CatalogsManager.ApplySchemaDelta(stagedSchema, entry);
-
-                try
-                {
-                    await PersistCheckpointAsync(database, stagedSchema.SchemaVersion, entry, stagedTableSchema).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(
-                        ex,
-                        "Failed to persist schema checkpoint for database {DbName} at version {SchemaVersion}; in-memory schema remains at version {CurrentVersion}",
-                        database.Name,
-                        entry.ToVersion,
-                        database.Schema.SchemaVersion
-                    );
-
-                    return true;
-                }
-
-                TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, entry);
-                InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
-            }
-            else
-            {
-                TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, entry);
-                InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
-            }
+            // Apply the committed delta to the in-memory schema on every node (leader and
+            // follower alike). Durable checkpoint persistence is intentionally NOT performed
+            // here: this callback runs inside the schema partition's commit pipeline, and
+            // issuing the checkpoint's KV writes (which themselves replicate on the same
+            // partition) from this context deadlocks the partition (ProposalTimeout). The
+            // proposer persists the checkpoint after the replication round-trip returns —
+            // see CatalogsManager.ReplicateAndWaitLocalApplyAsync. The committed schema log
+            // remains the source of truth; the KV checkpoint is a load-time optimization.
+            TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, entry);
+            InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
 
             logger.LogInformation(
                 "Applied schema change {SchemaOp} for database {DbName}: {FromVersion}->{ToVersion}",
@@ -196,30 +177,6 @@ public sealed class SchemaReplicator
         finally
         {
             database.Schema.Semaphore.Release();
-        }
-    }
-
-    private async Task PersistCheckpointAsync(
-        DatabaseDescriptor database,
-        long schemaVersion,
-        SchemaChangeLogEntry entry,
-        TableSchema? tableSchema
-    )
-    {
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
-
-        try
-        {
-            if (entry.Op == SchemaOp.DropTable && tableSchema?.Id is not null)
-                await catalogs.PersistDroppedTableAsync(database, tableSchema.Id, schemaVersion, tx).ConfigureAwait(false);
-            else if (tableSchema is not null)
-                await catalogs.PersistSchemaTableAsync(database, tableSchema, schemaVersion, tx).ConfigureAwait(false);
-
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
     }
 

@@ -198,8 +198,12 @@ public sealed class TestSchemaReplicator
     }
 
     [Test]
-    public async Task ApplyAsync_LeaderPersistsCheckpoint()
+    public async Task ApplyAsync_AppliesInMemoryWithoutPersistingCheckpoint()
     {
+        // ApplyAsync runs inside the schema partition's commit pipeline, so it must only
+        // mutate in-memory schema and never issue checkpoint KV writes (which would re-enter
+        // the same partition and deadlock). The durable checkpoint is written separately by
+        // the proposer (CatalogsManager.ReplicateAndWaitLocalApplyAsync).
         await using EmbeddedKahuna kahuna = new();
         await kahuna.StartAsync(CancellationToken.None);
 
@@ -214,42 +218,16 @@ public sealed class TestSchemaReplicator
 
         Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
 
+        // In-memory schema advanced...
+        Assert.AreEqual(1, database.Schema.SchemaVersion);
+        Assert.True(database.Schema.Tables.ContainsKey("robots"));
+
+        // ...but nothing was persisted, so a fresh descriptor loaded from KV sees nothing.
         DatabaseDescriptor reopened = CreateDescriptor(db, kahuna);
         await catalogs.LoadMetaAsync(reopened);
 
-        Assert.AreEqual(1, reopened.Schema.SchemaVersion);
-        Assert.True(reopened.Schema.Tables.ContainsKey("robots"));
-        Assert.AreEqual(1, reopened.Schema.Tables.Count);
-    }
-
-    [Test]
-    public async Task ApplyAsync_LeaderCheckpointFailureDoesNotAdvanceMemoryOrFailCallback()
-    {
-        await using EmbeddedKahuna kahuna = new();
-        await kahuna.StartAsync(CancellationToken.None);
-
-        string db = NextSchemaLogDatabaseName(kahuna);
-        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
-        SchemaReplicator replicator = CreateReplicator();
-        int partitionId = database.Kahuna.SchemaLogPartition(db);
-        await database.Kahuna.Raft.WaitForLeader(partitionId, CancellationToken.None);
-
-        database.Schema.Tables["robots"] = new()
-        {
-            Id = null,
-            Name = "robots",
-            Version = 0,
-            Columns = [new("id-col", "id", ColumnType.Id, true, null)],
-            SchemaHistory = [new() { Version = 0, Columns = [new("id-col", "id", ColumnType.Id, true, null)] }]
-        };
-
-        byte[] bytes = Serializator.Serialize(AddColumnEntry(db, 0, 1));
-
-        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
-
-        Assert.AreEqual(0, database.Schema.SchemaVersion);
-        Assert.AreEqual(0, database.Schema.Tables["robots"].Version);
-        Assert.AreEqual(1, database.Schema.Tables["robots"].Columns!.Count);
+        Assert.AreEqual(0, reopened.Schema.SchemaVersion);
+        Assert.AreEqual(0, reopened.Schema.Tables.Count);
     }
 
     [Test]
