@@ -155,10 +155,9 @@ public static class RowEncoder
         Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
 
         List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
-        List<TableColumnSchema>? visibilityColumns = await GetVisibilityColumnsAsync(
-            schema,
-            txId,
-            visibilitySchemaVersion).ConfigureAwait(false);
+        List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
+            ? columns
+            : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
         return DecodeColumns(columns, visibilityColumns, data, ref pointer, requiredColumns, ColumnVisibility.PublicOnly);
     }
 
@@ -182,29 +181,25 @@ public static class RowEncoder
         Serializator.ReadObjectId(data, ref pointer);
 
         List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
-        List<TableColumnSchema>? visibilityColumns = await GetVisibilityColumnsAsync(
-            schema,
-            txId,
-            visibilitySchemaVersion).ConfigureAwait(false);
+        List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
+            ? columns
+            : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
         return DecodeColumns(columns, visibilityColumns, data, ref pointer, requiredColumns, ColumnVisibility.Writable);
     }
 
     private static async ValueTask<List<TableColumnSchema>?> GetVisibilityColumnsAsync(
         TableSchema schema,
         HLCTimestamp txId,
-        long? visibilitySchemaVersion
+        long visibilitySchemaVersion
     )
     {
-        if (visibilitySchemaVersion is null)
-            return schema.Columns;
-
-        if (visibilitySchemaVersion.Value > int.MaxValue || visibilitySchemaVersion.Value < int.MinValue)
+        if (visibilitySchemaVersion > int.MaxValue || visibilitySchemaVersion < int.MinValue)
             throw new CamusDBException(
                 CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Invalid table schema visibility version {visibilitySchemaVersion.Value}"
+                $"Invalid table schema visibility version {visibilitySchemaVersion}"
             );
 
-        return (await schema.GetSchemaHistoryAsync(txId, (int)visibilitySchemaVersion.Value).ConfigureAwait(false)).Columns;
+        return (await schema.GetSchemaHistoryAsync(txId, (int)visibilitySchemaVersion).ConfigureAwait(false)).Columns;
     }
 
     private static Dictionary<string, ColumnValue> DecodeColumns(
