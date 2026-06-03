@@ -45,7 +45,7 @@ public sealed class RowUpdater
             if (string.IsNullOrEmpty(columnName))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid or empty column name in values list");
 
-            if (string.Equals(column.Name, columnName))
+            if (string.Equals(column.Name, columnName) && SchemaElementStateRules.IsWritable(column))
             {
                 hasColumn = true;
                 break;
@@ -75,6 +75,9 @@ public sealed class RowUpdater
 
         foreach (TableColumnSchema columnSchema in columns)
         {
+            if (!SchemaElementStateRules.IsWritable(columnSchema))
+                continue;
+
             if (!columnSchema.NotNull)
                 continue;
 
@@ -101,6 +104,9 @@ public sealed class RowUpdater
 
         foreach (TableColumnSchema columnSchema in columns)
         {
+            if (!SchemaElementStateRules.IsWritable(columnSchema))
+                continue;
+
             if (!columnSchema.NotNull)
                 continue;
 
@@ -197,6 +203,9 @@ public sealed class RowUpdater
 
         foreach (TableColumnSchema columnSchema in columns)
         {
+            if (!SchemaElementStateRules.IsWritable(columnSchema))
+                continue;
+
             if (!columnSchema.NotNull)
                 continue;
 
@@ -213,11 +222,15 @@ public sealed class RowUpdater
         }
     }
 
-    private static Dictionary<string, ColumnValue> GetNewUpdatedRow(QueryResultRow row, UpdateTicket ticket)
+    private static Dictionary<string, ColumnValue> GetNewUpdatedRow(
+        Dictionary<string, ColumnValue> currentRow,
+        QueryResultRow queryRow,
+        UpdateTicket ticket
+    )
     {
-        Dictionary<string, ColumnValue> rowValues = new(row.Row.Count);
+        Dictionary<string, ColumnValue> rowValues = new(currentRow.Count);
 
-        foreach (KeyValuePair<string, ColumnValue> keyValue in row.Row)
+        foreach (KeyValuePair<string, ColumnValue> keyValue in currentRow)
             rowValues[keyValue.Key] = keyValue.Value;
 
         if (ticket.PlainValues is not null)
@@ -231,7 +244,7 @@ public sealed class RowUpdater
         if (ticket.ExprValues is not null)
         {
             foreach (KeyValuePair<string, NodeAst> keyValuePair in ticket.ExprValues)
-                rowValues[keyValuePair.Key] = SqlExecutor.EvalExpr(keyValuePair.Value, row.Row, ticket.Parameters);
+                rowValues[keyValuePair.Key] = SqlExecutor.EvalExpr(keyValuePair.Value, queryRow.Row, ticket.Parameters);
 
             return rowValues;
         }
@@ -253,19 +266,19 @@ public sealed class RowUpdater
 
         foreach (QueryResultRow queryRow in state.RowsToUpdate)
         {
-            Dictionary<string, ColumnValue> rowValues = GetNewUpdatedRow(queryRow, ticket);
+            ObjectIdValue rowId = queryRow.RowId;
+            Dictionary<string, ColumnValue> oldRow = await LoadWritableRow(state.Database, table, tx, rowId).ConfigureAwait(false);
+            Dictionary<string, ColumnValue> rowValues = GetNewUpdatedRow(oldRow, queryRow, ticket);
 
             CheckForNotNulls(table, rowValues);
-
-            ObjectIdValue rowId = queryRow.RowId;
 
             byte[] buffer = RowEncoder.Encode(table.Schema, rowValues, rowId);
 
             await table.Store.UpdateRow(tx, rowId, buffer).ConfigureAwait(false);
 
-            await UpdateUniqueIndexes(table, tx, rowId, queryRow.Row, rowValues).ConfigureAwait(false);
+            await UpdateUniqueIndexes(table, tx, rowId, oldRow, rowValues).ConfigureAwait(false);
 
-            await UpdateMultiIndexes(table, tx, rowId, queryRow.Row, rowValues).ConfigureAwait(false);
+            await UpdateMultiIndexes(table, tx, rowId, oldRow, rowValues).ConfigureAwait(false);
 
             logger.LogInformation("Row with rowid {RowId} updated", rowId);
 
@@ -273,6 +286,25 @@ public sealed class RowUpdater
         }
 
         return FluxAction.Continue;
+    }
+
+    private static async Task<Dictionary<string, ColumnValue>> LoadWritableRow(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        KvTransaction tx,
+        ObjectIdValue rowId
+    )
+    {
+        byte[]? data = await table.Store.GetRow(tx.TransactionId, rowId).ConfigureAwait(false);
+        if (data is null || data.Length == 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before update");
+
+        return await RowEncoder.DecodeWritableAsync(
+            table.Schema,
+            tx.TransactionId,
+            rowId,
+            data,
+            visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
     }
 
     private static async Task UpdateUniqueIndexes(
@@ -287,7 +319,7 @@ public sealed class RowUpdater
         {
             TableIndexSchema index = kv.Value;
 
-            if (index.Type != IndexType.Unique)
+            if (index.Type != IndexType.Unique || !SchemaElementStateRules.IsWritableIndex(table.Schema, index))
                 continue;
 
             CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns);
@@ -310,7 +342,7 @@ public sealed class RowUpdater
         {
             TableIndexSchema index = kv.Value;
 
-            if (index.Type != IndexType.Multi)
+            if (index.Type != IndexType.Multi || !SchemaElementStateRules.IsWritableIndex(table.Schema, index))
                 continue;
 
             ColumnValue rowIdValue = new(ColumnType.Id, rowId.ToString());

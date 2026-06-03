@@ -22,8 +22,12 @@ public sealed class TestRowEncoder
 {
     // ---- schema helpers ---------------------------------------------------
 
-    private static TableColumnSchema Col(string name, ColumnType type, bool notNull = false) =>
-        new(name, name, type, notNull, null);
+    private static TableColumnSchema Col(
+        string name,
+        ColumnType type,
+        bool notNull = false,
+        SchemaElementState state = SchemaElementState.Public
+    ) => new(name, name, type, notNull, null, state);
 
     /// <summary>
     /// Builds a minimal TableSchema whose SchemaHistory[version] matches its Columns list,
@@ -118,6 +122,117 @@ public sealed class TestRowEncoder
             Assert.AreEqual(ColumnType.String, decoded["s"].Type);
             Assert.AreEqual(v, decoded["s"].StrValue, $"Round-trip failed for string '{v}'");
         }
+    }
+
+    [Test]
+    public void Decode_UsesCurrentStateForVisibilityWhenRowUsesOldSchemaHistory()
+    {
+        TableSchema schema = MakeSchema(0,
+            Col("id", ColumnType.Id),
+            Col("shadow", ColumnType.String));
+        ObjectIdValue rowId = RowId();
+        byte[] bytes = RowEncoder.Encode(schema, new()
+        {
+            ["id"] = new(ColumnType.Id, rowId.ToString()),
+            ["shadow"] = new(ColumnType.String, "hidden")
+        }, rowId);
+
+        schema.Version = 1;
+        schema.Columns =
+        [
+            Col("id", ColumnType.Id),
+            Col("shadow", ColumnType.String, state: SchemaElementState.DeleteOnly)
+        ];
+
+        Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+        Assert.True(decoded.ContainsKey("id"));
+        Assert.False(decoded.ContainsKey("shadow"));
+    }
+
+    [Test]
+    public void DecodeWritable_IncludesWriteOnlyColumnsButNotDeleteOnlyColumns()
+    {
+        TableSchema schema = MakeSchema(0,
+            Col("public_col", ColumnType.String),
+            Col("write_col", ColumnType.String, state: SchemaElementState.WriteOnly),
+            Col("delete_col", ColumnType.String, state: SchemaElementState.DeleteOnly));
+        ObjectIdValue rowId = RowId();
+        byte[] bytes = RowEncoder.Encode(schema, new()
+        {
+            ["public_col"] = new(ColumnType.String, "visible"),
+            ["write_col"] = new(ColumnType.String, "internal"),
+            ["delete_col"] = new(ColumnType.String, "ignored")
+        }, rowId);
+
+        Dictionary<string, ColumnValue> visible = RowEncoder.Decode(schema, rowId, bytes);
+        Dictionary<string, ColumnValue> writable = RowEncoder.DecodeWritableAsync(
+            schema,
+            Kommander.Time.HLCTimestamp.Zero,
+            rowId,
+            bytes).AsTask().GetAwaiter().GetResult();
+
+        Assert.True(visible.ContainsKey("public_col"));
+        Assert.False(visible.ContainsKey("write_col"));
+        Assert.False(visible.ContainsKey("delete_col"));
+
+        Assert.True(writable.ContainsKey("public_col"));
+        Assert.True(writable.ContainsKey("write_col"));
+        Assert.False(writable.ContainsKey("delete_col"));
+        Assert.AreEqual("internal", writable["write_col"].StrValue);
+    }
+
+    [Test]
+    public void Decode_DoesNotMapDroppedColumnBytesToReaddedSameNameColumn()
+    {
+        TableSchema schema = MakeSchema(0, new TableColumnSchema(
+            id: "old-x",
+            name: "x",
+            type: ColumnType.String,
+            notNull: false,
+            defaultValue: null));
+        ObjectIdValue rowId = RowId();
+        byte[] bytes = RowEncoder.Encode(schema, new()
+        {
+            ["x"] = new(ColumnType.String, "old-bytes")
+        }, rowId);
+
+        schema.Version = 1;
+        schema.Columns =
+        [
+            new TableColumnSchema("new-x", "x", ColumnType.String, false, null, SchemaElementState.Public)
+        ];
+
+        Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+        Assert.False(decoded.ContainsKey("x"));
+    }
+
+    [Test]
+    public void Decode_NameFallbackStillWorksForLegacyIdlessHistoryColumns()
+    {
+        TableSchema schema = MakeSchema(0, new TableColumnSchema(
+            id: "",
+            name: "legacy",
+            type: ColumnType.String,
+            notNull: false,
+            defaultValue: null));
+        ObjectIdValue rowId = RowId();
+        byte[] bytes = RowEncoder.Encode(schema, new()
+        {
+            ["legacy"] = new(ColumnType.String, "kept")
+        }, rowId);
+
+        schema.Version = 1;
+        schema.Columns =
+        [
+            new TableColumnSchema("legacy-id", "legacy", ColumnType.String, false, null, SchemaElementState.Public)
+        ];
+
+        Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+        Assert.True(decoded.ContainsKey("legacy"));
+        Assert.AreEqual("kept", decoded["legacy"].StrValue);
     }
 
     [Test]

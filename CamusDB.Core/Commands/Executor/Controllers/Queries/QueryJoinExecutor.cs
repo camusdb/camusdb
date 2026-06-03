@@ -276,7 +276,8 @@ internal sealed class QueryJoinExecutor
             plan.Ticket.TxnState.TransactionId,
             rowId,
             data,
-            GetRequiredColumnsForAlias(plan, source.Alias)).ConfigureAwait(false);
+            GetRequiredColumnsForAlias(plan, source.Alias),
+            GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
 
         if (executionFilter is not null)
         {
@@ -354,7 +355,8 @@ internal sealed class QueryJoinExecutor
                 txId,
                 rowId,
                 data,
-                required).ConfigureAwait(false);
+                required,
+                GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
 
             if (executionFilter is not null)
             {
@@ -403,6 +405,13 @@ internal sealed class QueryJoinExecutor
             return required;
 
         return plan.ScanRequiredColumns;
+    }
+
+    private static int GetTableSchemaVersionForAlias(QueryPlan plan, string alias)
+    {
+        return plan.TableSchemaVersionByAlias.TryGetValue(alias, out int version)
+            ? version
+            : plan.TableSchemaVersion;
     }
 
     private static ColumnType[] GetIndexColumnTypes(TableDescriptor table, TableIndexSchema index)

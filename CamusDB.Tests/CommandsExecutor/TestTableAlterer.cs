@@ -565,6 +565,7 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
         TableDescriptor table = await executor.OpenTable(openTableTicket);
         Assert.True(table.Indexes.TryGetValue("name_idx", out TableIndexSchema? index));
         Assert.AreEqual(IndexType.Multi, index!.Type);
+        Assert.AreEqual(SchemaElementState.Public, index.State);
         
         txnState = await database.Transactions.BeginAsync();
 
@@ -673,15 +674,32 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
         TableDescriptor table = await executor.OpenTable(openTableTicket);
         Assert.True(table.Indexes.TryGetValue("name_idx", out TableIndexSchema? index));
         Assert.AreEqual(IndexType.Multi, index!.Type);
+        Assert.AreEqual(SchemaElementState.Public, index.State);
+
+        DatabaseIndexObject systemIndex = database.SystemSchema.Indexes.Values.Single(x => x.Name == "name_idx");
+        Assert.AreEqual(SchemaElementState.Public, systemIndex.State);
+        Assert.IsNotEmpty(systemIndex.StartOffset);
 
         await database.Transactions.CommitAsync(txnState);
 
         txnState = await database.Transactions.BeginAsync();
 
+        ExecuteSQLTicket fullIndexScanTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT id FROM robots@{FORCE_INDEX=name_idx}",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> fullIndexCursor) = await executor.ExecuteSQLQuery(fullIndexScanTicket);
+
+        List<QueryResultRow> fullIndexResult = await fullIndexCursor.ToListAsync();
+        Assert.AreEqual(25, fullIndexResult.Count);
+
         ExecuteSQLTicket ticket = new(
             txnState: txnState,
             database: dbname,
-            sql: "SELECT name FROM robots WHERE name = 'some name 7'",
+            sql: "SELECT name FROM robots@{FORCE_INDEX=name_idx} WHERE name = 'some name 7'",
             parameters: null
         );
 
@@ -720,6 +738,7 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
         TableDescriptor table = await executor.OpenTable(openTableTicket);
         Assert.True(table.Indexes.TryGetValue("name_idx", out TableIndexSchema? index));
         Assert.AreEqual(IndexType.Multi, index!.Type);
+        Assert.AreEqual(SchemaElementState.Public, index.State);
     }
 
     [Test]
@@ -768,6 +787,10 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
 
         CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () => await executor.AlterIndex(alterIndexTicket));
         Assert.True(exception!.Message.StartsWith("Duplicate entry for key 'name_idx'"));
+
+        TableDescriptor table = await executor.OpenTable(new OpenTableTicket(dbname, "robots"));
+        Assert.False(table.Indexes.ContainsKey("name_idx"));
+        Assert.False(database.SystemSchema.Indexes.Values.Any(index => index.Name == "name_idx"));
     }
 
     [Test]

@@ -220,7 +220,8 @@ internal sealed class QueryExecutor
             txId,
             resolvedRowId,
             data,
-            plan.ScanRequiredColumns).ConfigureAwait(false);
+            plan.ScanRequiredColumns,
+            plan.TableSchemaVersion).ConfigureAwait(false);
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(resolvedRowId, row);
@@ -275,7 +276,8 @@ internal sealed class QueryExecutor
                 txId,
                 rowId,
                 data,
-                plan.ScanRequiredColumns).ConfigureAwait(false);
+                plan.ScanRequiredColumns,
+                plan.TableSchemaVersion).ConfigureAwait(false);
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);
@@ -307,7 +309,12 @@ internal sealed class QueryExecutor
         if (data is null || data.Length == 0)
             yield break;
 
-        yield return await RowEncoder.DecodeAsync(table.Schema, txId, rowId.Value, data).ConfigureAwait(false);
+        yield return await RowEncoder.DecodeAsync(
+            table.Schema,
+            txId,
+            rowId.Value,
+            data,
+            visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
     }
 
     private static ColumnType[] GetIndexColumnTypes(TableDescriptor table, TableIndexSchema index)

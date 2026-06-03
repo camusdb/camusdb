@@ -161,7 +161,11 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// Begins a transaction, runs <paramref name="action"/>, commits on success,
     /// or rolls back (and re-throws) on any exception.
     /// </summary>
-    private async Task<T> ExecuteDdlInTransaction<T>(DatabaseDescriptor database, Func<KvTransaction, Task<T>> action)
+    private async Task<T> ExecuteDdlInTransaction<T>(
+        DatabaseDescriptor database,
+        Func<KvTransaction, Task<T>> action,
+        Func<Task>? onAbort = null
+    )
     {
         if (!database.OwnsKahuna)
             await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
@@ -173,9 +177,27 @@ public sealed class CommandExecutor : IAsyncDisposable
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
             return result;
         }
-        catch
+        catch (Exception ex)
         {
             await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+
+            if (onAbort is not null)
+            {
+                try
+                {
+                    await onAbort().ConfigureAwait(false);
+                }
+                catch (Exception cleanupEx)
+                {
+                    logger.LogWarning(
+                        cleanupEx,
+                        "Failed to run DDL abort compensation for database {DatabaseName} after {ErrorType}",
+                        database.Name,
+                        ex.GetType().Name
+                    );
+                }
+            }
+
             throw;
         }
         finally
@@ -231,9 +253,43 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await ExecuteDdlInTransaction(database, tx =>
-            tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx)
+        bool addIndexOperation = ticket.Operation is
+            AlterIndexOperation.AddIndex or
+            AlterIndexOperation.AddUniqueIndex or
+            AlterIndexOperation.AddPrimaryKey;
+        bool indexExistedBefore = table.Indexes.ContainsKey(ticket.IndexName);
+
+        return await ExecuteDdlInTransaction(
+            database,
+            tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx),
+            onAbort: addIndexOperation && !indexExistedBefore
+                ? () => CompensateAbortedAddIndexAsync(database, table, ticket.IndexName)
+                : null
         ).ConfigureAwait(false);
+    }
+
+    private static async Task CompensateAbortedAddIndexAsync(DatabaseDescriptor database, TableDescriptor table, string indexName)
+    {
+        table.Indexes.Remove(indexName);
+
+        await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            List<string> indexIdsToRemove = [];
+
+            foreach (KeyValuePair<string, DatabaseIndexObject> index in database.SystemSchema.Indexes)
+            {
+                if (index.Value.TableId == table.Id && index.Value.Name == indexName)
+                    indexIdsToRemove.Add(index.Key);
+            }
+
+            foreach (string indexId in indexIdsToRemove)
+                database.SystemSchema.Indexes.Remove(indexId);
+        }
+        finally
+        {
+            database.SystemSchemaSemaphore.Release();
+        }
     }
 
     public async Task<bool> DropTable(DropTableTicket ticket)
@@ -517,6 +573,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        PinSchemaVersion(database, table, ticket.TxnState);
 
         return new(database, table, await rowInserter.Insert(database, table, ticket).ConfigureAwait(false));
     }
@@ -533,6 +590,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        PinSchemaVersion(database, table, ticket.TxnState);
 
         return new(database, table, await rowUpdater.Update(queryExecutor, database, table, ticket).ConfigureAwait(false));
     }
@@ -549,6 +607,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        PinSchemaVersion(database, table, ticket.TxnState);
 
         return new(database, table, await rowDeleter.Delete(queryExecutor, database, table, ticket).ConfigureAwait(false));
     }
@@ -565,6 +624,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        PinSchemaVersion(database, table, ticket.TxnState);
 
         return (database, queryExecutor.Query(database, table, ticket));
     }
@@ -581,6 +641,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        PinSchemaVersion(database, table, ticket.TxnState);
 
         return queryExecutor.QueryById(database, table, ticket);
     }
@@ -605,6 +666,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     InsertTicket insertTicket = await sqlExecutor.CreateInsertTicket(this, database, ticket, ast).ConfigureAwait(false);
 
                     TableDescriptor table = await tableOpener.Open(database, insertTicket.TableName).ConfigureAwait(false);
+                    PinSchemaVersion(database, table, ticket.TxnState);
 
                     return new(database, table, await rowInserter.Insert(database, table, insertTicket).ConfigureAwait(false));
                 }
@@ -614,6 +676,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     UpdateTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);
 
                     TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName).ConfigureAwait(false);
+                    PinSchemaVersion(database, table, ticket.TxnState);
 
                     return new(database, table, await rowUpdater.Update(queryExecutor, database, table, updateTicket));
                 }
@@ -623,6 +686,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     DeleteTicket deleteTicket = sqlExecutor.CreateDeleteTicket(ticket, ast);
 
                     TableDescriptor table = await tableOpener.Open(database, deleteTicket.TableName).ConfigureAwait(false);
+                    PinSchemaVersion(database, table, ticket.TxnState);
 
                     return new(database, table, await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false));
                 }
@@ -669,6 +733,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                         boundQuery.RowNames,
                         boundQuery.DerivedSources);
                     QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(boundQuery, ticket, existsRegistry);
+                    PinSchemaVersions(database, boundQuery.Sources, ticket.TxnState);
 
                     if (boundQuery.IsMultiSource)
                         return (database, queryExecutor.ExecuteJoinQuery(database, boundQuery, queryTicket));
@@ -686,6 +751,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.ShowColumns:
                 {
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
+                    PinSchemaVersion(database, table, ticket.TxnState);
 
                     return (database, schemaQuerier.ShowColumns(table));
                 }
@@ -693,6 +759,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.ShowIndexes:
                 {
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
+                    PinSchemaVersion(database, table, ticket.TxnState);
 
                     return (database, schemaQuerier.ShowIndexes(table));
                 }
@@ -700,6 +767,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.ShowCreateTable:
                 {
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
+                    PinSchemaVersion(database, table, ticket.TxnState);
 
                     return (database, schemaQuerier.ShowCreateTable(table));
                 }
@@ -715,6 +783,28 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     #endregion   
+
+    private static void PinSchemaVersions(
+        DatabaseDescriptor database,
+        IEnumerable<BoundTableSource> sources,
+        KvTransaction tx
+    )
+    {
+        foreach (BoundTableSource source in sources)
+            PinSchemaVersion(database, source.Table, tx);
+    }
+
+    private static void PinSchemaVersion(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx)
+    {
+        string resource = $"{database.Name}/{table.Id}";
+        tx.PinSchemaVersion(
+            resource,
+            table.Schema.Version,
+            () => table.Schema.Version,
+            () => database.Schema.Tables.TryGetValue(table.Name, out TableSchema? current)
+                  && current.Id == table.Id
+        );
+    }
 
     public async ValueTask DisposeAsync()
     {

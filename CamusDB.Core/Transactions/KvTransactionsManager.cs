@@ -132,6 +132,8 @@ public sealed class KvTransactionsManager
                 $"Transaction {tx.UniqueId} is already {tx.Status}"
             );
 
+        tx.ValidateSchemaPins();
+
         KeyValueResponseType result = await kahuna.LocateAndCommitTransaction(
             tx.UniqueId,
             tx.TransactionId,

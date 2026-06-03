@@ -33,6 +33,7 @@ internal sealed class QueryScanner
     {
         TableDescriptor table = plan.Table;
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
+        int visibilityVersion = plan.TableSchemaVersion;
 
         await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(txId, maxRows: plan.ScanRowLimit))
         {
@@ -44,7 +45,8 @@ internal sealed class QueryScanner
                 txId,
                 rowId,
                 data,
-                plan.ScanRequiredColumns).ConfigureAwait(false);
+                plan.ScanRequiredColumns,
+                visibilityVersion).ConfigureAwait(false);
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);
@@ -59,8 +61,17 @@ internal sealed class QueryScanner
     {
         TableDescriptor table = plan.Table;
         QueryTicket ticket = plan.Ticket;
+        int visibilityVersion = plan.TableSchemaVersion;
 
         if (!table.Indexes.TryGetValue(ticket.IndexName!, out TableIndexSchema? index))
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.UnknownKey,
+                $"Key '{ticket.IndexName!}' doesn't exist in table '{table.Name}'"
+            );
+        }
+
+        if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.UnknownKey,
@@ -95,7 +106,8 @@ internal sealed class QueryScanner
                 txId,
                 rowId,
                 data,
-                plan.ScanRequiredColumns).ConfigureAwait(false);
+                plan.ScanRequiredColumns,
+                visibilityVersion).ConfigureAwait(false);
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);
@@ -115,4 +127,5 @@ internal sealed class QueryScanner
 
         return types;
     }
+
 }

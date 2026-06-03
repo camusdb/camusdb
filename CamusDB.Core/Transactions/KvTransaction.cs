@@ -49,6 +49,7 @@ public sealed class KvTransaction
 
     private HashSet<(string key, KeyValueDurability durability)>? acquiredLocks;
     private HashSet<(string key, KeyValueDurability durability)>? modifiedKeys;
+    private Dictionary<string, SchemaVersionPin>? schemaPins;
 
     public KvTransaction(HLCTimestamp transactionId, string uniqueId)
     {
@@ -75,6 +76,67 @@ public sealed class KvTransaction
         modifiedKeys.Add((key, durability));
     }
 
+    public void PinSchemaVersion(
+        string resource,
+        long schemaVersion,
+        Func<long> currentVersion,
+        Func<bool>? isStillValid = null
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(resource);
+        ArgumentNullException.ThrowIfNull(currentVersion);
+
+        schemaPins ??= new(StringComparer.Ordinal);
+
+        if (schemaPins.TryGetValue(resource, out SchemaVersionPin pin))
+        {
+            if (pin.SchemaVersion != schemaVersion)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"Transaction {UniqueId} already pinned schema resource '{resource}' at version {pin.SchemaVersion}, not {schemaVersion}"
+                );
+
+            return;
+        }
+
+        schemaPins[resource] = new(schemaVersion, currentVersion, isStillValid);
+    }
+
+    public void ValidateSchemaPins()
+    {
+        if (schemaPins is null)
+            return;
+
+        foreach ((string resource, SchemaVersionPin pin) in schemaPins)
+        {
+            if (pin.IsStillValid is not null && !pin.IsStillValid())
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"Transaction {UniqueId} pinned schema resource '{resource}', but it is no longer present"
+                );
+            }
+
+            long current = pin.CurrentVersion();
+            if (current == pin.SchemaVersion)
+                continue;
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Transaction {UniqueId} pinned schema resource '{resource}' at version {pin.SchemaVersion}, but current version is {current}"
+            );
+        }
+    }
+
+    public long? GetPinnedSchemaVersion(string resource)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(resource);
+
+        return schemaPins is not null && schemaPins.TryGetValue(resource, out SchemaVersionPin pin)
+            ? pin.SchemaVersion
+            : null;
+    }
+
     /// <summary>Returns the acquired-locks list in the shape Kahuna's commit/rollback expects.</summary>
     public List<KeyValueTransactionModifiedKey> GetAcquiredLocks()
     {
@@ -98,4 +160,10 @@ public sealed class KvTransaction
             result.Add(new KeyValueTransactionModifiedKey { Key = key, Durability = durability });
         return result;
     }
+
+    private readonly record struct SchemaVersionPin(
+        long SchemaVersion,
+        Func<long> CurrentVersion,
+        Func<bool>? IsStillValid
+    );
 }

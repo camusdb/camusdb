@@ -45,6 +45,9 @@ internal sealed class JoinQueryPlanner
             Root = BuildJoinTree(bound.Query.Source, bound, pushdown),
         };
 
+        foreach (BoundTableSource source in bound.Sources)
+            plan.TableSchemaVersionByAlias[source.Alias] = source.Table.Schema.Version;
+
         QueryPlanStepAdapter.PopulateLinearSteps(plan);
         ProjectionPushdownPlanner.Apply(plan);
 

@@ -42,9 +42,14 @@ public sealed record DatabaseIndexObject
     public IndexType Type { get; }
 
     /// <summary>
-    /// Offset of the first page of the index.
+    /// Last row id checkpoint completed by an online index backfill.
     /// </summary>
     public string StartOffset { get; }
+
+    /// <summary>
+    /// Online schema-change state of the index.
+    /// </summary>
+    public SchemaElementState State { get; }
 
     /// <summary>
     /// Constructor
@@ -55,7 +60,16 @@ public sealed record DatabaseIndexObject
     /// <param name="columnIds"></param>
     /// <param name="type"></param>
     /// <param name="startOffset"></param>
-    public DatabaseIndexObject(string id, string name, string tableId, string[] columnIds, IndexType type, string startOffset)
+    /// <param name="state"></param>
+    public DatabaseIndexObject(
+        string id,
+        string name,
+        string tableId,
+        string[] columnIds,
+        IndexType type,
+        string startOffset,
+        SchemaElementState state = SchemaElementState.Public
+    )
     {
         Id = id;
         Name = name;
@@ -63,5 +77,6 @@ public sealed record DatabaseIndexObject
         ColumnIds = columnIds;        
         Type = type;
         StartOffset = startOffset;
+        State = state;
     }
 }

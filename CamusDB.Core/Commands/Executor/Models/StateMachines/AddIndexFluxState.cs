@@ -31,6 +31,10 @@ internal sealed class AddIndexFluxState
 
     public int ModifiedRows { get; set; }
 
+    public string? IndexId { get; set; }
+
+    public string? LastBackfilledRowId { get; set; }
+
     public AddIndexFluxState(
         CatalogsManager catalogs,
         KvTransaction tx,

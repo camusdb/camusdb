@@ -190,6 +190,13 @@ public sealed class QueryPlanner
                     $"Key '{ticket.IndexName}' doesn't exist in table '{table.Name}'");
             }
 
+            if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.UnknownKey,
+                    $"Key '{ticket.IndexName}' doesn't exist in table '{table.Name}'");
+            }
+
             QueryPlanStep forcedIndexStep = new(QueryPlanStepType.FullScanFromIndex, index);
             return (new TableScanNode(TableScanSource.ForcedIndex, index), forcedIndexStep);
         }
@@ -230,5 +237,5 @@ public sealed class QueryPlanner
                     $"Cannot convert plan step to scan node: {step.Type}");
         }
     }
-}
 
+}

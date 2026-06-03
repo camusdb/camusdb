@@ -45,7 +45,12 @@ public sealed class QueryRowNameResolver
             }
 
             foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
+            {
+                if (!SchemaElementStateRules.IsReadable(column))
+                    continue;
+
                 RegisterColumnAlias(column.Name, source.Alias);
+            }
         }
 
         foreach (BoundDerivedTableSource source in this.derivedSources)
@@ -170,7 +175,7 @@ public sealed class QueryRowNameResolver
     {
         foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
         {
-            if (column.Name == columnName)
+            if (column.Name == columnName && SchemaElementStateRules.IsReadable(column))
                 return true;
         }
 

@@ -99,6 +99,7 @@ public sealed class KvTableStore
     public async IAsyncEnumerable<(ObjectIdValue rowId, byte[] data)> ScanRows(
         HLCTimestamp txId,
         long? maxRows = null,
+        ObjectIdValue? afterRowId = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         if (maxRows is <= 0)
@@ -122,6 +123,12 @@ public sealed class KvTableStore
             // Key format: "{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
             ReadOnlySpan<char> hex = key.AsSpan(prefixLen);
             ObjectIdValue rowId = ObjectId.ToValue(hex.ToString());
+
+            // Resume uses ObjectIdValue.CompareTo because ObjectId.ToString writes the
+            // same unsigned a/b/c segments in big-endian hex. Keep that equivalence
+            // pinned by tests before changing ObjectId formatting or comparison.
+            if (afterRowId is not null && rowId.CompareTo(afterRowId.Value) <= 0)
+                continue;
 
             if (maxRows is not null && emitted >= maxRows.Value)
                 yield break;

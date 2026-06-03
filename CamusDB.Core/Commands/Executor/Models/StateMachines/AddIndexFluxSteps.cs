@@ -15,7 +15,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 public enum AddIndexFluxSteps
 {
     NotInitialized = 0,
-    LocateTuplesToFeedTheIndex = 1,
-    FeedTheIndex = 2,
-    AddSystemObject = 3,
+    AddWriteOnlySystemObject = 1,
+    BackfillIndex = 2,
+    PublishIndex = 3,
 }

@@ -8,6 +8,7 @@
 
 using System.Collections.Generic;
 using System.Linq;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -245,6 +246,55 @@ public sealed class TestKvTableStore
                 string.CompareOrdinal(scannedIds[i].ToString(), scannedIds[i + 1].ToString()),
                 Is.LessThanOrEqualTo(0),
                 $"Scan not sorted at position {i}: {scannedIds[i]} vs {scannedIds[i + 1]}"
+            );
+
+            Assert.That(
+                scannedIds[i].CompareTo(scannedIds[i + 1]),
+                Is.LessThanOrEqualTo(0),
+                $"ObjectId comparison diverged from scan order at position {i}: {scannedIds[i]} vs {scannedIds[i + 1]}"
+            );
+        }
+    }
+
+    [Test]
+    public async Task ScanRows_AfterRowIdUsesSameOrderAsFixedWidthObjectIdKeys()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("t7-resume");
+        await using EmbeddedKahuna __ = node;
+
+        TableSchema schema = MakeSchema(Col("n", ColumnType.Integer64));
+        ObjectIdValue[] ids =
+        [
+            new(0x00000001, 0, 0),
+            new(unchecked((int)0x80000000), 0, 0),
+            new(unchecked((int)0xffffffff), 0, 0),
+            new(unchecked((int)0xffffffff), 0x00000001, 0),
+            new(unchecked((int)0xffffffff), unchecked((int)0xffffffff), 0x00000001)
+        ];
+
+        KvTransaction tx = await BeginTransaction(node.Kahuna, "t7-resume-insert");
+        foreach (ObjectIdValue id in ids.Reverse())
+        {
+            byte[] data = RowEncoder.Encode(schema, new() { ["n"] = new(ColumnType.Integer64, 1L) }, id);
+            await store.InsertRow(tx, id, data);
+        }
+        await CommitTransaction(node.Kahuna, tx);
+
+        ObjectIdValue[] expected = ids.OrderBy(x => x.ToString(), StringComparer.Ordinal).ToArray();
+        ObjectIdValue afterRowId = expected[1];
+
+        List<ObjectIdValue> scannedIds = [];
+        await foreach ((ObjectIdValue rowId, _) in store.ScanRows(HLCTimestamp.Zero, afterRowId: afterRowId))
+            scannedIds.Add(rowId);
+
+        Assert.AreEqual(expected.Skip(2).ToArray(), scannedIds);
+
+        for (int i = 0; i + 1 < expected.Length; i++)
+        {
+            Assert.AreEqual(
+                Math.Sign(string.CompareOrdinal(expected[i].ToString(), expected[i + 1].ToString())),
+                Math.Sign(expected[i].CompareTo(expected[i + 1])),
+                $"ObjectId string order and CompareTo order diverged for {expected[i]} vs {expected[i + 1]}"
             );
         }
     }

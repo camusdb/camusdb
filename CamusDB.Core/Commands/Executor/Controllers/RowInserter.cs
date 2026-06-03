@@ -48,7 +48,7 @@ internal sealed class RowInserter
                 for (int i = 0; i < columns.Count; i++)
                 {
                     TableColumnSchema column = columns[i];
-                    if (column.Name == columnValue.Key)
+                    if (column.Name == columnValue.Key && SchemaElementStateRules.IsWritable(column))
                     {
                         hasColumn = true;
                         break;
@@ -65,6 +65,9 @@ internal sealed class RowInserter
             // Step #2. Check for not null violations
             foreach (TableColumnSchema columnSchema in columns)
             {
+                if (!SchemaElementStateRules.IsWritable(columnSchema))
+                    continue;
+
                 if (!columnSchema.NotNull)
                     continue;
 
@@ -154,6 +157,8 @@ internal sealed class RowInserter
             foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
             {
                 TableIndexSchema index = kv.Value;
+                if (!SchemaElementStateRules.IsWritableIndex(table.Schema, index))
+                    continue;
 
                 if (index.Type == IndexType.Unique)
                 {

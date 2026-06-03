@@ -34,7 +34,7 @@ public sealed record BoundJoinRightSource
     {
         foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
         {
-            if (column.Name == columnName)
+            if (column.Name == columnName && SchemaElementStateRules.IsReadable(column))
                 return true;
         }
 

@@ -46,6 +46,9 @@ internal sealed class SchemaQuerier
 
         foreach (TableColumnSchema column in table.Schema.Columns!)
         {
+            if (!SchemaElementStateRules.IsReadable(column))
+                continue;
+
             yield return new QueryResultRow(default, new()
             {
                 { "Field", new ColumnValue(ColumnType.String, column.Name) },
@@ -91,6 +94,9 @@ internal sealed class SchemaQuerier
 
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
+            if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index.Value))
+                continue;
+
             yield return new QueryResultRow(default, new()
             {
                 { "Table", new ColumnValue(ColumnType.String, table.Name) },
@@ -115,6 +121,9 @@ internal sealed class SchemaQuerier
         int i = 0;
         foreach (TableColumnSchema column in columns)
         {
+            if (!SchemaElementStateRules.IsReadable(column))
+                continue;
+
             createTableSql.Append(' ');
             createTableSql.Append('`');
             createTableSql.Append(column.Name);
@@ -129,6 +138,9 @@ internal sealed class SchemaQuerier
 
         foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
         {
+            if (!SchemaElementStateRules.IsReadableIndex(table.Schema, kv.Value))
+                continue;
+
             string cols = string.Join(", ", kv.Value.Columns.Select(c => "`" + c + "`"));
 
             if (kv.Key == CamusDBConfig.PrimaryKeyInternalName)
@@ -185,4 +197,5 @@ internal sealed class SchemaQuerier
 
         return "NULL";
     }
+
 }

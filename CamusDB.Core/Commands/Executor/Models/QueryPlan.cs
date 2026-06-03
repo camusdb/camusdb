@@ -42,6 +42,8 @@ public sealed class QueryPlan
 
 	public QueryTicket Ticket { get; }
 
+    public int TableSchemaVersion { get; }
+
 	public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }
 
     /// <summary>Cached materializations for derived table scans within a join query (QP5.5).</summary>
@@ -54,17 +56,20 @@ public sealed class QueryPlan
     /// <summary>Per-alias scan column subsets for join plans (QP6.1).</summary>
     internal Dictionary<string, IReadOnlySet<string>>? RequiredColumnsByAlias { get; set; }
 
+    internal Dictionary<string, int> TableSchemaVersionByAlias { get; } = new(StringComparer.Ordinal);
+
     /// <summary>
     /// Optional scan-level row cap for LIMIT pushdown (QP6.3).
     /// When set, scan operators may stop after emitting this many rows.
     /// </summary>
     public long? ScanRowLimit { get; internal set; }
 
-    public QueryPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+	public QueryPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
 	{
 		Database = database;
 		Table = table;
 		Ticket = ticket;
+        TableSchemaVersion = table.Schema.Version;
 	}
 
 	public void AddStep(QueryPlanStep step)

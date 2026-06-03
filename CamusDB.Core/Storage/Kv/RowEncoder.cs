@@ -37,6 +37,12 @@ namespace CamusDB.Core.Storage.Kv;
 /// </summary>
 public static class RowEncoder
 {
+    private enum ColumnVisibility
+    {
+        PublicOnly,
+        Writable
+    }
+
     public static byte[] Encode(TableSchema schema, Dictionary<string, ColumnValue> row, ObjectIdValue rowId)
     {
         ArgumentNullException.ThrowIfNull(schema);
@@ -57,6 +63,12 @@ public static class RowEncoder
         for (int i = 0; i < columns.Count; i++)
         {
             TableColumnSchema column = columns[i];
+
+            if (!SchemaElementStateRules.IsWritable(column))
+            {
+                Serializator.WriteType(buffer, SerializatorTypes.TypeNull, ref pointer);
+                continue;
+            }
 
             if (!row.TryGetValue(column.Name, out ColumnValue? columnValue))
             {
@@ -120,7 +132,7 @@ public static class RowEncoder
         Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
 
         List<TableColumnSchema> columns = schema.GetSchemaHistory(schemaVersion).Columns!;
-        return DecodeColumns(columns, data, ref pointer, requiredColumns);
+        return DecodeColumns(columns, schema.Columns, data, ref pointer, requiredColumns, ColumnVisibility.PublicOnly);
     }
 
     public static async ValueTask<Dictionary<string, ColumnValue>> DecodeAsync(
@@ -128,7 +140,8 @@ public static class RowEncoder
         HLCTimestamp txId,
         ObjectIdValue rowId,
         byte[] data,
-        IReadOnlySet<string>? requiredColumns = null)
+        IReadOnlySet<string>? requiredColumns = null,
+        long? visibilitySchemaVersion = null)
     {
         ArgumentNullException.ThrowIfNull(schema);
         ArgumentNullException.ThrowIfNull(data);
@@ -142,14 +155,65 @@ public static class RowEncoder
         Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
 
         List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
-        return DecodeColumns(columns, data, ref pointer, requiredColumns);
+        List<TableColumnSchema>? visibilityColumns = await GetVisibilityColumnsAsync(
+            schema,
+            txId,
+            visibilitySchemaVersion).ConfigureAwait(false);
+        return DecodeColumns(columns, visibilityColumns, data, ref pointer, requiredColumns, ColumnVisibility.PublicOnly);
+    }
+
+    public static async ValueTask<Dictionary<string, ColumnValue>> DecodeWritableAsync(
+        TableSchema schema,
+        HLCTimestamp txId,
+        ObjectIdValue rowId,
+        byte[] data,
+        IReadOnlySet<string>? requiredColumns = null,
+        long? visibilitySchemaVersion = null)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+        ArgumentNullException.ThrowIfNull(data);
+
+        int pointer = 0;
+
+        Serializator.ReadType(data, ref pointer);
+        int schemaVersion = Serializator.ReadInt32(data, ref pointer);
+
+        Serializator.ReadType(data, ref pointer);
+        Serializator.ReadObjectId(data, ref pointer);
+
+        List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
+        List<TableColumnSchema>? visibilityColumns = await GetVisibilityColumnsAsync(
+            schema,
+            txId,
+            visibilitySchemaVersion).ConfigureAwait(false);
+        return DecodeColumns(columns, visibilityColumns, data, ref pointer, requiredColumns, ColumnVisibility.Writable);
+    }
+
+    private static async ValueTask<List<TableColumnSchema>?> GetVisibilityColumnsAsync(
+        TableSchema schema,
+        HLCTimestamp txId,
+        long? visibilitySchemaVersion
+    )
+    {
+        if (visibilitySchemaVersion is null)
+            return schema.Columns;
+
+        if (visibilitySchemaVersion.Value > int.MaxValue || visibilitySchemaVersion.Value < int.MinValue)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Invalid table schema visibility version {visibilitySchemaVersion.Value}"
+            );
+
+        return (await schema.GetSchemaHistoryAsync(txId, (int)visibilitySchemaVersion.Value).ConfigureAwait(false)).Columns;
     }
 
     private static Dictionary<string, ColumnValue> DecodeColumns(
         List<TableColumnSchema> columns,
+        List<TableColumnSchema>? currentColumns,
         byte[] data,
         ref int pointer,
-        IReadOnlySet<string>? requiredColumns)
+        IReadOnlySet<string>? requiredColumns,
+        ColumnVisibility visibility)
     {
         bool decodeAll = requiredColumns is null;
 
@@ -159,6 +223,12 @@ public static class RowEncoder
         {
             TableColumnSchema column = columns[i];
 
+            if (!IsVisible(column, currentColumns, visibility))
+            {
+                SkipColumnValue(column.Type, data, ref pointer);
+                continue;
+            }
+
             if (decodeAll || requiredColumns!.Contains(column.Name))
                 result.Add(column.Name, ReadColumnValue(column, data, ref pointer));
             else
@@ -166,6 +236,47 @@ public static class RowEncoder
         }
 
         return result;
+    }
+
+    private static bool IsVisible(
+        TableColumnSchema column,
+        List<TableColumnSchema>? currentColumns,
+        ColumnVisibility visibility
+    )
+    {
+        TableColumnSchema? current = FindCurrentColumn(column, currentColumns);
+        if (current is null)
+            return false;
+
+        return visibility switch
+        {
+            ColumnVisibility.PublicOnly => SchemaElementStateRules.IsReadable(current),
+            ColumnVisibility.Writable => SchemaElementStateRules.IsWritable(current),
+            _ => false
+        };
+    }
+
+    private static TableColumnSchema? FindCurrentColumn(TableColumnSchema historyColumn, List<TableColumnSchema>? currentColumns)
+    {
+        if (currentColumns is null)
+            return null;
+
+        foreach (TableColumnSchema current in currentColumns)
+        {
+            if (current.Id == historyColumn.Id)
+                return current;
+        }
+
+        if (string.IsNullOrWhiteSpace(historyColumn.Id))
+        {
+            foreach (TableColumnSchema current in currentColumns)
+            {
+                if (current.Name == historyColumn.Name)
+                    return current;
+            }
+        }
+
+        return null;
     }
 
     private static ColumnValue ReadColumnValue(TableColumnSchema column, byte[] data, ref int pointer)
@@ -310,6 +421,12 @@ public static class RowEncoder
         for (int i = 0; i < columns.Count; i++)
         {
             TableColumnSchema column = columns[i];
+
+            if (!SchemaElementStateRules.IsWritable(column))
+            {
+                length += SerializatorTypeSizes.TypeNull;
+                continue;
+            }
 
             if (!row.TryGetValue(column.Name, out ColumnValue? columnValue) || columnValue.Type == ColumnType.Null)
             {

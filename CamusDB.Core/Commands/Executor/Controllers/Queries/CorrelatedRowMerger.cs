@@ -50,7 +50,12 @@ internal static class CorrelatedRowMerger
     private static IEnumerable<string> GetTableColumnNames(BoundTableSource outerSource)
     {
         foreach (TableColumnSchema column in outerSource.Table.Schema.Columns ?? [])
+        {
+            if (!SchemaElementStateRules.IsReadable(column))
+                continue;
+
             yield return column.Name;
+        }
     }
 
     private static void MergeOuterColumns(

@@ -86,7 +86,12 @@ internal sealed class ExistsSubqueryExecutor
             if (data.Length == 0)
                 continue;
 
-            Dictionary<string, ColumnValue> innerRow = await RowEncoder.DecodeAsync(innerTable.Schema, txId, rowId, data).ConfigureAwait(false);
+            Dictionary<string, ColumnValue> innerRow = await RowEncoder.DecodeAsync(
+                innerTable.Schema,
+                txId,
+                rowId,
+                data,
+                visibilitySchemaVersion: innerTable.Schema.Version).ConfigureAwait(false);
             Dictionary<string, ColumnValue> evalRow = CorrelatedRowMerger.MergeForEvaluation(
                 innerRow,
                 innerSource,

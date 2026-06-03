@@ -105,7 +105,7 @@ internal static class DerivedTableSchemaBuilder
         {
             foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
             {
-                if (column.Name == lookupKey)
+                if (column.Name == lookupKey && SchemaElementStateRules.IsReadable(column))
                     return column.Type;
             }
         }

@@ -35,6 +35,9 @@ internal static class IndexScanSelector
 
         foreach (TableIndexSchema index in table.Indexes.Values)
         {
+            if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+                continue;
+
             if (!TryMatchPredicateIndex(table, index, byColumn, out QueryPlanStep step, out int score))
                 continue;
 
@@ -206,6 +209,9 @@ internal static class IndexScanSelector
 
         foreach (TableIndexSchema index in table.Indexes.Values)
         {
+            if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+                continue;
+
             int matchLength = MatchOrderByPrefixLength(index, orderBy);
             if (matchLength == 0)
                 continue;

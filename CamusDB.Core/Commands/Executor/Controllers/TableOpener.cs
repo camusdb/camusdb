@@ -69,7 +69,7 @@ internal sealed class TableOpener
                 case IndexType.Multi:
                     tableDescriptor.Indexes.Add(
                         index.Name,
-                        new(index.Name, MapColumnsIdsToNames(tableSchema.Columns, index.ColumnIds), index.Type)
+                        new(index.Name, MapColumnsIdsToNames(tableSchema.Columns, index.ColumnIds), index.Type, index.State)
                     );
                     break;
 

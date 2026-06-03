@@ -106,12 +106,13 @@ internal sealed class RowDeleter
         foreach (QueryResultRow row in state.RowsToDelete)
         {
             ObjectIdValue rowId = row.RowId;
+            Dictionary<string, ColumnValue> writableRow = await LoadWritableRow(state.Database, table, tx, rowId).ConfigureAwait(false);
 
             await table.Store.DeleteRow(tx, rowId).ConfigureAwait(false);
 
-            await DeleteUniqueIndexEntries(table, tx, rowId, row.Row).ConfigureAwait(false);
+            await DeleteUniqueIndexEntries(table, tx, rowId, writableRow).ConfigureAwait(false);
 
-            await DeleteMultiIndexEntries(table, tx, rowId, row.Row).ConfigureAwait(false);
+            await DeleteMultiIndexEntries(table, tx, rowId, writableRow).ConfigureAwait(false);
 
             logger.LogInformation("Row with rowid {RowId} deleted", rowId);
 
@@ -119,6 +120,25 @@ internal sealed class RowDeleter
         }
 
         return FluxAction.Continue;
+    }
+
+    private static async Task<Dictionary<string, ColumnValue>> LoadWritableRow(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        KvTransaction tx,
+        ObjectIdValue rowId
+    )
+    {
+        byte[]? data = await table.Store.GetRow(tx.TransactionId, rowId).ConfigureAwait(false);
+        if (data is null || data.Length == 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before delete");
+
+        return await RowEncoder.DecodeWritableAsync(
+            table.Schema,
+            tx.TransactionId,
+            rowId,
+            data,
+            visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
     }
 
     private static async Task DeleteUniqueIndexEntries(
@@ -132,7 +152,7 @@ internal sealed class RowDeleter
         {
             TableIndexSchema index = kv.Value;
 
-            if (index.Type != IndexType.Unique)
+            if (index.Type != IndexType.Unique || !SchemaElementStateRules.IsWritableIndex(table.Schema, index))
                 continue;
 
             CompositeColumnValue uniqueKeyValue = GetColumnValue(row, index.Columns);
@@ -152,7 +172,7 @@ internal sealed class RowDeleter
         {
             TableIndexSchema index = kv.Value;
 
-            if (index.Type != IndexType.Multi)
+            if (index.Type != IndexType.Multi || !SchemaElementStateRules.IsWritableIndex(table.Schema, index))
                 continue;
 
             CompositeColumnValue multiKeyValue = GetColumnValue(row, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
