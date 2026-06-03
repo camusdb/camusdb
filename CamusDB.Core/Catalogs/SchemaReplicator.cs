@@ -211,6 +211,7 @@ public sealed class SchemaReplicator
             SchemaOp.DropTable => !schema.Tables.ContainsKey(DecodePayload<SchemaDropTablePayload>(entry).TableName),
             SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
+            SchemaOp.SetElementState => HasElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
     }
@@ -220,6 +221,17 @@ public sealed class SchemaReplicator
         return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
                table.Columns is not null &&
                table.Columns.Any(column => column.Name == payload.Column.Name);
+    }
+
+    private static bool HasElementState(Schema schema, SchemaElementStatePayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) || table.Columns is null)
+            return payload.State == SchemaElementState.Absent;
+
+        TableColumnSchema? column = table.Columns.FirstOrDefault(column => column.Name == payload.ElementName);
+        return payload.State == SchemaElementState.Absent
+            ? column is null
+            : column?.State == payload.State;
     }
 
     private static T DecodePayload<T>(SchemaChangeLogEntry entry) where T : new()

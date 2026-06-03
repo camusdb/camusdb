@@ -8,6 +8,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -260,6 +261,57 @@ public sealed class TestSchemaReplicator
     }
 
     [Test]
+    public async Task RestoreAsync_ResumesCommittedElementStateTransition()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+
+        database.Schema.Tables["robots"] = new()
+        {
+            Id = "robots-id",
+            Name = "robots",
+            Version = 0,
+            Columns =
+            [
+                new("id-col", "id", ColumnType.Id, true, null),
+                new("enabled-col", "enabled", ColumnType.Bool, false, null, SchemaElementState.DeleteOnly)
+            ],
+            SchemaHistory =
+            [
+                new()
+                {
+                    Version = 0,
+                    Columns =
+                    [
+                        new("id-col", "id", ColumnType.Id, true, null),
+                        new("enabled-col", "enabled", ColumnType.Bool, false, null, SchemaElementState.DeleteOnly)
+                    ]
+                }
+            ]
+        };
+
+        byte[] bytes = Serializator.Serialize(SetElementStateEntry(
+            db,
+            0,
+            1,
+            "enabled",
+            SchemaElementState.WriteOnly
+        ));
+
+        Assert.True(await replicator.RestoreAsync(database, bytes));
+
+        TableSchema table = database.Schema.Tables["robots"];
+        Assert.AreEqual(1, database.Schema.SchemaVersion);
+        Assert.AreEqual(1, table.Version);
+        Assert.AreEqual(SchemaElementState.WriteOnly, table.Columns!.Single(column => column.Name == "enabled").State);
+        Assert.AreEqual(2, table.SchemaHistory!.Count);
+    }
+
+    [Test]
     public async Task RestoreAsync_OutOfOrderEntryIsSkippedWithoutFailingOpen()
     {
         await using EmbeddedKahuna kahuna = new();
@@ -402,6 +454,29 @@ public sealed class TestSchemaReplicator
             ToVersion = toVersion,
             Op = SchemaOp.DropTable,
             Payload = Serializator.Serialize(new SchemaDropTablePayload { TableName = "robots" })
+        };
+    }
+
+    private static SchemaChangeLogEntry SetElementStateEntry(
+        string db,
+        long fromVersion,
+        long toVersion,
+        string elementName,
+        SchemaElementState state
+    )
+    {
+        return new()
+        {
+            Database = db,
+            FromVersion = fromVersion,
+            ToVersion = toVersion,
+            Op = SchemaOp.SetElementState,
+            Payload = Serializator.Serialize(new SchemaElementStatePayload
+            {
+                TableName = "robots",
+                ElementName = elementName,
+                State = state
+            })
         };
     }
 

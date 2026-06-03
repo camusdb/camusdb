@@ -314,6 +314,7 @@ public sealed class CatalogsManager
             SchemaOp.DropTable => !schema.Tables.ContainsKey(DecodePayload<SchemaDropTablePayload>(entry).TableName),
             SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
+            SchemaOp.SetElementState => HasElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
     }
@@ -325,6 +326,17 @@ public sealed class CatalogsManager
                table.Columns.Any(column => column.Name == payload.Column.Name);
     }
 
+    private static bool HasElementState(Schema schema, SchemaElementStatePayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) || table.Columns is null)
+            return payload.State == SchemaElementState.Absent;
+
+        TableColumnSchema? column = table.Columns.FirstOrDefault(column => column.Name == payload.ElementName);
+        return payload.State == SchemaElementState.Absent
+            ? column is null
+            : column?.State == payload.State;
+    }
+
     public static TableSchema? ApplySchemaDelta(Schema schema, SchemaChangeLogEntry entry)
     {
         TableSchema? tableSchema = entry.Op switch
@@ -333,7 +345,8 @@ public sealed class CatalogsManager
             SchemaOp.DropTable => ApplyDropTable(schema, DecodePayload<SchemaDropTablePayload>(entry)),
             SchemaOp.AddColumn => ApplyAlterColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry), entry.Op),
             SchemaOp.DropColumn => ApplyAlterColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry), entry.Op),
-            SchemaOp.AddIndex or SchemaOp.DropIndex or SchemaOp.SetElementState => null,
+            SchemaOp.SetElementState => ApplyElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
+            SchemaOp.AddIndex or SchemaOp.DropIndex => null,
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -374,7 +387,8 @@ public sealed class CatalogsManager
                     name: column.Name,
                     type: column.Type,
                     notNull: column.NotNull,
-                    defaultValue: column.DefaultValue
+                    defaultValue: column.DefaultValue,
+                    state: column.State
                 )
             );
         }
@@ -457,11 +471,87 @@ public sealed class CatalogsManager
                 name: newColumn.Name,
                 type: newColumn.Type,
                 notNull: newColumn.NotNull,
-                defaultValue: newColumn.DefaultValue
+                defaultValue: newColumn.DefaultValue,
+                state: SchemaElementState.Public
             )
         );
 
         tableSchema.Columns = tableColumns;
+    }
+
+    private static TableSchema ApplyElementState(Schema schema, SchemaElementStatePayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        if (tableSchema.Columns is null)
+            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
+
+        int columnIndex = tableSchema.Columns.FindIndex(column => column.Name == payload.ElementName);
+        if (columnIndex < 0)
+            throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Unknown column '{payload.ElementName}'");
+
+        TableColumnSchema current = tableSchema.Columns[columnIndex];
+        ValidateElementStateTransition(current.State, payload.State, payload.ElementName);
+
+        if (current.State == payload.State)
+            return tableSchema;
+
+        List<TableColumnSchema> tableColumns = [.. tableSchema.Columns];
+
+        if (payload.State == SchemaElementState.Absent)
+        {
+            tableColumns.RemoveAt(columnIndex);
+        }
+        else
+        {
+            tableColumns[columnIndex] = new(
+                current.Id,
+                current.Name,
+                current.Type,
+                current.NotNull,
+                current.DefaultValue,
+                payload.State
+            );
+        }
+
+        tableSchema.Version++;
+        tableSchema.Columns = tableColumns;
+        tableSchema.SchemaHistory ??= [];
+        tableSchema.SchemaHistory.Add(new()
+        {
+            Version = tableSchema.Version,
+            Columns = tableSchema.Columns
+        });
+
+        return tableSchema;
+    }
+
+    private static void ValidateElementStateTransition(
+        SchemaElementState current,
+        SchemaElementState next,
+        string elementName
+    )
+    {
+        if (current == next)
+            return;
+
+        bool valid = (current, next) switch
+        {
+            (SchemaElementState.Absent, SchemaElementState.DeleteOnly) => true,
+            (SchemaElementState.DeleteOnly, SchemaElementState.WriteOnly) => true,
+            (SchemaElementState.WriteOnly, SchemaElementState.Public) => true,
+            (SchemaElementState.Public, SchemaElementState.WriteOnly) => true,
+            (SchemaElementState.WriteOnly, SchemaElementState.DeleteOnly) => true,
+            (SchemaElementState.DeleteOnly, SchemaElementState.Absent) => true,
+            _ => false
+        };
+
+        if (!valid)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Invalid state transition for schema element '{elementName}': {current} -> {next}"
+            );
     }
 
     private static void DropColumn(TableSchema tableSchema, string columnName)

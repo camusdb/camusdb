@@ -15,6 +15,7 @@ namespace CamusDB.Core.Catalogs;
 
 [JsonSerializable(typeof(long))]
 [JsonSerializable(typeof(ColumnValue))]
+[JsonSerializable(typeof(SchemaElementState))]
 [JsonSerializable(typeof(TableColumnSchema))]
 [JsonSerializable(typeof(TableSchema))]
 [JsonSerializable(typeof(TableSchemaHistory))]

@@ -38,6 +38,8 @@ public sealed class SchemaColumnPayload
 
     public ColumnValue? DefaultValue { get; set; }
 
+    public SchemaElementState State { get; set; } = SchemaElementState.Public;
+
     public static SchemaColumnPayload FromColumnInfo(ColumnInfo column)
     {
         return new()
@@ -70,5 +72,5 @@ public sealed class SchemaElementStatePayload
 
     public string ElementName { get; set; } = "";
 
-    public string State { get; set; } = "";
+    public SchemaElementState State { get; set; } = SchemaElementState.Public;
 }

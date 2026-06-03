@@ -37,12 +37,18 @@ public sealed class TableColumnSchema
     /// </summary>
     public ColumnValue? DefaultValue { get; }
 
+    /// <summary>
+    /// Online schema-change state of the column.
+    /// </summary>
+    public SchemaElementState State { get; }
+
     public TableColumnSchema(
         string id,
         string name,
         ColumnType type,
         bool notNull,
-        ColumnValue? defaultValue
+        ColumnValue? defaultValue,
+        SchemaElementState state = SchemaElementState.Public
     )
     {
         Id = id;
@@ -50,6 +56,6 @@ public sealed class TableColumnSchema
         Type = type;
         NotNull = notNull;
         DefaultValue = defaultValue;
+        State = state;
     }
 }
-

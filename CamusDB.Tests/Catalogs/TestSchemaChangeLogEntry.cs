@@ -9,10 +9,12 @@
 using NUnit.Framework;
 
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer;
 using Kommander.Time;
@@ -73,6 +75,7 @@ public sealed class TestSchemaChangeLogEntry
         Assert.AreEqual("robots", table!.Name);
         Assert.AreEqual(0, table.Version);
         Assert.AreEqual(2, table.Columns!.Count);
+        Assert.True(table.Columns.TrueForAll(column => column.State == SchemaElementState.Public));
         Assert.AreEqual(1, table.SchemaHistory!.Count);
         Assert.AreEqual(0, table.SchemaHistory[0].Version);
         Assert.AreSame(table.Columns, table.SchemaHistory[0].Columns);
@@ -106,6 +109,7 @@ public sealed class TestSchemaChangeLogEntry
         Assert.AreEqual(1, table!.Version);
         Assert.AreEqual(3, table.Columns!.Count);
         Assert.AreEqual("enabled", table.Columns[2].Name);
+        Assert.AreEqual(SchemaElementState.Public, table.Columns[2].State);
         Assert.AreEqual(2, table.SchemaHistory!.Count);
         Assert.AreEqual(1, table.SchemaHistory[1].Version);
         Assert.AreEqual(2, schema.SchemaVersion);
@@ -159,26 +163,20 @@ public sealed class TestSchemaChangeLogEntry
 
     [TestCase(SchemaOp.AddIndex)]
     [TestCase(SchemaOp.DropIndex)]
-    [TestCase(SchemaOp.SetElementState)]
     public void ApplySchemaDelta_IndexAndStateOpsAreNoOpsUntilTheirOwnersAreReplicated(SchemaOp op)
     {
         Schema schema = new();
         CatalogsManager.ApplySchemaDelta(schema, Entry(SchemaOp.CreateTable, CreateTablePayload()));
 
-        SchemaChangeLogEntry entry = op == SchemaOp.SetElementState
-            ? Entry(
-                op,
-                new SchemaElementStatePayload { TableName = "robots", ElementName = "name", State = "Public" }
-            )
-            : Entry(
-                op,
-                new SchemaIndexPayload
-                {
-                    TableName = "robots",
-                    IndexName = "name_idx",
-                    Index = new("name_idx", ["name"], IndexType.Multi)
-                }
-            );
+        SchemaChangeLogEntry entry = Entry(
+            op,
+            new SchemaIndexPayload
+            {
+                TableName = "robots",
+                IndexName = "name_idx",
+                Index = new("name_idx", ["name"], IndexType.Multi)
+            }
+        );
 
         TableSchema? table = CatalogsManager.ApplySchemaDelta(
             schema,
@@ -189,6 +187,135 @@ public sealed class TestSchemaChangeLogEntry
         Assert.True(schema.Tables.ContainsKey("robots"));
         Assert.AreEqual(0, schema.Tables["robots"].Version);
         Assert.AreEqual(2, schema.SchemaVersion);
+    }
+
+    [Test]
+    public void ApplySchemaDelta_SetElementState_AdvancesThroughOnlineColumnStates()
+    {
+        Schema schema = new();
+        TableSchema table = CatalogsManager.ApplySchemaDelta(schema, Entry(SchemaOp.CreateTable, CreateTablePayload()))!;
+
+        // Seed a column already staged in DeleteOnly (as the DS7 coordinator will once it
+        // drives staged adds); this test exercises the SetElementState advance machinery.
+        table.Columns!.Add(new("enabled-col", "enabled", ColumnType.Bool, false, null, SchemaElementState.DeleteOnly));
+
+        Assert.AreEqual(SchemaElementState.DeleteOnly, table.Columns!.Single(column => column.Name == "enabled").State);
+
+        TableSchema? writeOnly = CatalogsManager.ApplySchemaDelta(
+            schema,
+            Entry(
+                SchemaOp.SetElementState,
+                new SchemaElementStatePayload
+                {
+                    TableName = "robots",
+                    ElementName = "enabled",
+                    State = SchemaElementState.WriteOnly
+                }
+            )
+        );
+
+        Assert.NotNull(writeOnly);
+        Assert.AreEqual(SchemaElementState.WriteOnly, table.Columns!.Single(column => column.Name == "enabled").State);
+
+        CatalogsManager.ApplySchemaDelta(
+            schema,
+            Entry(
+                SchemaOp.SetElementState,
+                new SchemaElementStatePayload
+                {
+                    TableName = "robots",
+                    ElementName = "enabled",
+                    State = SchemaElementState.Public
+                }
+            )
+        );
+
+        Assert.AreEqual(SchemaElementState.Public, table.Columns!.Single(column => column.Name == "enabled").State);
+        Assert.AreEqual(2, table.Version);
+        Assert.AreEqual(3, table.SchemaHistory!.Count);
+    }
+
+    [Test]
+    public void ApplySchemaDelta_SetElementState_DoesNotSkipState()
+    {
+        Schema schema = new();
+        CatalogsManager.ApplySchemaDelta(schema, Entry(SchemaOp.CreateTable, CreateTablePayload()));
+
+        TableSchema table = schema.Tables["robots"];
+        table.Columns!.Add(new("enabled-col", "enabled", ColumnType.Bool, false, null, SchemaElementState.DeleteOnly));
+
+        CamusDBException? ex = Assert.Throws<CamusDBException>(() => CatalogsManager.ApplySchemaDelta(
+            schema,
+            Entry(
+                SchemaOp.SetElementState,
+                new SchemaElementStatePayload
+                {
+                    TableName = "robots",
+                    ElementName = "enabled",
+                    State = SchemaElementState.Public
+                }
+            )
+        ));
+
+        Assert.NotNull(ex);
+        Assert.That(ex!.Message, Does.Contain("Invalid state transition"));
+        Assert.AreEqual(SchemaElementState.DeleteOnly, table.Columns.Single(column => column.Name == "enabled").State);
+    }
+
+    [Test]
+    public void ApplySchemaDelta_SetElementState_SameStateDoesNotBumpTableVersionOrHistory()
+    {
+        Schema schema = new();
+        CatalogsManager.ApplySchemaDelta(schema, Entry(SchemaOp.CreateTable, CreateTablePayload()));
+
+        TableSchema table = schema.Tables["robots"];
+        int versionBefore = table.Version;
+        int historyCountBefore = table.SchemaHistory!.Count;
+
+        TableSchema? applied = CatalogsManager.ApplySchemaDelta(
+            schema,
+            Entry(
+                SchemaOp.SetElementState,
+                new SchemaElementStatePayload
+                {
+                    TableName = "robots",
+                    ElementName = "name",
+                    State = SchemaElementState.Public
+                }
+            )
+        );
+
+        Assert.AreSame(table, applied);
+        Assert.AreEqual(versionBefore, table.Version);
+        Assert.AreEqual(historyCountBefore, table.SchemaHistory!.Count);
+        Assert.AreEqual(2, schema.SchemaVersion);
+    }
+
+    [Test]
+    public void ApplySchemaDelta_SetElementState_DeleteOnlyToAbsentRemovesColumn()
+    {
+        Schema schema = new();
+        CatalogsManager.ApplySchemaDelta(schema, Entry(SchemaOp.CreateTable, CreateTablePayload()));
+
+        TableSchema table = schema.Tables["robots"];
+        table.Columns!.Add(new("enabled-col", "enabled", ColumnType.Bool, false, null, SchemaElementState.DeleteOnly));
+
+        CatalogsManager.ApplySchemaDelta(
+            schema,
+            Entry(
+                SchemaOp.SetElementState,
+                new SchemaElementStatePayload
+                {
+                    TableName = "robots",
+                    ElementName = "enabled",
+                    State = SchemaElementState.Absent
+                }
+            )
+        );
+
+        Assert.False(table.Columns.Any(column => column.Name == "enabled"));
+        Assert.AreEqual(1, table.Version);
+        Assert.AreEqual(2, table.SchemaHistory!.Count);
     }
 
     [Test]
@@ -237,7 +364,7 @@ public sealed class TestSchemaChangeLogEntry
                 {
                     TableName = "robots",
                     ElementName = "name",
-                    State = "Public"
+                    State = SchemaElementState.Public
                 }
             )
         ];
@@ -350,6 +477,7 @@ public sealed class TestSchemaChangeLogEntry
         Assert.AreEqual(3, roundTrip.SchemaVersion);
         Assert.True(roundTrip.Tables.ContainsKey("robots"));
         Assert.Less(utf8.Length, utf16.Length);
+        Assert.AreEqual(SchemaElementState.Public, roundTrip.Tables["robots"].Columns![0].State);
         Assert.AreEqual((byte)'{', utf8[0], "New meta writes should be UTF-8 JSON, not UTF-16 with interleaved zero bytes");
         Assert.DoesNotThrow(() => Encoding.UTF8.GetString(utf8));
     }

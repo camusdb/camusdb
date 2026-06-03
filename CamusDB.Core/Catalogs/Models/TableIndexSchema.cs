@@ -27,10 +27,16 @@ public sealed class TableIndexSchema
     /// </summary>
     public IndexType Type { get; }
 
-    public TableIndexSchema(string name, string[] columns, IndexType type)
+    /// <summary>
+    /// Online schema-change state of the index.
+    /// </summary>
+    public SchemaElementState State { get; }
+
+    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public)
     {
         Name = name;
         Columns = columns;
         Type = type;
+        State = state;
     }
 }
