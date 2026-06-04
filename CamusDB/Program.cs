@@ -73,13 +73,44 @@ if (config.IsClusterMode)
 {
     builder.Services.AddSingleton<ISchemaDdlForwarder>(services =>
     {
+        // Build a raft-endpoint → HTTP base-URI map from the (Peers, HttpPeers)
+        // config pair.  When http_peers is populated and its count matches peers,
+        // each entry gives the exact HTTP address for that node regardless of port
+        // or host topology.  When http_peers is absent the resolver falls back to
+        // extracting the host from the raft endpoint and appending this node's
+        // --http-port, which is correct for uniform-port clusters.
+        Dictionary<string, Uri> peerEndpointMap = [];
+        if (config.HttpPeers.Count == config.Peers.Count && config.HttpPeers.Count > 0)
+        {
+            for (int i = 0; i < config.Peers.Count; i++)
+                peerEndpointMap[config.Peers[i]] = new Uri($"http://{config.HttpPeers[i]}");
+        }
+
         int httpPort = opts.HttpPort;
+        ILogger<ICamusDB> resolverLogger = services.GetRequiredService<ILogger<ICamusDB>>();
         Func<string, Uri> resolver = raftEndpoint =>
         {
+            if (peerEndpointMap.TryGetValue(raftEndpoint, out Uri? mapped))
+                return mapped;
+
+            // Uniform-port fallback: same host as the raft endpoint, this node's HTTP port.
+            // This fires when the map is populated but the key didn't match — either because
+            // http_peers was omitted (expected) or because a peers entry doesn't byte-match
+            // the format Raft reports for that node (misconfiguration).  Log at Warning so
+            // operators can catch the latter case; a silent miss would route DDL to the
+            // wrong address.
+            if (peerEndpointMap.Count > 0)
+                resolverLogger.LogWarning(
+                    "Raft endpoint '{RaftEndpoint}' not found in http_peers map (keys: {Keys}); " +
+                    "falling back to uniform-port heuristic. If this is unexpected, verify that " +
+                    "each peers entry byte-matches the format Raft reports (host:raftPort).",
+                    raftEndpoint,
+                    string.Join(", ", peerEndpointMap.Keys));
+
             string host = raftEndpoint.Contains(':') ? raftEndpoint.Split(':')[0] : raftEndpoint;
             return new Uri($"http://{host}:{httpPort}");
         };
-        return new HttpSchemaDdlForwarder(new HttpClient(), resolver, services.GetRequiredService<ILogger<ICamusDB>>());
+        return new HttpSchemaDdlForwarder(new HttpClient(), resolver, resolverLogger);
     });
 
     builder.Services.AddSingleton<CommandExecutor>(services =>
@@ -98,6 +129,8 @@ else
 }
 builder.Services.AddSingleton<CommandValidator>();
 builder.Services.AddSingleton<CatalogsManager>();
+if (config.IsClusterMode)
+    builder.Services.AddSingleton<DdlOperationIdCache>();
 builder.Services.AddSingleton<HttpTransactionCoordinator>();
 
 if (config.IsClusterMode)

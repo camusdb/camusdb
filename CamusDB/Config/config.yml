@@ -6,7 +6,20 @@ data_dir: /tmp/camusdb/
 # raft_host: 192.168.1.10
 # raft_port: 7070
 # initial_partitions: 3
+#
+# peers: Raft endpoint list.  Each entry MUST be "host:raftPort" exactly as Raft
+# reports it — the endpoint-map lookup is a byte-exact string match against the
+# leader endpoint string returned by Raft.WaitForLeader().  A mismatch causes a
+# silent fallback to the uniform-port heuristic (logged at Warning level).
 # peers:
 #   - 192.168.1.10:7070
 #   - 192.168.1.11:7070
 #   - 192.168.1.12:7070
+#
+# Per-peer HTTP addresses (parallel to peers, same index order).
+# Required for heterogeneous HTTP ports or multiple nodes per host.
+# If omitted, the leader's host is reused with this node's --http-port (uniform-port assumption).
+# http_peers:
+#   - 192.168.1.10:5095
+#   - 192.168.1.11:5095
+#   - 192.168.1.12:5095

@@ -17,11 +17,11 @@ namespace CamusDB.Core.CommandsExecutor;
 /// </summary>
 public interface ISchemaDdlForwarder
 {
-    Task<bool?> ForwardCreateTableAsync(string leader, CreateTableTicket ticket, CancellationToken cancellationToken);
+    Task<bool?> ForwardCreateTableAsync(string leader, CreateTableTicket ticket, string operationId, CancellationToken cancellationToken);
 
-    Task<bool?> ForwardAlterTableAsync(string leader, AlterTableTicket ticket, CancellationToken cancellationToken);
+    Task<bool?> ForwardAlterTableAsync(string leader, AlterTableTicket ticket, string operationId, CancellationToken cancellationToken);
 
-    Task<bool?> ForwardAlterIndexAsync(string leader, AlterIndexTicket ticket, CancellationToken cancellationToken);
+    Task<bool?> ForwardAlterIndexAsync(string leader, AlterIndexTicket ticket, string operationId, CancellationToken cancellationToken);
 
-    Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, CancellationToken cancellationToken);
+    Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, string operationId, CancellationToken cancellationToken);
 }

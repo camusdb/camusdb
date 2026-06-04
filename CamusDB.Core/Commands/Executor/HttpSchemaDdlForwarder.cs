@@ -44,11 +44,11 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder
         this.logger = logger;
     }
 
-    public async Task<bool?> ForwardCreateTableAsync(string leader, CreateTableTicket ticket, CancellationToken cancellationToken)
+    public async Task<bool?> ForwardCreateTableAsync(string leader, CreateTableTicket ticket, string operationId, CancellationToken cancellationToken)
     {
         ForwardCreateTableRequest request = new()
         {
-            OperationId = Guid.NewGuid().ToString("N"),
+            OperationId = operationId,
             DatabaseName = ticket.DatabaseName,
             TableName = ticket.TableName,
             Columns = MapColumns(ticket.Columns),
@@ -59,11 +59,11 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder
         return await PostAsync(leader, "create-table", request, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<bool?> ForwardAlterTableAsync(string leader, AlterTableTicket ticket, CancellationToken cancellationToken)
+    public async Task<bool?> ForwardAlterTableAsync(string leader, AlterTableTicket ticket, string operationId, CancellationToken cancellationToken)
     {
         ForwardAlterTableRequest request = new()
         {
-            OperationId = Guid.NewGuid().ToString("N"),
+            OperationId = operationId,
             DatabaseName = ticket.DatabaseName,
             TableName = ticket.TableName,
             Operation = ticket.Operation,
@@ -73,11 +73,11 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder
         return await PostAsync(leader, "alter-table", request, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<bool?> ForwardAlterIndexAsync(string leader, AlterIndexTicket ticket, CancellationToken cancellationToken)
+    public async Task<bool?> ForwardAlterIndexAsync(string leader, AlterIndexTicket ticket, string operationId, CancellationToken cancellationToken)
     {
         ForwardAlterIndexRequest request = new()
         {
-            OperationId = Guid.NewGuid().ToString("N"),
+            OperationId = operationId,
             DatabaseName = ticket.DatabaseName,
             TableName = ticket.TableName,
             IndexName = ticket.IndexName,
@@ -89,11 +89,11 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder
         return await PostAsync(leader, "alter-index", request, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, CancellationToken cancellationToken)
+    public async Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, string operationId, CancellationToken cancellationToken)
     {
         ForwardDropTableRequest request = new()
         {
-            OperationId = Guid.NewGuid().ToString("N"),
+            OperationId = operationId,
             DatabaseName = ticket.DatabaseName,
             TableName = ticket.TableName,
             IfExists = ticket.IfExists,
@@ -109,23 +109,52 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder
 
         logger.LogDebug("Forwarding DDL {Operation} to {Endpoint}", operation, endpoint);
 
-        using HttpResponseMessage response = await httpClient.PostAsJsonAsync(endpoint, request, JsonOptions, cancellationToken).ConfigureAwait(false);
-
-        if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
-            return null;
-
-        SchemaDdlForwardResponse? body = await response.Content.ReadFromJsonAsync<SchemaDdlForwardResponse>(JsonOptions, cancellationToken).ConfigureAwait(false);
-
-        if (body is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Empty response from leader at {endpoint}");
-
-        return body.Status switch
+        // Transport failures (connection refused, DNS failure, mid-election TCP
+        // reset, HTTP-client timeout) are safe to treat as "not-leader": the
+        // leader never applied the request, so returning null lets
+        // TryForwardDdlAsync elect a fresh leader and retry.
+        //
+        // The exception to the above is the response-lost case: the leader
+        // applied the DDL and sent a 200, but the connection dropped before we
+        // read the body.  That path returns successfully here (no exception is
+        // thrown), and the retry carries the same stable operationId.  The
+        // leader's DdlOperationIdCache catches the duplicate and replays the
+        // cached response, making the operation idempotent.
+        HttpResponseMessage response;
+        try
         {
-            "ok" => body.Applied,
-            "not-leader" => null,
-            "failed" => throw new CamusDBException(body.Code ?? CamusDBErrorCodes.InvalidInternalOperation, body.Message ?? "Unknown error from schema leader"),
-            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Unexpected status '{body.Status}' from {endpoint}"),
-        };
+            response = await httpClient.PostAsJsonAsync(endpoint, request, JsonOptions, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex)
+        {
+            logger.LogWarning(ex, "DDL forward to {Endpoint} failed with transport error; will retry with new leader", endpoint);
+            return null;
+        }
+        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            // HTTP-client timeout (not caller-requested cancellation).
+            logger.LogWarning(ex, "DDL forward to {Endpoint} timed out; will retry with new leader", endpoint);
+            return null;
+        }
+
+        using (response)
+        {
+            if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+                return null;
+
+            SchemaDdlForwardResponse? body = await response.Content.ReadFromJsonAsync<SchemaDdlForwardResponse>(JsonOptions, cancellationToken).ConfigureAwait(false);
+
+            if (body is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Empty response from leader at {endpoint}");
+
+            return body.Status switch
+            {
+                "ok" => body.Applied,
+                "not-leader" => null,
+                "failed" => throw new CamusDBException(body.Code ?? CamusDBErrorCodes.InvalidInternalOperation, body.Message ?? "Unknown error from schema leader"),
+                _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Unexpected status '{body.Status}' from {endpoint}"),
+            };
+        }
     }
 
     private static ColumnInfoRequest MapColumn(ColumnInfo col) => new()

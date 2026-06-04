@@ -26,5 +26,14 @@ public class ConfigDefinition
 
     public List<string> Peers { get; set; } = [];
 
+    /// <summary>
+    /// Per-peer HTTP base addresses, parallel to <see cref="Peers"/>.
+    /// Entry i is the HTTP URL for the node whose Raft endpoint is Peers[i].
+    /// When populated and Peers.Count == HttpPeers.Count, the endpoint map uses
+    /// these explicit addresses instead of the uniform-port fallback (C1).
+    /// Format: "host:httpPort" (e.g. "192.168.1.10:5095").
+    /// </summary>
+    public List<string> HttpPeers { get; set; } = [];
+
     public bool IsClusterMode => Mode == "cluster" || Peers.Count > 0;
 }

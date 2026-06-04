@@ -6,6 +6,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -37,7 +38,9 @@ public sealed class TestHttpSchemaDdlForwarder
         PropertyNameCaseInsensitive = true,
     };
 
-    private static HttpSchemaDdlForwarder BuildForwarder(FakeMessageHandler handler, Uri? resolvedUri = null)
+    private const string StableOperationId = "aabbccdd11223344aabbccdd11223344";
+
+    private static HttpSchemaDdlForwarder BuildForwarder(HttpMessageHandler handler, Uri? resolvedUri = null)
     {
         Uri baseUri = resolvedUri ?? new Uri("http://fake-leader:5095");
         HttpClient client = new(handler);
@@ -80,34 +83,53 @@ public sealed class TestHttpSchemaDdlForwarder
             ifNotExists: false
         );
 
-        await forwarder.ForwardCreateTableAsync("leader-node:7070", ticket, CancellationToken.None);
+        await forwarder.ForwardCreateTableAsync("leader-node:7070", ticket, StableOperationId, CancellationToken.None);
 
         Assert.AreEqual(HttpMethod.Post, handler.LastRequest!.Method);
         Assert.AreEqual("http://leader-node:5095/internal/schema-ddl/create-table", handler.LastRequest.RequestUri!.ToString());
     }
 
     [Test]
-    public async Task ForwardCreateTable_IncludesOperationIdInBody()
+    public async Task ForwardCreateTable_PropagatesCallerOperationId()
     {
         FakeMessageHandler handler = new(OkResponse(true));
         HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
 
-        CreateTableTicket ticket = new(
-            databaseName: "mydb",
-            tableName: "robots",
-            columns: [new ColumnInfo("id", ColumnType.Id)],
-            constraints: [],
-            ifNotExists: false
-        );
+        CreateTableTicket ticket = new("mydb", "robots", [new ColumnInfo("id", ColumnType.Id)], [], false);
 
-        await forwarder.ForwardCreateTableAsync("leader:7070", ticket, CancellationToken.None);
+        await forwarder.ForwardCreateTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
 
         string body = await handler.LastRequest!.Content!.ReadAsStringAsync();
         using JsonDocument doc = JsonDocument.Parse(body);
         string operationId = doc.RootElement.GetProperty("operationId").GetString()!;
 
-        Assert.IsFalse(string.IsNullOrEmpty(operationId), "operationId must be present in request body");
-        Assert.AreEqual(32, operationId.Length, "operationId must be a 32-char hex GUID (no dashes)");
+        Assert.AreEqual(StableOperationId, operationId,
+            "forwarder must use the caller-supplied operationId, not mint a new one");
+    }
+
+    [Test]
+    public async Task ForwardCreateTable_SameOperationIdAcrossRetries()
+    {
+        // Simulate two not-leader responses then success. The handler collects
+        // every operationId it receives so the test can verify they are all equal.
+        MultiResponseHandler handler = new(
+            NotLeaderResponse(), HttpStatusCode.ServiceUnavailable,
+            NotLeaderResponse(), HttpStatusCode.ServiceUnavailable,
+            OkResponse(true),   HttpStatusCode.OK
+        );
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+        CreateTableTicket ticket = new("mydb", "robots", [], [], false);
+
+        // The caller holds the stable id (generated once in TryForwardDdlAsync).
+        await forwarder.ForwardCreateTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
+        await forwarder.ForwardCreateTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
+        await forwarder.ForwardCreateTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
+
+        Assert.AreEqual(3, handler.ReceivedOperationIds.Count, "expected 3 calls");
+        Assert.IsTrue(
+            handler.ReceivedOperationIds.TrueForAll(id => id == StableOperationId),
+            "all retries must carry the same operationId"
+        );
     }
 
     [Test]
@@ -117,7 +139,7 @@ public sealed class TestHttpSchemaDdlForwarder
         HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
 
         CreateTableTicket ticket = new("mydb", "robots", [], [], false);
-        bool? result = await forwarder.ForwardCreateTableAsync("leader:7070", ticket, CancellationToken.None);
+        bool? result = await forwarder.ForwardCreateTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
 
         Assert.AreEqual(true, result);
     }
@@ -129,7 +151,7 @@ public sealed class TestHttpSchemaDdlForwarder
         HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
 
         CreateTableTicket ticket = new("mydb", "robots", [], [], ifNotExists: true);
-        bool? result = await forwarder.ForwardCreateTableAsync("leader:7070", ticket, CancellationToken.None);
+        bool? result = await forwarder.ForwardCreateTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
 
         Assert.AreEqual(false, result);
     }
@@ -141,7 +163,7 @@ public sealed class TestHttpSchemaDdlForwarder
         HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
 
         CreateTableTicket ticket = new("mydb", "robots", [], [], false);
-        bool? result = await forwarder.ForwardCreateTableAsync("leader:7070", ticket, CancellationToken.None);
+        bool? result = await forwarder.ForwardCreateTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
 
         Assert.IsNull(result);
     }
@@ -155,7 +177,7 @@ public sealed class TestHttpSchemaDdlForwarder
         CreateTableTicket ticket = new("mydb", "robots", [], [], false);
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await forwarder.ForwardCreateTableAsync("leader:7070", ticket, CancellationToken.None));
+            await forwarder.ForwardCreateTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None));
 
         Assert.NotNull(ex);
         Assert.AreEqual("CA0042", ex!.Code);
@@ -171,7 +193,7 @@ public sealed class TestHttpSchemaDdlForwarder
         HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
 
         AlterTableTicket ticket = new("mydb", "robots", AlterTableOperation.AddColumn, new ColumnInfo("year", ColumnType.Integer64));
-        await forwarder.ForwardAlterTableAsync("leader:7070", ticket, CancellationToken.None);
+        await forwarder.ForwardAlterTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
 
         Assert.That(handler.LastRequest!.RequestUri!.ToString(), Does.EndWith("/internal/schema-ddl/alter-table"));
     }
@@ -183,7 +205,7 @@ public sealed class TestHttpSchemaDdlForwarder
         HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
 
         AlterTableTicket ticket = new("mydb", "robots", AlterTableOperation.AddColumn, new ColumnInfo("year", ColumnType.Integer64, notNull: true));
-        await forwarder.ForwardAlterTableAsync("leader:7070", ticket, CancellationToken.None);
+        await forwarder.ForwardAlterTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
 
         string body = await handler.LastRequest!.Content!.ReadAsStringAsync();
         using JsonDocument doc = JsonDocument.Parse(body);
@@ -205,7 +227,7 @@ public sealed class TestHttpSchemaDdlForwarder
             [new ColumnIndexInfo("name", OrderType.Ascending)],
             AlterIndexOperation.AddIndex);
 
-        await forwarder.ForwardAlterIndexAsync("leader:7070", ticket, CancellationToken.None);
+        await forwarder.ForwardAlterIndexAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
 
         Assert.That(handler.LastRequest!.RequestUri!.ToString(), Does.EndWith("/internal/schema-ddl/alter-index"));
     }
@@ -220,7 +242,7 @@ public sealed class TestHttpSchemaDdlForwarder
             [new ColumnIndexInfo("name", OrderType.Ascending)],
             AlterIndexOperation.AddUniqueIndex);
 
-        await forwarder.ForwardAlterIndexAsync("leader:7070", ticket, CancellationToken.None);
+        await forwarder.ForwardAlterIndexAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
 
         string body = await handler.LastRequest!.Content!.ReadAsStringAsync();
         using JsonDocument doc = JsonDocument.Parse(body);
@@ -239,12 +261,80 @@ public sealed class TestHttpSchemaDdlForwarder
         HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
 
         DropTableTicket ticket = new("mydb", "robots", ifExists: false);
-        await forwarder.ForwardDropTableAsync("leader:7070", ticket, CancellationToken.None);
+        await forwarder.ForwardDropTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
 
         Assert.That(handler.LastRequest!.RequestUri!.ToString(), Does.EndWith("/internal/schema-ddl/drop-table"));
     }
 
-    // ── FakeMessageHandler ────────────────────────────────────────────────────
+    // ── Transport-failure → null (C3) ─────────────────────────────────────────
+
+    [Test]
+    public async Task ForwardCreateTable_ReturnsNullOnHttpRequestException()
+    {
+        // Connection refused / DNS failure / leader mid-election TCP reset.
+        // The leader never saw the request so returning null is safe — lets
+        // TryForwardDdlAsync elect a fresh leader and retry.
+        ErrorMessageHandler handler = new(new HttpRequestException("Connection refused"));
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+
+        CreateTableTicket ticket = new("mydb", "robots", [new ColumnInfo("id", ColumnType.Id)], [], false);
+        bool? result = await forwarder.ForwardCreateTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
+
+        Assert.IsNull(result, "HttpRequestException must be converted to null (retry signal)");
+    }
+
+    [Test]
+    public async Task ForwardAlterTable_ReturnsNullOnHttpRequestException()
+    {
+        ErrorMessageHandler handler = new(new HttpRequestException("Network unreachable"));
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+
+        AlterTableTicket ticket = new("mydb", "robots", AlterTableOperation.AddColumn, new ColumnInfo("year", ColumnType.Integer64));
+        bool? result = await forwarder.ForwardAlterTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
+
+        Assert.IsNull(result);
+    }
+
+    [Test]
+    public async Task ForwardAlterIndex_ReturnsNullOnHttpRequestException()
+    {
+        ErrorMessageHandler handler = new(new HttpRequestException("Network unreachable"));
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+
+        AlterIndexTicket ticket = new("mydb", "robots", "name_idx",
+            [new ColumnIndexInfo("name", OrderType.Ascending)],
+            AlterIndexOperation.AddIndex);
+        bool? result = await forwarder.ForwardAlterIndexAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
+
+        Assert.IsNull(result);
+    }
+
+    [Test]
+    public async Task ForwardDropTable_ReturnsNullOnHttpRequestException()
+    {
+        ErrorMessageHandler handler = new(new HttpRequestException("Connection refused"));
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+
+        DropTableTicket ticket = new("mydb", "robots", ifExists: false);
+        bool? result = await forwarder.ForwardDropTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
+
+        Assert.IsNull(result);
+    }
+
+    [Test]
+    public async Task ForwardCreateTable_ReturnsNullOnHttpClientTimeout()
+    {
+        // TaskCanceledException with no caller cancellation = HTTP-client timeout.
+        ErrorMessageHandler handler = new(new TaskCanceledException("Request timed out"));
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+
+        CreateTableTicket ticket = new("mydb", "robots", [], [], false);
+        bool? result = await forwarder.ForwardCreateTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
+
+        Assert.IsNull(result, "HTTP-client timeout must be converted to null (retry signal)");
+    }
+
+    // ── FakeMessageHandler ─────────────────────────────────────────────────────
 
     private sealed class FakeMessageHandler : HttpMessageHandler
     {
@@ -263,6 +353,41 @@ public sealed class TestHttpSchemaDdlForwarder
         {
             LastRequest = request;
             return Task.FromResult(new HttpResponseMessage(statusCode) { Content = responseContent });
+        }
+    }
+
+    // Throws the supplied exception from SendAsync to simulate transport failures.
+    private sealed class ErrorMessageHandler(Exception exception) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromException<HttpResponseMessage>(exception);
+    }
+
+    // Cycles through a pre-set list of (content, statusCode) pairs and records
+    // the operationId from each incoming request body.
+    private sealed class MultiResponseHandler : HttpMessageHandler
+    {
+        private readonly (HttpContent Content, HttpStatusCode Status)[] responses;
+        private int index;
+
+        public List<string> ReceivedOperationIds { get; } = [];
+
+        public MultiResponseHandler(params object[] alternating)
+        {
+            responses = new (HttpContent, HttpStatusCode)[alternating.Length / 2];
+            for (int i = 0; i < alternating.Length; i += 2)
+                responses[i / 2] = ((HttpContent)alternating[i], (HttpStatusCode)alternating[i + 1]);
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            string body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            using JsonDocument doc = JsonDocument.Parse(body);
+            ReceivedOperationIds.Add(doc.RootElement.GetProperty("operationId").GetString()!);
+
+            var (content, status) = responses[index % responses.Length];
+            index++;
+            return new HttpResponseMessage(status) { Content = content };
         }
     }
 }

@@ -9,11 +9,16 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
 using NUnit.Framework;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 using Kahuna;
 using Kahuna.Server.Communication.Internode;
@@ -141,6 +146,79 @@ public sealed class TestSchemaDdlForwarding
         }
     }
 
+    /// <summary>
+    /// Wires a real <see cref="HttpSchemaDdlForwarder"/> (not a stub) on a
+    /// follower and verifies the full path:
+    ///   follower.CreateTable → TryForwardDdlAsync → HttpSchemaDdlForwarder
+    ///   → HTTP POST to the leader's mapped URL → fake 200/not-applied response
+    ///   → CreateTableResult.Success == false.
+    ///
+    /// The endpoint map is built from the cluster nodes' actual Raft endpoints
+    /// (just as Program.cs would build it from config.Peers / config.HttpPeers),
+    /// proving the resolver hands each leader endpoint through to the right URI.
+    /// </summary>
+    [Test]
+    public async Task FollowerForwardsCreateTableViaHttpSchemaDdlForwarder()
+    {
+        await using ClusterHarness cluster = await ClusterHarness.StartAsync();
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(db);
+        EmbeddedKahuna follower = cluster.Nodes.First(node => node != leader);
+
+        // Build an endpoint map that mirrors what Program.cs does from config:
+        //   raft-endpoint → http://fake-{nodeName}:5095
+        // We use distinct fake hostnames per node so the test can assert which
+        // node's URL was actually called.
+        JsonSerializerOptions jsonOpts = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true };
+
+        Dictionary<string, Uri> endpointMap = cluster.Nodes.ToDictionary(
+            node => node.Raft.GetLocalEndpoint(),
+            node => new Uri($"http://fake-{node.Raft.GetLocalNodeName()}:5095")
+        );
+
+        // Fake handler: returns "ok / applied:false" and records the last request.
+        CapturingHandler handler = new(
+            JsonSerializer.Serialize(new SchemaDdlForwardResponse { Status = "ok", Applied = false }, jsonOpts));
+
+        HttpSchemaDdlForwarder forwarder = new(
+            new HttpClient(handler),
+            raftEndpoint => endpointMap[raftEndpoint],
+            NullLogger<ICamusDB>.Instance
+        );
+
+        CommandExecutor followerExecutor = cluster.CreateExecutor(follower, forwarder);
+
+        try
+        {
+            CreateTableResult result = await followerExecutor
+                .CreateTable(CreateRobotsTableTicket(db, ifNotExists: true))
+                .WaitAsync(TimeSpan.FromSeconds(20));
+
+            // The forwarder returned false (not applied) → CreateTableResult.Success is false.
+            Assert.IsFalse(result.Success, "follower should surface the forwarder's not-applied result");
+
+            // Exactly one HTTP request was made.
+            Assert.IsNotNull(handler.LastRequest, "HttpSchemaDdlForwarder must have made an HTTP request");
+
+            // The request was posted to the leader's mapped URI — not a peer's.
+            Uri expectedLeaderUri = endpointMap[leader.Raft.GetLocalEndpoint()];
+            Assert.That(handler.LastRequest!.RequestUri!.ToString(),
+                Does.StartWith(expectedLeaderUri.ToString()),
+                "request must target the schema leader's mapped HTTP address");
+
+            // The request body carries the database name and table name.
+            string body = handler.LastBody!;
+            using JsonDocument doc = JsonDocument.Parse(body);
+            Assert.AreEqual(db, doc.RootElement.GetProperty("databaseName").GetString());
+            Assert.AreEqual("robots", doc.RootElement.GetProperty("tableName").GetString());
+        }
+        finally
+        {
+            await CleanupDatabaseAsync(db, followerExecutor);
+        }
+    }
+
     private static CreateTableTicket CreateRobotsTableTicket(string db, bool ifNotExists = false)
     {
         return new(
@@ -226,13 +304,13 @@ public sealed class TestSchemaDdlForwarding
 
         public bool EmitUnrelatedVersionBumpBeforeAlterApply { get; set; }
 
-        public Task<bool?> ForwardCreateTableAsync(string leader, CreateTableTicket ticket, CancellationToken cancellationToken)
+        public Task<bool?> ForwardCreateTableAsync(string leader, CreateTableTicket ticket, string operationId, CancellationToken cancellationToken)
         {
             CreateTableCalls++;
             return Task.FromResult<bool?>(false);
         }
 
-        public Task<bool?> ForwardAlterTableAsync(string leader, AlterTableTicket ticket, CancellationToken cancellationToken)
+        public Task<bool?> ForwardAlterTableAsync(string leader, AlterTableTicket ticket, string operationId, CancellationToken cancellationToken)
         {
             AlterTableCalls++;
             DatabaseDescriptor database = Database ?? throw new InvalidOperationException("Forwarder database was not set");
@@ -274,11 +352,34 @@ public sealed class TestSchemaDdlForwarding
             return Task.FromResult<bool?>(true);
         }
 
-        public Task<bool?> ForwardAlterIndexAsync(string leader, AlterIndexTicket ticket, CancellationToken cancellationToken)
+        public Task<bool?> ForwardAlterIndexAsync(string leader, AlterIndexTicket ticket, string operationId, CancellationToken cancellationToken)
             => Task.FromResult<bool?>(false);
 
-        public Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, CancellationToken cancellationToken)
+        public Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, string operationId, CancellationToken cancellationToken)
             => Task.FromResult<bool?>(false);
+    }
+
+    private sealed class CapturingHandler : HttpMessageHandler
+    {
+        private readonly string responseBody;
+
+        public HttpRequestMessage? LastRequest { get; private set; }
+        public string? LastBody { get; private set; }
+
+        public CapturingHandler(string responseBody)
+        {
+            this.responseBody = responseBody;
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            LastBody = await request.Content!.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(responseBody, Encoding.UTF8, "application/json")
+            };
+        }
     }
 
     private sealed class ClusterHarness : IAsyncDisposable

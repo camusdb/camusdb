@@ -386,7 +386,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         return await TryForwardDdlAsync(
             database,
-            (leader, ct) => schemaDdlForwarder!.ForwardCreateTableAsync(leader, ticket, ct),
+            (leader, opId, ct) => schemaDdlForwarder!.ForwardCreateTableAsync(leader, ticket, opId, ct),
             () => ForwardedCreateTableApplied(database, ticket)
         ).ConfigureAwait(false);
     }
@@ -395,7 +395,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         return await TryForwardDdlAsync(
             database,
-            (leader, ct) => schemaDdlForwarder!.ForwardAlterTableAsync(leader, ticket, ct),
+            (leader, opId, ct) => schemaDdlForwarder!.ForwardAlterTableAsync(leader, ticket, opId, ct),
             () => ForwardedAlterTableApplied(database, ticket)
         ).ConfigureAwait(false);
     }
@@ -404,7 +404,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         return await TryForwardDdlAsync(
             database,
-            (leader, ct) => schemaDdlForwarder!.ForwardAlterIndexAsync(leader, ticket, ct),
+            (leader, opId, ct) => schemaDdlForwarder!.ForwardAlterIndexAsync(leader, ticket, opId, ct),
             () => ForwardedAlterIndexApplied(database, ticket)
         ).ConfigureAwait(false);
     }
@@ -413,14 +413,14 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         return await TryForwardDdlAsync(
             database,
-            (leader, ct) => schemaDdlForwarder!.ForwardDropTableAsync(leader, ticket, ct),
+            (leader, opId, ct) => schemaDdlForwarder!.ForwardDropTableAsync(leader, ticket, opId, ct),
             () => ForwardedDropTableApplied(database, ticket)
         ).ConfigureAwait(false);
     }
 
     private async Task<bool?> TryForwardDdlAsync(
         DatabaseDescriptor database,
-        Func<string, CancellationToken, Task<bool?>> forward,
+        Func<string, string, CancellationToken, Task<bool?>> forward,
         Func<bool> wasApplied
     )
     {
@@ -439,6 +439,10 @@ public sealed class CommandExecutor : IAsyncDisposable
             );
         }
 
+        // One stable id for all retry attempts so a C3 dedup receiver can
+        // recognise retransmissions of the same logical operation.
+        string operationId = Guid.NewGuid().ToString("N");
+
         await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -447,7 +451,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             for (int attempt = 0; attempt < 3; attempt++)
             {
                 string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Name, CancellationToken.None).ConfigureAwait(false);
-                bool? result = await forward(leader, CancellationToken.None).ConfigureAwait(false);
+                bool? result = await forward(leader, operationId, CancellationToken.None).ConfigureAwait(false);
                 if (result is not null)
                 {
                     if (result.Value)

@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj" />
+    <ProjectReference Include="..\CamusDB\CamusDB.csproj" />
   </ItemGroup>
   
   <ItemGroup>

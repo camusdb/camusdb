@@ -87,9 +87,10 @@ Key properties:
 - `FromVersion`/`ToVersion` are always adjacent (`+1`). The log is a strict chain.
 - The entry is the unit of replication and the unit of idempotency.
 
-`SchemaOp` is intentionally small. Note that **index DDL (`AddIndex`/`DropIndex`) is not
-yet routed through this log** — see §8. The enum has the slots reserved, but today indexes
-live in a separate `SystemSchema` (see §7.3).
+`SchemaOp` includes `AddIndex`/`DropIndex` (B2): index DDL **is** routed through this log.
+The replicated source of truth for indexes is now `TableSchema.Indexes`, persisted per-object
+alongside columns. The proposer commits the index data first, then replicates the
+delta — see §7.3.
 
 ---
 
@@ -312,9 +313,10 @@ To scale to databases with many tables, metadata is stored per object, not as on
 
 ```
 {db}/meta/version                       → the database SchemaVersion counter
-{db}/meta/system                        → SystemSchema (indexes live here today)
-{db}/meta/table/{tableId}               → one TableSchema (current version, no history)
+{db}/meta/table/{tableId}               → one TableSchema, incl. its Indexes (current version)
 {db}/meta/history/{tableId}/{version}   → one past column layout (TableSchemaHistory)
+{db}/meta/system                        → SystemSchema — LEGACY index storage, read-only;
+                                          only migrated from on load (see §7.3)
 {db}/meta/schema                        → LEGACY single-blob schema (migrated on load)
 ```
 
@@ -327,20 +329,49 @@ To scale to databases with many tables, metadata is stored per object, not as on
   for old data.
 - Legacy single-blob schema is detected on load and migrated to per-object keys.
 
-### 7.3 Indexes: `SystemSchema`, not the schema log (yet)
+### 7.3 Indexes live in `TableSchema.Indexes` (B1) and replicate through the log (B2)
 
-Index metadata is a `DatabaseIndexObject` stored inside `SystemSchema`
-(`{db}/meta/system`), **separate** from `Schema.Tables`. It carries:
+Indexes are now **owned by the replicated `TableSchema`**, like columns:
+`TableSchema.Indexes : List<TableIndexSchema>`, persisted inside the same
+`{db}/meta/table/{tableId}` blob. `TableIndexSchema` serves two forms (one type, disambiguated
+for JSON by a `[JsonConstructor]`):
 
-```
-Id, Name, TableId, ColumnIds, Type (Unique/Multi),
-StartOffset  // online-backfill checkpoint: last completed rowId
-State        // SchemaElementState
-```
+- **Persisted** (inside `TableSchema.Indexes`): immutable `Id`, `ColumnIds` (immutable column
+  ids — rename-safe), `Type`, `State`, `StartOffset` (online-backfill checkpoint). `Columns`
+  is empty.
+- **In-memory (query/DML)** (inside `TableDescriptor.Indexes`): resolved column `Names`, `Type`,
+  `State`. `TableOpener` builds this from `TableSchema.Indexes`, resolving names from `ColumnIds`.
+  `Id`/`ColumnIds`/`StartOffset` are intentionally dropped here — code that needs them reads
+  `table.Schema.Indexes`.
 
-This is why index DDL does not currently flow through `SchemaChangeLogEntry`/Raft —
-replicated index ownership/backfill into `Schema.Tables` is deferred (DS9 builds the local
-online-backfill machinery; DS10/DS11 add cluster-wide completion).
+**Legacy `SystemSchema` (`{db}/meta/system`, `DatabaseIndexObject`)** is now read-only: it is
+no longer written by index DDL. On open, `MigrateIndexesFromSystemSchema` copies any
+not-yet-migrated index objects into `TableSchema.Indexes` in memory; the next index DDL
+persists them. `TableOpener` falls back to `SystemSchema` only for descriptors opened before
+`LoadMetaAsync` runs.
+
+**Index DDL is replicated (B2).** `CommandExecutor.AlterIndex` on a cluster node runs a strict
+two-phase sequence (`ExecuteClusteredIndexDdlAsync`, under `SchemaDdlSemaphore`):
+
+1. **Phase 1 — data first.** Run the local DDL/backfill in `tx1` and **commit** it, so the
+   index KV entries (`{tableId}:i:{indexId}/…`) are durable and visible cluster-wide (KV is
+   itself Raft-replicated) *before* anything is announced.
+2. **Phase 2 — then announce.** Replicate an `AddIndex`/`DropIndex` `SchemaChangeLogEntry`
+   (`ReplicateIndexChangeAsync`). The `AddIndex` payload carries the completed
+   `TableIndexSchema`; `ApplyAddIndex`/`ApplyDropIndex` update every node's `TableSchema.Indexes`
+   (idempotent: remove-by-name then add / remove) and `SchemaReplicator` evicts each node's
+   cached `TableDescriptor` so the next open rebuilds with the new index.
+
+Ordering matters: committing the data before the delta means a failure between phases leaves at
+worst orphaned KV entries (harmless), never a *phantom* index (schema says it exists, no data).
+Index deltas advance the database `SchemaVersion` chain but **not** `TableSchema.Version`
+(indexes aren't part of row layout). `DROP INDEX` reclaims the data via
+`KvTableStore.DropIndexEntries`.
+
+The remaining gap is online-safety: the proposer backfills-then-publishes rather than driving a
+staged `WriteOnly → backfill → Public` sequence with the ack gate between steps, so concurrent
+writes during a build, and crash-resumable backfill, are still the DS9/coordinator (Workstream D)
+follow-up.
 
 ### 7.4 Positional row encoding & why renames are free (`RowEncoder`)
 
@@ -413,10 +444,12 @@ State semantics (`SchemaElementStateRules`):
     composite "index + all its columns" check).
   - DML/read transactions **pin** each touched table's `(version, identity)` and the
     commit path rejects the transaction if the schema moved underneath it (see §9).
-- **DS9 (resumable index backfill, local foundation):** `ADD INDEX` installs the index
-  `WriteOnly`, streams existing rows via `KvTableStore.ScanRows`, writes index entries, and
-  flips to `Public` only after the backfill completes. `DatabaseIndexObject.StartOffset`
-  holds a rowId checkpoint and `ScanRows(afterRowId:)` can resume from it.
+- **DS9 + B1/B2 (index backfill & replicated ownership):** `ADD INDEX` installs the index
+  `WriteOnly` in `TableSchema.Indexes`, streams existing rows via `KvTableStore.ScanRows`,
+  writes index entries, and flips to `Public` after the backfill completes; the checkpoint
+  (`StartOffset`) and `ScanRows(afterRowId:)` allow resume. B1 moved index ownership into the
+  replicated `TableSchema.Indexes`, and B2 routes `ADD/DROP INDEX` through the schema log
+  (data-first, then delta) so indexes converge cluster-wide without reopen — see §7.3.
 - **Deferred (DS7 coordinator / DS10 / DS11):** a resumable **coordinator job** that emits
   the successive `SetElementState` deltas, waits for the `FromVersion` ack gate between each
   one, runs the index backfill with independent checkpoint commits, drives cluster-wide
@@ -475,12 +508,14 @@ SELECTs don't run the commit-time validation step (they have a consistent snapsh
   Workstream F.)
 - **Out-of-order / gap on apply:** thrown (apply) or logged+skipped (restore). A gap means a
   node is missing a delta; restore replays in order.
-- **DDL transaction abort (`ExecuteDdlInTransaction`):** rolls back the KV transaction, then
-  runs an optional `onAbort` compensation. `ADD INDEX` uses this to remove the phantom
-  in-memory index (it mutates `table.Indexes` + `SystemSchema` *before* commit, so a failed
-  backfill must undo those in-memory mutations). Compensation errors are swallowed+logged so
-  they never mask the original exception. Hard crashes need no compensation — the node
-  reloads from persisted (rolled-back) metadata on restart.
+- **DDL transaction abort (`ExecuteDdlInTransaction` / `ExecuteClusteredIndexDdlAsync`):**
+  rolls back the KV transaction, then runs an optional `onAbort` compensation. `ADD INDEX`
+  uses this to remove the phantom in-memory index — it mutates `table.Indexes` and
+  `table.Schema.Indexes` *before* commit, so a failed backfill must undo both
+  (`CompensateAbortedAddIndexAsync`). On the cluster path the schema delta is published only
+  *after* the data transaction commits, so an abort never leaves a replicated phantom index.
+  Compensation errors are swallowed+logged so they never mask the original exception. Hard
+  crashes need no compensation — the node reloads from persisted (rolled-back) metadata.
 - **Two-version gate timeout:** if a live node never acks `FromVersion`/`ToVersion` within
   `SchemaAckWaitTimeout`, the DDL throws. With the infinite live-node lease this is also how
   a dead-but-un-evicted member surfaces (a DS11 test target).
@@ -550,14 +585,24 @@ the v7 layout but are read with v8 visibility: `age` reads as absent/null until 
   - `CamusDB.Tests/Catalogs/TestSchemaReplicator.cs`, `TestEmbeddedKahuna.cs` — ack gate,
     leader/follower apply, follower forwarding.
   - `CamusDB.Tests/CommandsExecutor/TestTableAlterer.cs` — online index add + backfill.
+  - `CamusDB.Tests/CommandsExecutor/TestPersistentIndexSchema.cs` — B1 index persist →
+    reopen → deserialize round-trip; new path stands alone with `SystemSchema` cleared.
+  - `CamusDB.Tests/Cluster/InProcessSchemaCluster.cs` — N distinct-node fixture with
+    ack-based convergence await and fault injection (pause/kill/force-leader);
+    `TestInProcessSchemaCluster.cs` — cluster create-table + B2 `ADD/DROP INDEX` convergence.
   - `CamusDB.Tests/Cluster/TestMultiPartitionRouting.cs` — partition routing.
 
 ### Key carry-forwards still open
 
 - **DS5R:** rename ops (`RenameTable`/`RenameIndex`/`RenameColumn`) end-to-end.
-- **DS5:** production follower→leader DDL forwarder + endpoint map + idempotent retries.
-- **DS7 coordinator:** drive staged `SetElementState` sequences with the ack gate between
-  each, then let `AddColumn` start in `DeleteOnly`; auto-retry on schema-version conflict.
-- **DS9 → DS10/DS11:** coordinator-owned checkpoint commits, leader-change resume,
-  cluster-wide index completion; replace the in-process static `SchemaAckTracker` with real
-  heartbeat/membership before enabling timed lease expiry.
+- **DS5 / Workstream C:** production follower→leader DDL forwarder + endpoint map +
+  idempotent retries (the in-process `ISchemaReplicationForwarder` is test-only).
+- **DS7 coordinator / Workstream D:** drive staged `SetElementState` sequences with the ack
+  gate between each (so `AddColumn`/`ADD INDEX` go through `DeleteOnly → WriteOnly → Public`
+  with concurrent-write safety and crash-resumable backfill); auto-retry on schema-version
+  conflict. B2 replicates indexes but still backfills-then-publishes (not staged).
+- **Workstream E/F:** replace the in-process static `SchemaAckTracker` with real
+  heartbeat/membership before enabling timed lease expiry; make schema-log replay
+  authoritative on restart + a richer checkpoint-persist-failure policy.
+- **Index cleanup:** `SystemSchema` index storage is now read-only legacy; remove it once all
+  databases are known to be migrated.
