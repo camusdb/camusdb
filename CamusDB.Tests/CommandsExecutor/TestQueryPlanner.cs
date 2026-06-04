@@ -641,7 +641,7 @@ public class TestQueryPlanner
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         Assert.IsNotNull(plan.ScanRequiredColumns);
-        Assert.AreEqual(0, plan.ScanRequiredColumns.Count);
+        Assert.AreEqual(0, plan.ScanRequiredColumns!.Count);
     }
 
     [Test]

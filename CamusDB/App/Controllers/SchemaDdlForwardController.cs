@@ -35,10 +35,16 @@ namespace CamusDB.App.Controllers;
 /// internal <c>TryForwardDdlAsync</c> re-check can still cause one additional hop
 /// to the new leader, but that chain is finite and bounded by the retry limit.
 ///
-/// After the leader check, each action consults <see cref="DdlOperationIdCache"/>
-/// before executing.  If the stable operationId was already processed (the response-
-/// lost retry case) the cached response is replayed without re-executing the DDL.
-/// Only successful ("ok") responses are cached; errors are never replayed.
+/// After the leader check, each action calls
+/// <see cref="DdlOperationIdCache.TryGetOrReserve"/> before executing.
+/// <list type="bullet">
+///   <item>Sequential retry (response was lost in transit): the result was already
+///     cached — replay it without re-executing the DDL.</item>
+///   <item>Concurrent duplicate (same opId arrives while the original is still
+///     executing, e.g. because the HTTP client timed out): the duplicate awaits
+///     the in-flight TCS and returns the original's result when it completes.
+///     If the original faults, the duplicate propagates the same error.</item>
+/// </list>
 /// </summary>
 [ApiController]
 public sealed class SchemaDdlForwardController : CommandsController
@@ -52,19 +58,35 @@ public sealed class SchemaDdlForwardController : CommandsController
     [Route("/internal/schema-ddl/create-table")]
     public async Task<JsonResult> ForwardCreateTable()
     {
+        ForwardCreateTableRequest? req;
         try
         {
-            ForwardCreateTableRequest? req = await ReadJsonBodyAsync<ForwardCreateTableRequest>().ConfigureAwait(false);
+            req = await ReadJsonBodyAsync<ForwardCreateTableRequest>().ConfigureAwait(false);
             if (req is null)
                 return BadDdlRequest("ForwardCreateTable request is null");
 
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
 
-            DdlOperationIdCache? opCache = GetOperationIdCache();
-            if (TryGetCachedResponse(req.OperationId, opCache, out JsonResult? cached))
-                return cached;
+        DdlOperationIdCache? opCache = GetOperationIdCache();
+        Task<SchemaDdlForwardResponse?>? pending = opCache?.TryGetOrReserve(req.OperationId);
+        if (pending is not null)
+        {
+            // Cached result or concurrent duplicate awaiting the original.
+            // If the original faulted, await throws — caught below.
+            try { return new JsonResult(await pending.ConfigureAwait(false)); }
+            catch (CamusDBException e) { return FailedDdl(e.Code, e.Message); }
+            catch (Exception e) { return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message); }
+        }
 
+        try
+        {
             CreateTableTicket ticket = new(
                 databaseName: req.DatabaseName,
                 tableName: req.TableName,
@@ -74,15 +96,19 @@ public sealed class SchemaDdlForwardController : CommandsController
             );
 
             CreateTableResult result = await executor.CreateTable(ticket).ConfigureAwait(false);
-            return OkDdlCached(result.Success, req.OperationId, opCache);
+            SchemaDdlForwardResponse response = new() { Status = "ok", Applied = result.Success };
+            opCache?.SetAndComplete(req.OperationId, response);
+            return new JsonResult(response);
         }
         catch (CamusDBException e)
         {
+            opCache?.FaultAndRelease(req.OperationId, e);
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
         {
+            opCache?.FaultAndRelease(req.OperationId, e);
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
             return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
         }
@@ -92,19 +118,33 @@ public sealed class SchemaDdlForwardController : CommandsController
     [Route("/internal/schema-ddl/alter-table")]
     public async Task<JsonResult> ForwardAlterTable()
     {
+        ForwardAlterTableRequest? req;
         try
         {
-            ForwardAlterTableRequest? req = await ReadJsonBodyAsync<ForwardAlterTableRequest>().ConfigureAwait(false);
+            req = await ReadJsonBodyAsync<ForwardAlterTableRequest>().ConfigureAwait(false);
             if (req is null)
                 return BadDdlRequest("ForwardAlterTable request is null");
 
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
 
-            DdlOperationIdCache? opCache = GetOperationIdCache();
-            if (TryGetCachedResponse(req.OperationId, opCache, out JsonResult? cached))
-                return cached;
+        DdlOperationIdCache? opCache = GetOperationIdCache();
+        Task<SchemaDdlForwardResponse?>? pending = opCache?.TryGetOrReserve(req.OperationId);
+        if (pending is not null)
+        {
+            try { return new JsonResult(await pending.ConfigureAwait(false)); }
+            catch (CamusDBException e) { return FailedDdl(e.Code, e.Message); }
+            catch (Exception e) { return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message); }
+        }
 
+        try
+        {
             AlterTableTicket ticket = new(
                 databaseName: req.DatabaseName,
                 tableName: req.TableName,
@@ -113,15 +153,19 @@ public sealed class SchemaDdlForwardController : CommandsController
             );
 
             bool result = await executor.AlterTable(ticket).ConfigureAwait(false);
-            return OkDdlCached(result, req.OperationId, opCache);
+            SchemaDdlForwardResponse response = new() { Status = "ok", Applied = result };
+            opCache?.SetAndComplete(req.OperationId, response);
+            return new JsonResult(response);
         }
         catch (CamusDBException e)
         {
+            opCache?.FaultAndRelease(req.OperationId, e);
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
         {
+            opCache?.FaultAndRelease(req.OperationId, e);
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
             return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
         }
@@ -131,19 +175,33 @@ public sealed class SchemaDdlForwardController : CommandsController
     [Route("/internal/schema-ddl/alter-index")]
     public async Task<JsonResult> ForwardAlterIndex()
     {
+        ForwardAlterIndexRequest? req;
         try
         {
-            ForwardAlterIndexRequest? req = await ReadJsonBodyAsync<ForwardAlterIndexRequest>().ConfigureAwait(false);
+            req = await ReadJsonBodyAsync<ForwardAlterIndexRequest>().ConfigureAwait(false);
             if (req is null)
                 return BadDdlRequest("ForwardAlterIndex request is null");
 
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
 
-            DdlOperationIdCache? opCache = GetOperationIdCache();
-            if (TryGetCachedResponse(req.OperationId, opCache, out JsonResult? cached))
-                return cached;
+        DdlOperationIdCache? opCache = GetOperationIdCache();
+        Task<SchemaDdlForwardResponse?>? pending = opCache?.TryGetOrReserve(req.OperationId);
+        if (pending is not null)
+        {
+            try { return new JsonResult(await pending.ConfigureAwait(false)); }
+            catch (CamusDBException e) { return FailedDdl(e.Code, e.Message); }
+            catch (Exception e) { return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message); }
+        }
 
+        try
+        {
             AlterIndexTicket ticket = new(
                 databaseName: req.DatabaseName,
                 tableName: req.TableName,
@@ -154,15 +212,19 @@ public sealed class SchemaDdlForwardController : CommandsController
             );
 
             bool result = await executor.AlterIndex(ticket).ConfigureAwait(false);
-            return OkDdlCached(result, req.OperationId, opCache);
+            SchemaDdlForwardResponse response = new() { Status = "ok", Applied = result };
+            opCache?.SetAndComplete(req.OperationId, response);
+            return new JsonResult(response);
         }
         catch (CamusDBException e)
         {
+            opCache?.FaultAndRelease(req.OperationId, e);
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
         {
+            opCache?.FaultAndRelease(req.OperationId, e);
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
             return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
         }
@@ -172,19 +234,33 @@ public sealed class SchemaDdlForwardController : CommandsController
     [Route("/internal/schema-ddl/drop-table")]
     public async Task<JsonResult> ForwardDropTable()
     {
+        ForwardDropTableRequest? req;
         try
         {
-            ForwardDropTableRequest? req = await ReadJsonBodyAsync<ForwardDropTableRequest>().ConfigureAwait(false);
+            req = await ReadJsonBodyAsync<ForwardDropTableRequest>().ConfigureAwait(false);
             if (req is null)
                 return BadDdlRequest("ForwardDropTable request is null");
 
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
 
-            DdlOperationIdCache? opCache = GetOperationIdCache();
-            if (TryGetCachedResponse(req.OperationId, opCache, out JsonResult? cached))
-                return cached;
+        DdlOperationIdCache? opCache = GetOperationIdCache();
+        Task<SchemaDdlForwardResponse?>? pending = opCache?.TryGetOrReserve(req.OperationId);
+        if (pending is not null)
+        {
+            try { return new JsonResult(await pending.ConfigureAwait(false)); }
+            catch (CamusDBException e) { return FailedDdl(e.Code, e.Message); }
+            catch (Exception e) { return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message); }
+        }
 
+        try
+        {
             DropTableTicket ticket = new(
                 databaseName: req.DatabaseName,
                 tableName: req.TableName,
@@ -192,15 +268,19 @@ public sealed class SchemaDdlForwardController : CommandsController
             );
 
             bool result = await executor.DropTable(ticket).ConfigureAwait(false);
-            return OkDdlCached(result, req.OperationId, opCache);
+            SchemaDdlForwardResponse response = new() { Status = "ok", Applied = result };
+            opCache?.SetAndComplete(req.OperationId, response);
+            return new JsonResult(response);
         }
         catch (CamusDBException e)
         {
+            opCache?.FaultAndRelease(req.OperationId, e);
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
         {
+            opCache?.FaultAndRelease(req.OperationId, e);
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
             return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
         }
@@ -225,35 +305,6 @@ public sealed class SchemaDdlForwardController : CommandsController
 
     private DdlOperationIdCache? GetOperationIdCache() =>
         HttpContext.RequestServices.GetService<DdlOperationIdCache>();
-
-    /// <summary>
-    /// Returns true and sets <paramref name="result"/> to the cached response
-    /// when <paramref name="operationId"/> was already processed by this leader.
-    /// </summary>
-    private static bool TryGetCachedResponse(
-        string operationId,
-        DdlOperationIdCache? cache,
-        out JsonResult result)
-    {
-        if (cache is not null && cache.TryGet(operationId, out SchemaDdlForwardResponse? cached))
-        {
-            result = new JsonResult(cached);
-            return true;
-        }
-        result = null!;
-        return false;
-    }
-
-    /// <summary>
-    /// Builds an "ok" response, writes it to the cache, and returns it.
-    /// Caching is skipped when <paramref name="cache"/> is null (standalone mode).
-    /// </summary>
-    private static JsonResult OkDdlCached(bool applied, string operationId, DdlOperationIdCache? cache)
-    {
-        SchemaDdlForwardResponse response = new() { Status = "ok", Applied = applied };
-        cache?.Set(operationId, response);
-        return new JsonResult(response);
-    }
 
     private async Task<T?> ReadJsonBodyAsync<T>()
     {
