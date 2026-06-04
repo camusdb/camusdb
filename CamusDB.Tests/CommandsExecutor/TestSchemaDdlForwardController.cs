@@ -659,6 +659,168 @@ public sealed class TestSchemaDdlForwardController
         }
     }
 
+    // ── Layer 2: in-flight TCS (concurrent duplicates) ───────────────────────
+
+    [Test]
+    public async Task ForwardCreateTable_InFlightDuplicate_AwaitsOwnerResult_DoesNotReExecute()
+    {
+        // Pre-register an owner directly so we control when it completes, then
+        // fire a duplicate through the controller and assert it awaits the TCS
+        // rather than executing the DDL a second time.
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            SyncDdlOperationIdCache opCache = new();
+            string opId = Guid.NewGuid().ToString("N");
+
+            // Register ourselves as the in-flight owner — the controller will see
+            // this opId as already in-flight and block on the TCS.
+            _ = opCache.TryGetOrReserve(opId);
+
+            string body = JsonSerializer.Serialize(new ForwardCreateTableRequest
+            {
+                OperationId = opId,
+                DatabaseName = db,
+                TableName = "robots",
+                Columns = [new ColumnInfoRequest { Name = "id", Type = CamusDB.Core.Catalogs.Models.ColumnType.Id }],
+                Constraints =
+                [
+                    new ConstraintInfoRequest
+                    {
+                        Type = ConstraintType.PrimaryKey,
+                        Name = "~pk",
+                        Columns = [new ColumnIndexInfoRequest { Name = "id", Order = OrderType.Ascending }],
+                    }
+                ],
+                IfNotExists = false,
+            }, JsonOpts);
+
+            // Fire the duplicate request; it must block on the in-flight TCS.
+            Task<JsonResult> duplicateTask = Task.Run(() =>
+                BuildController(body, clusterNode: node, opCache: opCache).ForwardCreateTable());
+
+            // Wait until the controller detects it's a duplicate (TryGetOrReserve returned non-null).
+            await opCache.WhenDuplicateDetected.WaitAsync(TimeSpan.FromSeconds(5));
+
+            // Verify the table was NOT created — the duplicate must not have executed the DDL.
+            DatabaseDescriptor desc = await executor!.OpenDatabase(db);
+            Assert.IsFalse(desc.Schema.Tables.ContainsKey("robots"),
+                "table must not exist — duplicate must not have executed the DDL");
+
+            // Complete the in-flight operation; the duplicate must unblock with the owner's result.
+            opCache.SetAndComplete(opId, new SchemaDdlForwardResponse { Status = "ok", Applied = true });
+
+            JsonResult result = await duplicateTask.WaitAsync(TimeSpan.FromSeconds(5));
+            SchemaDdlForwardResponse? resp = ExtractResponse(result);
+            Assert.AreEqual("ok", resp!.Status, "duplicate must return the owner's cached response");
+            Assert.IsTrue(resp.Applied);
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+    }
+
+    [Test]
+    public async Task ForwardCreateTable_InFlightDuplicate_PropagatesOwnerFault()
+    {
+        // When the original faults, the duplicate's await must propagate the same
+        // exception, which the controller maps to a "failed" response.
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            SyncDdlOperationIdCache opCache = new();
+            string opId = Guid.NewGuid().ToString("N");
+
+            _ = opCache.TryGetOrReserve(opId); // register as owner
+
+            string body = JsonSerializer.Serialize(new ForwardCreateTableRequest
+            {
+                OperationId = opId,
+                DatabaseName = db,
+                TableName = "robots",
+                Columns = [new ColumnInfoRequest { Name = "id", Type = CamusDB.Core.Catalogs.Models.ColumnType.Id }],
+                Constraints =
+                [
+                    new ConstraintInfoRequest
+                    {
+                        Type = ConstraintType.PrimaryKey,
+                        Name = "~pk",
+                        Columns = [new ColumnIndexInfoRequest { Name = "id", Order = OrderType.Ascending }],
+                    }
+                ],
+                IfNotExists = false,
+            }, JsonOpts);
+
+            Task<JsonResult> duplicateTask = Task.Run(() =>
+                BuildController(body, clusterNode: node, opCache: opCache).ForwardCreateTable());
+
+            await opCache.WhenDuplicateDetected.WaitAsync(TimeSpan.FromSeconds(5));
+
+            // Fault the owner; the duplicate must surface the fault as a failed response.
+            opCache.FaultAndRelease(opId, new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, "table already exists"));
+
+            JsonResult result = await duplicateTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.AreEqual(500, result.StatusCode);
+            SchemaDdlForwardResponse? resp = ExtractResponse(result);
+            Assert.IsNotNull(resp);
+            Assert.AreEqual("failed", resp!.Status, "duplicate must surface the owner's fault as a failed response");
+            Assert.AreEqual(CamusDBErrorCodes.TableAlreadyExists, resp.Code);
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+    }
+
+    [Test]
+    public async Task ForwardCreateTable_ConcurrentSameOpId_ExactlyOneExecutes()
+    {
+        // Two concurrent requests with the same opId and ifNotExists:false.
+        // If dedup works, exactly one executes and the other awaits/gets cached result.
+        // Both must return "ok".  Without dedup, one would return "failed"
+        // (TableAlreadyExists) because the table was already created by the first.
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            DdlOperationIdCache opCache = new();
+            string opId = Guid.NewGuid().ToString("N");
+
+            string body = JsonSerializer.Serialize(new ForwardCreateTableRequest
+            {
+                OperationId = opId,
+                DatabaseName = db,
+                TableName = "robots",
+                Columns = [new ColumnInfoRequest { Name = "id", Type = CamusDB.Core.Catalogs.Models.ColumnType.Id }],
+                Constraints =
+                [
+                    new ConstraintInfoRequest
+                    {
+                        Type = ConstraintType.PrimaryKey,
+                        Name = "~pk",
+                        Columns = [new ColumnIndexInfoRequest { Name = "id", Order = OrderType.Ascending }],
+                    }
+                ],
+                IfNotExists = false,
+            }, JsonOpts);
+
+            Task<JsonResult> t1 = Task.Run(() =>
+                BuildController(body, clusterNode: node, opCache: opCache).ForwardCreateTable());
+            Task<JsonResult> t2 = Task.Run(() =>
+                BuildController(body, clusterNode: node, opCache: opCache).ForwardCreateTable());
+
+            JsonResult[] results = await Task.WhenAll(t1, t2);
+
+            Assert.IsTrue(
+                results.All(r => ExtractResponse(r)?.Status == "ok"),
+                "both concurrent requests must return ok — without dedup one would have returned failed (TableAlreadyExists)");
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+    }
+
     // ── Minimal IServiceProvider used by BuildController ─────────────────────
 
     private sealed class SingleServiceProvider(EmbeddedKahuna? kahuna, DdlOperationIdCache? opCache = null) : IServiceProvider
@@ -668,6 +830,26 @@ public sealed class TestSchemaDdlForwardController
             if (serviceType == typeof(EmbeddedKahuna)) return kahuna;
             if (serviceType == typeof(DdlOperationIdCache)) return opCache;
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Test-only subclass that signals <see cref="WhenDuplicateDetected"/> the
+    /// first time <see cref="TryGetOrReserve"/> returns a non-null task (i.e., a
+    /// concurrent duplicate has been detected and is now awaiting the in-flight TCS).
+    /// </summary>
+    private sealed class SyncDdlOperationIdCache : DdlOperationIdCache
+    {
+        private readonly TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task WhenDuplicateDetected => _gate.Task;
+
+        public override Task<SchemaDdlForwardResponse?>? TryGetOrReserve(string operationId)
+        {
+            Task<SchemaDdlForwardResponse?>? result = base.TryGetOrReserve(operationId);
+            if (result is not null)
+                _gate.TrySetResult();
+            return result;
         }
     }
 }

@@ -521,6 +521,47 @@ public sealed class KvTableStore
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Batched delete path (mass delete / drop index / drop table)
+    // -----------------------------------------------------------------------
+
+    /// <summary>A single row plus its secondary-index entries, to be deleted as part of a batch.</summary>
+    public sealed class RowDelete
+    {
+        public required ObjectIdValue RowId { get; init; }
+        public List<IndexDelete> IndexEntries { get; } = [];
+    }
+
+    /// <summary>One secondary-index entry for a row in a batch delete.</summary>
+    public readonly record struct IndexDelete(string IndexId, CompositeColumnValue Key, ObjectIdValue RowId, bool Unique);
+
+    /// <summary>
+    /// Deletes many rows (and their index entries) using two Kahuna round-trips for the whole
+    /// batch — one <see cref="IKahuna.LocateAndTryAcquireManyExclusiveLocks"/> and one
+    /// <see cref="IKahuna.LocateAndTryDeleteManyKeyValue"/> — instead of an acquire+delete per key.
+    /// </summary>
+    public async Task DeleteRowsBatch(KvTransaction tx, IReadOnlyList<RowDelete> rows, CancellationToken cancellationToken = default)
+    {
+        if (rows.Count == 0)
+            return;
+
+        List<string> keys = [];
+
+        foreach (RowDelete row in rows)
+        {
+            keys.Add(BuildRowKey(row.RowId));
+
+            foreach (IndexDelete ix in row.IndexEntries)
+            {
+                keys.Add(ix.Unique
+                    ? BuildUniqueIndexKey(ix.IndexId, ix.Key)
+                    : BuildNonUniqueIndexKey(ix.IndexId, ix.Key, ix.RowId));
+            }
+        }
+
+        await DeleteKeysBatch(tx, keys, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Removes a secondary index entry. No-ops silently if the entry does not exist.
     /// </summary>
@@ -576,20 +617,7 @@ public sealed class KvTableStore
                 keysToDelete.Add(kvKey);
         }
 
-        foreach (string kvKey in keysToDelete)
-        {
-            await AcquireLock(tx, kvKey, cancellationToken).ConfigureAwait(false);
-
-            (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
-                () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, kvKey, KeyValueDurability.Persistent, cancellationToken),
-                cancellationToken
-            ).ConfigureAwait(false);
-
-            if (type is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
-                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"DropIndexEntries failed for key {kvKey}: {type}");
-
-            tx.TrackModified(kvKey, KeyValueDurability.Persistent);
-        }
+        await DeleteKeysBatch(tx, keysToDelete, cancellationToken).ConfigureAwait(false);
 
         return keysToDelete.Count;
     }
@@ -597,6 +625,77 @@ public sealed class KvTableStore
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+
+    private async Task DeleteKeysBatch(KvTransaction tx, List<string> keys, CancellationToken cancellationToken)
+    {
+        if (keys.Count == 0)
+            return;
+
+        List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys =
+            keys.Select(k => (k, 0, KeyValueDurability.Persistent)).ToList();
+
+        List<KahunaDeleteKeyValueRequestItem> deleteItems = keys.Select(k => new KahunaDeleteKeyValueRequestItem
+        {
+            TransactionId = tx.TransactionId,
+            Key = k,
+            Durability = KeyValueDurability.Persistent
+        }).ToList();
+
+        await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
+        await DeleteManyWithRetry(deleteItems, cancellationToken).ConfigureAwait(false);
+
+        foreach (string key in keys)
+        {
+            tx.TrackLock(key, KeyValueDurability.Persistent);
+            tx.TrackModified(key, KeyValueDurability.Persistent);
+        }
+    }
+
+    private async Task DeleteManyWithRetry(List<KahunaDeleteKeyValueRequestItem> items, CancellationToken ct)
+    {
+        List<KahunaDeleteKeyValueRequestItem> pending = new(items);
+        int retries = 0;
+
+        while (pending.Count > 0)
+        {
+            List<KahunaDeleteKeyValueResponseItem> responses =
+                await kahuna.LocateAndTryDeleteManyKeyValue(pending, ct).ConfigureAwait(false);
+
+            List<KahunaDeleteKeyValueRequestItem> retry = [];
+            Dictionary<string, KahunaDeleteKeyValueRequestItem>? byKey = null;
+
+            foreach (KahunaDeleteKeyValueResponseItem resp in responses)
+            {
+                string key = resp.Key ?? "";
+
+                switch (resp.Type)
+                {
+                    case KeyValueResponseType.Deleted:
+                    case KeyValueResponseType.DoesNotExist:
+                        break;
+
+                    case KeyValueResponseType.MustRetry:
+                    case KeyValueResponseType.WaitingForReplication:
+                        byKey ??= pending.ToDictionary(i => i.Key!, i => i);
+                        if (byKey.TryGetValue(key, out KahunaDeleteKeyValueRequestItem? item))
+                            retry.Add(item);
+                        break;
+
+                    default:
+                        throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch delete failed for key {key}: {resp.Type}");
+                }
+            }
+
+            if (retry.Count == 0)
+                return;
+
+            if (++retries >= MaxKahunaRetries)
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch delete failed for {retry.Count} key(s) after {MaxKahunaRetries} retries");
+
+            await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+            pending = retry;
+        }
+    }
 
     private async Task WriteRow(KvTransaction tx, ObjectIdValue rowId, byte[] data, CancellationToken cancellationToken)
     {

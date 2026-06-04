@@ -34,6 +34,8 @@ internal sealed class DatabaseOpener
 
     private readonly SchemaReplicator schemaReplicator;
 
+    private readonly SchemaChangeCoordinator coordinator;
+
     private readonly ILogger<ICamusDB> logger;
 
     private readonly ILoggerFactory? loggerFactory;
@@ -52,6 +54,7 @@ internal sealed class DatabaseOpener
         this.databaseDescriptors = databaseDescriptors;
         this.catalogs = catalogs;
         this.schemaReplicator = new(catalogs, logger);
+        this.coordinator = new(catalogs, logger);
         this.logger = logger;
         this.clusterNode = clusterNode;
         this.loggerFactory = loggerFactory;
@@ -102,7 +105,7 @@ internal sealed class DatabaseOpener
         await catalogs.LoadMetaAsync(databaseDescriptor).ConfigureAwait(false);
 
         if (!databaseDescriptor.OwnsKahuna)
-            schemaReplicator.Register(databaseDescriptor);
+            schemaReplicator.Register(databaseDescriptor, coordinator);
 
         logger.LogInformation("Database {DbName} opened", name);
 

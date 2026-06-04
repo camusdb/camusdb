@@ -41,19 +41,29 @@ public sealed class SchemaReplicator
         this.logger = logger;
     }
 
-    public void Register(DatabaseDescriptor database)
+    public void Register(DatabaseDescriptor database, SchemaChangeCoordinator? coordinator = null)
     {
         ArgumentNullException.ThrowIfNull(database);
 
         database.Kahuna.RegisterLocalSchemaAckNode(database.Name);
         database.Kahuna.RecordLocalSchemaApplied(database.Name, database.Schema.SchemaVersion);
 
-        IDisposable subscription = database.Kahuna.RegisterSchemaApply(
+        IDisposable applySubscription = database.Kahuna.RegisterSchemaApply(
             (partitionId, bytes) => ApplyAsync(database, partitionId, bytes),
             (_, bytes) => RestoreAsync(database, bytes)
         );
 
-        database.SetSchemaReplicationSubscription(subscription);
+        IDisposable? leaderSubscription = coordinator is not null
+            ? database.Kahuna.RegisterSchemaLeaderCallback(
+                database.Name,
+                () => coordinator.ResumeJobsAsync(database))
+            : null;
+
+        IDisposable composite = leaderSubscription is not null
+            ? new CompositeDisposable(applySubscription, leaderSubscription)
+            : applySubscription;
+
+        database.SetSchemaReplicationSubscription(composite);
     }
 
     public async Task<bool> ApplyAsync(DatabaseDescriptor database, int partitionId, byte[] bytes)
@@ -286,5 +296,28 @@ public sealed class SchemaReplicator
             Version = history.Version,
             Columns = history.Columns is null ? null : [.. history.Columns]
         };
+    }
+}
+
+/// <summary>
+/// Disposes two <see cref="IDisposable"/> instances together. Used by
+/// <see cref="SchemaReplicator.Register"/> to bundle the schema-apply subscription
+/// with the optional leader-callback subscription into a single token.
+/// </summary>
+file sealed class CompositeDisposable : IDisposable
+{
+    private readonly IDisposable first;
+    private readonly IDisposable second;
+
+    public CompositeDisposable(IDisposable first, IDisposable second)
+    {
+        this.first = first;
+        this.second = second;
+    }
+
+    public void Dispose()
+    {
+        first.Dispose();
+        second.Dispose();
     }
 }

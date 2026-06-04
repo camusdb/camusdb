@@ -335,6 +335,43 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     }
 
     /// <summary>
+    /// Makes <paramref name="targetNode"/> start an immediate election for the schema-log
+    /// partition of <paramref name="databaseName"/>.  Waits until that node has actually
+    /// become the schema leader.  Because Raft log-freshness rules still apply the node must
+    /// have an up-to-date log (call after schema convergence to guarantee this).
+    /// No transport blocking — the previous leader steps down gracefully and all nodes
+    /// remain live, so the cluster stays stable.
+    /// </summary>
+    public async Task TransferSchemaLeadershipAsync(
+        string databaseName,
+        Node targetNode,
+        TimeSpan? timeout = null)
+    {
+        TimeSpan searchTimeout = timeout ?? TimeSpan.FromSeconds(15);
+
+        await targetNode.Kahuna.ForceSchemaLeaderForTestingAsync(databaseName, CancellationToken.None)
+            .ConfigureAwait(false);
+
+        // Wait until the target node has won the election.
+        DateTime deadline = DateTime.UtcNow.Add(searchTimeout);
+        while (DateTime.UtcNow < deadline)
+        {
+            using CancellationTokenSource cts = new(TimeSpan.FromMilliseconds(200));
+            try
+            {
+                if (await targetNode.Kahuna.AmISchemaLeaderAsync(databaseName, cts.Token).ConfigureAwait(false))
+                    return;
+            }
+            catch (OperationCanceledException) { }
+
+            await Task.Delay(50).ConfigureAwait(false);
+        }
+
+        throw new AssertionException(
+            $"Node {targetNode.Index} did not become schema leader for '{databaseName}' within {searchTimeout.TotalSeconds}s");
+    }
+
+    /// <summary>
     /// Forces a leadership change on the schema partition for <paramref name="databaseName"/> by
     /// blocking all outbound messages from the current leader so followers time out and elect a
     /// new one. Returns the new leader node. The old leader's outbound remains blocked until the

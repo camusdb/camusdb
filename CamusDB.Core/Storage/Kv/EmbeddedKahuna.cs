@@ -177,6 +177,21 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         schemaReplicationForwarder = forwarder;
     }
 
+    /// <summary>
+    /// Triggers this node to start an immediate election for the schema-log partition of
+    /// <paramref name="db"/>.  The node still has to satisfy Raft log-freshness and quorum
+    /// rules, so it is not guaranteed to win — but if it has an up-to-date log it will.
+    /// Intended for testing only.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Task<RaftOperationStatus> ForceSchemaLeaderForTestingAsync(
+        string db,
+        CancellationToken cancellationToken = default)
+    {
+        int partitionId = SchemaLogPartition(db);
+        return Raft.ForceLeaderForTestingAsync(partitionId, cancellationToken);
+    }
+
     public async ValueTask<bool> AmISchemaLeaderAsync(string db, CancellationToken cancellationToken = default)
     {
         int partitionId = SchemaLogPartition(db);
@@ -266,6 +281,32 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             liveNodeLease ?? SchemaAckLiveNodeLease,
             cancellationToken
         );
+    }
+
+    /// <summary>
+    /// Registers a callback that fires when THIS node becomes the schema leader for
+    /// <paramref name="db"/>. Useful for coordinator resume on leader change (D2).
+    /// Returns an <see cref="IDisposable"/> that unhooks the handler on dispose.
+    /// </summary>
+    public IDisposable RegisterSchemaLeaderCallback(string db, Func<Task> onBecameLeader)
+    {
+        ArgumentNullException.ThrowIfNull(onBecameLeader);
+
+        int schemaPartition = SchemaLogPartition(db);
+        string localEndpoint = Raft.GetLocalEndpoint();
+
+        Func<int, string, Task<bool>> handler = async (partitionId, leaderEndpoint) =>
+        {
+            if (partitionId == schemaPartition &&
+                string.Equals(leaderEndpoint, localEndpoint, StringComparison.Ordinal))
+            {
+                await onBecameLeader().ConfigureAwait(false);
+            }
+            return true;
+        };
+
+        Raft.OnLeaderChanged += handler;
+        return new LeaderCallbackSubscription(Raft, handler);
     }
 
     public IDisposable RegisterSchemaApply(
@@ -363,6 +404,28 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     {
         lock (schemaSubscriptionsSync)
             schemaSubscriptions.Remove(subscription);
+    }
+
+    private sealed class LeaderCallbackSubscription : IDisposable
+    {
+        private readonly IRaft raft;
+        private readonly Func<int, string, Task<bool>> handler;
+        private bool disposed;
+
+        public LeaderCallbackSubscription(IRaft raft, Func<int, string, Task<bool>> handler)
+        {
+            this.raft = raft;
+            this.handler = handler;
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+                return;
+
+            disposed = true;
+            raft.OnLeaderChanged -= handler;
+        }
     }
 
     private sealed class SchemaApplySubscription : IDisposable

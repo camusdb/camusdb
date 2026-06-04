@@ -36,7 +36,7 @@ namespace CamusDB.App.Services;
 /// practice; the SchemaDdlSemaphore on the leader ensures idempotency at the apply
 /// layer regardless.
 /// </summary>
-public sealed class DdlOperationIdCache
+public class DdlOperationIdCache
 {
     internal static readonly TimeSpan Ttl = TimeSpan.FromSeconds(120);
     private static readonly TimeSpan EvictionInterval = TimeSpan.FromSeconds(60);
@@ -66,7 +66,7 @@ public sealed class DdlOperationIdCache
     /// <see cref="SetAndComplete"/> on success or <see cref="FaultAndRelease"/>
     /// on failure.
     /// </summary>
-    public Task<SchemaDdlForwardResponse?>? TryGetOrReserve(string operationId)
+    public virtual Task<SchemaDdlForwardResponse?>? TryGetOrReserve(string operationId)
     {
         // Layer 1: completed result cache.
         if (resultCache.TryGetValue(operationId, out Entry? entry) && entry.ExpiresAt > DateTime.UtcNow)

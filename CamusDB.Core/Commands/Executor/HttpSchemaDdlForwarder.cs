@@ -109,36 +109,20 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder
 
         logger.LogDebug("Forwarding DDL {Operation} to {Endpoint}", operation, endpoint);
 
-        // Transport failures (connection refused, DNS failure, mid-election TCP
-        // reset, HTTP-client timeout) are safe to treat as "not-leader": the
-        // leader never applied the request, so returning null lets
-        // TryForwardDdlAsync elect a fresh leader and retry.
+        // Transport failures at any point — connection refused, DNS failure,
+        // mid-election TCP reset, HTTP-client timeout, or a connection drop
+        // while reading the response body — are safe to treat as "not-leader":
+        // returning null lets TryForwardDdlAsync elect a fresh leader and retry.
         //
-        // The exception to the above is the response-lost case: the leader
-        // applied the DDL and sent a 200, but the connection dropped before we
-        // read the body.  That path returns successfully here (no exception is
-        // thrown), and the retry carries the same stable operationId.  The
-        // leader's DdlOperationIdCache catches the duplicate and replays the
-        // cached response, making the operation idempotent.
-        HttpResponseMessage response;
+        // When the leader already applied the DDL before the connection dropped,
+        // the retry carries the same stable operationId.  The leader's
+        // DdlOperationIdCache catches the duplicate and replays the cached
+        // response, making the operation idempotent end-to-end.
+        HttpResponseMessage? response = null;
         try
         {
             response = await httpClient.PostAsJsonAsync(endpoint, request, JsonOptions, cancellationToken).ConfigureAwait(false);
-        }
-        catch (HttpRequestException ex)
-        {
-            logger.LogWarning(ex, "DDL forward to {Endpoint} failed with transport error; will retry with new leader", endpoint);
-            return null;
-        }
-        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
-        {
-            // HTTP-client timeout (not caller-requested cancellation).
-            logger.LogWarning(ex, "DDL forward to {Endpoint} timed out; will retry with new leader", endpoint);
-            return null;
-        }
 
-        using (response)
-        {
             if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
                 return null;
 
@@ -154,6 +138,21 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder
                 "failed" => throw new CamusDBException(body.Code ?? CamusDBErrorCodes.InvalidInternalOperation, body.Message ?? "Unknown error from schema leader"),
                 _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Unexpected status '{body.Status}' from {endpoint}"),
             };
+        }
+        catch (HttpRequestException ex)
+        {
+            logger.LogWarning(ex, "DDL forward to {Endpoint} failed with transport error; will retry with new leader", endpoint);
+            return null;
+        }
+        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            // HTTP-client timeout (not caller-requested cancellation).
+            logger.LogWarning(ex, "DDL forward to {Endpoint} timed out; will retry with new leader", endpoint);
+            return null;
+        }
+        finally
+        {
+            response?.Dispose();
         }
     }
 

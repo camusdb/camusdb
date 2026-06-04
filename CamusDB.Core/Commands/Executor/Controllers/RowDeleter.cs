@@ -103,21 +103,24 @@ internal sealed class RowDeleter
         TableDescriptor table = state.Table;
         KvTransaction tx = state.Ticket.TxnState;
 
+        List<KvTableStore.RowDelete> batch = new(state.RowsToDelete.Count);
+
         foreach (QueryResultRow row in state.RowsToDelete)
         {
             ObjectIdValue rowId = row.RowId;
             Dictionary<string, ColumnValue> writableRow = await LoadWritableRow(state.Database, table, tx, rowId).ConfigureAwait(false);
 
-            await table.Store.DeleteRow(tx, rowId).ConfigureAwait(false);
-
-            await DeleteUniqueIndexEntries(table, tx, rowId, writableRow).ConfigureAwait(false);
-
-            await DeleteMultiIndexEntries(table, tx, rowId, writableRow).ConfigureAwait(false);
-
-            logger.LogInformation("Row with rowid {RowId} deleted", rowId);
-
-            state.DeletedRows++;
+            KvTableStore.RowDelete rowDelete = new() { RowId = rowId };
+            CollectIndexDeletes(table, rowId, writableRow, rowDelete);
+            batch.Add(rowDelete);
         }
+
+        await table.Store.DeleteRowsBatch(tx, batch).ConfigureAwait(false);
+
+        state.DeletedRows += batch.Count;
+
+        foreach (KvTableStore.RowDelete row in batch)
+            logger.LogInformation("Row with rowid {RowId} deleted", row.RowId);
 
         return FluxAction.Continue;
     }
@@ -141,43 +144,30 @@ internal sealed class RowDeleter
             visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
     }
 
-    private static async Task DeleteUniqueIndexEntries(
+    private static void CollectIndexDeletes(
         TableDescriptor table,
-        KvTransaction tx,
         ObjectIdValue rowId,
-        Dictionary<string, ColumnValue> row
+        Dictionary<string, ColumnValue> row,
+        KvTableStore.RowDelete rowDelete
     )
     {
         foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
         {
             TableIndexSchema index = kv.Value;
 
-            if (index.Type != IndexType.Unique || !SchemaElementStateRules.IsWritableIndex(table.Schema, index))
+            if (!SchemaElementStateRules.IsWritableIndex(table.Schema, index))
                 continue;
 
-            CompositeColumnValue uniqueKeyValue = GetColumnValue(row, index.Columns);
-
-            await table.Store.DeleteIndexEntry(tx, index.Name, uniqueKeyValue, rowId, unique: true).ConfigureAwait(false);
-        }
-    }
-
-    private static async Task DeleteMultiIndexEntries(
-        TableDescriptor table,
-        KvTransaction tx,
-        ObjectIdValue rowId,
-        Dictionary<string, ColumnValue> row
-    )
-    {
-        foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
-        {
-            TableIndexSchema index = kv.Value;
-
-            if (index.Type != IndexType.Multi || !SchemaElementStateRules.IsWritableIndex(table.Schema, index))
-                continue;
-
-            CompositeColumnValue multiKeyValue = GetColumnValue(row, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
-
-            await table.Store.DeleteIndexEntry(tx, index.Name, multiKeyValue, rowId, unique: false).ConfigureAwait(false);
+            if (index.Type == IndexType.Unique)
+            {
+                CompositeColumnValue key = GetColumnValue(row, index.Columns);
+                rowDelete.IndexEntries.Add(new KvTableStore.IndexDelete(index.Name, key, rowId, Unique: true));
+            }
+            else if (index.Type == IndexType.Multi)
+            {
+                CompositeColumnValue key = GetColumnValue(row, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
+                rowDelete.IndexEntries.Add(new KvTableStore.IndexDelete(index.Name, key, rowId, Unique: false));
+            }
         }
     }
 

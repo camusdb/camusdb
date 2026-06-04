@@ -304,6 +304,96 @@ public sealed class CatalogsManager
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Proposes an <c>AddColumn</c> delta with <paramref name="initialState"/> and replicates
+    /// it to all cluster nodes via the schema log.  Used by
+    /// <see cref="SchemaChangeCoordinator"/> to begin a staged add sequence in
+    /// <c>DeleteOnly</c> rather than jumping straight to <c>Public</c>.
+    /// Only valid on cluster nodes (<c>!OwnsKahuna</c>).
+    /// </summary>
+    public async Task ReplicateAddColumnInStateAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        ColumnInfo column,
+        SchemaElementState initialState
+    )
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Database = database.Name,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.AddColumn,
+                Payload = Serializator.Serialize(new SchemaAlterColumnPayload
+                {
+                    TableName = tableName,
+                    Column = new SchemaColumnPayload
+                    {
+                        Id = ObjectIdGenerator.Generate().ToString(),
+                        Name = column.Name,
+                        Type = column.Type,
+                        NotNull = column.NotNull,
+                        DefaultValue = column.Default,
+                        State = initialState,
+                    }
+                })
+            };
+            ValidateSchemaDelta(database.Schema, entry);
+        }
+        finally
+        {
+            database.Schema.Semaphore.Release();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Proposes a single <c>SetElementState</c> delta and replicates it to all cluster nodes
+    /// via the schema log, then waits for every live node to ack the resulting version.
+    /// Validates the state transition before proposing.
+    /// Only valid on cluster nodes (<c>!OwnsKahuna</c>).
+    /// </summary>
+    public async Task ReplicateElementStateAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        string elementName,
+        SchemaElementState targetState
+    )
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Database = database.Name,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.SetElementState,
+                Payload = Serializator.Serialize(new SchemaElementStatePayload
+                {
+                    TableName = tableName,
+                    ElementName = elementName,
+                    State = targetState,
+                })
+            };
+            ValidateSchemaDelta(database.Schema, entry);
+        }
+        finally
+        {
+            database.Schema.Semaphore.Release();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
     private static SchemaChangeLogEntry AddIndexEntry(
         DatabaseDescriptor database,
         AlterIndexTicket ticket,
@@ -720,7 +810,7 @@ public sealed class CatalogsManager
                 type: newColumn.Type,
                 notNull: newColumn.NotNull,
                 defaultValue: newColumn.DefaultValue,
-                state: SchemaElementState.Public
+                state: newColumn.State
             )
         );
 
@@ -835,6 +925,9 @@ public sealed class CatalogsManager
     private static string HistoryBucketPrefix(string dbName, string tableId) => $"{dbName}/meta/history/{tableId}";
     private static string HistoryKeyPrefix(string dbName, string tableId) => $"{HistoryBucketPrefix(dbName, tableId)}/";
     private static string HistoryKey(string dbName, string tableId, int version) => $"{HistoryKeyPrefix(dbName, tableId)}{version}";
+    private static string CoordinatorBucketPrefix(string dbName) => $"{dbName}/meta/coordinator";
+    private static string CoordinatorKeyPrefix(string dbName) => $"{CoordinatorBucketPrefix(dbName)}/";
+    private static string CoordinatorKey(string dbName, string tableName, string elementName) => $"{CoordinatorKeyPrefix(dbName)}{tableName}~{elementName}";
 
     /// <summary>
     /// Persists the system schema metadata. Schema table metadata is stored per object
@@ -892,6 +985,76 @@ public sealed class CatalogsManager
 
         await WriteMetaKey(kahuna, tx, VersionKey(database.Name), versionBytes).ConfigureAwait(false);
         await DeleteMetaKey(kahuna, tx, TableKey(database.Name, tableId)).ConfigureAwait(false);
+    }
+
+    // -----------------------------------------------------------------------
+    // Coordinator job persistence (D2)
+    // -----------------------------------------------------------------------
+
+    public async Task PersistCoordinatorJobAsync(DatabaseDescriptor database, PersistedCoordinatorJob job)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        byte[] bytes = MetaJsonSerializer.Serialize(job, MetaJsonContext.Default.PersistedCoordinatorJob);
+
+        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        try
+        {
+            await WriteMetaKey(kahuna, tx, CoordinatorKey(database.Name, job.TableName, job.ElementName), bytes).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    public async Task DeleteCoordinatorJobAsync(DatabaseDescriptor database, string tableName, string elementName)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        try
+        {
+            await DeleteMetaKey(kahuna, tx, CoordinatorKey(database.Name, tableName, elementName)).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    public async Task<List<PersistedCoordinatorJob>> LoadCoordinatorJobsAsync(DatabaseDescriptor database)
+    {
+        List<PersistedCoordinatorJob> jobs = [];
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string keyPrefix = CoordinatorKeyPrefix(database.Name);
+
+        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+                tx.TransactionId,
+                CoordinatorBucketPrefix(database.Name),
+                null, true,
+                null, true,
+                128,
+                KeyValueDurability.Persistent,
+                CancellationToken.None).ConfigureAwait(false))
+            {
+                if (!key.StartsWith(keyPrefix, StringComparison.Ordinal) || entry.Value is null)
+                    continue;
+
+                PersistedCoordinatorJob job = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.PersistedCoordinatorJob);
+                jobs.Add(job);
+            }
+
+            return jobs;
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
