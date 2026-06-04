@@ -34,4 +34,13 @@ public sealed class PersistedCoordinatorJob
     public bool ColumnNotNull { get; set; }
 
     public ColumnValue? ColumnDefault { get; set; }
+
+    /// <summary>
+    /// Number of leader-change resume attempts already spent on this job. The initial
+    /// (user-driven) run records 0; each subsequent <c>ResumeJobsAsync</c> pickup bumps it
+    /// durably before driving. Once it reaches the coordinator's max, the job is abandoned
+    /// (deleted + logged) instead of being retried on every future election — a doomed job
+    /// must not poison leader changes forever.
+    /// </summary>
+    public int Attempts { get; set; }
 }

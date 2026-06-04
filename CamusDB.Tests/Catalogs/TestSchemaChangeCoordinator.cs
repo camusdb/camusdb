@@ -520,6 +520,98 @@ public sealed class TestSchemaChangeCoordinator
         await cluster.WaitForSchemaConvergenceAsync(db, version, timeout: TimeSpan.FromSeconds(10));
     }
 
+    [Test]
+    public async Task ResumeJobsAsync_AbandonsJobThatExceededAttemptBudget()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        long version = 0;
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns: [new ColumnInfo("id", ColumnType.Id)],
+                constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
+                ifNotExists: false
+            ));
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            CatalogsManager catalogs = new(NullLogger<ICamusDB>.Instance);
+            SchemaChangeCoordinator coordinator = new(catalogs);
+
+            // A job that has already burned far more than the retry budget.
+            await catalogs.PersistCoordinatorJobAsync(leader.Database!, new PersistedCoordinatorJob
+            {
+                TableName = "robots",
+                ElementName = "year",
+                TargetState = SchemaElementState.Public,
+                ColumnType = ColumnType.Integer64,
+                Attempts = 100,
+            });
+
+            await coordinator.ResumeJobsAsync(leader.Database!);
+
+            // The over-budget job must be abandoned (deleted), not driven.
+            List<PersistedCoordinatorJob> remaining = await catalogs.LoadCoordinatorJobsAsync(leader.Database!);
+            Assert.AreEqual(0, remaining.Count, "over-budget job must be deleted, not retried");
+
+            bool hasYear = leader.Database!.Schema.Tables["robots"].Columns?.Any(c => c.Name == "year") ?? false;
+            Assert.IsFalse(hasYear, "abandoned job must NOT be driven — the column must not be created");
+        });
+    }
+
+    [Test]
+    public async Task ResumeJobsAsync_DeletesAlreadyCompletedJob()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        long version = 0;
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns: [new ColumnInfo("id", ColumnType.Id), new ColumnInfo("year", ColumnType.Integer64)],
+                constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
+                ifNotExists: false
+            ));
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            CatalogsManager catalogs = new(NullLogger<ICamusDB>.Instance);
+            SchemaChangeCoordinator coordinator = new(catalogs);
+
+            // Stale job whose target ('year' Public) is already reached — e.g. the previous
+            // leader finished the last step but crashed before deleting the record.
+            await catalogs.PersistCoordinatorJobAsync(leader.Database!, new PersistedCoordinatorJob
+            {
+                TableName = "robots",
+                ElementName = "year",
+                TargetState = SchemaElementState.Public,
+            });
+
+            long before = leader.Database!.Schema.SchemaVersion;
+            await coordinator.ResumeJobsAsync(leader.Database!);
+
+            List<PersistedCoordinatorJob> remaining = await catalogs.LoadCoordinatorJobsAsync(leader.Database!);
+            Assert.AreEqual(0, remaining.Count, "already-completed job must be cleaned up on resume");
+            Assert.AreEqual(before, leader.Database!.Schema.SchemaVersion,
+                "no transition should be emitted for a job already at its target");
+        });
+    }
+
     /// <summary>
     /// Full D2 scenario: a coordinator runs the first step on node A, persists its job,
     /// then node B wins a new election (<c>ForceLeaderForTestingAsync</c>).  A fresh
@@ -569,6 +661,10 @@ public sealed class TestSchemaChangeCoordinator
                 ColumnType = ColumnType.Integer64,
             });
 
+            // Verify job is readable immediately after write on the same node.
+            List<PersistedCoordinatorJob> writtenJobs = await catalogs.LoadCoordinatorJobsAsync(leader.Database!);
+            Assert.AreEqual(1, writtenJobs.Count, $"Job must be readable right after write on node {leader.Index}");
+
             version = leader.Database!.Schema.SchemaVersion;
         });
         await cluster.WaitForSchemaConvergenceAsync(db, version, timeout: TimeSpan.FromSeconds(10));
@@ -589,30 +685,12 @@ public sealed class TestSchemaChangeCoordinator
         InProcessSchemaCluster.Node newLeader = cluster.Nodes.First(n => n.Index != originalLeaderIndex);
         await cluster.TransferSchemaLeadershipAsync(db, newLeader, timeout: TimeSpan.FromSeconds(15));
 
-        // Step 4: a fresh coordinator on the new leader resumes the persisted job.
-        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
-        {
-            CatalogsManager catalogs = new(NullLogger<ICamusDB>.Instance);
-            SchemaChangeCoordinator coordinator = new(catalogs);
-
-            // Use direct RunJobAsync to propagate exceptions during diagnosis
-            List<PersistedCoordinatorJob> jobs = await catalogs.LoadCoordinatorJobsAsync(leader.Database!);
-            Assert.AreEqual(1, jobs.Count, $"Expected 1 persisted coordinator job on node {leader.Index}, got {jobs.Count}");
-            PersistedCoordinatorJob job = jobs[0];
-            ColumnInfo? colDef = job.ColumnType.HasValue
-                ? new ColumnInfo(job.ElementName, job.ColumnType.Value, job.ColumnNotNull, job.ColumnDefault)
-                : null;
-            await coordinator.RunJobAsync(
-                leader.Database!,
-                new SchemaChangeJob(leader.Database!.Name, job.TableName, job.ElementName, job.TargetState),
-                colDef
-            );
-
-            version = leader.Database!.Schema.SchemaVersion;
-        }, leaderTimeout: TimeSpan.FromSeconds(20));
-
-        // All 3 nodes must converge with the column at Public (cluster is fully live).
-        await cluster.WaitForSchemaConvergenceAsync(db, version, timeout: TimeSpan.FromSeconds(10));
+        // Step 4: the production OnBecameLeader callback (wired by DatabaseOpener via
+        // SchemaReplicator.Register) fires ResumeJobsAsync automatically on the new leader.
+        // ResumeJobsAsync retries with backoff to handle the KV apply race (OnLeaderChanged
+        // fires before the new leader's KV state machine has applied all committed entries).
+        // Wait for all nodes to converge two versions ahead: DeleteOnly → WriteOnly → Public.
+        await cluster.WaitForSchemaConvergenceAsync(db, version + 2, timeout: TimeSpan.FromSeconds(20));
 
         foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
         {

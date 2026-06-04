@@ -295,14 +295,16 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         int schemaPartition = SchemaLogPartition(db);
         string localEndpoint = Raft.GetLocalEndpoint();
 
-        Func<int, string, Task<bool>> handler = async (partitionId, leaderEndpoint) =>
+        Func<int, string, Task<bool>> handler = (partitionId, leaderEndpoint) =>
         {
             if (partitionId == schemaPartition &&
                 string.Equals(leaderEndpoint, localEndpoint, StringComparison.Ordinal))
             {
-                await onBecameLeader().ConfigureAwait(false);
+                // Fire on the thread pool so the Raft actor is not blocked while the
+                // coordinator reads from KV and replicates schema changes back through Raft.
+                _ = Task.Run(onBecameLeader);
             }
-            return true;
+            return Task.FromResult(true);
         };
 
         Raft.OnLeaderChanged += handler;

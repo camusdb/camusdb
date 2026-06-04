@@ -96,17 +96,32 @@ public sealed class SchemaChangeCoordinator
         if (path.Length == 0)
             return;
 
-        // Persist the job so a new leader can resume if this coordinator is interrupted.
-        await catalogs.PersistCoordinatorJobAsync(database, new PersistedCoordinatorJob
-        {
-            TableName = job.TableName,
-            ElementName = job.ElementName,
-            TargetState = job.TargetState,
-            ColumnType = columnDefinition?.Type,
-            ColumnNotNull = columnDefinition?.NotNull ?? false,
-            ColumnDefault = columnDefinition?.Default,
-        }).ConfigureAwait(false);
+        // Persist the job (attempt 0) so a new leader can resume if this coordinator is
+        // interrupted. ResumeJobsAsync bumps the attempt count on each pickup and abandons the
+        // job once it exhausts the retry budget, so a doomed job can't loop forever.
+        await catalogs.PersistCoordinatorJobAsync(
+            database, BuildPersistedJob(job, columnDefinition, attempts: 0)
+        ).ConfigureAwait(false);
 
+        await DriveToTargetAsync(database, job, columnDefinition, current, path, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs the adjacent-transition steps in <paramref name="path"/>, gating on the cluster-wide
+    /// ack of each version (enforced inside the <c>Replicate*</c> methods). Deletes the durable
+    /// job record only when the element actually reaches the target; a transient failure (e.g.
+    /// leadership loss) leaves the record so a new leader can resume it.
+    /// </summary>
+    private async Task DriveToTargetAsync(
+        DatabaseDescriptor database,
+        SchemaChangeJob job,
+        ColumnInfo? columnDefinition,
+        SchemaElementState current,
+        SchemaElementState[] path,
+        CancellationToken cancellationToken
+    )
+    {
         try
         {
             foreach (SchemaElementState nextState in path)
@@ -142,17 +157,22 @@ public sealed class SchemaChangeCoordinator
         }
         finally
         {
-            // Remove the durable job record on success OR on terminal failure so we don't
-            // leave stale entries that would be re-run indefinitely by future leaders.
-            // Transient failures (leadership loss) are expected to cause an exception here;
-            // the new leader will pick up the persisted job and resume.
             if (current == job.TargetState)
-            {
                 await catalogs.DeleteCoordinatorJobAsync(database, job.TableName, job.ElementName)
                     .ConfigureAwait(false);
-            }
         }
     }
+
+    private static PersistedCoordinatorJob BuildPersistedJob(SchemaChangeJob job, ColumnInfo? columnDefinition, int attempts) => new()
+    {
+        TableName = job.TableName,
+        ElementName = job.ElementName,
+        TargetState = job.TargetState,
+        ColumnType = columnDefinition?.Type,
+        ColumnNotNull = columnDefinition?.NotNull ?? false,
+        ColumnDefault = columnDefinition?.Default,
+        Attempts = attempts,
+    };
 
     /// <summary>
     /// Loads all persisted coordinator jobs for <paramref name="database"/> and
@@ -161,34 +181,77 @@ public sealed class SchemaChangeCoordinator
     /// </summary>
     public async Task ResumeJobsAsync(DatabaseDescriptor database)
     {
-        List<PersistedCoordinatorJob> jobs;
-        try
+        // Retry with backoff: OnLeaderChanged fires before the KV state machine has applied all
+        // committed Raft entries on the new leader. The coordinator job written by the previous
+        // leader may not be visible on the first read. Retrying closes that window without
+        // requiring a Kahuna API change for linearizable range scans.
+        const int MaxAttempts = 10;
+        List<PersistedCoordinatorJob> jobs = [];
+
+        for (int attempt = 0; attempt < MaxAttempts; attempt++)
         {
-            jobs = await catalogs.LoadCoordinatorJobsAsync(database).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogWarning(ex, "Failed to load coordinator jobs for database {DbName} on leader resume; skipping", database.Name);
-            return;
+            try
+            {
+                jobs = await catalogs.LoadCoordinatorJobsAsync(database).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger?.LogWarning(ex, "Failed to load coordinator jobs for database {DbName} on leader resume; skipping", database.Name);
+                return;
+            }
+
+            if (jobs.Count > 0 || attempt == MaxAttempts - 1)
+                break;
+
+            await Task.Delay(100).ConfigureAwait(false);
         }
 
         foreach (PersistedCoordinatorJob persisted in jobs)
         {
+            SchemaChangeJob job = new(database.Name, persisted.TableName, persisted.ElementName, persisted.TargetState);
+
+            // Abandon a job that keeps failing across leader changes rather than retry it on
+            // every election forever. A terminal failure (unreachable invariant, persistent
+            // validation error) burns one attempt per resume; once the budget is spent we
+            // delete + log loudly instead of looping.
+            if (persisted.Attempts >= MaxResumeAttempts)
+            {
+                logger?.LogError(
+                    "Abandoning coordinator job {TableName}.{ElementName} → {TargetState} on database {DbName} after {Attempts} resume attempts",
+                    persisted.TableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
+                try { await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableName, persisted.ElementName).ConfigureAwait(false); }
+                catch (Exception ex) { logger?.LogWarning(ex, "Failed to delete abandoned coordinator job for database {DbName}", database.Name); }
+                continue;
+            }
+
             ColumnInfo? columnDefinition = persisted.ColumnType.HasValue
                 ? new ColumnInfo(persisted.ElementName, persisted.ColumnType.Value, persisted.ColumnNotNull, persisted.ColumnDefault)
                 : null;
 
             try
             {
-                logger?.LogInformation(
-                    "Resuming coordinator job for {TableName}.{ElementName} → {TargetState} on database {DbName}",
-                    persisted.TableName, persisted.ElementName, persisted.TargetState, database.Name);
+                SchemaElementState current = GetCurrentColumnState(database.Schema, job.TableName, job.ElementName);
+                SchemaElementState[] path = ComputeTransitionPath(current, job.TargetState);
 
-                await RunJobAsync(
-                    database,
-                    new SchemaChangeJob(database.Name, persisted.TableName, persisted.ElementName, persisted.TargetState),
-                    columnDefinition
-                ).ConfigureAwait(false);
+                if (path.Length == 0)
+                {
+                    // Already at target — e.g. the previous leader completed the last step but
+                    // crashed before deleting the record. Clean it up rather than leave it.
+                    await catalogs.DeleteCoordinatorJobAsync(database, job.TableName, job.ElementName).ConfigureAwait(false);
+                    continue;
+                }
+
+                // Record this resume attempt durably BEFORE driving, so a crash mid-resume still
+                // counts against the budget and the job can't be retried indefinitely.
+                persisted.Attempts++;
+                await catalogs.PersistCoordinatorJobAsync(database, persisted).ConfigureAwait(false);
+
+                logger?.LogInformation(
+                    "Resuming coordinator job for {TableName}.{ElementName} → {TargetState} on database {DbName} (attempt {Attempt})",
+                    persisted.TableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
+
+                await DriveToTargetAsync(database, job, columnDefinition, current, path, CancellationToken.None)
+                    .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -198,6 +261,14 @@ public sealed class SchemaChangeCoordinator
             }
         }
     }
+
+    /// <summary>
+    /// Maximum number of leader-change resume attempts before a job is abandoned. A transient
+    /// failure (leadership flap) normally completes within one or two resumes; exhausting this
+    /// budget means the job is genuinely stuck, so it is deleted and logged rather than retried
+    /// on every future election.
+    /// </summary>
+    private const int MaxResumeAttempts = 5;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 

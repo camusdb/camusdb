@@ -236,9 +236,80 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
+        if (!database.OwnsKahuna && ticket.Operation == AlterTableOperation.AddColumn)
+            return await ExecuteClusterAddColumnAsync(database, table, ticket).ConfigureAwait(false);
+
         return await ExecuteDdlInTransaction(database, tx =>
             tableColumnAlterer.Alter(queryExecutor, database, table, ticket, tx)
         ).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Cluster path for ADD COLUMN: drives the column through the staged
+    /// Absent → DeleteOnly → WriteOnly → Public sequence via <see cref="SchemaChangeCoordinator"/>,
+    /// backfilling row defaults once the column reaches <c>WriteOnly</c> (the first state at
+    /// which <see cref="RowEncoder.Encode"/> includes the column in encoded bytes).
+    ///
+    /// The <c>SchemaDdlSemaphore</c> is held across the entire coordinator sequence so
+    /// concurrent DDL on this node cannot observe an intermediate schema version.
+    /// </summary>
+    private async Task<bool> ExecuteClusterAddColumnAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        AlterTableTicket ticket
+    )
+    {
+        ColumnInfo columnInfo = ticket.Column;
+
+        // Eagerly reject duplicates before acquiring the semaphore — the coordinator
+        // would silently no-op (already-at-Public = empty path) instead of throwing.
+        if (table.Schema.Columns?.Any(c => c.Name == columnInfo.Name) == true)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate column '{columnInfo.Name}'");
+
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            SchemaChangeCoordinator coordinator = new(catalogs, logger);
+
+            coordinator.OnStepCompleted = async (state, _) =>
+            {
+                if (state != SchemaElementState.WriteOnly)
+                    return;
+
+                AlterColumnTicket alterTicket = new(
+                    databaseName: database.Name,
+                    tableName: ticket.TableName,
+                    column: columnInfo,
+                    operation: ticket.Operation
+                );
+
+                KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+                try
+                {
+                    await tableColumnAlterer.BackfillColumnDefaultsAsync(
+                        queryExecutor, database, table, alterTicket, tx
+                    ).ConfigureAwait(false);
+                    await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+                }
+                catch
+                {
+                    await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                    throw;
+                }
+            };
+
+            await coordinator.RunJobAsync(
+                database,
+                new SchemaChangeJob(database.Name, ticket.TableName, columnInfo.Name, SchemaElementState.Public),
+                columnDefinition: columnInfo
+            ).ConfigureAwait(false);
+
+            return true;
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
     }
 
     public async Task<bool> AlterIndex(AlterIndexTicket ticket)
@@ -498,11 +569,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (!database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema))
             return false;
 
-        bool hasColumn = tableSchema.Columns?.Any(column => column.Name == ticket.Column.Name) == true;
         return ticket.Operation switch
         {
-            AlterTableOperation.AddColumn => hasColumn,
-            AlterTableOperation.DropColumn => !hasColumn,
+            // A forwarded AddColumn is complete only when the column is Public — intermediate
+            // staged states (DeleteOnly, WriteOnly) are not yet visible to queries.
+            AlterTableOperation.AddColumn =>
+                tableSchema.Columns?.Any(c => c.Name == ticket.Column.Name && c.State == SchemaElementState.Public) == true,
+            AlterTableOperation.DropColumn =>
+                tableSchema.Columns?.Any(c => c.Name == ticket.Column.Name) != true,
             _ => false
         };
     }
@@ -567,6 +641,12 @@ public sealed class CommandExecutor : IAsyncDisposable
                         return new ExecuteDDLSQLResult(database, forwarded.Value);
 
                     TableDescriptor table = await tableOpener.Open(database, alterTableTicket.TableName).ConfigureAwait(false);
+
+                    if (!database.OwnsKahuna && alterTableTicket.Operation == AlterTableOperation.AddColumn)
+                    {
+                        bool ok = await ExecuteClusterAddColumnAsync(database, table, alterTableTicket).ConfigureAwait(false);
+                        return new ExecuteDDLSQLResult(database, ok);
+                    }
 
                     return await ExecuteDdlInTransaction(database, async tx =>
                     {

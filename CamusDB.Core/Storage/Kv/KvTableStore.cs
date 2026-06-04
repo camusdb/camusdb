@@ -416,12 +416,10 @@ public sealed class KvTableStore
         // Phase 2 — set every value for the batch in one round-trip (retrying only transients).
         await SetManyWithRetry(setItems, uniqueByKey, cancellationToken).ConfigureAwait(false);
 
-        // Track locks + modified keys for the 2PC commit.
+        // Track modified keys for the 2PC commit. Locks were already tracked inside
+        // AcquireManyWithRetry as each key was confirmed Locked.
         foreach ((string key, int _, KeyValueDurability durability) in lockKeys)
-        {
-            tx.TrackLock(key, durability);
             tx.TrackModified(key, KeyValueDurability.Persistent);
-        }
     }
 
     private async Task AcquireManyWithRetry(
@@ -437,14 +435,22 @@ public sealed class KvTableStore
             List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses =
                 await kahuna.LocateAndTryAcquireManyExclusiveLocks(tx.TransactionId, pending, ct).ConfigureAwait(false);
 
+            // First pass: track every successfully locked key before any throw so that
+            // the transaction rollback path can release them even if a later key fails.
+            // Mirrors the coordinator's two-pass pattern in AcquireLocksPessimistically.
+            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in responses)
+            {
+                if (type == KeyValueResponseType.Locked)
+                    tx.TrackLock(key, durability);
+            }
+
+            // Second pass: queue transient failures for retry; throw on hard failures.
             List<(string, int, KeyValueDurability)> retry = [];
             foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in responses)
             {
                 if (type == KeyValueResponseType.Locked)
                     continue;
 
-                // Re-acquiring keys already held by this transaction is idempotent, so retrying
-                // only the transient ones is safe and avoids re-walking the whole list.
                 if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
                 {
                     retry.Add((key, 0, durability));
@@ -644,11 +650,9 @@ public sealed class KvTableStore
         await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
         await DeleteManyWithRetry(deleteItems, cancellationToken).ConfigureAwait(false);
 
+        // Locks were already tracked inside AcquireManyWithRetry.
         foreach (string key in keys)
-        {
-            tx.TrackLock(key, KeyValueDurability.Persistent);
             tx.TrackModified(key, KeyValueDurability.Persistent);
-        }
     }
 
     private async Task DeleteManyWithRetry(List<KahunaDeleteKeyValueRequestItem> items, CancellationToken ct)

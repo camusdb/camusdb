@@ -55,6 +55,14 @@ internal sealed class TableColumnAlterer
         return true;
     }
 
+    internal Task<int> BackfillColumnDefaultsAsync(
+        QueryExecutor queryExecutor,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        AlterColumnTicket ticket,
+        KvTransaction tx
+    ) => tableColumnAdder.BackfillColumnDefaultsAsync(queryExecutor, database, table, ticket, tx);
+
     private async Task<bool> DropColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {
         AlterColumnTicket alterColumnTicket = new(

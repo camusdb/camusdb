@@ -410,7 +410,9 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
         tableSchema = catalogs.GetTableSchema(database, "robots");
 
         Assert.AreEqual("robots", tableSchema.Name);
-        Assert.AreEqual(1, tableSchema.Version);
+        // Cluster path: coordinator issues 3 transitions (DeleteOnly→WriteOnly→Public),
+        // each incrementing tableSchema.Version, so the table version ends at 3.
+        Assert.AreEqual(3, tableSchema.Version);
 
         Assert.AreEqual(5, tableSchema.Columns!.Count);
 
@@ -459,13 +461,15 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
         tableSchema = catalogs.GetTableSchema(database, "robots");
 
         Assert.AreEqual("robots", tableSchema.Name);
-        Assert.AreEqual(1, tableSchema.Version);
+        // Cluster path: coordinator issues 3 transitions (DeleteOnly→WriteOnly→Public),
+        // each incrementing tableSchema.Version, so the table version ends at 3.
+        Assert.AreEqual(3, tableSchema.Version);
 
         Assert.AreEqual(5, tableSchema.Columns!.Count);
 
         Assert.AreEqual("type", tableSchema.Columns![4].Name);
         Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![4].Type);
-        
+
         txnState = await database.Transactions.BeginAsync();
 
         QueryTicket queryTicket = new(

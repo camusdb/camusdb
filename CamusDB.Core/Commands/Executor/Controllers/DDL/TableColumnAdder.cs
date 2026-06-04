@@ -139,6 +139,57 @@ public sealed class TableColumnAdder
         return FluxAction.Continue;
     }
 
+    /// <summary>
+    /// Re-encodes every existing row in the table so that columns added after the row was
+    /// written receive their default value.  Called by the cluster AddColumn path (D3) after
+    /// the coordinator advances the column to <c>WriteOnly</c> state, at which point
+    /// <see cref="RowEncoder.Encode"/> will include the column in the encoded bytes.
+    /// </summary>
+    internal async Task<int> BackfillColumnDefaultsAsync(
+        QueryExecutor queryExecutor,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        AlterColumnTicket ticket,
+        KvTransaction tx
+    )
+    {
+        QueryTicket queryTicket = new(
+            txnState: tx,
+            databaseName: ticket.DatabaseName,
+            tableName: ticket.TableName,
+            index: null,
+            projection: null,
+            filters: null,
+            where: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null
+        );
+
+        int modifiedRows = 0;
+
+        await foreach (QueryResultRow row in queryExecutor.Query(database, table, queryTicket))
+        {
+            // The query runs while the column is still WriteOnly (not yet readable), so
+            // injectMissingCurrentColumns skips it. Explicitly inject the default so that
+            // RowEncoder.Encode writes the value rather than TypeNull.
+            if (!row.Row.ContainsKey(ticket.Column.Name))
+                row.Row[ticket.Column.Name] = ticket.Column.Default ?? new(ColumnType.Null, 0L);
+
+            byte[] buffer = RowEncoder.Encode(table.Schema, row.Row, row.RowId);
+            await table.Store.UpdateRow(tx, row.RowId, buffer).ConfigureAwait(false);
+            modifiedRows++;
+        }
+
+        logger.LogInformation(
+            "Backfilled {ModifiedRows} rows for column '{Column}'",
+            modifiedRows, ticket.Column.Name
+        );
+
+        return modifiedRows;
+    }
+
     private async Task<int> AlterColumnInternal(FluxMachine<AlterColumnFluxSteps, AlterColumnFluxState> machine, AlterColumnFluxState state)
     {
         ValueStopwatch timer = ValueStopwatch.StartNew();
