@@ -10,6 +10,16 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.Catalogs.Models;
 
+/// <summary>
+/// Discriminator for <see cref="SchemaElementStatePayload"/>: whether the state
+/// transition targets a column or an index element.
+/// </summary>
+public enum SchemaElementKind
+{
+    Column,
+    Index,
+}
+
 public sealed class SchemaCreateTablePayload
 {
     public string? TableId { get; set; }
@@ -73,4 +83,10 @@ public sealed class SchemaElementStatePayload
     public string ElementName { get; set; } = "";
 
     public SchemaElementState State { get; set; } = SchemaElementState.Public;
+
+    /// <summary>
+    /// Identifies whether this transition targets a column (default) or an index.
+    /// Absent in legacy log entries — deserialized as <see cref="SchemaElementKind.Column"/>.
+    /// </summary>
+    public SchemaElementKind ElementKind { get; set; } = SchemaElementKind.Column;
 }

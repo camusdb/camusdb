@@ -36,6 +36,11 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
     private readonly EmbeddedKahunaNode node;
 
+    // True when this instance was constructed with an explicit IInterNodeCommunication (cluster mode).
+    // False for standalone embedded nodes that use phantom EmbeddedRaftCommunication.Witnesses — those
+    // witness nodes must not appear in the schema ack gate because they are never real schema participants.
+    private readonly bool isClusterMode;
+
     private readonly object schemaSubscriptionsSync = new();
     private readonly List<SchemaApplySubscription> schemaSubscriptions = new();
     private ISchemaReplicationForwarder? schemaReplicationForwarder;
@@ -68,6 +73,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         node = new EmbeddedKahunaNode(options, loggerFactory);
+        isClusterMode = false;
     }
 
     /// <summary>
@@ -83,6 +89,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         node = new EmbeddedKahunaNode(options, interNode, raftComm, discovery, loggerFactory);
+        isClusterMode = true;
     }
 
     /// <summary>
@@ -251,19 +258,27 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: lastLeader);
     }
 
-    public void RegisterLocalSchemaAckNode(string db)
-    {
-        SchemaAcks.Register(db, Raft.GetLocalNodeName());
-    }
-
-    public void UnregisterLocalSchemaAckNode(string db)
-    {
-        SchemaAcks.Unregister(db, Raft.GetLocalNodeName());
-    }
-
     public void RecordLocalSchemaApplied(string db, long schemaVersion)
     {
-        SchemaAcks.RecordApplied(db, Raft.GetLocalNodeName(), schemaVersion);
+        SchemaAcks.RecordApplied(db, Raft.GetLocalEndpoint(), schemaVersion);
+    }
+
+    /// <summary>
+    /// Returns the live schema membership as a set of endpoint strings.
+    /// In cluster mode: local endpoint plus every peer from <c>Raft.GetNodes()</c>.
+    /// In standalone mode: only the local endpoint — <c>GetNodes()</c> returns phantom witness
+    /// nodes used by the embedded Raft for quorum and must not appear in the ack gate.
+    /// </summary>
+    private IReadOnlyCollection<string> GetLiveSchemaNodes()
+    {
+        if (!isClusterMode)
+            return [Raft.GetLocalEndpoint()];
+
+        IList<RaftNode> peers = Raft.GetNodes();
+        List<string> members = new(peers.Count + 1) { Raft.GetLocalEndpoint() };
+        foreach (RaftNode peer in peers)
+            members.Add(peer.Endpoint);
+        return members;
     }
 
     public Task<bool> WaitForSchemaAcksAsync(
@@ -278,6 +293,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             db,
             schemaVersion,
             timeout,
+            GetLiveSchemaNodes,
             liveNodeLease ?? SchemaAckLiveNodeLease,
             cancellationToken
         );

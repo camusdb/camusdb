@@ -363,7 +363,8 @@ public sealed class CatalogsManager
         DatabaseDescriptor database,
         string tableName,
         string elementName,
-        SchemaElementState targetState
+        SchemaElementState targetState,
+        SchemaElementKind elementKind = SchemaElementKind.Column
     )
     {
         SchemaChangeLogEntry entry;
@@ -382,9 +383,94 @@ public sealed class CatalogsManager
                     TableName = tableName,
                     ElementName = elementName,
                     State = targetState,
+                    ElementKind = elementKind,
                 })
             };
             ValidateSchemaDelta(database.Schema, entry);
+        }
+        finally
+        {
+            database.Schema.Semaphore.Release();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Proposes an <c>AddIndex</c> delta with <paramref name="initialState"/> and replicates
+    /// it to all cluster nodes via the schema log. Used by <see cref="SchemaChangeCoordinator"/>
+    /// to begin the staged add sequence in <c>DeleteOnly</c> rather than jumping straight to
+    /// <c>Public</c>. Only valid on cluster nodes (<c>!OwnsKahuna</c>).
+    /// </summary>
+    public async Task ReplicateAddIndexInStateAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        IndexBuildInfo indexBuildInfo,
+        SchemaElementState initialState
+    )
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Database = database.Name,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.AddIndex,
+                Payload = Serializator.Serialize(new SchemaIndexPayload
+                {
+                    TableName = tableName,
+                    IndexName = indexBuildInfo.IndexName,
+                    Index = new TableIndexSchema(
+                        id: indexBuildInfo.IndexId,
+                        name: indexBuildInfo.IndexName,
+                        columnIds: indexBuildInfo.ColumnIds,
+                        type: indexBuildInfo.IndexType,
+                        state: initialState,
+                        startOffset: null
+                    )
+                })
+            };
+            ValidateSchemaDelta(database.Schema, entry);
+        }
+        finally
+        {
+            database.Schema.Semaphore.Release();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Proposes a <c>DropIndex</c> delta and replicates it to all cluster nodes.
+    /// Used to compensate a failed coordinator-driven add-index sequence: if the
+    /// index was added in <c>DeleteOnly</c> or <c>WriteOnly</c> state but the sequence
+    /// did not reach <c>Public</c>, this removes it cleanly on every node.
+    /// Only valid on cluster nodes (<c>!OwnsKahuna</c>). No-op if the index is
+    /// already absent (idempotent).
+    /// </summary>
+    public async Task ReplicateDropIndexAsync(DatabaseDescriptor database, string tableName, string indexName)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Database = database.Name,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.DropIndex,
+                Payload = Serializator.Serialize(new SchemaIndexPayload
+                {
+                    TableName = tableName,
+                    IndexName = indexName
+                })
+            };
         }
         finally
         {
@@ -631,7 +717,18 @@ public sealed class CatalogsManager
 
     private static bool HasElementState(Schema schema, SchemaElementStatePayload payload)
     {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) || table.Columns is null)
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? table))
+            return payload.State == SchemaElementState.Absent;
+
+        if (payload.ElementKind == SchemaElementKind.Index)
+        {
+            TableIndexSchema? index = table.Indexes?.FirstOrDefault(ix => ix.Name == payload.ElementName);
+            return payload.State == SchemaElementState.Absent
+                ? index is null
+                : index?.State == payload.State;
+        }
+
+        if (table.Columns is null)
             return payload.State == SchemaElementState.Absent;
 
         TableColumnSchema? column = table.Columns.FirstOrDefault(column => column.Name == payload.ElementName);
@@ -822,6 +919,9 @@ public sealed class CatalogsManager
         if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
             throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
 
+        if (payload.ElementKind == SchemaElementKind.Index)
+            return ApplyIndexElementState(tableSchema, payload);
+
         if (tableSchema.Columns is null)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
 
@@ -862,6 +962,54 @@ public sealed class CatalogsManager
             Columns = tableSchema.Columns
         });
 
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Applies a <c>SetElementState</c> delta that targets an index. Unlike the column
+    /// variant, this does NOT bump <c>tableSchema.Version</c> or write schema history —
+    /// indexes are not part of the row encoding so their state changes are invisible to
+    /// the row decoder.
+    /// </summary>
+    private static TableSchema ApplyIndexElementState(TableSchema tableSchema, SchemaElementStatePayload payload)
+    {
+        if (tableSchema.Indexes is null || tableSchema.Indexes.Count == 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Table '{tableSchema.Name}' has no indexes — cannot apply state transition for '{payload.ElementName}'"
+            );
+
+        int indexIdx = tableSchema.Indexes.FindIndex(ix => ix.Name == payload.ElementName);
+        if (indexIdx < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Unknown index '{payload.ElementName}' on table '{tableSchema.Name}'"
+            );
+
+        TableIndexSchema current = tableSchema.Indexes[indexIdx];
+        ValidateElementStateTransition(current.State, payload.State, payload.ElementName);
+
+        if (current.State == payload.State)
+            return tableSchema;
+
+        if (payload.State == SchemaElementState.Absent)
+        {
+            tableSchema.Indexes.RemoveAt(indexIdx);
+        }
+        else
+        {
+            tableSchema.Indexes[indexIdx] = new TableIndexSchema(
+                current.Id!,
+                current.Name,
+                current.ColumnIds,
+                current.Type,
+                payload.State,
+                current.StartOffset
+            );
+        }
+
+        // TableSchema.Version is intentionally NOT bumped: indexes are not part of the
+        // row encoding, so index state changes are invisible to the row decoder.
         return tableSchema;
     }
 

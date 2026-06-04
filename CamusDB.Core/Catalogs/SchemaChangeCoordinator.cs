@@ -54,6 +54,24 @@ public sealed class SchemaChangeCoordinator
     /// </summary>
     public Func<SchemaElementState, long, Task>? OnStepCompleted { get; set; }
 
+    /// <summary>
+    /// Optional delegate invoked once, just before a column transitions from
+    /// <c>WriteOnly</c> to <c>Public</c>. Fires on both the initial run and any
+    /// leader-change resume that starts from <c>WriteOnly</c>, closing the crash window.
+    /// Must be set on the command-path coordinator and on the resume coordinator in
+    /// <c>DatabaseOpener</c>.
+    /// </summary>
+    public Func<DatabaseDescriptor, string, ColumnInfo, Task>? BackfillAsync { get; set; }
+
+    /// <summary>
+    /// Optional delegate invoked once, just before an index transitions from
+    /// <c>WriteOnly</c> to <c>Public</c>. Receives the database, table name, index build
+    /// info, and the last committed backfill offset (null = start from the beginning).
+    /// Idempotent: using <c>backfillMode: true</c> in <c>PutIndexEntry</c> ensures re-runs
+    /// on resume are safe even for unique indexes.
+    /// </summary>
+    public Func<DatabaseDescriptor, string, IndexBuildInfo, string?, Task>? IndexBackfillAsync { get; set; }
+
     public SchemaChangeCoordinator(CatalogsManager catalogs, ILogger<ICamusDB>? logger = null)
     {
         this.catalogs = catalogs;
@@ -81,6 +99,7 @@ public sealed class SchemaChangeCoordinator
         DatabaseDescriptor database,
         SchemaChangeJob job,
         ColumnInfo? columnDefinition = null,
+        IndexBuildInfo? indexBuildInfo = null,
         CancellationToken cancellationToken = default
     )
     {
@@ -90,7 +109,7 @@ public sealed class SchemaChangeCoordinator
                 "SchemaChangeCoordinator requires a cluster database (OwnsKahuna must be false)"
             );
 
-        SchemaElementState current = GetCurrentColumnState(database.Schema, job.TableName, job.ElementName);
+        SchemaElementState current = GetCurrentElementState(database.Schema, job.TableName, job.ElementName, job.ElementKind);
         SchemaElementState[] path = ComputeTransitionPath(current, job.TargetState);
 
         if (path.Length == 0)
@@ -100,10 +119,10 @@ public sealed class SchemaChangeCoordinator
         // interrupted. ResumeJobsAsync bumps the attempt count on each pickup and abandons the
         // job once it exhausts the retry budget, so a doomed job can't loop forever.
         await catalogs.PersistCoordinatorJobAsync(
-            database, BuildPersistedJob(job, columnDefinition, attempts: 0)
+            database, BuildPersistedJob(job, columnDefinition, indexBuildInfo, attempts: 0)
         ).ConfigureAwait(false);
 
-        await DriveToTargetAsync(database, job, columnDefinition, current, path, cancellationToken)
+        await DriveToTargetAsync(database, job, columnDefinition, indexBuildInfo, startOffset: null, current, path, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -117,6 +136,8 @@ public sealed class SchemaChangeCoordinator
         DatabaseDescriptor database,
         SchemaChangeJob job,
         ColumnInfo? columnDefinition,
+        IndexBuildInfo? indexBuildInfo,
+        string? startOffset,
         SchemaElementState current,
         SchemaElementState[] path,
         CancellationToken cancellationToken
@@ -128,24 +149,59 @@ public sealed class SchemaChangeCoordinator
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
+                // Backfill existing rows just BEFORE the element becomes Public.
+                // `current` is still the PRIOR state (not yet reassigned), so this fires
+                // exactly on the WriteOnly → Public transition — both on initial run and
+                // on a leader-change resume that starts from WriteOnly.
+                if (current == SchemaElementState.WriteOnly && nextState == SchemaElementState.Public)
+                {
+                    if (job.ElementKind == SchemaElementKind.Column &&
+                        BackfillAsync is not null &&
+                        columnDefinition is not null)
+                    {
+                        await BackfillAsync(database, job.TableName, columnDefinition).ConfigureAwait(false);
+                    }
+                    else if (job.ElementKind == SchemaElementKind.Index &&
+                             IndexBackfillAsync is not null &&
+                             indexBuildInfo is not null)
+                    {
+                        await IndexBackfillAsync(database, job.TableName, indexBuildInfo, startOffset).ConfigureAwait(false);
+                    }
+                }
+
                 if (current == SchemaElementState.Absent && nextState == SchemaElementState.DeleteOnly)
                 {
-                    // First step of an add sequence: create the column in DeleteOnly state.
-                    if (columnDefinition is null)
-                        throw new CamusDBException(
-                            CamusDBErrorCodes.InvalidInput,
-                            $"A ColumnInfo is required to add column '{job.ElementName}' to table '{job.TableName}' (current state is Absent)"
-                        );
+                    // First step of an add sequence: create the element in DeleteOnly state.
+                    if (job.ElementKind == SchemaElementKind.Column)
+                    {
+                        if (columnDefinition is null)
+                            throw new CamusDBException(
+                                CamusDBErrorCodes.InvalidInput,
+                                $"A ColumnInfo is required to add column '{job.ElementName}' to table '{job.TableName}' (current state is Absent)"
+                            );
 
-                    await catalogs.ReplicateAddColumnInStateAsync(
-                        database, job.TableName, columnDefinition, SchemaElementState.DeleteOnly
-                    ).ConfigureAwait(false);
+                        await catalogs.ReplicateAddColumnInStateAsync(
+                            database, job.TableName, columnDefinition, SchemaElementState.DeleteOnly
+                        ).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        if (indexBuildInfo is null)
+                            throw new CamusDBException(
+                                CamusDBErrorCodes.InvalidInput,
+                                $"An IndexBuildInfo is required to add index '{job.ElementName}' to table '{job.TableName}' (current state is Absent)"
+                            );
+
+                        await catalogs.ReplicateAddIndexInStateAsync(
+                            database, job.TableName, indexBuildInfo, SchemaElementState.DeleteOnly
+                        ).ConfigureAwait(false);
+                    }
                 }
                 else
                 {
-                    // Subsequent steps: move the existing column to the next adjacent state.
+                    // Subsequent steps: move the existing element to the next adjacent state.
                     await catalogs.ReplicateElementStateAsync(
-                        database, job.TableName, job.ElementName, nextState
+                        database, job.TableName, job.ElementName, nextState, job.ElementKind
                     ).ConfigureAwait(false);
                 }
 
@@ -163,14 +219,18 @@ public sealed class SchemaChangeCoordinator
         }
     }
 
-    private static PersistedCoordinatorJob BuildPersistedJob(SchemaChangeJob job, ColumnInfo? columnDefinition, int attempts) => new()
+    private static PersistedCoordinatorJob BuildPersistedJob(SchemaChangeJob job, ColumnInfo? columnDefinition, IndexBuildInfo? indexBuildInfo, int attempts) => new()
     {
         TableName = job.TableName,
         ElementName = job.ElementName,
         TargetState = job.TargetState,
+        ElementKind = job.ElementKind,
         ColumnType = columnDefinition?.Type,
         ColumnNotNull = columnDefinition?.NotNull ?? false,
         ColumnDefault = columnDefinition?.Default,
+        IndexId = indexBuildInfo?.IndexId,
+        IndexColumnIds = indexBuildInfo?.ColumnIds,
+        IndexType = indexBuildInfo?.IndexType,
         Attempts = attempts,
     };
 
@@ -208,7 +268,7 @@ public sealed class SchemaChangeCoordinator
 
         foreach (PersistedCoordinatorJob persisted in jobs)
         {
-            SchemaChangeJob job = new(database.Name, persisted.TableName, persisted.ElementName, persisted.TargetState);
+            SchemaChangeJob job = new(database.Name, persisted.TableName, persisted.ElementName, persisted.TargetState, persisted.ElementKind);
 
             // Abandon a job that keeps failing across leader changes rather than retry it on
             // every election forever. A terminal failure (unreachable invariant, persistent
@@ -228,9 +288,22 @@ public sealed class SchemaChangeCoordinator
                 ? new ColumnInfo(persisted.ElementName, persisted.ColumnType.Value, persisted.ColumnNotNull, persisted.ColumnDefault)
                 : null;
 
+            IndexBuildInfo? indexBuildInfo = null;
+            if (persisted.ElementKind == SchemaElementKind.Index &&
+                persisted.IndexId is not null &&
+                persisted.IndexColumnIds is not null &&
+                persisted.IndexType.HasValue)
+            {
+                if (database.Schema.Tables.TryGetValue(persisted.TableName, out TableSchema? tableSchema))
+                {
+                    string[] columnNames = ResolveColumnNames(tableSchema, persisted.IndexColumnIds);
+                    indexBuildInfo = new(persisted.IndexId, persisted.ElementName, persisted.IndexColumnIds, columnNames, persisted.IndexType.Value);
+                }
+            }
+
             try
             {
-                SchemaElementState current = GetCurrentColumnState(database.Schema, job.TableName, job.ElementName);
+                SchemaElementState current = GetCurrentElementState(database.Schema, job.TableName, job.ElementName, job.ElementKind);
                 SchemaElementState[] path = ComputeTransitionPath(current, job.TargetState);
 
                 if (path.Length == 0)
@@ -250,7 +323,7 @@ public sealed class SchemaChangeCoordinator
                     "Resuming coordinator job for {TableName}.{ElementName} → {TargetState} on database {DbName} (attempt {Attempt})",
                     persisted.TableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
 
-                await DriveToTargetAsync(database, job, columnDefinition, current, path, CancellationToken.None)
+                await DriveToTargetAsync(database, job, columnDefinition, indexBuildInfo, persisted.StartOffset, current, path, CancellationToken.None)
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -272,13 +345,30 @@ public sealed class SchemaChangeCoordinator
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private static SchemaElementState GetCurrentColumnState(Schema schema, string tableName, string elementName)
+    private static SchemaElementState GetCurrentElementState(Schema schema, string tableName, string elementName, SchemaElementKind kind)
     {
         if (!schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema))
             return SchemaElementState.Absent;
 
+        if (kind == SchemaElementKind.Index)
+        {
+            TableIndexSchema? index = tableSchema.Indexes?.FirstOrDefault(ix => ix.Name == elementName);
+            return index?.State ?? SchemaElementState.Absent;
+        }
+
         TableColumnSchema? column = tableSchema.Columns?.FirstOrDefault(c => c.Name == elementName);
         return column?.State ?? SchemaElementState.Absent;
+    }
+
+    private static string[] ResolveColumnNames(TableSchema table, string[] columnIds)
+    {
+        string[] names = new string[columnIds.Length];
+        for (int i = 0; i < columnIds.Length; i++)
+        {
+            TableColumnSchema? col = table.Columns?.FirstOrDefault(c => c.Id == columnIds[i]);
+            names[i] = col?.Name ?? columnIds[i];
+        }
+        return names;
     }
 
     /// <summary>
@@ -316,11 +406,31 @@ public sealed class SchemaChangeCoordinator
 /// </summary>
 /// <param name="DatabaseName">The database the table belongs to.</param>
 /// <param name="TableName">The table whose element is being transitioned.</param>
-/// <param name="ElementName">The column (or future index) name.</param>
+/// <param name="ElementName">The column or index name.</param>
 /// <param name="TargetState">The desired final state for the element.</param>
+/// <param name="ElementKind">Whether the element is a column (default) or an index.</param>
 public sealed record SchemaChangeJob(
     string DatabaseName,
     string TableName,
     string ElementName,
-    SchemaElementState TargetState
+    SchemaElementState TargetState,
+    SchemaElementKind ElementKind = SchemaElementKind.Column
+);
+
+/// <summary>
+/// Carries the immutable metadata needed to (re)build an index during coordinator-driven
+/// backfill. Passed to <see cref="SchemaChangeCoordinator.IndexBackfillAsync"/> on both
+/// the initial run and any leader-change resume.
+/// </summary>
+/// <param name="IndexId">Immutable index ID (used to locate the schema entry).</param>
+/// <param name="IndexName">Index name (KV key prefix for <c>PutIndexEntry</c>).</param>
+/// <param name="ColumnIds">Immutable column IDs covered by the index.</param>
+/// <param name="ColumnNames">Resolved column names, populated from the table schema.</param>
+/// <param name="IndexType">Whether the index enforces uniqueness.</param>
+public sealed record IndexBuildInfo(
+    string IndexId,
+    string IndexName,
+    string[] ColumnIds,
+    string[] ColumnNames,
+    IndexType IndexType
 );

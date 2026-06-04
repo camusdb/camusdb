@@ -47,6 +47,7 @@ public sealed class KvTransaction
     /// <summary>Current lifecycle state. Set by <see cref="KvTransactionsManager"/>.</summary>
     public KvTransactionStatus Status { get; internal set; } = KvTransactionStatus.Active;
 
+    private readonly Lock trackSync = new();
     private HashSet<(string key, KeyValueDurability durability)>? acquiredLocks;
     private HashSet<(string key, KeyValueDurability durability)>? modifiedKeys;
     private Dictionary<string, SchemaVersionPin>? schemaPins;
@@ -63,8 +64,11 @@ public sealed class KvTransaction
     /// </summary>
     public void TrackLock(string key, KeyValueDurability durability)
     {
-        acquiredLocks ??= [];
-        acquiredLocks.Add((key, durability));
+        lock (trackSync)
+        {
+            acquiredLocks ??= [];
+            acquiredLocks.Add((key, durability));
+        }
     }
 
     /// <summary>
@@ -72,8 +76,11 @@ public sealed class KvTransaction
     /// </summary>
     public void TrackModified(string key, KeyValueDurability durability)
     {
-        modifiedKeys ??= [];
-        modifiedKeys.Add((key, durability));
+        lock (trackSync)
+        {
+            modifiedKeys ??= [];
+            modifiedKeys.Add((key, durability));
+        }
     }
 
     public void PinSchemaVersion(

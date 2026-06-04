@@ -286,89 +286,59 @@ public sealed class TestEmbeddedKahuna
         }
     }
 
+    /// <summary>
+    /// E1: the ack gate sources live membership from Raft (<c>GetNodes()</c> + local endpoint)
+    /// rather than a manual register set. This test verifies that the gate blocks while at
+    /// least one Raft member has not yet acked, and unblocks once all members have acked.
+    /// </summary>
     [Test]
-    public async Task SchemaAckGate_WaitsForEveryLiveNode()
+    public async Task SchemaAckGate_WaitsForAllRaftMembers()
     {
         string db = $"db_{Guid.NewGuid():N}";
 
-        await using EmbeddedKahuna node1 = CreateUnstartedNode("ack-node1", 9301);
-        await using EmbeddedKahuna node2 = CreateUnstartedNode("ack-node2", 9302);
+        InMemoryCommunication raftCommunication = new();
+        MemoryInterNodeCommmunication interNode = new();
 
-        node1.RegisterLocalSchemaAckNode(db);
-        node2.RegisterLocalSchemaAckNode(db);
+        EmbeddedKahuna node1 = CreateClusterNode("ack-node1", 1, 9301, [new("localhost:9302"), new("localhost:9303")], raftCommunication, interNode);
+        EmbeddedKahuna node2 = CreateClusterNode("ack-node2", 2, 9302, [new("localhost:9301"), new("localhost:9303")], raftCommunication, interNode);
+        EmbeddedKahuna node3 = CreateClusterNode("ack-node3", 3, 9303, [new("localhost:9301"), new("localhost:9302")], raftCommunication, interNode);
+        EmbeddedKahuna[] nodes = [node1, node2, node3];
 
-        node1.RecordLocalSchemaApplied(db, 1);
+        try
+        {
+            raftCommunication.SetNodes(nodes.ToDictionary(x => x.Raft.GetLocalEndpoint(), x => x.Raft));
+            interNode.SetNodes(nodes.ToDictionary(x => x.Raft.GetLocalEndpoint(), x => x.Kahuna));
 
-        bool beforeFollowerAck = await node1.WaitForSchemaAcksAsync(
-            db,
-            1,
-            TimeSpan.FromMilliseconds(100),
-            TimeSpan.FromMinutes(1),
-            CancellationToken.None
-        );
+            foreach (EmbeddedKahuna node in nodes)
+                await node.Raft.UpdateNodes();
 
-        Assert.IsFalse(beforeFollowerAck);
+            await Task.WhenAll(nodes.Select(x => x.StartAsync(CancellationToken.None)))
+                .WaitAsync(TimeSpan.FromSeconds(10));
 
-        node2.RecordLocalSchemaApplied(db, 1);
+            int partitionId = node1.SchemaLogPartition(db);
+            await node1.Raft.WaitForLeader(partitionId, CancellationToken.None);
+            EmbeddedKahuna leader = await WaitForLeaderNode(nodes, partitionId);
 
-        bool afterFollowerAck = await node1.WaitForSchemaAcksAsync(
-            db,
-            1,
-            TimeSpan.FromSeconds(1),
-            TimeSpan.FromMinutes(1),
-            CancellationToken.None
-        );
+            // Only the leader acks — gate must block while the 2 followers haven't acked.
+            leader.RecordLocalSchemaApplied(db, 1);
 
-        Assert.IsTrue(afterFollowerAck);
-    }
+            bool partialAck = await leader.WaitForSchemaAcksAsync(
+                db, 1, TimeSpan.FromMilliseconds(100), TimeSpan.FromMinutes(1), CancellationToken.None);
+            Assert.IsFalse(partialAck, "Gate must block until all Raft members ack");
 
-    [Test]
-    public async Task SchemaAckGate_ExpiredNodeDoesNotBlockProgress()
-    {
-        string db = $"db_{Guid.NewGuid():N}";
+            // All nodes ack — gate must now pass.
+            foreach (EmbeddedKahuna node in nodes)
+                node.RecordLocalSchemaApplied(db, 1);
 
-        await using EmbeddedKahuna node1 = CreateUnstartedNode("lease-node1", 9401);
-        await using EmbeddedKahuna node2 = CreateUnstartedNode("lease-node2", 9402);
-
-        node1.RegisterLocalSchemaAckNode(db);
-        node2.RegisterLocalSchemaAckNode(db);
-        node1.RecordLocalSchemaApplied(db, 2);
-
-        await Task.Delay(50);
-
-        bool acked = await node1.WaitForSchemaAcksAsync(
-            db,
-            2,
-            TimeSpan.FromSeconds(1),
-            TimeSpan.FromMilliseconds(10),
-            CancellationToken.None
-        );
-
-        Assert.IsTrue(acked);
-    }
-
-    [Test]
-    public async Task SchemaAckGate_UnregisteringLastNodeDropsDatabaseState()
-    {
-        string db = $"db_{Guid.NewGuid():N}";
-
-        await using EmbeddedKahuna node = CreateUnstartedNode("cleanup-node", 9501);
-
-        node.RegisterLocalSchemaAckNode(db);
-        node.RecordLocalSchemaApplied(db, 3);
-        node.UnregisterLocalSchemaAckNode(db);
-
-        node.RegisterLocalSchemaAckNode(db);
-
-        bool inheritedOldAck = await node.WaitForSchemaAcksAsync(
-            db,
-            3,
-            TimeSpan.FromMilliseconds(100),
-            TimeSpan.FromMinutes(1),
-            CancellationToken.None
-        );
-
-        Assert.IsFalse(inheritedOldAck);
+            bool allAcked = await leader.WaitForSchemaAcksAsync(
+                db, 1, TimeSpan.FromSeconds(2), TimeSpan.FromMinutes(1), CancellationToken.None);
+            Assert.IsTrue(allAcked, "Gate must pass once all Raft members ack");
+        }
+        finally
+        {
+            foreach (EmbeddedKahuna node in nodes)
+                await node.DisposeAsync();
+        }
     }
 
     private static EmbeddedKahuna CreateClusterNode(
@@ -393,22 +363,6 @@ public sealed class TestEmbeddedKahuna
             interNode,
             raftCommunication,
             new StaticDiscovery(peers)
-        );
-    }
-
-    private static EmbeddedKahuna CreateUnstartedNode(string nodeName, int port)
-    {
-        return new(
-            new EmbeddedKahunaOptions
-            {
-                NodeName = nodeName,
-                NodeId = port,
-                Host = "localhost",
-                Port = port,
-                Storage = "memory",
-                WalStorage = "memory",
-                InitialPartitions = 1
-            }
         );
     }
 

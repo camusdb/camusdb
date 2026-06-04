@@ -67,9 +67,6 @@ public sealed record DatabaseDescriptor : IDisposable
         IDisposable? subscription = Interlocked.Exchange(ref schemaReplicationSubscription, null);
         subscription?.Dispose();
 
-        if (!OwnsKahuna)
-            Kahuna.UnregisterLocalSchemaAckNode(Name);
-
         Schema?.Dispose();
         SchemaDdlSemaphore?.Dispose();
         SystemSchemaSemaphore?.Dispose();

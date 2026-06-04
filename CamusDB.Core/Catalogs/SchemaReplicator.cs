@@ -45,7 +45,6 @@ public sealed class SchemaReplicator
     {
         ArgumentNullException.ThrowIfNull(database);
 
-        database.Kahuna.RegisterLocalSchemaAckNode(database.Name);
         database.Kahuna.RecordLocalSchemaApplied(database.Name, database.Schema.SchemaVersion);
 
         IDisposable applySubscription = database.Kahuna.RegisterSchemaApply(
@@ -145,6 +144,17 @@ public sealed class SchemaReplicator
         // the updated table.Schema.Indexes.
         if ((entry.Op == SchemaOp.AddIndex || entry.Op == SchemaOp.DropIndex) && tableSchema?.Name is not null)
             database.TableDescriptors.TryRemove(tableSchema.Name, out _);
+
+        // For SetElementState targeting an index, evict the descriptor so that
+        // TableDescriptor.Indexes is rebuilt with the updated index state on next access.
+        // Column SetElementState does not need this because DML reads column state directly
+        // from table.Schema.Columns (updated in place by ApplyElementState).
+        if (entry.Op == SchemaOp.SetElementState)
+        {
+            SchemaElementStatePayload payload = DecodePayload<SchemaElementStatePayload>(entry);
+            if (payload.ElementKind == SchemaElementKind.Index)
+                database.TableDescriptors.TryRemove(payload.TableName, out _);
+        }
     }
 
     public async Task<bool> RestoreAsync(DatabaseDescriptor database, byte[] bytes)
@@ -239,7 +249,18 @@ public sealed class SchemaReplicator
 
     private static bool HasElementState(Schema schema, SchemaElementStatePayload payload)
     {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) || table.Columns is null)
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? table))
+            return payload.State == SchemaElementState.Absent;
+
+        if (payload.ElementKind == SchemaElementKind.Index)
+        {
+            TableIndexSchema? index = table.Indexes?.FirstOrDefault(ix => ix.Name == payload.ElementName);
+            return payload.State == SchemaElementState.Absent
+                ? index is null
+                : index?.State == payload.State;
+        }
+
+        if (table.Columns is null)
             return payload.State == SchemaElementState.Absent;
 
         TableColumnSchema? column = table.Columns.FirstOrDefault(column => column.Name == payload.ElementName);

@@ -54,7 +54,19 @@ internal sealed class DatabaseOpener
         this.databaseDescriptors = databaseDescriptors;
         this.catalogs = catalogs;
         this.schemaReplicator = new(catalogs, logger);
-        this.coordinator = new(catalogs, logger);
+        this.coordinator = new(catalogs, logger)
+        {
+            // Wire column backfill: leader-change resume re-runs it at WriteOnly before
+            // advancing to Public so existing rows carry the default before the column
+            // becomes visible.
+            BackfillAsync = (db, tableName, column) =>
+                commandExecutor.BackfillColumnDefaultsAsync(db, tableName, column),
+
+            // Wire index backfill: same guarantee for the index add sequence — backfill
+            // existing rows with the index entries before the index is published.
+            IndexBackfillAsync = (db, tableName, indexInfo, startOffset) =>
+                commandExecutor.BackfillIndexEntriesAsync(db, tableName, indexInfo, startOffset),
+        };
         this.logger = logger;
         this.clusterNode = clusterNode;
         this.loggerFactory = loggerFactory;

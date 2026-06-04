@@ -8,52 +8,22 @@
 namespace CamusDB.Core.Storage.Kv;
 
 /// <summary>
-/// Tracks, per database and per node, the highest schema version each live member has applied
-/// ("acked"), plus a last-seen timestamp. This is the data behind the <b>two-version
-/// invariant</b>: a DDL proposer waits via <see cref="WaitForAllLiveAsync"/> until every live
-/// node has acked the previous version before proposing the next, so the cluster never spans
-/// more than two adjacent schema versions. See <c>docs/distributed-schema-architecture.md</c> §6.2.
+/// Tracks, per database and per node endpoint, the highest schema version each node has applied
+/// ("acked"). This is the data behind the <b>two-version invariant</b>: a DDL proposer waits
+/// via <see cref="WaitForAllLiveAsync"/> until every live node has acked the previous version
+/// before proposing the next, so the cluster never spans more than two adjacent schema versions.
+/// See <c>docs/distributed-schema-architecture.md</c> §6.2.
 ///
-/// With no real heartbeat at this layer, the default live-node lease is infinite (a registered
-/// node never expires by elapsed time) — correctness over liveness. The lease parameter is a
-/// hook for future heartbeat integration. This tracker is process-global/<c>static</c> only to
-/// support the in-process multi-node test harness; it is not a multi-process ack transport
-/// (replacing it with real membership is a DS10/DS11 carry-forward).
+/// Live membership is sourced from Raft (<c>GetNodes()</c> + local endpoint) at query time,
+/// not from a manual register set. This closes the gap where a deregistered-but-up node still
+/// counted as live. A finite <c>liveNodeLease</c> additionally drops a live member from the gate
+/// once its last ack is older than the lease (interim apply-derived liveness); the default lease
+/// is infinite, so production blocks on every member until E2 supplies a real heartbeat.
 /// </summary>
 internal sealed class SchemaAckTracker
 {
     private readonly object sync = new();
     private readonly Dictionary<string, DatabaseAcks> databases = new(StringComparer.Ordinal);
-
-    public void Register(string database, string node)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(database);
-        ArgumentException.ThrowIfNullOrWhiteSpace(node);
-
-        lock (sync)
-        {
-            DatabaseAcks acks = GetOrCreate(database);
-            acks.LiveNodes[node] = DateTime.UtcNow;
-        }
-    }
-
-    public void Unregister(string database, string node)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(database);
-        ArgumentException.ThrowIfNullOrWhiteSpace(node);
-
-        lock (sync)
-        {
-            if (!databases.TryGetValue(database, out DatabaseAcks? acks))
-                return;
-
-            acks.LiveNodes.Remove(node);
-            acks.AppliedVersions.Remove(node);
-
-            if (acks.LiveNodes.Count == 0)
-                databases.Remove(database);
-        }
-    }
 
     public void RecordApplied(string database, string node, long schemaVersion)
     {
@@ -63,22 +33,34 @@ internal sealed class SchemaAckTracker
         lock (sync)
         {
             DatabaseAcks acks = GetOrCreate(database);
-            acks.LiveNodes[node] = DateTime.UtcNow;
 
-            if (!acks.AppliedVersions.TryGetValue(node, out long current) || current < schemaVersion)
-                acks.AppliedVersions[node] = schemaVersion;
+            long version = acks.Nodes.TryGetValue(node, out NodeAck existing)
+                ? Math.Max(existing.Version, schemaVersion)
+                : schemaVersion;
+
+            // Always refresh LastSeen — every RecordApplied (even an idempotent re-apply of the
+            // same version) is a liveness signal for the interim lease (E1). E2 replaces this
+            // apply-derived signal with a real heartbeat.
+            acks.Nodes[node] = new NodeAck(version, DateTime.UtcNow);
         }
     }
 
+    /// <summary>
+    /// Polls until every endpoint returned by <paramref name="getLiveMembers"/> has acked
+    /// <paramref name="schemaVersion"/>, or until the timeout elapses.
+    /// <paramref name="liveNodeLease"/> is reserved for E2 heartbeat-based expiry and unused here.
+    /// </summary>
     public async Task<bool> WaitForAllLiveAsync(
         string database,
         long schemaVersion,
         TimeSpan timeout,
+        Func<IReadOnlyCollection<string>> getLiveMembers,
         TimeSpan liveNodeLease,
         CancellationToken cancellationToken
     )
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(database);
+        ArgumentNullException.ThrowIfNull(getLiveMembers);
 
         DateTime deadline = DateTime.UtcNow.Add(timeout);
 
@@ -86,10 +68,12 @@ internal sealed class SchemaAckTracker
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            IReadOnlyCollection<string> liveMembers = getLiveMembers();
+
             lock (sync)
             {
-                if (!databases.TryGetValue(database, out DatabaseAcks? acks) ||
-                    HasEveryLiveNodeAcked(acks, schemaVersion, liveNodeLease))
+                databases.TryGetValue(database, out DatabaseAcks? acks);
+                if (HasEveryLiveNodeAcked(acks, schemaVersion, liveMembers, liveNodeLease, DateTime.UtcNow))
                     return true;
             }
 
@@ -117,26 +101,43 @@ internal sealed class SchemaAckTracker
         return acks;
     }
 
-    private static bool HasEveryLiveNodeAcked(DatabaseAcks acks, long schemaVersion, TimeSpan liveNodeLease)
+    private static bool HasEveryLiveNodeAcked(
+        DatabaseAcks? acks,
+        long schemaVersion,
+        IReadOnlyCollection<string> liveMembers,
+        TimeSpan liveNodeLease,
+        DateTime now)
     {
-        DateTime now = DateTime.UtcNow;
+        // A finite lease lets a live Raft member that has gone silent (no ack within the lease)
+        // be treated as down, so it stops blocking the gate. The default lease is infinite, so
+        // production keeps the strict "wait for every member" behaviour until E2 supplies a real
+        // heartbeat; only an explicit finite lease (tests / operators accepting the limitation)
+        // activates apply-derived expiry.
+        bool leaseFinite = liveNodeLease != Timeout.InfiniteTimeSpan;
 
-        foreach ((string node, DateTime lastSeen) in acks.LiveNodes)
+        foreach (string node in liveMembers)
         {
-            if (liveNodeLease != Timeout.InfiniteTimeSpan && now - lastSeen > liveNodeLease)
+            if (acks is null || !acks.Nodes.TryGetValue(node, out NodeAck ack))
+                return false; // never reported — can't time-expire without a LastSeen; wait for it.
+
+            if (ack.Version >= schemaVersion)
+                continue; // acked the target version.
+
+            // Behind: keep blocking while the member still looks alive (acked within the lease).
+            // If it has been silent longer than the lease, presume it down and don't block on it.
+            if (leaseFinite && now - ack.LastSeen > liveNodeLease)
                 continue;
 
-            if (!acks.AppliedVersions.TryGetValue(node, out long appliedVersion) || appliedVersion < schemaVersion)
-                return false;
+            return false;
         }
 
         return true;
     }
 
+    private readonly record struct NodeAck(long Version, DateTime LastSeen);
+
     private sealed class DatabaseAcks
     {
-        public Dictionary<string, DateTime> LiveNodes { get; } = new(StringComparer.Ordinal);
-
-        public Dictionary<string, long> AppliedVersions { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, NodeAck> Nodes { get; } = new(StringComparer.Ordinal);
     }
 }

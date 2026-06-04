@@ -20,6 +20,7 @@ using CamusDB.Core.Serializer;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.Cluster;
 
@@ -315,7 +316,7 @@ public sealed class TestInProcessSchemaCluster
             }
         });
 
-        // Step 3: add a secondary index on the leader (schema version → 2).
+        // Step 3: add a secondary index on the leader (schema version → 4: DeleteOnly + WriteOnly + Public).
         await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.AlterIndex(new AlterIndexTicket(
             databaseName: db,
             tableName: "robots",
@@ -324,7 +325,7 @@ public sealed class TestInProcessSchemaCluster
             operation: AlterIndexOperation.AddIndex
         )).WaitAsync(TimeSpan.FromSeconds(30)));
 
-        await cluster.WaitForSchemaConvergenceAsync(db, version: 2);
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 4);
 
         // Step 4: every node must have the index in table.Schema.Indexes without reopen.
         Assert.True(cluster.Nodes.All(node =>
@@ -406,9 +407,10 @@ public sealed class TestInProcessSchemaCluster
             operation: AlterIndexOperation.AddIndex
         )).WaitAsync(TimeSpan.FromSeconds(30)));
 
-        await cluster.WaitForSchemaConvergenceAsync(db, version: 2);
+        // AddIndex now takes 3 coordinator transitions (DeleteOnly + WriteOnly + Public).
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 4);
 
-        // Drop the index (schema version → 3).
+        // Drop the index (schema version → 5).
         await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.AlterIndex(new AlterIndexTicket(
             databaseName: db,
             tableName: "sensors",
@@ -417,7 +419,7 @@ public sealed class TestInProcessSchemaCluster
             operation: AlterIndexOperation.DropIndex
         )).WaitAsync(TimeSpan.FromSeconds(20)));
 
-        await cluster.WaitForSchemaConvergenceAsync(db, version: 3);
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 5);
 
         // All nodes must have the index absent from TableSchema.Indexes.
         Assert.True(cluster.Nodes.All(node =>
@@ -446,5 +448,105 @@ public sealed class TestInProcessSchemaCluster
             });
             await node.Database.Transactions.RollbackAsync(tx);
         }
+    }
+
+    // D3: a cluster ADD COLUMN drives the column through the staged sequence to Public on
+    // every node, and the WriteOnly→Public backfill physically materializes the default into
+    // pre-existing rows. The physical-bytes assertion is essential: a normal SELECT injects the
+    // default for a missing Public column at read time (injectMissingCurrentColumns), so a
+    // SELECT alone would pass even if the backfill never ran — only decoding with injection OFF
+    // distinguishes "physically backfilled" from "injected on read".
+    [Test]
+    public async Task AddColumnOnLeaderBackfillsDefaultAndConvergesAcrossNodes()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        // Create the table and insert 5 rows BEFORE the column exists.
+        long version = 0;
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns: [new ColumnInfo("id", ColumnType.Id), new ColumnInfo("name", ColumnType.String)],
+                constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
+                ifNotExists: false
+            ));
+
+            for (int i = 0; i < 5; i++)
+            {
+                KvTransaction txIns = await leader.Database!.Transactions.BeginAsync();
+                await leader.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                    txnState: txIns,
+                    database: db,
+                    sql: $"INSERT INTO robots (id, name) VALUES (gen_id(), 'robot {i}')",
+                    parameters: null
+                ));
+                await leader.Database.Transactions.CommitAsync(txIns);
+            }
+
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        // ADD COLUMN 'score' INT64 DEFAULT 42 — drives DeleteOnly → WriteOnly → [backfill] → Public.
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.AlterTable(new AlterTableTicket(
+            databaseName: db,
+            tableName: "robots",
+            operation: AlterTableOperation.AddColumn,
+            column: new ColumnInfo("score", ColumnType.Integer64, notNull: false, defaultValue: new ColumnValue(ColumnType.Integer64, 42L))
+        )));
+
+        // The staged add advances the schema version by 3 (DeleteOnly, WriteOnly, Public).
+        await cluster.WaitForSchemaConvergenceAsync(db, version + 3, timeout: TimeSpan.FromSeconds(20));
+
+        // Every node sees 'score' as a Public column.
+        Assert.True(cluster.Nodes.All(node =>
+            node.Database is not null &&
+            node.Database.Schema.Tables["robots"].Columns!
+                .Any(c => c.Name == "score" && c.State == SchemaElementState.Public)),
+            "'score' must be Public on every node after the staged add converges");
+
+        // Read correctness on a follower: existing rows surface the default.
+        InProcessSchemaCluster.Node follower = cluster.Nodes.First(n =>
+            !n.Kahuna.AmISchemaLeaderAsync(db, default).AsTask().GetAwaiter().GetResult());
+
+        KvTransaction readTx = await follower.Database!.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await follower.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+            txnState: readTx, database: db, sql: "SELECT score FROM robots", parameters: null));
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        await follower.Database.Transactions.CommitAsync(readTx);
+
+        Assert.AreEqual(5, rows.Count);
+        Assert.True(rows.All(r => r.Row["score"].LongValue == 42L), "every existing row must read score = 42");
+
+        // Physical proof the backfill ran: decode raw row bytes with injection OFF
+        // (visibilitySchemaVersion: null). The backfill re-encodes each row while 'score' is in
+        // WriteOnly state, so the row header stores the WriteOnly-era schema version and the value
+        // is physically in the bytes (Encode includes writable columns). We must decode with
+        // WRITABLE visibility — PublicOnly would filter 'score' out as not-yet-readable in that
+        // version, masking the physically-present value. If the backfill never ran, the row header
+        // predates 'score' entirely, so it is absent here and only read-time injection would surface it.
+        InProcessSchemaCluster.Node leaderNode = await cluster.WaitForSchemaLeaderNodeAsync(db);
+        TableDescriptor table = await leaderNode.Executor.OpenTable(new OpenTableTicket(db, "robots"));
+        KvTransaction scanTx = await leaderNode.Database!.Transactions.BeginAsync();
+
+        int physicallyBackfilled = 0;
+        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(scanTx.TransactionId))
+        {
+            Dictionary<string, ColumnValue> physical = await RowEncoder.DecodeWritableAsync(
+                table.Schema, scanTx.TransactionId, rowId, data,
+                requiredColumns: null, visibilitySchemaVersion: null);
+
+            Assert.True(physical.ContainsKey("score"),
+                "backfill must physically write 'score' into the row bytes, not rely on read-time injection");
+            Assert.AreEqual(42L, physical["score"].LongValue);
+            physicallyBackfilled++;
+        }
+        await leaderNode.Database.Transactions.CommitAsync(scanTx);
+
+        Assert.AreEqual(5, physicallyBackfilled, "all 5 pre-existing rows must be physically backfilled");
     }
 }

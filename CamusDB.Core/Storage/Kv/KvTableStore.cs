@@ -308,6 +308,11 @@ public sealed class KvTableStore
     /// Writes a secondary index entry.
     /// For unique indexes enforces uniqueness via <c>SetIfNotExists</c>; throws
     /// <see cref="CamusDBException"/> with <c>DuplicateKey</c> if the entry already exists.
+    /// Set <paramref name="backfillMode"/> to <c>true</c> during coordinator-driven backfill:
+    /// a <c>NotSet</c> response on a unique index triggers a read-back check — if the
+    /// existing entry maps to the same rowId (idempotent re-run after leader change) the
+    /// write is silently skipped; if it maps to a different rowId, a genuine duplicate is
+    /// detected and <see cref="CamusDBException"/> is thrown.
     /// </summary>
     public async Task PutIndexEntry(
         KvTransaction tx,
@@ -315,6 +320,7 @@ public sealed class KvTableStore
         CompositeColumnValue key,
         ObjectIdValue rowId,
         bool unique,
+        bool backfillMode = false,
         CancellationToken cancellationToken = default)
     {
         string kvKey = unique
@@ -333,7 +339,26 @@ public sealed class KvTableStore
         ).ConfigureAwait(false);
 
         if (unique && type == KeyValueResponseType.NotSet)
-            throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{indexId}'");
+        {
+            if (backfillMode)
+            {
+                // Backfill resume: a NotSet response may be an idempotent re-write of a row
+                // already processed in a previous partial run, or a genuine duplicate key.
+                // Read back the existing entry to distinguish: same rowId → skip; different → throw.
+                (_, ReadOnlyKeyValueEntry? existing) = await RetryOnMustRetry(
+                    () => kahuna.LocateAndTryGetValue(tx.TransactionId, kvKey, -1, KeyValueDurability.Persistent, cancellationToken),
+                    cancellationToken
+                ).ConfigureAwait(false);
+                string existingRowId = existing?.Value is not null ? Encoding.UTF8.GetString(existing.Value) : "";
+                if (existingRowId != rowId.ToString())
+                    throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{indexId}'");
+                // else: same rowId — idempotent re-write on resume, continue
+            }
+            else
+            {
+                throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{indexId}'");
+            }
+        }
 
         if (type is not (KeyValueResponseType.Set or KeyValueResponseType.NotSet))
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"PutIndexEntry failed for key {kvKey}: {type}");

@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.Catalogs.Models;
@@ -34,6 +35,30 @@ public sealed class PersistedCoordinatorJob
     public bool ColumnNotNull { get; set; }
 
     public ColumnValue? ColumnDefault { get; set; }
+
+    /// <summary>
+    /// Identifies whether this job drives a column (default) or an index element.
+    /// Absent in legacy persisted entries — deserialized as <see cref="SchemaElementKind.Column"/>.
+    /// </summary>
+    public SchemaElementKind ElementKind { get; set; } = SchemaElementKind.Column;
+
+    // ── Index-specific fields (null for column jobs) ──────────────────────────
+
+    /// <summary>Immutable index ID, set when ElementKind is Index.</summary>
+    public string? IndexId { get; set; }
+
+    /// <summary>Column IDs the index covers, used to resolve column names on resume.</summary>
+    public string[]? IndexColumnIds { get; set; }
+
+    /// <summary>Index type (Unique / Multi), needed to rebuild IndexBuildInfo on resume.</summary>
+    public IndexType? IndexType { get; set; }
+
+    /// <summary>
+    /// Last row-id checkpoint written by the backfill pass. Non-null only when the
+    /// backfill has committed at least one checkpoint batch. On resume the backfill
+    /// starts scanning from this offset instead of the beginning of the table.
+    /// </summary>
+    public string? StartOffset { get; set; }
 
     /// <summary>
     /// Number of leader-change resume attempts already spent on this job. The initial

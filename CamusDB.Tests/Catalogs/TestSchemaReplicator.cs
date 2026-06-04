@@ -136,8 +136,6 @@ public sealed class TestSchemaReplicator
         SchemaReplicator replicator = CreateReplicator();
         int partitionId = database.Kahuna.SchemaLogPartition(db);
 
-        database.Kahuna.RegisterLocalSchemaAckNode(db);
-
         Assert.True(await replicator.ApplyAsync(
             database,
             partitionId,

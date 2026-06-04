@@ -518,7 +518,9 @@ public sealed class TestMultiPartitionRouting
                 operation: AlterTableOperation.AddColumn
             ));
 
-            Assert.AreEqual(2, database.Schema.SchemaVersion);
+            // Coordinator issues 3 transitions (DeleteOnly → WriteOnly → Public), each
+            // incrementing the database schema version, so +3 from the version after CreateTable.
+            Assert.AreEqual(4, database.Schema.SchemaVersion);
 
             await executor.CloseDatabase(new CloseDatabaseTicket(dbname));
 
@@ -527,7 +529,7 @@ public sealed class TestMultiPartitionRouting
                 "Schema must survive close/reopen on the shared cluster node");
             Assert.AreEqual(3, reopened.Schema.Tables["robots"].Columns!.Count,
                 "Table must retain id, name, and enabled columns after reopen");
-            Assert.AreEqual(2, reopened.Schema.SchemaVersion,
+            Assert.AreEqual(4, reopened.Schema.SchemaVersion,
                 "Database schema version must survive close/reopen");
             Assert.IsNull(reopened.Schema.Tables["robots"].SchemaHistory,
                 "Per-object table metadata should not eagerly load schema history");
@@ -579,7 +581,8 @@ public sealed class TestMultiPartitionRouting
                 operation: AlterTableOperation.AddColumn
             ));
 
-            Assert.AreEqual(2, databaseB.Schema.SchemaVersion);
+            // Coordinator: 3 transitions per AddColumn, so version increments by 3.
+            Assert.AreEqual(4, databaseB.Schema.SchemaVersion);
             Assert.AreEqual(3, tableB.Schema.Columns!.Count);
             Assert.AreEqual("enabled", tableB.Schema.Columns[2].Name);
         }

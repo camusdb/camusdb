@@ -18,6 +18,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
+using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 
@@ -270,33 +271,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         try
         {
             SchemaChangeCoordinator coordinator = new(catalogs, logger);
-
-            coordinator.OnStepCompleted = async (state, _) =>
-            {
-                if (state != SchemaElementState.WriteOnly)
-                    return;
-
-                AlterColumnTicket alterTicket = new(
-                    databaseName: database.Name,
-                    tableName: ticket.TableName,
-                    column: columnInfo,
-                    operation: ticket.Operation
-                );
-
-                KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
-                try
-                {
-                    await tableColumnAlterer.BackfillColumnDefaultsAsync(
-                        queryExecutor, database, table, alterTicket, tx
-                    ).ConfigureAwait(false);
-                    await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-                }
-                catch
-                {
-                    await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-                    throw;
-                }
-            };
+            coordinator.BackfillAsync = (db, tableName, column) => BackfillColumnDefaultsAsync(db, tableName, column);
 
             await coordinator.RunJobAsync(
                 database,
@@ -310,6 +285,211 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             database.SchemaDdlSemaphore.Release();
         }
+    }
+
+    /// <summary>
+    /// Re-encodes every existing row in <paramref name="tableName"/> so that the newly added
+    /// <paramref name="column"/> (in <c>WriteOnly</c> state) is stored with its default value.
+    /// Used by both the command-path coordinator and the D2 leader-change resume coordinator so
+    /// backfill is always part of the resumable sequence.
+    /// </summary>
+    internal async Task BackfillColumnDefaultsAsync(DatabaseDescriptor database, string tableName, ColumnInfo column)
+    {
+        TableDescriptor table = await tableOpener.Open(database, tableName).ConfigureAwait(false);
+
+        AlterColumnTicket alterTicket = new(
+            databaseName: database.Name,
+            tableName: tableName,
+            column: column,
+            operation: AlterTableOperation.AddColumn
+        );
+
+        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        try
+        {
+            await tableColumnAlterer.BackfillColumnDefaultsAsync(queryExecutor, database, table, alterTicket, tx).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        catch
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Scans every existing row in <paramref name="tableName"/> and writes an index entry
+    /// for each, using backfill mode (idempotent — <c>Set</c> rather than <c>SetIfNotExists</c>
+    /// for unique indexes). Called by the <see cref="SchemaChangeCoordinator"/> just before the
+    /// index transitions from <c>WriteOnly</c> to <c>Public</c>, both on the initial run and
+    /// on any leader-change resume.
+    /// </summary>
+    internal async Task BackfillIndexEntriesAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        IndexBuildInfo indexInfo,
+        string? startOffset
+    )
+    {
+        TableDescriptor table = await tableOpener.Open(database, tableName).ConfigureAwait(false);
+        bool unique = indexInfo.IndexType == IndexType.Unique;
+
+        ObjectIdValue? afterRowId = string.IsNullOrWhiteSpace(startOffset)
+            ? null
+            : ObjectId.ToValue(startOffset!);
+
+        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        int rows = 0;
+        try
+        {
+            await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(
+                tx.TransactionId, afterRowId: afterRowId).ConfigureAwait(false))
+            {
+                Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
+                    table.Schema, tx.TransactionId, rowId, data,
+                    visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
+
+                int i = 0;
+                ColumnValue[] columnValues = unique
+                    ? new ColumnValue[indexInfo.ColumnNames.Length]
+                    : new ColumnValue[indexInfo.ColumnNames.Length + 1];
+
+                foreach (string columnName in indexInfo.ColumnNames)
+                {
+                    ColumnValue? keyValue = row.GetValueOrDefault(columnName);
+                    if (keyValue is null)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidInternalOperation,
+                            $"A null value was found for index key field '{columnName}'"
+                        );
+                    columnValues[i++] = keyValue;
+                }
+
+                if (!unique)
+                    columnValues[i] = new(ColumnType.Id, rowId.ToString());
+
+                CompositeColumnValue compositeKey = new(columnValues);
+                await table.Store.PutIndexEntry(tx, indexInfo.IndexName, compositeKey, rowId, unique, backfillMode: true).ConfigureAwait(false);
+                rows++;
+            }
+
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        catch
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            throw;
+        }
+
+        logger.LogInformation("Backfilled {Rows} rows into index {IndexName}", rows, indexInfo.IndexName);
+    }
+
+    /// <summary>
+    /// Drives the add-index sequence through the coordinator-owned staged path
+    /// (<c>Absent → DeleteOnly → WriteOnly → [backfill] → Public</c>).
+    /// Only called when <c>!database.OwnsKahuna</c>.
+    /// </summary>
+    private async Task<bool> ExecuteClusterAddIndexAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        AlterIndexTicket ticket
+    )
+    {
+        if (table.Indexes.ContainsKey(ticket.IndexName))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{ticket.IndexName}' already exists on table '{table.Name}'");
+
+        IndexType indexType = ticket.Operation is AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey
+            ? IndexType.Unique
+            : IndexType.Multi;
+
+        string indexId = ObjectIdGenerator.Generate().ToString();
+        string[] columnIds = GetColumnIdsForIndex(table, ticket.Columns);
+        string[] columnNames = ticket.Columns.Select(c => c.Name).ToArray();
+
+        IndexBuildInfo indexInfo = new(indexId, ticket.IndexName, columnIds, columnNames, indexType);
+
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            SchemaChangeCoordinator coordinator = new(catalogs, logger);
+            coordinator.IndexBackfillAsync = (db, tbl, info, start) => BackfillIndexEntriesAsync(db, tbl, info, start);
+
+            try
+            {
+                await coordinator.RunJobAsync(
+                    database,
+                    new SchemaChangeJob(database.Name, ticket.TableName, ticket.IndexName, SchemaElementState.Public, SchemaElementKind.Index),
+                    indexBuildInfo: indexInfo
+                ).ConfigureAwait(false);
+
+                return true;
+            }
+            catch
+            {
+                // Compensate: if the index was partially committed to the schema (in DeleteOnly
+                // or WriteOnly state) but did not reach Public, emit DropIndex on all nodes and
+                // delete the persisted coordinator job, leaving the cluster in a clean state.
+                await CompensateClusterAddIndexAsync(database, ticket.TableName, ticket.IndexName).ConfigureAwait(false);
+                throw;
+            }
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+    }
+
+    private async Task CompensateClusterAddIndexAsync(DatabaseDescriptor database, string tableName, string indexName)
+    {
+        try
+        {
+            if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema) &&
+                tableSchema.Indexes?.Any(ix => ix.Name == indexName) == true)
+            {
+                await catalogs.ReplicateDropIndexAsync(database, tableName, indexName).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to compensate partial index add for {IndexName} on {TableName}", indexName, tableName);
+        }
+
+        try
+        {
+            await catalogs.DeleteCoordinatorJobAsync(database, tableName, indexName).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to delete coordinator job for index {IndexName} on {TableName}", indexName, tableName);
+        }
+    }
+
+    private static string[] GetColumnIdsForIndex(TableDescriptor table, ReadOnlySpan<ColumnIndexInfo> columns)
+    {
+        string[] columnIds = new string[columns.Length];
+        int i = 0;
+
+        foreach (ColumnIndexInfo columnIndex in columns)
+        {
+            bool found = false;
+            foreach (TableColumnSchema column in table.Schema.Columns!)
+            {
+                if (column.Name == columnIndex.Name)
+                {
+                    columnIds[i++] = column.Id;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Column '{columnIndex.Name}' does not exist on table '{table.Name}'"
+                );
+        }
+
+        return columnIds;
     }
 
     public async Task<bool> AlterIndex(AlterIndexTicket ticket)
@@ -328,8 +508,11 @@ public sealed class CommandExecutor : IAsyncDisposable
             AlterIndexOperation.AddIndex or
             AlterIndexOperation.AddUniqueIndex or
             AlterIndexOperation.AddPrimaryKey;
-        bool indexExistedBefore = table.Indexes.ContainsKey(ticket.IndexName);
 
+        if (!database.OwnsKahuna && addIndexOperation)
+            return await ExecuteClusterAddIndexAsync(database, table, ticket).ConfigureAwait(false);
+
+        bool indexExistedBefore = table.Indexes.ContainsKey(ticket.IndexName);
         bool compensateOnAbort = addIndexOperation && !indexExistedBefore;
 
         if (!database.OwnsKahuna)
@@ -671,6 +854,17 @@ public sealed class CommandExecutor : IAsyncDisposable
                         return new ExecuteDDLSQLResult(database, forwarded.Value);
 
                     TableDescriptor table = await tableOpener.Open(database, alterIndexTicket.TableName).ConfigureAwait(false);
+
+                    bool sqlAddIndex = alterIndexTicket.Operation is
+                        AlterIndexOperation.AddIndex or
+                        AlterIndexOperation.AddUniqueIndex or
+                        AlterIndexOperation.AddPrimaryKey;
+
+                    if (!database.OwnsKahuna && sqlAddIndex)
+                    {
+                        bool ok = await ExecuteClusterAddIndexAsync(database, table, alterIndexTicket).ConfigureAwait(false);
+                        return new ExecuteDDLSQLResult(database, ok);
+                    }
 
                     if (!database.OwnsKahuna)
                     {
