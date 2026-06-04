@@ -112,25 +112,21 @@ internal sealed class TableIndexAdder
             : IndexType.Multi;
 
         string indexId = ObjectIdGenerator.Generate().ToString();
+        string[] columnIds = GetColumnIds(table, ticket.Columns);
 
         try
         {
             await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
 
-            database.SystemSchema.Indexes.Add(
+            table.Schema.Indexes ??= [];
+            table.Schema.Indexes.Add(new TableIndexSchema(
                 indexId,
-                new DatabaseIndexObject(
-                    indexId,
-                    ticket.IndexName,
-                    table.Id,
-                    GetColumnIds(table, ticket.Columns),
-                    indexType,
-                    startOffset: "",
-                    state: SchemaElementState.WriteOnly
-                )
-            );
-
-            await state.Catalogs.PersistMetaAsync(database, state.Tx).ConfigureAwait(false);
+                ticket.IndexName,
+                columnIds,
+                indexType,
+                SchemaElementState.WriteOnly,
+                startOffset: null
+            ));
         }
         finally
         {
@@ -153,8 +149,13 @@ internal sealed class TableIndexAdder
         TableDescriptor table = state.Table;
         KvTransaction tx = state.Tx;
         bool unique = ticket.Operation is AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddUniqueIndex;
-        string indexId = state.IndexId ?? FindIndexId(state.Database, table.Id, ticket.IndexName);
-        ObjectIdValue? afterRowId = GetBackfillCheckpoint(state.Database, indexId);
+        string indexId = state.IndexId
+            ?? table.Schema.Indexes?.FirstOrDefault(ix => ix.Name == ticket.IndexName)?.Id
+            ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{ticket.IndexName}' was not found in schema");
+        TableIndexSchema? schemaIndex = table.Schema.Indexes?.FirstOrDefault(ix => ix.Id == indexId);
+        ObjectIdValue? afterRowId = string.IsNullOrWhiteSpace(schemaIndex?.StartOffset)
+            ? null
+            : ObjectId.ToValue(schemaIndex.StartOffset!);
 
         int rows = 0;
 
@@ -210,17 +211,40 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket = state.Ticket;
         TableDescriptor table = state.Table;
         DatabaseDescriptor database = state.Database;
-        string indexId = state.IndexId ?? FindIndexId(database, table.Id, ticket.IndexName);
+        string indexId = state.IndexId
+            ?? table.Schema.Indexes?.FirstOrDefault(ix => ix.Name == ticket.IndexName)?.Id
+            ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{ticket.IndexName}' was not found in schema");
+        string finalOffset = state.LastBackfilledRowId ?? "";
 
         try
         {
             await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
 
-            DatabaseIndexObject index = GetIndexObject(database, indexId);
-            string finalOffset = state.LastBackfilledRowId ?? index.StartOffset;
-            database.SystemSchema.Indexes[indexId] = CopyIndexObject(index, finalOffset, SchemaElementState.Public);
+            if (table.Schema.Indexes is not null)
+            {
+                for (int i = 0; i < table.Schema.Indexes.Count; i++)
+                {
+                    if (table.Schema.Indexes[i].Id != indexId)
+                        continue;
 
-            await state.Catalogs.PersistMetaAsync(database, state.Tx).ConfigureAwait(false);
+                    TableIndexSchema old = table.Schema.Indexes[i];
+                    table.Schema.Indexes[i] = new TableIndexSchema(
+                        old.Id!,
+                        old.Name,
+                        old.ColumnIds,
+                        old.Type,
+                        SchemaElementState.Public,
+                        finalOffset
+                    );
+                    break;
+                }
+            }
+
+            // table.Schema.Version is not bumped: indexes are not part of the row encoding.
+            // On the cluster path, PersistSchemaCheckpointAsync (called by
+            // ReplicateAndWaitLocalApplyAsync after Raft commits) is the authoritative write.
+            if (database.OwnsKahuna)
+                await state.Catalogs.PersistSchemaTableAsync(database, table.Schema, state.Tx).ConfigureAwait(false);
         }
         finally
         {
@@ -228,42 +252,10 @@ internal sealed class TableIndexAdder
         }
 
         TableIndexSchema current = table.Indexes[ticket.IndexName];
-        table.Indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns, current.Type, SchemaElementState.Public);
+        table.Indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public);
 
         return FluxAction.Continue;
     }
-
-    private static ObjectIdValue? GetBackfillCheckpoint(DatabaseDescriptor database, string indexId)
-    {
-        DatabaseIndexObject index = GetIndexObject(database, indexId);
-
-        if (string.IsNullOrWhiteSpace(index.StartOffset))
-            return null;
-
-        return ObjectId.ToValue(index.StartOffset);
-    }
-
-    private static string FindIndexId(DatabaseDescriptor database, string tableId, string indexName)
-    {
-        foreach (KeyValuePair<string, DatabaseIndexObject> index in database.SystemSchema.Indexes)
-        {
-            if (index.Value.TableId == tableId && index.Value.Name == indexName)
-                return index.Key;
-        }
-
-        throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{indexName}' was not found in system metadata");
-    }
-
-    private static DatabaseIndexObject GetIndexObject(DatabaseDescriptor database, string indexId)
-    {
-        if (!database.SystemSchema.Indexes.TryGetValue(indexId, out DatabaseIndexObject? index))
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{indexId}' was not found in system metadata");
-
-        return index;
-    }
-
-    private static DatabaseIndexObject CopyIndexObject(DatabaseIndexObject index, string startOffset, SchemaElementState state) =>
-        new(index.Id, index.Name, index.TableId, index.ColumnIds, index.Type, startOffset, state);
 
     private static string[] GetColumnIds(TableDescriptor table, ReadOnlySpan<ColumnIndexInfo> columns)
     {

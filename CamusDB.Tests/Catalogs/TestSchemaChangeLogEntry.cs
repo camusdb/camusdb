@@ -161,15 +161,14 @@ public sealed class TestSchemaChangeLogEntry
         Assert.AreEqual(2, schema.SchemaVersion);
     }
 
-    [TestCase(SchemaOp.AddIndex)]
-    [TestCase(SchemaOp.DropIndex)]
-    public void ApplySchemaDelta_IndexAndStateOpsAreNoOpsUntilTheirOwnersAreReplicated(SchemaOp op)
+    [Test]
+    public void ApplySchemaDelta_AddIndex_AppendsIndexToTableSchema()
     {
         Schema schema = new();
         CatalogsManager.ApplySchemaDelta(schema, Entry(SchemaOp.CreateTable, CreateTablePayload()));
 
         SchemaChangeLogEntry entry = Entry(
-            op,
+            SchemaOp.AddIndex,
             new SchemaIndexPayload
             {
                 TableName = "robots",
@@ -178,14 +177,38 @@ public sealed class TestSchemaChangeLogEntry
             }
         );
 
+        TableSchema? table = CatalogsManager.ApplySchemaDelta(schema, entry);
+
+        Assert.NotNull(table);
+        Assert.True(schema.Tables.ContainsKey("robots"));
+        Assert.AreEqual(0, schema.Tables["robots"].Version);  // index DDL does not bump Version
+        Assert.NotNull(schema.Tables["robots"].Indexes);
+        Assert.AreEqual(1, schema.Tables["robots"].Indexes!.Count);
+        Assert.AreEqual("name_idx", schema.Tables["robots"].Indexes![0].Name);
+        Assert.AreEqual(2, schema.SchemaVersion);
+    }
+
+    [Test]
+    public void ApplySchemaDelta_DropIndex_RemovesIndexFromTableSchema()
+    {
+        Schema schema = new();
+        CatalogsManager.ApplySchemaDelta(schema, Entry(SchemaOp.CreateTable, CreateTablePayload()));
+        CatalogsManager.ApplySchemaDelta(schema, Entry(SchemaOp.AddIndex, new SchemaIndexPayload
+        {
+            TableName = "robots",
+            IndexName = "name_idx",
+            Index = new("name_idx", ["name"], IndexType.Multi)
+        }));
+
         TableSchema? table = CatalogsManager.ApplySchemaDelta(
             schema,
-            entry
+            Entry(SchemaOp.DropIndex, new SchemaIndexPayload { TableName = "robots", IndexName = "name_idx" })
         );
 
-        Assert.Null(table);
+        Assert.NotNull(table);
         Assert.True(schema.Tables.ContainsKey("robots"));
-        Assert.AreEqual(0, schema.Tables["robots"].Version);
+        Assert.AreEqual(0, schema.Tables["robots"].Version);  // index DDL does not bump Version
+        Assert.AreEqual(0, schema.Tables["robots"].Indexes?.Count ?? 0);
         Assert.AreEqual(2, schema.SchemaVersion);
     }
 

@@ -71,13 +71,25 @@ builder.Services.AddRazorPages();
 
 if (config.IsClusterMode)
 {
+    builder.Services.AddSingleton<ISchemaDdlForwarder>(services =>
+    {
+        int httpPort = opts.HttpPort;
+        Func<string, Uri> resolver = raftEndpoint =>
+        {
+            string host = raftEndpoint.Contains(':') ? raftEndpoint.Split(':')[0] : raftEndpoint;
+            return new Uri($"http://{host}:{httpPort}");
+        };
+        return new HttpSchemaDdlForwarder(new HttpClient(), resolver, services.GetRequiredService<ILogger<ICamusDB>>());
+    });
+
     builder.Services.AddSingleton<CommandExecutor>(services =>
         new CommandExecutor(
             services.GetRequiredService<CommandValidator>(),
             services.GetRequiredService<CatalogsManager>(),
             services.GetRequiredService<ILogger<ICamusDB>>(),
             services.GetRequiredService<ILoggerFactory>(),
-            services.GetRequiredService<EmbeddedKahuna>()
+            services.GetRequiredService<EmbeddedKahuna>(),
+            services.GetRequiredService<ISchemaDdlForwarder>()
         ));
 }
 else

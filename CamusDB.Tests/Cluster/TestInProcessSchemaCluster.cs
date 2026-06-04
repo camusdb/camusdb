@@ -8,15 +8,18 @@
 using System;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 
 using NUnit.Framework;
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.Cluster;
 
@@ -265,5 +268,183 @@ public sealed class TestInProcessSchemaCluster
             n.Database is not null &&
             n.Database.Schema.Tables.ContainsKey("actuators")),
             "Live nodes must converge on DDL issued to new leader");
+    }
+
+    // B2: CREATE INDEX on the leader must be visible on every node via table.Schema.Indexes
+    // and usable via FORCE_INDEX without a reopen, proving the schema log carries the change.
+    [Test]
+    public async Task AddIndexOnLeaderConvergesAcrossNodesWithoutReopen()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        // Step 1: create the table on the leader (schema version → 1).
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "robots",
+            columns:
+            [
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("name", ColumnType.String, notNull: true),
+                new ColumnInfo("year", ColumnType.Integer64)
+            ],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        )).WaitAsync(TimeSpan.FromSeconds(20)));
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        // Step 2: insert a few rows so the backfill has work to do.
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            for (int i = 1; i <= 5; i++)
+            {
+                KvTransaction tx = await leader.Database!.Transactions.BeginAsync();
+                await leader.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                    txnState: tx,
+                    database: db,
+                    sql: $"INSERT INTO robots (id, name, year) VALUES (gen_id(), 'robot {i}', {2000 + i})",
+                    parameters: null
+                ));
+                await leader.Database.Transactions.CommitAsync(tx);
+            }
+        });
+
+        // Step 3: add a secondary index on the leader (schema version → 2).
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.AlterIndex(new AlterIndexTicket(
+            databaseName: db,
+            tableName: "robots",
+            indexName: "name_idx",
+            columns: [new ColumnIndexInfo("name", OrderType.Ascending)],
+            operation: AlterIndexOperation.AddIndex
+        )).WaitAsync(TimeSpan.FromSeconds(30)));
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 2);
+
+        // Step 4: every node must have the index in table.Schema.Indexes without reopen.
+        Assert.True(cluster.Nodes.All(node =>
+            node.Database is not null &&
+            node.Database.Schema.Tables.TryGetValue("robots", out TableSchema? schema) &&
+            schema.Indexes is not null &&
+            schema.Indexes.Any(ix => ix.Name == "name_idx" && ix.State == SchemaElementState.Public)),
+            "name_idx must appear in TableSchema.Indexes on every node after AddIndex convergence"
+        );
+
+        // Step 5: every node's in-memory TableDescriptor must answer FORCE_INDEX without reopen.
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            KvTransaction tx = await leader.Database!.Transactions.BeginAsync();
+            (_, IAsyncEnumerable<QueryResultRow> cursor) =
+                await leader.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                    txnState: tx,
+                    database: db,
+                    sql: "SELECT id FROM robots@{FORCE_INDEX=name_idx}",
+                    parameters: null
+                ));
+            List<QueryResultRow> rows = await cursor.ToListAsync();
+            await leader.Database.Transactions.CommitAsync(tx);
+            Assert.AreEqual(5, rows.Count, "FORCE_INDEX on leader must return all 5 rows");
+        });
+
+        // Check each follower as well.
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            if (node.Database is null) continue;
+
+            KvTransaction tx = await node.Database.Transactions.BeginAsync();
+            (_, IAsyncEnumerable<QueryResultRow> cursor) =
+                await node.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                    txnState: tx,
+                    database: db,
+                    sql: "SELECT id FROM robots@{FORCE_INDEX=name_idx}",
+                    parameters: null
+                ));
+            List<QueryResultRow> rows = await cursor.ToListAsync();
+            await node.Database.Transactions.CommitAsync(tx);
+            Assert.AreEqual(5, rows.Count, $"FORCE_INDEX on node {node.Index} must return all 5 rows");
+        }
+    }
+
+    // B2: DROP INDEX on the leader must remove the index from every node's table.Schema.Indexes
+    // without reopen, and FORCE_INDEX must subsequently fail on all nodes.
+    [Test]
+    public async Task DropIndexOnLeaderConvergesAcrossNodesWithoutReopen()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        // Create table + index (2 schema versions).
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "sensors",
+            columns:
+            [
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("label", ColumnType.String, notNull: true)
+            ],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        )).WaitAsync(TimeSpan.FromSeconds(20)));
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.AlterIndex(new AlterIndexTicket(
+            databaseName: db,
+            tableName: "sensors",
+            indexName: "label_idx",
+            columns: [new ColumnIndexInfo("label", OrderType.Ascending)],
+            operation: AlterIndexOperation.AddIndex
+        )).WaitAsync(TimeSpan.FromSeconds(30)));
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 2);
+
+        // Drop the index (schema version → 3).
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.AlterIndex(new AlterIndexTicket(
+            databaseName: db,
+            tableName: "sensors",
+            indexName: "label_idx",
+            columns: [],
+            operation: AlterIndexOperation.DropIndex
+        )).WaitAsync(TimeSpan.FromSeconds(20)));
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 3);
+
+        // All nodes must have the index absent from TableSchema.Indexes.
+        Assert.True(cluster.Nodes.All(node =>
+            node.Database is not null &&
+            node.Database.Schema.Tables.TryGetValue("sensors", out TableSchema? schema) &&
+            (schema.Indexes is null || schema.Indexes.All(ix => ix.Name != "label_idx"))),
+            "label_idx must be absent from TableSchema.Indexes on every node after DropIndex convergence"
+        );
+
+        // FORCE_INDEX on the dropped index must throw on every node.
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            if (node.Database is null) continue;
+
+            KvTransaction tx = await node.Database.Transactions.BeginAsync();
+            Assert.ThrowsAsync<CamusDB.Core.CamusDBException>(async () =>
+            {
+                (_, IAsyncEnumerable<QueryResultRow> cursor) =
+                    await node.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                        txnState: tx,
+                        database: db,
+                        sql: "SELECT id FROM sensors@{FORCE_INDEX=label_idx}",
+                        parameters: null
+                    ));
+                await cursor.ToListAsync();
+            });
+            await node.Database.Transactions.RollbackAsync(tx);
+        }
     }
 }

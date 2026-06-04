@@ -44,24 +44,21 @@ internal sealed class TableIndexDropper
         TableDescriptor table = state.Table;
         DatabaseDescriptor database = state.Database;
 
+        // Delete all KV entries for the index before removing it from the schema.
+        // Both happen in state.Tx so the purge is atomic with the schema update.
+        int purged = await table.Store.DropIndexEntries(state.Tx, ticket.IndexName).ConfigureAwait(false);
+        logger.LogInformation("Purged {Count} KV entries for index {IndexName}", purged, ticket.IndexName);
+
         try
         {
             await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
 
-            Dictionary<string, DatabaseIndexObject> objects = database.SystemSchema.Indexes;
+            table.Schema.Indexes?.RemoveAll(ix => ix.Name == ticket.IndexName);
 
-            foreach (KeyValuePair<string, DatabaseIndexObject> systemObject in objects)
-            {
-                DatabaseIndexObject databaseObject = systemObject.Value;
-
-                if (databaseObject.Name != ticket.IndexName)
-                    continue;
-
-                objects.Remove(databaseObject.Id);
-                break;
-            }
-
-            await state.Catalogs.PersistMetaAsync(database, state.Tx).ConfigureAwait(false);
+            // table.Schema.Version is not bumped: indexes are not part of the row encoding.
+            // On the cluster path, PersistSchemaCheckpointAsync is the authoritative write.
+            if (database.OwnsKahuna)
+                await state.Catalogs.PersistSchemaTableAsync(database, table.Schema, state.Tx).ConfigureAwait(false);
         }
         finally
         {

@@ -274,6 +274,87 @@ public sealed class CatalogsManager
         };
     }
 
+    /// <summary>
+    /// Replicates a completed AddIndex or DropIndex change to all cluster nodes via the
+    /// schema log. Must be called AFTER the local work (backfill etc.) is done and
+    /// <c>table.Schema.Indexes</c> reflects the final state. Only called when
+    /// <c>!database.OwnsKahuna</c>; standalone nodes need no replication.
+    /// </summary>
+    public async Task ReplicateIndexChangeAsync(
+        DatabaseDescriptor database,
+        AlterIndexTicket ticket,
+        TableDescriptor table,
+        KvTransaction tx
+    )
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            entry = ticket.Operation is AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey
+                ? DropIndexEntry(database, ticket, tx)
+                : AddIndexEntry(database, ticket, table, tx);
+        }
+        finally
+        {
+            database.Schema.Semaphore.Release();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    private static SchemaChangeLogEntry AddIndexEntry(
+        DatabaseDescriptor database,
+        AlterIndexTicket ticket,
+        TableDescriptor table,
+        KvTransaction tx
+    )
+    {
+        // The completed index lives in table.Schema.Indexes (written by TableIndexAdder).
+        TableIndexSchema? indexSchema = table.Schema.Indexes?.FirstOrDefault(ix => ix.Name == ticket.IndexName)
+            ?? throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Index '{ticket.IndexName}' not found in table schema after local apply — cannot build replication entry"
+            );
+
+        return new()
+        {
+            Ts = tx.TransactionId,
+            Database = database.Name,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.AddIndex,
+            Payload = Serializator.Serialize(new SchemaIndexPayload
+            {
+                TableName = ticket.TableName,
+                IndexName = ticket.IndexName,
+                Index = indexSchema
+            })
+        };
+    }
+
+    private static SchemaChangeLogEntry DropIndexEntry(
+        DatabaseDescriptor database,
+        AlterIndexTicket ticket,
+        KvTransaction tx
+    )
+    {
+        return new()
+        {
+            Ts = tx.TransactionId,
+            Database = database.Name,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.DropIndex,
+            Payload = Serializator.Serialize(new SchemaIndexPayload
+            {
+                TableName = ticket.TableName,
+                IndexName = ticket.IndexName
+            })
+        };
+    }
+
     private async Task ReplicateAndWaitLocalApplyAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
         await WaitForPreviousVersionAcksAsync(database, entry).ConfigureAwait(false);
@@ -398,6 +479,7 @@ public sealed class CatalogsManager
         SchemaOp.AddColumn or SchemaOp.DropColumn => DecodePayload<SchemaAlterColumnPayload>(entry).TableName,
         SchemaOp.SetElementState => DecodePayload<SchemaElementStatePayload>(entry).TableName,
         SchemaOp.DropTable => DecodePayload<SchemaDropTablePayload>(entry).TableName,
+        SchemaOp.AddIndex or SchemaOp.DropIndex => DecodePayload<SchemaIndexPayload>(entry).TableName,
         _ => throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
             $"Cannot resolve table name for schema operation '{entry.Op}'"
@@ -437,8 +519,17 @@ public sealed class CatalogsManager
             SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.SetElementState => HasElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
+            SchemaOp.AddIndex => HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
+            SchemaOp.DropIndex => !HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
+    }
+
+    private static bool HasIndex(Schema schema, SchemaIndexPayload payload)
+    {
+        return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
+               table.Indexes is not null &&
+               table.Indexes.Any(ix => ix.Name == payload.IndexName);
     }
 
     private static bool HasColumn(Schema schema, SchemaAlterColumnPayload payload)
@@ -468,7 +559,8 @@ public sealed class CatalogsManager
             SchemaOp.AddColumn => ApplyAlterColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry), entry.Op),
             SchemaOp.DropColumn => ApplyAlterColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry), entry.Op),
             SchemaOp.SetElementState => ApplyElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
-            SchemaOp.AddIndex or SchemaOp.DropIndex => null,
+            SchemaOp.AddIndex => ApplyAddIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
+            SchemaOp.DropIndex => ApplyDropIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -535,6 +627,39 @@ public sealed class CatalogsManager
             return null;
 
         schema.Tables.Remove(payload.TableName);
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Applies an AddIndex delta. Idempotent: if an entry with the same name already exists
+    /// (e.g. the proposer already applied it locally before proposing), it is replaced.
+    /// TableSchema.Version is intentionally NOT bumped — see TableSchema.Version doc.
+    /// </summary>
+    private static TableSchema ApplyAddIndex(Schema schema, SchemaIndexPayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        if (payload.Index is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"AddIndex payload for '{payload.IndexName}' carries no index definition");
+
+        tableSchema.Indexes ??= [];
+        tableSchema.Indexes.RemoveAll(ix => ix.Name == payload.IndexName);
+        tableSchema.Indexes.Add(payload.Index);
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Applies a DropIndex delta. Idempotent: if the index is already absent the operation
+    /// is a no-op. Returns the table even when the index was absent, because the schema
+    /// version must still advance and the checkpoint must still be persisted.
+    /// </summary>
+    private static TableSchema? ApplyDropIndex(Schema schema, SchemaIndexPayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            return null;
+
+        tableSchema.Indexes?.RemoveAll(ix => ix.Name == payload.IndexName);
         return tableSchema;
     }
 
@@ -823,6 +948,12 @@ public sealed class CatalogsManager
             if (migratedLegacySchema)
                 await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
 
+            // B1: Populate TableSchema.Indexes in-memory for any table that still carries
+            // its indexes only in the legacy SystemSchema blob. The migration is in-memory
+            // here; the next index DDL write will persist the updated TableSchema to KV via
+            // PersistSchemaTableAsync (which includes Indexes via WithoutHistory).
+            MigrateIndexesFromSystemSchema(database);
+
             logger.LogInformation(
                 "Schema loaded: {Tables} table(s), {Indexes} index object(s)",
                 database.Schema.Tables.Count,
@@ -833,6 +964,47 @@ public sealed class CatalogsManager
         {
             await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
             database.TableDescriptors.Clear();
+        }
+    }
+
+    /// <summary>
+    /// B1 migration: for every table whose <see cref="TableSchema.Indexes"/> is still null
+    /// (i.e. stored only in the legacy <c>SystemSchema</c> blob), populate it in-memory from
+    /// <c>database.SystemSchema.Indexes</c>. The result is used immediately by
+    /// <c>TableOpener</c> so the table opens correctly; the next index DDL write will persist
+    /// the populated <c>Indexes</c> list to the table's KV entry via
+    /// <c>PersistSchemaTableAsync</c>.
+    /// </summary>
+    private static void MigrateIndexesFromSystemSchema(DatabaseDescriptor database)
+    {
+        if (database.SystemSchema.Indexes.Count == 0)
+            return;
+
+        foreach (TableSchema table in database.Schema.Tables.Values)
+        {
+            if (table.Indexes is not null && table.Indexes.Count > 0)
+                continue;
+
+            List<TableIndexSchema>? migrated = null;
+
+            foreach (DatabaseIndexObject sysIndex in database.SystemSchema.Indexes.Values)
+            {
+                if (sysIndex.TableId != table.Id)
+                    continue;
+
+                migrated ??= [];
+                migrated.Add(new TableIndexSchema(
+                    sysIndex.Id,
+                    sysIndex.Name,
+                    sysIndex.ColumnIds,
+                    sysIndex.Type,
+                    sysIndex.State,
+                    sysIndex.StartOffset
+                ));
+            }
+
+            if (migrated is not null)
+                table.Indexes = migrated;
         }
     }
 
@@ -1006,6 +1178,7 @@ public sealed class CatalogsManager
             Version = tableSchema.Version,
             Name = tableSchema.Name,
             Columns = tableSchema.Columns,
+            Indexes = tableSchema.Indexes,
             SchemaHistory = null
         };
     }

@@ -676,9 +676,11 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
         Assert.AreEqual(IndexType.Multi, index!.Type);
         Assert.AreEqual(SchemaElementState.Public, index.State);
 
-        DatabaseIndexObject systemIndex = database.SystemSchema.Indexes.Values.Single(x => x.Name == "name_idx");
-        Assert.AreEqual(SchemaElementState.Public, systemIndex.State);
-        Assert.IsNotEmpty(systemIndex.StartOffset);
+        // B2: indexes are owned by TableSchema.Indexes (the replicated source of truth),
+        // no longer dual-written to SystemSchema.
+        TableIndexSchema persistedIndex = table.Schema.Indexes!.Single(x => x.Name == "name_idx");
+        Assert.AreEqual(SchemaElementState.Public, persistedIndex.State);
+        Assert.IsNotEmpty(persistedIndex.StartOffset);
 
         await database.Transactions.CommitAsync(txnState);
 
@@ -790,7 +792,9 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
 
         TableDescriptor table = await executor.OpenTable(new OpenTableTicket(dbname, "robots"));
         Assert.False(table.Indexes.ContainsKey("name_idx"));
-        Assert.False(database.SystemSchema.Indexes.Values.Any(index => index.Name == "name_idx"));
+        // B2: the aborted unique-index add must not leave a phantom in TableSchema.Indexes
+        // (the abort compensation removes it).
+        Assert.False(table.Schema.Indexes?.Any(index => index.Name == "name_idx") ?? false);
     }
 
     [Test]

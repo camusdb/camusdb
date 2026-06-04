@@ -13,13 +13,16 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using Microsoft.Extensions.Logging;
+using System.Linq;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
 /// Opens a table, returning a <see cref="TableDescriptor"/> that contains the schema
 /// and a <see cref="KvTableStore"/> backed by the database's <see cref="EmbeddedKahuna"/> node.
-/// Index metadata comes from the <see cref="SystemSchema"/>; no B+Tree pages are loaded.
+/// Index metadata is read from <see cref="TableSchema.Indexes"/> (the B1 replicated source of
+/// truth), falling back to <see cref="SystemSchema"/> for tables not yet migrated.
+/// No B+Tree pages are loaded.
 /// </summary>
 internal sealed class TableOpener
 {
@@ -61,16 +64,35 @@ internal sealed class TableOpener
             store
         );
 
-        foreach (DatabaseIndexObject index in GetSystemObjectIndexes(database, tableSchema.Id ?? ""))
+        // B1: prefer TableSchema.Indexes (replicated source of truth), fall back to the
+        // legacy SystemSchema path for tables not yet migrated. LoadMetaAsync populates
+        // TableSchema.Indexes in-memory via MigrateIndexesFromSystemSchema, so the
+        // SystemSchema fallback is only reached for code paths that open a table descriptor
+        // before LoadMetaAsync has run (e.g. unit tests that bypass LoadMetaAsync).
+        IReadOnlyList<TableIndexSchema> indexSource =
+            tableSchema.Indexes is { Count: > 0 }
+                ? tableSchema.Indexes
+                : GetSystemObjectIndexes(database, tableSchema.Id ?? "").Select(
+                    ix => new TableIndexSchema(ix.Id, ix.Name, ix.ColumnIds, ix.Type, ix.State, ix.StartOffset)
+                ).ToList();
+
+        foreach (TableIndexSchema entry in indexSource)
         {
-            switch (index.Type)
+            string[] columnNames = entry.ColumnIds is not null
+                ? MapColumnsIdsToNames(tableSchema.Columns, entry.ColumnIds)
+                : (entry.Columns ?? []);
+
+            switch (entry.Type)
             {
                 case IndexType.Unique:
                 case IndexType.Multi:
-                    tableDescriptor.Indexes.Add(
-                        index.Name,
-                        new(index.Name, MapColumnsIdsToNames(tableSchema.Columns, index.ColumnIds), index.Type, index.State)
-                    );
+                    // In-memory projection: carries resolved column names, State, and Type.
+                    // Id, ColumnIds, and StartOffset are intentionally absent here — DDL and
+                    // backfill read those from table.Schema.Indexes (or SystemSchema fallback),
+                    // not from this descriptor. Any future query-time code that needs an index
+                    // Id must read table.Schema.Indexes, not TableDescriptor.Indexes.
+                    tableDescriptor.Indexes[entry.Name] =
+                        new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State);
                     break;
 
                 default:

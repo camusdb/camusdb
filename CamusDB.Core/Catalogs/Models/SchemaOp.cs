@@ -28,12 +28,18 @@ public enum SchemaOp
     DropColumn = 3,
 
     /// <summary>
-    /// Reserved for replicated index creation. Index DDL currently flows through
-    /// <c>SystemSchema</c> rather than this log — see architecture doc §7.3 / §8.
+    /// Add or rebuild an index (payload: <c>SchemaIndexPayload</c>). The proposer runs the
+    /// full backfill locally first (shared KV means the index data is immediately visible to
+    /// all nodes), then replicates the completed <c>TableIndexSchema</c> so every node
+    /// updates its in-memory <c>TableSchema.Indexes</c> and evicts its cached
+    /// <c>TableDescriptor</c>. Does not bump <c>TableSchema.Version</c>.
     /// </summary>
     AddIndex = 4,
 
-    /// <summary>Reserved for replicated index removal (see <see cref="AddIndex"/>).</summary>
+    /// <summary>
+    /// Remove an index (payload: <c>SchemaIndexPayload</c>). Idempotent on apply.
+    /// Does not bump <c>TableSchema.Version</c>.
+    /// </summary>
     DropIndex = 5,
 
     /// <summary>

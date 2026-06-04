@@ -259,10 +259,18 @@ public sealed class CommandExecutor : IAsyncDisposable
             AlterIndexOperation.AddPrimaryKey;
         bool indexExistedBefore = table.Indexes.ContainsKey(ticket.IndexName);
 
+        bool compensateOnAbort = addIndexOperation && !indexExistedBefore;
+
+        if (!database.OwnsKahuna)
+            return await ExecuteClusteredIndexDdlAsync(
+                database, table, ticket, compensateOnAbort,
+                tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx)
+            ).ConfigureAwait(false);
+
         return await ExecuteDdlInTransaction(
             database,
             tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx),
-            onAbort: addIndexOperation && !indexExistedBefore
+            onAbort: compensateOnAbort
                 ? () => CompensateAbortedAddIndexAsync(database, table, ticket.IndexName)
                 : null
         ).ConfigureAwait(false);
@@ -275,20 +283,70 @@ public sealed class CommandExecutor : IAsyncDisposable
         await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            List<string> indexIdsToRemove = [];
-
-            foreach (KeyValuePair<string, DatabaseIndexObject> index in database.SystemSchema.Indexes)
-            {
-                if (index.Value.TableId == table.Id && index.Value.Name == indexName)
-                    indexIdsToRemove.Add(index.Key);
-            }
-
-            foreach (string indexId in indexIdsToRemove)
-                database.SystemSchema.Indexes.Remove(indexId);
+            table.Schema.Indexes?.RemoveAll(ix => ix.Name == indexName);
         }
         finally
         {
             database.SystemSchemaSemaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// Two-phase execution for cluster index DDL. Phase 1 commits the backfill data
+    /// (tx1) so the index KV entries are visible before Phase 2 replicates the schema
+    /// delta. Both phases run under <c>SchemaDdlSemaphore</c> so <c>SchemaVersion</c>
+    /// stays stable across the pair. Must only be called when <c>!database.OwnsKahuna</c>.
+    /// </summary>
+    private async Task<bool> ExecuteClusteredIndexDdlAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        AlterIndexTicket ticket,
+        bool compensateOnAbort,
+        Func<KvTransaction, Task<bool>> localWork
+    )
+    {
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            // Phase 1: run local DDL (including backfill) and commit so the index KV
+            // entries are durable and visible before the schema delta is published.
+            KvTransaction tx1 = await database.Transactions.BeginAsync().ConfigureAwait(false);
+            bool result;
+            try
+            {
+                result = await localWork(tx1).ConfigureAwait(false);
+                await database.Transactions.CommitAsync(tx1).ConfigureAwait(false);
+            }
+            catch
+            {
+                await database.Transactions.RollbackIfNotCompletedAsync(tx1).ConfigureAwait(false);
+                if (compensateOnAbort)
+                    await CompensateAbortedAddIndexAsync(database, table, ticket.IndexName).ConfigureAwait(false);
+                throw;
+            }
+
+            if (!result) return result;
+
+            // Phase 2: index data is committed — replicate the schema change so every
+            // node updates its TableSchema.Indexes and evicts its TableDescriptor cache.
+            // A fresh transaction supplies the HLC timestamp for the schema-log entry;
+            // no KV writes happen under it (ReplicateIndexChangeAsync creates its own
+            // internal checkpoint transaction via PersistSchemaCheckpointAsync).
+            KvTransaction tx2 = await database.Transactions.BeginAsync().ConfigureAwait(false);
+            try
+            {
+                await catalogs.ReplicateIndexChangeAsync(database, ticket, table, tx2).ConfigureAwait(false);
+            }
+            finally
+            {
+                await database.Transactions.RollbackIfNotCompletedAsync(tx2).ConfigureAwait(false);
+            }
+
+            return result;
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
         }
     }
 
@@ -447,14 +505,16 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private static bool ForwardedAlterIndexApplied(DatabaseDescriptor database, AlterIndexTicket ticket)
     {
-        bool existsInSystem = database.SystemSchema.Indexes.Values.Any(index =>
-            string.Equals(index.Name, ticket.IndexName, StringComparison.Ordinal)
-        );
+        // Check TableSchema.Indexes (the B1/B2 source of truth). Fall back to SystemSchema
+        // for nodes that haven't yet applied the B1 migration (legacy path).
+        bool existsInSchema = database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema) &&
+                              tableSchema.Indexes is not null &&
+                              tableSchema.Indexes.Any(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.Ordinal));
 
         return ticket.Operation switch
         {
-            AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey => existsInSystem,
-            AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey => !existsInSystem,
+            AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey => existsInSchema,
+            AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey => !existsInSchema,
             _ => false
         };
     }
@@ -527,6 +587,15 @@ public sealed class CommandExecutor : IAsyncDisposable
                         return new ExecuteDDLSQLResult(database, forwarded.Value);
 
                     TableDescriptor table = await tableOpener.Open(database, alterIndexTicket.TableName).ConfigureAwait(false);
+
+                    if (!database.OwnsKahuna)
+                    {
+                        bool ok = await ExecuteClusteredIndexDdlAsync(
+                            database, table, alterIndexTicket, compensateOnAbort: false,
+                            tx => tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx)
+                        ).ConfigureAwait(false);
+                        return new ExecuteDDLSQLResult(database, ok);
+                    }
 
                     return await ExecuteDdlInTransaction(database, async tx =>
                     {

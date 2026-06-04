@@ -125,6 +125,15 @@ public sealed class SchemaReplicator
     )
     {
         if (entry.Op == SchemaOp.DropTable && tableSchema?.Name is not null)
+        {
+            database.TableDescriptors.TryRemove(tableSchema.Name, out _);
+            return;
+        }
+
+        // For index changes the table stays alive but its cached descriptor no longer
+        // reflects the updated index list — evict it so the next open rebuilds from
+        // the updated table.Schema.Indexes.
+        if ((entry.Op == SchemaOp.AddIndex || entry.Op == SchemaOp.DropIndex) && tableSchema?.Name is not null)
             database.TableDescriptors.TryRemove(tableSchema.Name, out _);
     }
 
@@ -198,8 +207,17 @@ public sealed class SchemaReplicator
             SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.SetElementState => HasElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
+            SchemaOp.AddIndex => HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
+            SchemaOp.DropIndex => !HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
+    }
+
+    private static bool HasIndex(Schema schema, SchemaIndexPayload payload)
+    {
+        return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
+               table.Indexes is not null &&
+               table.Indexes.Any(ix => ix.Name == payload.IndexName);
     }
 
     private static bool HasColumn(Schema schema, SchemaAlterColumnPayload payload)
@@ -252,6 +270,8 @@ public sealed class SchemaReplicator
             Version = table.Version,
             Name = table.Name,
             Columns = table.Columns is null ? null : [.. table.Columns],
+            // TableIndexSchema is immutable so a shallow list copy is sufficient.
+            Indexes = table.Indexes is null ? null : [.. table.Indexes],
             SchemaHistory = table.SchemaHistory is null
                 ? null
                 : table.SchemaHistory.Select(CloneHistory).ToList(),

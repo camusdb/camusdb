@@ -549,6 +549,51 @@ public sealed class KvTableStore
         tx.TrackModified(kvKey, KeyValueDurability.Persistent);
     }
 
+    /// <summary>
+    /// Deletes every KV entry belonging to the named index. Used by DROP INDEX to reclaim
+    /// the <c>{tableId}:i:{indexName}/…</c> space. All deletes run under <paramref name="tx"/>
+    /// so they are atomic with the schema-removal that follows in the same transaction.
+    /// Returns the number of entries deleted.
+    /// </summary>
+    public async Task<int> DropIndexEntries(KvTransaction tx, string indexName, CancellationToken cancellationToken = default)
+    {
+        string bucketPrefix = BuildIndexBucketPrefix(indexName);
+        string keyPrefix    = bucketPrefix + "/";
+
+        // Collect all raw keys first; deleting during async iteration is unsafe.
+        List<string> keysToDelete = [];
+
+        await foreach ((string kvKey, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
+            tx.TransactionId,
+            bucketPrefix,
+            null, true,
+            null, true,
+            DefaultPageSize,
+            KeyValueDurability.Persistent,
+            cancellationToken).ConfigureAwait(false))
+        {
+            if (kvKey.StartsWith(keyPrefix, StringComparison.Ordinal))
+                keysToDelete.Add(kvKey);
+        }
+
+        foreach (string kvKey in keysToDelete)
+        {
+            await AcquireLock(tx, kvKey, cancellationToken).ConfigureAwait(false);
+
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
+                () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, kvKey, KeyValueDurability.Persistent, cancellationToken),
+                cancellationToken
+            ).ConfigureAwait(false);
+
+            if (type is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"DropIndexEntries failed for key {kvKey}: {type}");
+
+            tx.TrackModified(kvKey, KeyValueDurability.Persistent);
+        }
+
+        return keysToDelete.Count;
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
