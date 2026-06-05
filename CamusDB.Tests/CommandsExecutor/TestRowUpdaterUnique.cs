@@ -118,7 +118,7 @@ public sealed class TestRowUpdaterUnique : SharedNodeBaseTest
 
         // Updating multiple rows to the same value violates the unique index on 'name'.
         CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Update(ticket));
-        Assert.AreEqual("Duplicate entry for key 'name_idx'", exception!.Message);
+        Assert.AreEqual("Duplicate entry for key 'robots.name_idx'", exception!.Message);
 
         await database.Transactions.RollbackIfNotCompletedAsync(txnState);
 

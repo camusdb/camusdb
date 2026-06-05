@@ -822,4 +822,94 @@ public sealed class TestInProcessSchemaCluster
         StringAssert.Contains("degraded", ddlEx!.Message.ToLowerInvariant(),
             "Exception message must mention 'degraded'");
     }
+
+    // DS11.5b — F1a persist-exhaustion on the A2 resume path:
+    //   When a new leader's ResumeJobsAsync (triggered by RegisterSchemaLeaderCallback)
+    //   exhausts persist retries, the same F1a policy must apply: the resuming node is
+    //   marked SchemaSubsystemDegraded and steps down so a healthy peer can take over.
+    //   This exercises SchemaReplicator.Register's leader-callback finally block, which
+    //   is a separate fire path from ExecuteDdlInTransaction (tested in DS11.5a).
+    [Test]
+    public async Task ResumeJobsPersistExhaustionMarksResumingNodeDegradedAndStepsDown()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.SchemaAckLiveNodeLease = TimeSpan.FromSeconds(5);
+
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        InProcessSchemaCluster.Node nodeA = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // Create a table so the coordinator job's target table exists on all nodes.
+        await nodeA.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "resume_test_tbl",
+            columns: [new ColumnInfo("id", ColumnType.Id)],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        ));
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        // Plant a coordinator job in KV (replicated to all nodes). The job targets adding
+        // a column; the first resume step will call ReplicateAddColumnInStateAsync which
+        // invokes PersistSchemaCheckpointWithRetryAsync — where the fault fires.
+        PersistedCoordinatorJob fakeJob = new()
+        {
+            TableName = "resume_test_tbl",
+            ElementName = "new_col",
+            TargetState = SchemaElementState.Public,
+            ElementKind = SchemaElementKind.Column,
+            ColumnType = ColumnType.String,
+            ColumnNotNull = false,
+            Attempts = 0
+        };
+        await nodeA.Executor.Catalogs.PersistCoordinatorJobAsync(nodeA.Database!, fakeJob);
+
+        // Pick a non-leader node to become the new leader; inject a fault on it
+        // before the election so its ResumeJobsAsync call exhausts persist retries.
+        InProcessSchemaCluster.Node nodeB = cluster.Nodes.First(n => n.Index != nodeA.Index);
+        nodeB.Executor.Catalogs.TestPersistCheckpointException = new IOException("F1a A2 resume fault");
+
+        // Transfer leadership to node B. TransferSchemaLeadershipAsync returns as soon as
+        // node B wins the election — the leader callback (ResumeJobsAsync) runs async in
+        // the background and drives the job until the persist fault exhausts.
+        await cluster.TransferSchemaLeadershipAsync(db, nodeB, timeout: TimeSpan.FromSeconds(15));
+
+        // Clear fault before polling so unrelated paths aren't affected during teardown.
+        nodeB.Executor.Catalogs.TestPersistCheckpointException = null;
+
+        // Poll for node B to be marked degraded (the callback runs after the election win,
+        // which may complete slightly after TransferSchemaLeadershipAsync returns).
+        DateTime degradedDeadline = DateTime.UtcNow.AddSeconds(15);
+        while (DateTime.UtcNow < degradedDeadline)
+        {
+            if (nodeB.Database!.SchemaSubsystemDegraded)
+                break;
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+
+        Assert.IsTrue(nodeB.Database!.SchemaSubsystemDegraded,
+            "Resuming node must be marked degraded after persist exhaustion during ResumeJobsAsync");
+
+        // Node B must have stepped down — the SchemaReplicator finally fires
+        // FireDeferredSchemaStepDownAsync after ResumeJobsAsync returns.
+        DateTime stepDownDeadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < stepDownDeadline)
+        {
+            if (!await nodeB.Kahuna.AmISchemaLeaderAsync(db, CancellationToken.None).ConfigureAwait(false))
+                break;
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+
+        Assert.IsFalse(
+            await nodeB.Kahuna.AmISchemaLeaderAsync(db, CancellationToken.None).ConfigureAwait(false),
+            "Degraded resuming node must have stepped down schema-partition leadership");
+    }
 }

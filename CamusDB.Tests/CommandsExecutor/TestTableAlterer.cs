@@ -792,7 +792,7 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
         );
 
         CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () => await executor.AlterIndex(alterIndexTicket));
-        Assert.True(exception!.Message.StartsWith("Duplicate entry for key 'name_idx'"));
+        Assert.True(exception!.Message.StartsWith("Duplicate entry for key 'robots.name_idx'"));
 
         TableDescriptor table = await executor.OpenTable(new OpenTableTicket(dbname, "robots"));
         Assert.False(table.Indexes.ContainsKey("name_idx"));

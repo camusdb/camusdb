@@ -55,7 +55,7 @@ internal sealed class TableOpener
 
     private Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
     {
-        KvTableStore store = new(database.Kahuna.Kahuna, tableSchema.Id!);
+        KvTableStore store = new(database.Kahuna.Kahuna, tableSchema.Id!, tableSchema.Name ?? "");
 
         TableDescriptor tableDescriptor = new(
             tableSchema.Id ?? "",

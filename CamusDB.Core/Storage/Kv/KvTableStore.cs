@@ -47,6 +47,7 @@ public sealed class KvTableStore
 {
     private readonly IKahuna kahuna;
     private readonly string tableId;
+    private readonly string tableName;
 
     private readonly string rowBucketPrefix;       // "{tableId}:r"  — bucket prefix for LocateAndScanRange
     private readonly string rowKeyPrefix;          // "{tableId}:r/" — prepended to rowIdHex
@@ -59,13 +60,14 @@ public sealed class KvTableStore
     // Exponential back-off: 1 ms, 2 ms, 4 ms, … capped at MaxRetryDelayMs.
     private static int RetryDelayMs(int attempt) => Math.Min(1 << attempt, MaxRetryDelayMs);
 
-    public KvTableStore(IKahuna kahuna, string tableId)
+    public KvTableStore(IKahuna kahuna, string tableId, string tableName = "")
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         ArgumentException.ThrowIfNullOrEmpty(tableId);
 
         this.kahuna = kahuna;
         this.tableId = tableId;
+        this.tableName = tableName;
         rowBucketPrefix = $"{tableId}:r";
         rowKeyPrefix    = $"{tableId}:r/";
     }
@@ -351,12 +353,12 @@ public sealed class KvTableStore
                 ).ConfigureAwait(false);
                 string existingRowId = existing?.Value is not null ? Encoding.UTF8.GetString(existing.Value) : "";
                 if (existingRowId != rowId.ToString())
-                    throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{indexId}'");
+                    throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(indexId)}'");
                 // else: same rowId — idempotent re-write on resume, continue
             }
             else
             {
-                throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{indexId}'");
+                throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(indexId)}'");
             }
         }
 
@@ -429,7 +431,7 @@ public sealed class KvTableStore
                     : BuildNonUniqueIndexKey(ix.IndexId, ix.Key, row.RowId);
 
                 if (ix.Unique && !seenUnique.Add(kvKey))
-                    throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{ix.IndexId}'");
+                    throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(ix.IndexId)}'");
 
                 AddWrite(kvKey, Encoding.UTF8.GetBytes(row.RowId.ToString()), ix.Unique);
             }
@@ -526,7 +528,7 @@ public sealed class KvTableStore
 
                     case KeyValueResponseType.NotSet:
                         if (uniqueByKey.TryGetValue(key, out bool unique) && unique)
-                            throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{key}'");
+                            throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{IndexNameFromKvKey(key)}'");
                         break; // non-unique NotSet mirrors the per-row path and is acceptable
 
                     case KeyValueResponseType.MustRetry:
@@ -867,4 +869,21 @@ public sealed class KvTableStore
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildNonUniqueIndexKey(string indexId, CompositeColumnValue key, ObjectIdValue rowId)
         => $"{tableId}:i:{indexId}/{KeyEncoder.Encode(key)}{rowId}";
+
+    // Formats a human-readable "table.index" key name for duplicate-key errors.
+    private string DuplicateKeyLabel(string indexId)
+        => string.IsNullOrEmpty(tableName) ? indexId : $"{tableName}.{indexId}";
+
+    // Extracts the index name from a full KV key ("{tableId}:i:{indexId}/{...}").
+    // Falls back to the raw key on unexpected formats.
+    private string IndexNameFromKvKey(string kvKey)
+    {
+        string prefix = $"{tableId}:i:";
+        if (!kvKey.StartsWith(prefix, StringComparison.Ordinal))
+            return kvKey;
+        string tail = kvKey[prefix.Length..];
+        int slash = tail.IndexOf('/');
+        string indexId = slash >= 0 ? tail[..slash] : tail;
+        return DuplicateKeyLabel(indexId);
+    }
 }
