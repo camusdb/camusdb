@@ -133,6 +133,22 @@ See [docs/distributed-schema-architecture.md](docs/distributed-schema-architectu
 - .NET 9 (SDK 9.0.100)
 - Docker (optional, for cluster setup)
 
+## Testing
+
+The test suite is split into two assemblies:
+
+- **`CamusDB.Tests`** — the fast unit/integration suite (run on every change):
+  ```sh
+  dotnet test CamusDB.Tests/CamusDB.Tests.csproj
+  ```
+- **`CamusDB.Cluster.Tests`** — the heavy in-process multi-node cluster suite (real Raft via
+  Kahuna/Kommander). It is isolated in its own assembly so its accumulated in-process load
+  (dozens of sequential clusters) stays out of the fast suite, where it caused load-induced
+  bring-up flakiness. Run it separately / periodically:
+  ```sh
+  dotnet test CamusDB.Cluster.Tests/CamusDB.Cluster.Tests.csproj
+  ```
+
 ## License
 
 This project is licensed under the [MIT license](LICENSE.txt).

@@ -4,6 +4,8 @@ CamusDB.Core/bin
 CamusDb.Core/obj
 CamusDB.Tests/bin
 CamusDb.Tests/obj
+CamusDB.Cluster.Tests/bin
+CamusDb.Cluster.Tests/obj
 CamusDb.Tests/TestResults
 CamusDB.Generators/bin
 CamusDB.Generators/obj

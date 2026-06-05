@@ -32,65 +32,10 @@ namespace CamusDB.Tests.Catalogs;
 /// </summary>
 [TestFixture]
 [NonParallelizable]
-public sealed class TestSchemaChangeCoordinator
+public sealed class TestSchemaChangeCoordinatorCluster
 {
-    // ── Path computation (unit tests, no cluster needed) ─────────────────────
-
-    [Test]
-    public void ComputePath_AbsentToPublic_ReturnsFullAddSequence()
-    {
-        SchemaElementState[] path = SchemaChangeCoordinator.ComputeTransitionPath(
-            SchemaElementState.Absent, SchemaElementState.Public);
-
-        Assert.AreEqual(3, path.Length);
-        Assert.AreEqual(SchemaElementState.DeleteOnly, path[0]);
-        Assert.AreEqual(SchemaElementState.WriteOnly, path[1]);
-        Assert.AreEqual(SchemaElementState.Public, path[2]);
-    }
-
-    [Test]
-    public void ComputePath_DeleteOnlyToPublic_SkipsAbsent()
-    {
-        SchemaElementState[] path = SchemaChangeCoordinator.ComputeTransitionPath(
-            SchemaElementState.DeleteOnly, SchemaElementState.Public);
-
-        Assert.AreEqual(2, path.Length);
-        Assert.AreEqual(SchemaElementState.WriteOnly, path[0]);
-        Assert.AreEqual(SchemaElementState.Public, path[1]);
-    }
-
-    [Test]
-    public void ComputePath_WriteOnlyToPublic_SingleStep()
-    {
-        SchemaElementState[] path = SchemaChangeCoordinator.ComputeTransitionPath(
-            SchemaElementState.WriteOnly, SchemaElementState.Public);
-
-        Assert.AreEqual(1, path.Length);
-        Assert.AreEqual(SchemaElementState.Public, path[0]);
-    }
-
-    [Test]
-    public void ComputePath_PublicToAbsent_ReturnsFullDropSequence()
-    {
-        SchemaElementState[] path = SchemaChangeCoordinator.ComputeTransitionPath(
-            SchemaElementState.Public, SchemaElementState.Absent);
-
-        Assert.AreEqual(3, path.Length);
-        Assert.AreEqual(SchemaElementState.WriteOnly, path[0]);
-        Assert.AreEqual(SchemaElementState.DeleteOnly, path[1]);
-        Assert.AreEqual(SchemaElementState.Absent, path[2]);
-    }
-
-    [Test]
-    public void ComputePath_SameState_ReturnsEmpty()
-    {
-        SchemaElementState[] path = SchemaChangeCoordinator.ComputeTransitionPath(
-            SchemaElementState.Public, SchemaElementState.Public);
-
-        Assert.AreEqual(0, path.Length);
-    }
-
-    // ── Cluster tests ─────────────────────────────────────────────────────────
+    // Pure path-computation unit tests (no cluster) live in CamusDB.Tests
+    // (TestSchemaChangeCoordinatorPath) so they stay in the fast suite.
 
     private static async Task<(InProcessSchemaCluster cluster, string db)> SetUpClusterAndTableAsync()
     {

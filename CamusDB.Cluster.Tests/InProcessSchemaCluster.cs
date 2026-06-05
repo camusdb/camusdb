@@ -220,6 +220,21 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         int partitionId = Nodes[0].Kahuna.SchemaLogPartition(databaseName);
         await Nodes[0].Kahuna.Raft.WaitForLeader(partitionId, CancellationToken.None).ConfigureAwait(false);
 
+        // Best-effort settle: let the schema-partition leader hold continuously before we resolve
+        // it, so the caller does not race a still-churning election (the common cluster-load flake).
+        // If it can't stabilise quickly, fall through to the polling loop rather than failing here.
+        try
+        {
+            await Nodes[0].Kahuna.Raft.WaitForLeaderStableAsync(partitionId, TimeSpan.FromMilliseconds(300), CancellationToken.None)
+                .AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(5))
+                .ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            // Could not confirm stability in time; the polling loop below still resolves a leader.
+        }
+
         DateTime deadline = DateTime.UtcNow.Add(timeout ?? TimeSpan.FromSeconds(15));
 
         while (DateTime.UtcNow < deadline)
@@ -541,6 +556,15 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
     private static async Task WaitForAllPartitionLeadersAsync(EmbeddedKahuna node, int partitions)
     {
+        // Stable-leader settle window. WaitForLeaderAsync returns as soon as *an* election
+        // produces a leader, but under accumulated in-process load that leader can immediately
+        // re-elect — so a test that proceeds right away can race a still-churning partition and
+        // time out later in WaitForSchemaLeaderNodeAsync. Gating bring-up on a continuously-stable
+        // leader (Kommander WaitForLeaderStableAsync) lets the cluster actually settle first. A
+        // partition that cannot stabilise inside the timeout throws, which the bring-up loop
+        // retries on fresh ports (maxStartAttempts).
+        TimeSpan minStableFor = TimeSpan.FromMilliseconds(500);
+
         HashSet<int> seenPartitions = [];
 
         for (int i = 0; seenPartitions.Count < partitions && i < 200; i++)
@@ -551,6 +575,11 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 continue;
 
             await node.WaitForLeaderAsync(key, CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(15))
+                .ConfigureAwait(false);
+
+            await node.Raft.WaitForLeaderStableAsync(partition, minStableFor, CancellationToken.None)
+                .AsTask()
                 .WaitAsync(TimeSpan.FromSeconds(15))
                 .ConfigureAwait(false);
         }
