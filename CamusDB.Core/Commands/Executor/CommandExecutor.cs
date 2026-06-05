@@ -205,6 +205,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             if (!database.OwnsKahuna)
                 database.SchemaDdlSemaphore.Release();
+            // F1a: fire after CommitAsync (or RollbackIfNotCompletedAsync on error) so the
+            // KV transaction is settled before schema-partition leadership changes.
+            await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
         }
     }
 
@@ -284,6 +287,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         finally
         {
             database.SchemaDdlSemaphore.Release();
+            await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
         }
     }
 
@@ -317,18 +321,37 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
     }
 
+    // Number of rows indexed per Kahuna transaction during backfill.  Committing in bounded
+    // batches keeps transaction size manageable and allows a leader-change resume to skip
+    // already-indexed rows via the persisted StartOffset checkpoint.
+    private const int BackfillBatchSize = 500;
+
+    /// <summary>
+    /// Test-only hook: invoked after each intermediate batch checkpoint is persisted
+    /// (i.e., after batch N commits and before batch N+1 starts). Allows tests to inject
+    /// a pause or forced leader change between batches without relying on timing.
+    /// Set to null in production; cleared in test TearDown.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    internal Func<Task>? TestInterceptAfterBackfillCheckpoint;
+
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    internal CatalogsManager Catalogs => catalogs;
+
     /// <summary>
     /// Scans every existing row in <paramref name="tableName"/> and writes an index entry
     /// for each, using backfill mode (idempotent — <c>Set</c> rather than <c>SetIfNotExists</c>
-    /// for unique indexes). Called by the <see cref="SchemaChangeCoordinator"/> just before the
-    /// index transitions from <c>WriteOnly</c> to <c>Public</c>, both on the initial run and
-    /// on any leader-change resume.
+    /// for unique indexes). Processes rows in <see cref="BackfillBatchSize"/>-row transactions;
+    /// after each committed batch invokes <paramref name="onCheckpoint"/> with the last rowId so
+    /// the coordinator can persist a resume offset. Called by <see cref="SchemaChangeCoordinator"/>
+    /// just before the index transitions from <c>WriteOnly</c> to <c>Public</c>.
     /// </summary>
     internal async Task BackfillIndexEntriesAsync(
         DatabaseDescriptor database,
         string tableName,
         IndexBuildInfo indexInfo,
-        string? startOffset
+        string? startOffset,
+        Func<string, Task>? onCheckpoint = null
     )
     {
         TableDescriptor table = await tableOpener.Open(database, tableName).ConfigureAwait(false);
@@ -338,50 +361,75 @@ public sealed class CommandExecutor : IAsyncDisposable
             ? null
             : ObjectId.ToValue(startOffset!);
 
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
-        int rows = 0;
-        try
+        int totalRows = 0;
+
+        while (true)
         {
-            await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(
-                tx.TransactionId, afterRowId: afterRowId).ConfigureAwait(false))
+            KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+            int batchRows = 0;
+            ObjectIdValue lastRowId = default;
+
+            try
             {
-                Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
-                    table.Schema, tx.TransactionId, rowId, data,
-                    visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
-
-                int i = 0;
-                ColumnValue[] columnValues = unique
-                    ? new ColumnValue[indexInfo.ColumnNames.Length]
-                    : new ColumnValue[indexInfo.ColumnNames.Length + 1];
-
-                foreach (string columnName in indexInfo.ColumnNames)
+                await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(
+                    tx.TransactionId, afterRowId: afterRowId).ConfigureAwait(false))
                 {
-                    ColumnValue? keyValue = row.GetValueOrDefault(columnName);
-                    if (keyValue is null)
-                        throw new CamusDBException(
-                            CamusDBErrorCodes.InvalidInternalOperation,
-                            $"A null value was found for index key field '{columnName}'"
-                        );
-                    columnValues[i++] = keyValue;
+                    Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
+                        table.Schema, tx.TransactionId, rowId, data,
+                        visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
+
+                    int i = 0;
+                    ColumnValue[] columnValues = unique
+                        ? new ColumnValue[indexInfo.ColumnNames.Length]
+                        : new ColumnValue[indexInfo.ColumnNames.Length + 1];
+
+                    foreach (string columnName in indexInfo.ColumnNames)
+                    {
+                        ColumnValue? keyValue = row.GetValueOrDefault(columnName);
+                        if (keyValue is null)
+                            throw new CamusDBException(
+                                CamusDBErrorCodes.InvalidInternalOperation,
+                                $"A null value was found for index key field '{columnName}'"
+                            );
+                        columnValues[i++] = keyValue;
+                    }
+
+                    if (!unique)
+                        columnValues[i] = new(ColumnType.Id, rowId.ToString());
+
+                    CompositeColumnValue compositeKey = new(columnValues);
+                    await table.Store.PutIndexEntry(tx, indexInfo.IndexName, compositeKey, rowId, unique, backfillMode: true).ConfigureAwait(false);
+
+                    lastRowId = rowId;
+                    batchRows++;
+
+                    if (batchRows >= BackfillBatchSize)
+                        break;
                 }
 
-                if (!unique)
-                    columnValues[i] = new(ColumnType.Id, rowId.ToString());
-
-                CompositeColumnValue compositeKey = new(columnValues);
-                await table.Store.PutIndexEntry(tx, indexInfo.IndexName, compositeKey, rowId, unique, backfillMode: true).ConfigureAwait(false);
-                rows++;
+                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            }
+            catch
+            {
+                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                throw;
             }
 
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-        }
-        catch
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-            throw;
+            totalRows += batchRows;
+
+            if (batchRows < BackfillBatchSize)
+                break;
+
+            // More rows may remain — checkpoint and advance the cursor.
+            afterRowId = lastRowId;
+            if (onCheckpoint is not null)
+                await onCheckpoint(lastRowId.ToString()).ConfigureAwait(false);
+
+            if (TestInterceptAfterBackfillCheckpoint is not null)
+                await TestInterceptAfterBackfillCheckpoint().ConfigureAwait(false);
         }
 
-        logger.LogInformation("Backfilled {Rows} rows into index {IndexName}", rows, indexInfo.IndexName);
+        logger.LogInformation("Backfilled {Rows} rows into index {IndexName}", totalRows, indexInfo.IndexName);
     }
 
     /// <summary>
@@ -396,7 +444,11 @@ public sealed class CommandExecutor : IAsyncDisposable
     )
     {
         if (table.Indexes.ContainsKey(ticket.IndexName))
+        {
+            if (ticket.IfNotExists)
+                return false;
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{ticket.IndexName}' already exists on table '{table.Name}'");
+        }
 
         IndexType indexType = ticket.Operation is AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey
             ? IndexType.Unique
@@ -412,7 +464,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         try
         {
             SchemaChangeCoordinator coordinator = new(catalogs, logger);
-            coordinator.IndexBackfillAsync = (db, tbl, info, start) => BackfillIndexEntriesAsync(db, tbl, info, start);
+            coordinator.IndexBackfillAsync = (db, tbl, info, start, checkpoint) => BackfillIndexEntriesAsync(db, tbl, info, start, checkpoint);
 
             try
             {
@@ -429,6 +481,9 @@ public sealed class CommandExecutor : IAsyncDisposable
                 // Compensate: if the index was partially committed to the schema (in DeleteOnly
                 // or WriteOnly state) but did not reach Public, emit DropIndex on all nodes and
                 // delete the persisted coordinator job, leaving the cluster in a clean state.
+                // Note: if this node is now degraded (F1a), compensation may be skipped by the
+                // degraded gate in ReplicateDropIndexAsync; a healthy peer's ResumeJobsAsync
+                // will reconcile the state after the step-down below.
                 await CompensateClusterAddIndexAsync(database, ticket.TableName, ticket.IndexName).ConfigureAwait(false);
                 throw;
             }
@@ -436,6 +491,31 @@ public sealed class CommandExecutor : IAsyncDisposable
         finally
         {
             database.SchemaDdlSemaphore.Release();
+            await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
+        }
+    }
+
+    // F1a: shared helper — fires the deferred schema-partition step-down if it was requested by
+    // PersistSchemaCheckpointWithRetryAsync on persist exhaustion. Called from the finally blocks
+    // of ExecuteDdlInTransaction, ExecuteClusterAddColumnAsync, ExecuteClusterAddIndexAsync, and
+    // ExecuteClusteredIndexDdlAsync so all DDL paths release leadership on degradation.
+    private async Task FireDeferredStepDownIfRequestedAsync(DatabaseDescriptor database)
+    {
+        if (!database.DeferredSchemaStepDown)
+            return;
+
+        database.ClearDeferredSchemaStepDown();
+        try
+        {
+            await database.Kahuna.StepDownSchemaPartitionAsync(database.Name, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex,
+                "Schema partition step-down after persist exhaustion failed for database {DatabaseName}",
+                database.Name
+            );
         }
     }
 
@@ -474,12 +554,18 @@ public sealed class CommandExecutor : IAsyncDisposable
             bool found = false;
             foreach (TableColumnSchema column in table.Schema.Columns!)
             {
-                if (column.Name == columnIndex.Name)
-                {
-                    columnIds[i++] = column.Id;
-                    found = true;
-                    break;
-                }
+                if (column.Name != columnIndex.Name)
+                    continue;
+
+                if (!SchemaElementStateRules.IsReadable(column) || !SchemaElementStateRules.IsWritable(column))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        $"Column '{columnIndex.Name}' is not public on table '{table.Name}'"
+                    );
+
+                columnIds[i++] = column.Id;
+                found = true;
+                break;
             }
 
             if (!found)
@@ -601,6 +687,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         finally
         {
             database.SchemaDdlSemaphore.Release();
+            await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
         }
     }
 
@@ -680,6 +767,14 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         if (database.OwnsKahuna)
             return null;
+
+        // F1a: degraded nodes must not propose or forward DDL — reject immediately so the
+        // caller gets a typed "degraded" error rather than a generic "not leader" error.
+        if (database.SchemaSubsystemDegraded)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Schema subsystem for database '{database.Name}' is degraded; DDL proposals are rejected until the node recovers"
+            );
 
         if (await database.Kahuna.AmISchemaLeaderAsync(database.Name, CancellationToken.None).ConfigureAwait(false))
             return null;

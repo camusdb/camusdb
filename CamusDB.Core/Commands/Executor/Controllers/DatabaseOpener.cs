@@ -64,8 +64,8 @@ internal sealed class DatabaseOpener
 
             // Wire index backfill: same guarantee for the index add sequence — backfill
             // existing rows with the index entries before the index is published.
-            IndexBackfillAsync = (db, tableName, indexInfo, startOffset) =>
-                commandExecutor.BackfillIndexEntriesAsync(db, tableName, indexInfo, startOffset),
+            IndexBackfillAsync = (db, tableName, indexInfo, startOffset, onCheckpoint) =>
+                commandExecutor.BackfillIndexEntriesAsync(db, tableName, indexInfo, startOffset, onCheckpoint),
         };
         this.logger = logger;
         this.clusterNode = clusterNode;

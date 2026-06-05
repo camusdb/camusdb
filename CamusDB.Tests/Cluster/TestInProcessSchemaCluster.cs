@@ -6,12 +6,15 @@
  */
 
 using System;
+using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
@@ -548,5 +551,275 @@ public sealed class TestInProcessSchemaCluster
         await leaderNode.Database.Transactions.CommitAsync(scanTx);
 
         Assert.AreEqual(5, physicallyBackfilled, "all 5 pre-existing rows must be physically backfilled");
+    }
+
+    // B3 resume: a unique index add with 600 rows (2 batches: 500 + 100) is interrupted
+    // between the two batches by a forced leader change. The new leader must:
+    //   (a) resume from the persisted StartOffset (not from row 0), evidenced by the
+    //       intermediate-checkpoint hook firing exactly once across the whole run — if
+    //       the resume re-ran from row 0 it would fire a second time;
+    //   (b) produce a complete index (FORCE_INDEX returns all 600 rows);
+    //   (c) not throw a DuplicateUniqueKeyValue exception, proving backfill-mode idempotency
+    //       for the rows that were already indexed before the crash.
+    [Test]
+    public async Task UniqueIndexBackfillResumesFromCheckpointAfterLeaderChange()
+    {
+        const int RowCount = 600;
+
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        // Short ack lease so a blocked node is quickly considered expired, letting the
+        // remaining two nodes form quorum for both DDL and the ack gate.
+        TimeSpan lease = TimeSpan.FromMilliseconds(1000);
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.SchemaAckLiveNodeLease = lease;
+
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        // Step 1: create table + insert 600 rows with unique names (schema version → 1).
+        long version = 0;
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns:
+                [
+                    new ColumnInfo("id", ColumnType.Id),
+                    new ColumnInfo("name", ColumnType.String, notNull: true)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+
+            for (int i = 0; i < RowCount; i++)
+            {
+                KvTransaction tx = await leader.Database!.Transactions.BeginAsync();
+                await leader.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                    txnState: tx,
+                    database: db,
+                    sql: $"INSERT INTO robots (id, name) VALUES (gen_id(), 'robot_{i:D5}')",
+                    parameters: null
+                ));
+                await leader.Database.Transactions.CommitAsync(tx);
+            }
+
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        // Step 2: set up a pause-between-batches hook on ALL node executors.
+        // The hook fires after each intermediate checkpoint (i.e., after batch 1 of 500 rows
+        // commits and before batch 2 of 100 rows starts). We count total fires: if the resume
+        // starts from the checkpoint (only 100 rows remaining), no further intermediate
+        // checkpoint fires. If the resume restarted from row 0, it would fire again.
+        int checkpointFires = 0;
+        TaskCompletionSource<bool> firstBatchDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        SemaphoreSlim proceedGate = new(0, 1); // released once leader change is arranged
+
+        Func<Task> hook = async () =>
+        {
+            int count = Interlocked.Increment(ref checkpointFires);
+            if (count == 1)
+            {
+                // First fire: batch 1 of original leader finished. Signal the test and block
+                // until the leader change is in place, then let the original leader fail naturally.
+                firstBatchDone.TrySetResult(true);
+                await proceedGate.WaitAsync().ConfigureAwait(false);
+            }
+            // Subsequent fires would indicate resume started from row 0 — tracked via checkpointFires.
+        };
+
+        // Install the hook on ALL node executors before identifying the leader so we don't
+        // miss the hook if leadership is resolved just before we install on the leader.
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Executor.TestInterceptAfterBackfillCheckpoint = hook;
+
+        InProcessSchemaCluster.Node leaderBeforeChange = await cluster.WaitForSchemaLeaderNodeAsync(db);
+        int blockedNodeIndex = leaderBeforeChange.Index;
+
+        // Step 3: start AddUniqueIndex DIRECTLY on the identified leader (not via the
+        // retry wrapper) so that when the leader is blocked mid-backfill the task fails
+        // rather than being retried on the new leader — which would complete without
+        // exercising the ResumeJobsAsync path.
+        Task addIndexTask = leaderBeforeChange.Executor.AlterIndex(new AlterIndexTicket(
+            databaseName: db,
+            tableName: "robots",
+            indexName: "name_unique",
+            columns: [new ColumnIndexInfo("name", OrderType.Ascending)],
+            operation: AlterIndexOperation.AddUniqueIndex
+        ));
+
+        try
+        {
+            // Step 4: wait for the first batch (500 rows) to commit and checkpoint.
+            await firstBatchDone.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+            // Step 5: block the current leader so its second-batch Kahuna writes fail.
+            // ForceLeaderChangeAsync blocks both inbound and outbound for the old leader.
+            await cluster.ForceLeaderChangeAsync(db, timeout: TimeSpan.FromSeconds(20));
+
+            // Wait for the old leader's ack-lease to expire so the new leader's quorum is clean.
+            await Task.Delay(lease + TimeSpan.FromMilliseconds(300));
+
+            // Release the hook — the original leader's second batch now continues but Kahuna is
+            // blocked, so the transaction will fail and the compensation path will also fail
+            // (Kahuna blocked), leaving the persisted coordinator job with StartOffset intact.
+            proceedGate.Release();
+
+            // The original leader's addIndexTask is expected to fail now (Kahuna blocked).
+            // Observe the exception so it isn't an unobserved task fault, but don't rethrow.
+            try
+            {
+                await addIndexTask.WaitAsync(TimeSpan.FromSeconds(20));
+            }
+            catch (Exception)
+            {
+                // Expected: original leader's backfill fails when its Kahuna transport is blocked.
+            }
+
+            // Step 6: the new leader's RegisterSchemaLeaderCallback fires ResumeJobsAsync which
+            // picks up the persisted job with StartOffset set and drives the index to Public.
+            // The blocked original leader can't receive schema version (version+3) since its
+            // transport is blocked. Poll only the two live (non-blocked) nodes.
+            long targetVersion = version + 3;
+            InProcessSchemaCluster.Node[] liveNodes = cluster.Nodes
+                .Where(n => n.Index != blockedNodeIndex)
+                .ToArray();
+
+            DateTime resumeDeadline = DateTime.UtcNow.AddSeconds(40);
+            while (DateTime.UtcNow < resumeDeadline)
+            {
+                if (liveNodes.All(n => n.Database?.Schema.SchemaVersion >= targetVersion))
+                    break;
+                await Task.Delay(200).ConfigureAwait(false);
+            }
+
+            Assert.True(liveNodes.All(n => n.Database?.Schema.SchemaVersion >= targetVersion),
+                $"Live nodes must reach schema version {targetVersion} after leader-change resume. " +
+                $"Versions: {string.Join(", ", liveNodes.Select(n => $"node{n.Index}={n.Database?.Schema.SchemaVersion}"))}");
+
+        }
+        finally
+        {
+            foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+                n.Executor.TestInterceptAfterBackfillCheckpoint = null;
+
+            // Make sure the gate is released so the original leader's goroutine can unblock
+            // even if an assertion above throws before we reach the Release call.
+            if (proceedGate.CurrentCount == 0)
+                proceedGate.Release();
+        }
+
+        // Assert (a): intermediate-checkpoint hook fired exactly once across the whole run.
+        // One fire = original leader's batch 1. No second fire = resume started from
+        // StartOffset (100 rows left < BackfillBatchSize, so no intermediate checkpoint fires).
+        Assert.AreEqual(1, checkpointFires,
+            "Hook must fire exactly once: batch 1 of the original leader. " +
+            "A second fire would mean the resume restarted from row 0 (re-batched 500 rows).");
+
+        // Assert (b): index is complete on a live (non-blocked) node.
+        InProcessSchemaCluster.Node queryNode = cluster.Nodes
+            .First(n => n.Index != blockedNodeIndex && n.Database?.Schema.SchemaVersion >= version + 3);
+        KvTransaction readTx = await queryNode.Database!.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await queryNode.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+            txnState: readTx,
+            database: db,
+            sql: "SELECT id FROM robots@{FORCE_INDEX=name_unique}",
+            parameters: null
+        ));
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        await queryNode.Database.Transactions.CommitAsync(readTx);
+
+        Assert.AreEqual(RowCount, rows.Count,
+            "FORCE_INDEX must return all rows after leader-change resume completes the index");
+    }
+
+    // DS11.5a — F1a persist-exhaustion policy:
+    //   • An injected persist fault never leaves the proposer having acked-and-returned-success
+    //     for a version it did not persist — the committed log is the source of truth.
+    //   • The DDL call must succeed (commit was live), but the proposer node is marked
+    //     SchemaSubsystemDegraded and voluntarily steps down schema-partition leadership.
+    //   • Subsequent DDL proposals on the degraded node are rejected with a typed exception.
+    [Test]
+    public async Task PersistExhaustionMarksNodeDegradedStepsDownAndBlocksFutureDdl()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        // Short live-node lease so the ack gate does not hang if one node is slow to ack.
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.SchemaAckLiveNodeLease = TimeSpan.FromSeconds(5);
+
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // Inject a persist fault — every call to PersistSchemaCheckpointAsync will throw.
+        leader.Executor.Catalogs.TestPersistCheckpointException = new IOException("injected checkpoint fault for F1a test");
+
+        // The DDL must NOT throw: the Raft commit already succeeded and is live cluster-wide.
+        // Only the proposer's KV checkpoint failed; the committed log remains the source of truth.
+        await leader.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "f1a_table",
+            columns:
+            [
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("name", ColumnType.String)
+            ],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        )).WaitAsync(TimeSpan.FromSeconds(20));
+
+        // Clear the fault so teardown logic does not encounter injected failures.
+        leader.Executor.Catalogs.TestPersistCheckpointException = null;
+
+        // The proposer node must be marked degraded.
+        Assert.IsTrue(leader.Database!.SchemaSubsystemDegraded,
+            "Proposer must be marked degraded after persist exhaustion");
+
+        // The proposer must have voluntarily stepped down — poll until it is no longer leader
+        // (step-down is asynchronous; allow up to 10 s for the new election to settle).
+        DateTime stepDownDeadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < stepDownDeadline)
+        {
+            if (!await leader.Kahuna.AmISchemaLeaderAsync(db, CancellationToken.None).ConfigureAwait(false))
+                break;
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+
+        Assert.IsFalse(
+            await leader.Kahuna.AmISchemaLeaderAsync(db, CancellationToken.None).ConfigureAwait(false),
+            "Degraded node must have stepped down schema-partition leadership");
+
+        // Further DDL proposals on the degraded node must be rejected with a typed exception
+        // (the degraded gate in ReplicateAndWaitLocalApplyAsync fires before any Raft traffic).
+        Exception? ddlEx = Assert.ThrowsAsync<CamusDBException>(() =>
+            leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "f1a_table_2",
+                columns: [new ColumnInfo("id", ColumnType.Id)],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            )).WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.IsNotNull(ddlEx, "Expected CamusDBException for DDL on degraded node");
+        StringAssert.Contains("degraded", ddlEx!.Message.ToLowerInvariant(),
+            "Exception message must mention 'degraded'");
     }
 }

@@ -31,6 +31,31 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public SemaphoreSlim SystemSchemaSemaphore { get; } = new(1, 1);
 
+    // F1a: set when persist-checkpoint exhausts all retries after a committed DDL.
+    // Gates further DDL proposals on this node until the node recovers (F1b restart replay).
+    private volatile int _schemaSubsystemDegraded;
+
+    public bool SchemaSubsystemDegraded => _schemaSubsystemDegraded != 0;
+
+    public void MarkSchemaSubsystemDegraded()
+        => Interlocked.Exchange(ref _schemaSubsystemDegraded, 1);
+
+    public void ClearSchemaSubsystemDegraded()
+        => Interlocked.Exchange(ref _schemaSubsystemDegraded, 0);
+
+    // F1a: step-down is deferred until the in-flight DDL transaction's CommitAsync completes,
+    // so the KV commit succeeds before leadership changes (important when schema and KV share a
+    // single Raft partition, as in single-partition test clusters).
+    private volatile int _deferredSchemaStepDown;
+
+    public bool DeferredSchemaStepDown => _deferredSchemaStepDown != 0;
+
+    public void RequestDeferredSchemaStepDown()
+        => Interlocked.Exchange(ref _deferredSchemaStepDown, 1);
+
+    public void ClearDeferredSchemaStepDown()
+        => Interlocked.Exchange(ref _deferredSchemaStepDown, 0);
+
     public Schema Schema { get; } = new();
 
     public SystemSchema SystemSchema { get; set; } = new();

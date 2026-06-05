@@ -30,6 +30,12 @@ public sealed class CatalogsManager
 {
     private readonly ILogger<ICamusDB> logger;
 
+    /// <summary>
+    /// Test hook: when non-null, thrown by <see cref="PersistSchemaCheckpointAsync"/> on every
+    /// call. Use in DS11.5a tests to simulate exhausted persist retries without a real KV fault.
+    /// </summary>
+    internal Exception? TestPersistCheckpointException;
+
     public CatalogsManager(ILogger<ICamusDB> logger)
     {
         this.logger = logger;
@@ -471,6 +477,7 @@ public sealed class CatalogsManager
                     IndexName = indexName
                 })
             };
+            ValidateSchemaDelta(database.Schema, entry);
         }
         finally
         {
@@ -533,6 +540,12 @@ public sealed class CatalogsManager
 
     private async Task ReplicateAndWaitLocalApplyAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
+        if (database.SchemaSubsystemDegraded)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Schema subsystem for database '{database.Name}' is degraded; DDL proposals are rejected until the node recovers"
+            );
+
         await WaitForPreviousVersionAcksAsync(database, entry).ConfigureAwait(false);
 
         // For DropTable the table is removed from the in-memory schema during apply, so capture
@@ -616,6 +629,28 @@ public sealed class CatalogsManager
 
                 await Task.Delay(50 * attempt).ConfigureAwait(false);
             }
+            catch (Exception ex)
+            {
+                // F1a: persist exhausted — the Raft commit already succeeded and the change is
+                // live cluster-wide, so do NOT surface this to the client. Mark this node's
+                // schema subsystem degraded and request a deferred schema-partition step-down.
+                // The step-down is deferred (fired after the in-flight DDL CommitAsync) because
+                // in single-partition clusters the schema and KV partitions are the same: stepping
+                // down before CommitAsync would invalidate the in-flight KV transaction.
+                // F1b restart replay will recover the checkpoint on the next open.
+                logger.LogCritical(
+                    ex,
+                    "Schema checkpoint persist exhausted all {MaxAttempts} attempts for database {DbName} version {Version}; marking node degraded and scheduling schema partition step-down",
+                    maxAttempts,
+                    database.Name,
+                    entry.ToVersion
+                );
+
+                database.MarkSchemaSubsystemDegraded();
+                database.RequestDeferredSchemaStepDown();
+
+                return; // swallow: committed log is the source of truth; degraded flag gates future DDL
+            }
         }
     }
 
@@ -625,6 +660,9 @@ public sealed class CatalogsManager
         string? droppedTableId
     )
     {
+        if (TestPersistCheckpointException is { } fault)
+            throw fault;
+
         KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
 
         try

@@ -66,11 +66,13 @@ public sealed class SchemaChangeCoordinator
     /// <summary>
     /// Optional delegate invoked once, just before an index transitions from
     /// <c>WriteOnly</c> to <c>Public</c>. Receives the database, table name, index build
-    /// info, and the last committed backfill offset (null = start from the beginning).
+    /// info, the last committed backfill offset (null = start from beginning), and a
+    /// checkpoint callback the implementation must invoke after each committed batch with
+    /// the last processed rowId so a leader-change resume can skip already-indexed rows.
     /// Idempotent: using <c>backfillMode: true</c> in <c>PutIndexEntry</c> ensures re-runs
     /// on resume are safe even for unique indexes.
     /// </summary>
-    public Func<DatabaseDescriptor, string, IndexBuildInfo, string?, Task>? IndexBackfillAsync { get; set; }
+    public Func<DatabaseDescriptor, string, IndexBuildInfo, string?, Func<string, Task>?, Task>? IndexBackfillAsync { get; set; }
 
     public SchemaChangeCoordinator(CatalogsManager catalogs, ILogger<ICamusDB>? logger = null)
     {
@@ -122,7 +124,7 @@ public sealed class SchemaChangeCoordinator
             database, BuildPersistedJob(job, columnDefinition, indexBuildInfo, attempts: 0)
         ).ConfigureAwait(false);
 
-        await DriveToTargetAsync(database, job, columnDefinition, indexBuildInfo, startOffset: null, current, path, cancellationToken)
+        await DriveToTargetAsync(database, job, columnDefinition, indexBuildInfo, startOffset: null, current, path, currentAttempts: 0, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -140,6 +142,7 @@ public sealed class SchemaChangeCoordinator
         string? startOffset,
         SchemaElementState current,
         SchemaElementState[] path,
+        int currentAttempts,
         CancellationToken cancellationToken
     )
     {
@@ -165,7 +168,16 @@ public sealed class SchemaChangeCoordinator
                              IndexBackfillAsync is not null &&
                              indexBuildInfo is not null)
                     {
-                        await IndexBackfillAsync(database, job.TableName, indexBuildInfo, startOffset).ConfigureAwait(false);
+                        // Build a checkpoint callback: after each committed batch, persist the
+                        // last processed rowId so a leader-change resume skips already-indexed rows.
+                        Func<string, Task> checkpoint = async offset =>
+                        {
+                            PersistedCoordinatorJob cp = BuildPersistedJob(job, columnDefinition, indexBuildInfo, currentAttempts);
+                            cp.StartOffset = offset;
+                            await catalogs.PersistCoordinatorJobAsync(database, cp).ConfigureAwait(false);
+                        };
+
+                        await IndexBackfillAsync(database, job.TableName, indexBuildInfo, startOffset, checkpoint).ConfigureAwait(false);
                     }
                 }
 
@@ -323,7 +335,7 @@ public sealed class SchemaChangeCoordinator
                     "Resuming coordinator job for {TableName}.{ElementName} → {TargetState} on database {DbName} (attempt {Attempt})",
                     persisted.TableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
 
-                await DriveToTargetAsync(database, job, columnDefinition, indexBuildInfo, persisted.StartOffset, current, path, CancellationToken.None)
+                await DriveToTargetAsync(database, job, columnDefinition, indexBuildInfo, persisted.StartOffset, current, path, persisted.Attempts, CancellationToken.None)
                     .ConfigureAwait(false);
             }
             catch (Exception ex)

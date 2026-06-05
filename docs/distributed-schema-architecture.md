@@ -2,7 +2,14 @@
 
 > **Audience:** engineers maintaining or extending CamusDB's catalog/DDL layer.
 > **Scope:** how schema (tables, columns, indexes) is changed, replicated, persisted,
-> versioned, and made visible across a cluster. 
+> versioned, and made visible across a cluster.
+
+> **Overview.** The cluster DDL path is end-to-end: production follower→leader forwarding
+> over HTTP with idempotent dedup, a resumable staged online-schema **coordinator** that
+> drives `AddColumn`/`AddIndex` through `DeleteOnly → WriteOnly → Public` with an ack gate
+> between steps and crash-resumable backfill, index DDL replicated through the schema log
+> with indexes owned by `TableSchema`, and an ack-gate membership set sourced from live Raft
+> membership. Known limitations and future-work items are collected in §13.
 
 ---
 
@@ -31,20 +38,73 @@ Two big consequences flow from this model and are worth internalizing before rea
    keyed and serialized *positionally by immutable IDs*, not by names (see §7). Renaming a
    column never rewrites a single row.
 
+### 1.1 Key concepts & vocabulary
+
+If you are new to this subsystem, these five ideas are the whole story; the rest of the
+document is detail.
+
+**Consensus.** A cluster has many nodes that can fail, restart, or be slow, yet they must all
+agree on *what the schema is and in what order it changed*. Kommander (Raft) provides this: a
+change is **proposed** to a leader, replicated to followers, and **committed** only once a
+**majority (quorum)** of nodes have durably stored it. A committed entry can never be lost or
+reordered. We put every schema change for a database into one ordered Raft log (one partition,
+§5.1), so "the committed log" *is* the authoritative, agreed-upon history of the schema. 
+
+**Replicated state machine.** Each node starts from the same empty schema and applies the same
+committed deltas in the same order, so each node deterministically arrives at the same schema.
+The schema is never "copied" between nodes — it is *recomputed* on each node by replaying the
+agreed log. (The persisted KV blob is only a cached snapshot so a restarting node doesn't have
+to replay from the beginning.)
+
+**Acknowledgement (ack).** Commit in Raft means "a majority has stored the delta", **not**
+"every node has *applied* it to its in-memory schema yet". An **ack** is a node reporting *"I
+have applied schema version N."* We track acks because two things depend on knowing every node
+has caught up, not just a majority:
+
+- *Safety of the next step.* We never want three different schema versions live at once (a
+  reader could be on N-1 while a writer is already on N+1 — an unbounded spread is impossible to
+  reason about). So before proposing the move to version N+1, we **wait until every live node
+  has acked N** (the two-version invariant, §6.2). Acks are the gate that enforces this.
+- *Honest completion.* When a `CREATE TABLE`/`ALTER` call returns to the client, we want it to
+  mean "this change is in effect everywhere", not "a majority will get it eventually". Waiting
+  for all live acks before returning gives that guarantee.
+
+**Convergence.** The cluster has *converged* on version N when every live node has applied N and
+acked it — i.e. all nodes show the same schema. Because of the ack gate, CamusDB's DDL is
+*synchronously* convergent at each step: a step does not start until the previous one has
+converged. (Tests assert this directly with `WaitForSchemaConvergenceAsync`.) A node that was
+offline during some changes converges on rejoin by replaying the missed committed log entries.
+
+**Coordinator.** A safe online schema change is not one delta — it is a *sequence* of small
+deltas (e.g. add a column as invisible, then make it writable, backfill existing rows, then make
+it readable), with a convergence gate between each. Something has to **own** that multi-step
+sequence: emit the next delta only after the previous one has converged, run the backfill at the
+right moment, and — crucially — **survive a leader change** so a half-finished change is carried
+to completion rather than left stuck. That owner is the `SchemaChangeCoordinator` (§8.2). It runs
+on the schema leader, records its progress durably, and resumes on whichever node becomes leader
+next.
+
+Putting it together: **consensus** agrees on each individual delta; **acks** tell us when a delta
+has **converged** to every node; the **coordinator** chains convergent deltas into a complete,
+crash-safe online schema change.
+
 ---
 
 ## 2. Component map
 
 | Layer | Type | Responsibility |
 |---|---|---|
-| SQL / executor | `CommandExecutor` | Entry point for DDL & DML. Owns the DDL transaction, schema-version *pinning*, and follower→leader *forwarding*. |
-| Catalog | `CatalogsManager` | Builds deltas, validates them, applies them (`ApplySchemaDelta`), persists per-object metadata, loads metadata on open. |
-| Replication glue | `SchemaReplicator` | Bridges Kahuna's apply/restore callbacks to `CatalogsManager`. Applies committed deltas in-memory (never persists from the callback) and records acks. |
-| KV / consensus | `EmbeddedKahuna` | Routes schema deltas to a Raft partition, replicates+commits them, fans them out to local subscribers, tracks per-node acks. |
-| Liveness | `SchemaAckTracker` | Per-database, per-node "last applied version" map; powers the two-version invariant gate. |
-| Models | `SchemaChangeLogEntry`, `SchemaOp`, `SchemaElementState`, `TableSchema`, `TableColumnSchema`, `TableIndexSchema`, `DatabaseIndexObject` | The serialized delta, the operation kinds, the online-state enum, and the in-memory/persisted shapes. |
-| Storage | `RowEncoder`, `KvTableStore` | Positional row encode/decode with element-state visibility; row/index scans. |
-| Transactions | `KvTransaction`, `KvTransactionsManager` | Carry schema-version *pins* and validate them at commit. |
+| SQL / executor | `CommandExecutor` | Entry point for DDL & DML. Owns the DDL transaction, schema-version *pinning*, follower→leader *forwarding*, and the cluster add-column/add-index entry points that drive the coordinator. |
+| Online-schema driver | `SchemaChangeCoordinator` | Drives a column or index element through the staged `SetElementState` sequence one adjacent transition at a time, gating each step on the cluster ack, running backfill before `Public`, and persisting its job for leader-change resume. |
+| Catalog | `CatalogsManager` | Builds deltas, validates them, applies them (`ApplySchemaDelta`), persists per-object metadata, loads metadata on open. Exposes the `Replicate*` primitives the coordinator composes (`ReplicateAddColumnInStateAsync`, `ReplicateAddIndexInStateAsync`, `ReplicateElementStateAsync`, `ReplicateDropIndexAsync`). |
+| Replication glue | `SchemaReplicator` | Bridges Kahuna's apply/restore callbacks to `CatalogsManager`. Applies committed deltas in-memory (never persists from the callback), records acks, evicts cached `TableDescriptor`s, and registers the coordinator-resume leader callback. |
+| KV / consensus | `EmbeddedKahuna` | Routes schema deltas to a Raft partition, replicates+commits them, fans them out to local subscribers, tracks per-node acks, sources live membership from Raft, and fires `OnLeaderChanged` for coordinator resume. |
+| Liveness | `SchemaAckTracker` | Per-database, per-node `{version, lastSeen}` map; powers the two-version invariant gate. The live set comes from Raft membership; an optional finite lease expires silent members. |
+| Forwarding | `ISchemaDdlForwarder` / `HttpSchemaDdlForwarder`, `SchemaDdlForwardController`, `DdlOperationIdCache` | Ship a DDL *ticket* from a follower to the schema leader over HTTP, re-execute it as leader, and dedup retries by a stable operation id. |
+| Models | `SchemaChangeLogEntry`, `SchemaOp`, `SchemaElementState`, `SchemaElementKind`, `TableSchema`, `TableColumnSchema`, `TableIndexSchema`, `PersistedCoordinatorJob`, `DatabaseIndexObject` | The serialized delta, the operation kinds, the online-state enum, the column/index discriminator, the in-memory/persisted shapes, and the durable coordinator job. |
+| Storage | `RowEncoder`, `KvTableStore` | Positional row encode/decode with element-state visibility; row/index scans; idempotent index backfill writes (`PutIndexEntry(backfillMode:)`). |
+| Transactions | `KvTransaction`, `KvTransactionsManager` | Carry schema-version *pins* and validate them at commit; lock/modified tracking is lock-guarded for concurrent use. |
+| Test harness | `InProcessSchemaCluster`, `FaultInjectingCommunication` | N distinct in-process nodes with real Raft, ack-based convergence await, and pause/kill/force-leader fault injection. |
 
 ### Single-node vs cluster: the `OwnsKahuna` switch
 
@@ -87,10 +147,17 @@ Key properties:
 - `FromVersion`/`ToVersion` are always adjacent (`+1`). The log is a strict chain.
 - The entry is the unit of replication and the unit of idempotency.
 
-`SchemaOp` includes `AddIndex`/`DropIndex` (B2): index DDL **is** routed through this log.
-The replicated source of truth for indexes is now `TableSchema.Indexes`, persisted per-object
-alongside columns. The proposer commits the index data first, then replicates the
-delta — see §7.3.
+`SchemaOp` includes `AddIndex`/`DropIndex` and `SetElementState` (the online-state advance
+used for both columns and indexes). Index DDL **is** routed through this log; the replicated
+source of truth for indexes is `TableSchema.Indexes`, persisted per-object alongside columns.
+A cluster `ADD INDEX` is driven by the coordinator as a staged
+`AddIndex(DeleteOnly) → SetElementState(WriteOnly) → [backfill] → SetElementState(Public)`
+sequence — see §7.3 and §8.2.
+
+`SetElementState` carries a `SchemaElementKind { Column, Index }` discriminator
+(`SchemaElementStatePayload.ElementKind`, default `Column` so legacy entries deserialize
+correctly). The same delta type therefore advances either kind; the apply path branches on
+the discriminator (`ApplyElementState` vs `ApplyIndexElementState`).
 
 ---
 
@@ -196,19 +263,48 @@ so it only triggers local apply *after* the quorum commit succeeds.
 
 ### 5.3 Follower forwarding
 
-A non-leader that is asked to do DDL cannot propose. Two mechanisms exist:
+A non-leader that is asked to do DDL cannot propose to Raft, so it **forwards the DDL ticket
+to the schema leader**, which re-runs the operation on the normal leader path and replies with
+the applied version. Two mechanisms exist; the production one ships the ticket over HTTP.
 
-- **Production:** `CommandExecutor.TryForward*Async` checks `AmISchemaLeaderAsync`; if not
-  leader, it forwards the *DDL ticket* to the leader via `ISchemaDdlForwarder` (the
-  intended production transport over the cluster's node-to-node channel), then waits for
-  the forwarded change to apply locally.
-- **Test-only:** `ISchemaReplicationForwarder` (internal) forwards the raw entry. This is
-  wired only in the in-process multi-node test harness.
+**Production: HTTP ticket forwarding with idempotent dedup.**
 
-> The production HTTP/node forwarder, the endpoint map, and idempotent retry semantics are
-> tracked as DS5 carry-forwards — see the tasks doc. The *protocol* works over real Kahuna
-> gRPC today; the missing piece is the follower→leader DDL *routing* transport for a real
-> multi-process deployment.
+```
+Follower CommandExecutor.AlterTable(ticket)
+  └─ TryForwardAlterTableAsync → TryForwardDdlAsync
+       ├─ AmISchemaLeaderAsync? → no
+       ├─ resolve leader endpoint (Raft schema-leader identity → HTTP base URL)
+       ├─ operationId = Guid.NewGuid("N")        // stable across retries of THIS call
+       └─ HttpSchemaDdlForwarder.ForwardAlterTableAsync(leader, ticket, operationId)
+             POST {leaderUrl}/internal/schema-ddl  { op, ticket, operationId }
+
+Leader SchemaDdlForwardController
+  ├─ leader check: not the schema leader → 503/not-leader (client re-resolves & retries)
+  ├─ DdlOperationIdCache.TryGetOrReserve(operationId)
+  │     ├─ already completed → replay cached result (no re-execute)   ← sequential retry
+  │     └─ in flight        → collapse onto the in-progress execution ← concurrent retry
+  ├─ execute the DDL locally as leader (the normal replicated path)
+  └─ cache + return the applied result
+```
+
+- **`ISchemaDdlForwarder` / `HttpSchemaDdlForwarder`** (`CamusDB.Core`) is the client:
+  `ForwardCreateTable/AlterTable/DropTable/AlterIndexAsync`, each carrying the stable
+  `operationId`. It is injected into `CommandExecutor` (nullable — single-node builds pass
+  `null`). It returns `bool?`: `null` = "not forwarded, handle locally", non-null = the
+  forwarded applied result.
+- **`SchemaDdlForwardController`** (`CamusDB/App`) is the receiver: it **always** begins with
+  an explicit leader check (returns not-leader rather than mis-applying on a stale follower),
+  then consults the op-id cache before executing. A leadership change between the check and
+  execution surfaces as a typed error and the client re-forwards to the new leader — a finite,
+  retry-bounded chain.
+- **`DdlOperationIdCache`** (`CamusDB/App/Services`) is the two-layer dedup: a stable op id
+  makes a lost-response retry replay the prior result instead of bumping the schema version
+  twice, and an in-flight reservation collapses concurrent duplicates. This is the
+  "applied at most once" guarantee.
+
+**Test-only:** `ISchemaReplicationForwarder` (internal) forwards the raw committed *entry*
+(not the ticket) directly between in-process nodes. It is wired only in `InProcessSchemaCluster`
+so multi-node tests can exercise apply/convergence without standing up HTTP endpoints.
 
 ---
 
@@ -245,8 +341,8 @@ typed `CamusDBException`. This inverts the older "persist-before-advance" orderi
 now advances first (in the apply callback) and the checkpoint is written just after. That is
 safe because the **committed schema log is the source of truth** and the KV checkpoint is a
 load-time optimization — a node whose checkpoint write fails is not divergent, it rebuilds
-from the committed log. (Making schema-log replay authoritative on restart, and a richer
-persist-failure policy, is Workstream F in the completion plan.)
+from the committed log. (See §13 for the still-open question of making schema-log replay
+authoritative on restart and adding a richer persist-failure policy.)
 
 `RestoreAsync` (log recovery) is a separate, simpler path: it applies in version order and
 logs+skips out-of-order entries; it likewise only mutates in-memory.
@@ -257,7 +353,7 @@ logs+skips out-of-order entries; it likewise only mutates in-memory.
 - Apply is gated on `FromVersion == current` and `ToVersion <= current` skips. Together
   these make redelivery and restart-replay safe.
 
-### 6.2 The two-version invariant (DS7)
+### 6.2 The two-version invariant
 
 Borrowed from CockroachDB/Yugabyte: at any instant the cluster tolerates at most **two
 adjacent schema versions** in use. We enforce it as a **proposal barrier**:
@@ -269,27 +365,41 @@ This is `WaitForPreviousVersionAcksAsync`, called *first* in
 `ReplicateAndWaitLocalApplyAsync`. It means a second DDL client cannot race ahead and
 stack a third version onto a cluster where some node is still on version N-1.
 
-Implemented by `SchemaAckTracker` (per-db `{node → lastAppliedVersion}` and
-`{node → lastSeen}`):
+Implemented by `SchemaAckTracker` (per-db `{node → NodeAck{Version, LastSeen}}`):
 
-- `RegisterLocalSchemaAckNode` / `RecordLocalSchemaApplied` / `UnregisterLocalSchemaAckNode`
-  are called by `SchemaReplicator.Register` (on database open, seeding the *current* loaded
-  version so a fresh node doesn't stall the first `FromVersion=0` gate), by the apply path,
-  and by descriptor close.
-- `WaitForAllLiveAsync(db, version, timeout, liveNodeLease)` blocks until every live member
-  has acked `version`, or throws on timeout.
+- `RecordApplied(db, node, version)` is called by the apply path on every node and takes the
+  `Math.Max` of the existing and new version. **It also refreshes `LastSeen` on every call**,
+  even an idempotent re-apply of the same version — so an apply is itself the interim liveness
+  signal.
+- `WaitForAllLiveAsync(db, version, timeout, getLiveMembers, liveNodeLease, ct)` polls until
+  every endpoint returned by `getLiveMembers()` has acked `version`, or throws on timeout.
 
-**Liveness vs correctness trade-off:** `SchemaAckLiveNodeLease` defaults to
-`Timeout.InfiniteTimeSpan`, i.e. registered nodes never expire by elapsed time. There is no
-real heartbeat at this layer yet, so we choose correctness (never silently drop a slow-but-
-alive follower from the quorum) over liveness (a crashed, un-unregistered node freezes DDL
-until `SchemaAckWaitTimeout`). The lease parameter is a hook for future heartbeat
-integration. Both timeouts are tunable on `EmbeddedKahuna` (`SchemaAckWaitTimeout`,
-`SchemaAckLiveNodeLease`).
+**Live membership comes from Raft, not a manual register set.**
+`EmbeddedKahuna.GetLiveSchemaNodes()` supplies the live set:
 
-> The tracker is process-global/`static` purely to support the in-process multi-node test
-> harness; it is **not** a multi-process ack transport. Replacing it with real
-> heartbeat/membership is a DS10/DS11 carry-forward.
+- **Cluster mode:** the local endpoint plus every peer from `Raft.GetNodes()`. Removing a node
+  from the cluster removes it from the gate; a deregistered-but-up node no longer counts as
+  live.
+- **Standalone mode** (`isClusterMode == false`): only `Raft.GetLocalEndpoint()`, because
+  `GetNodes()` returns phantom witness endpoints that would otherwise wedge the gate forever.
+
+Acks are keyed on `Raft.GetLocalEndpoint()`, so each node reports under its real Raft identity.
+
+**Liveness vs correctness trade-off (interim lease).** `SchemaAckLiveNodeLease` defaults to
+`Timeout.InfiniteTimeSpan`: with an infinite lease the gate waits for **every** live Raft
+member, choosing correctness (never silently drop a slow-but-alive follower) over liveness (a
+crashed member freezes DDL until `SchemaAckWaitTimeout`). Setting a **finite** lease activates
+apply-derived expiry: a live member whose last ack (`LastSeen`) is older than the lease is
+presumed down and stops blocking the gate, while a member that has *never* acked still blocks
+(it has no `LastSeen` to expire). Tests use a short finite lease to commit DDL with quorum
+while one node is paused; production keeps the strict infinite-lease behaviour. Both timeouts
+are tunable on `EmbeddedKahuna` (`SchemaAckWaitTimeout`, `SchemaAckLiveNodeLease`).
+
+> **Limitation.** The lease is *apply-derived*, not a true heartbeat — a node that is alive
+> but doing no schema work emits no fresh `LastSeen`, so enabling a finite lease in production
+> safely needs a real heartbeat as the liveness signal. The tracker is also currently
+> process-`static` (shared across in-process test nodes); a per-`EmbeddedKahuna` instance
+> would model multi-node state more honestly. See §13.
 
 ---
 
@@ -299,7 +409,7 @@ integration. Both timeouts are tunable on `EmbeddedKahuna` (`SchemaAckWaitTimeou
 
 - `Schema` — per database. Holds `SchemaVersion` (the monotonic counter), `Semaphore`
   (serializes apply/validate), and `Tables : Dictionary<name, TableSchema>`.
-- `TableSchema` — `Id` (immutable), `Version`, `Name` (mutable), `Columns`,
+- `TableSchema` — `Id` (immutable), `Version`, `Name` (mutable), `Columns`, `Indexes`,
   `SchemaHistory` (past column layouts), and an optional async `SchemaHistoryLoader`.
 - `TableColumnSchema` / `TableIndexSchema` — carry `State : SchemaElementState`
   (legacy elements default to `Public`).
@@ -315,6 +425,8 @@ To scale to databases with many tables, metadata is stored per object, not as on
 {db}/meta/version                       → the database SchemaVersion counter
 {db}/meta/table/{tableId}               → one TableSchema, incl. its Indexes (current version)
 {db}/meta/history/{tableId}/{version}   → one past column layout (TableSchemaHistory)
+{db}/meta/coordinator/...               → PersistedCoordinatorJob(s) for in-flight staged
+                                          changes, so a new leader can resume them (§8.2)
 {db}/meta/system                        → SystemSchema — LEGACY index storage, read-only;
                                           only migrated from on load (see §7.3)
 {db}/meta/schema                        → LEGACY single-blob schema (migrated on load)
@@ -329,9 +441,9 @@ To scale to databases with many tables, metadata is stored per object, not as on
   for old data.
 - Legacy single-blob schema is detected on load and migrated to per-object keys.
 
-### 7.3 Indexes live in `TableSchema.Indexes` (B1) and replicate through the log (B2)
+### 7.3 Indexes: owned by `TableSchema`, replicated through the log, built via the staged coordinator
 
-Indexes are now **owned by the replicated `TableSchema`**, like columns:
+Indexes are **owned by the replicated `TableSchema`**, like columns:
 `TableSchema.Indexes : List<TableIndexSchema>`, persisted inside the same
 `{db}/meta/table/{tableId}` blob. `TableIndexSchema` serves two forms (one type, disambiguated
 for JSON by a `[JsonConstructor]`):
@@ -344,34 +456,68 @@ for JSON by a `[JsonConstructor]`):
   `Id`/`ColumnIds`/`StartOffset` are intentionally dropped here — code that needs them reads
   `table.Schema.Indexes`.
 
-**Legacy `SystemSchema` (`{db}/meta/system`, `DatabaseIndexObject`)** is now read-only: it is
+**Legacy `SystemSchema` (`{db}/meta/system`, `DatabaseIndexObject`)** is read-only: it is
 no longer written by index DDL. On open, `MigrateIndexesFromSystemSchema` copies any
 not-yet-migrated index objects into `TableSchema.Indexes` in memory; the next index DDL
 persists them. `TableOpener` falls back to `SystemSchema` only for descriptors opened before
 `LoadMetaAsync` runs.
 
-**Index DDL is replicated (B2).** `CommandExecutor.AlterIndex` on a cluster node runs a strict
-two-phase sequence (`ExecuteClusteredIndexDdlAsync`, under `SchemaDdlSemaphore`):
+**Index DDL is replicated and staged.** On a cluster node, `CommandExecutor.AlterIndex`
+routes an **add** through `ExecuteClusterAddIndexAsync`, which (under `SchemaDdlSemaphore`) hands
+a `SchemaChangeJob{ kind: Index, target: Public }` to the `SchemaChangeCoordinator` with an
+`IndexBackfillAsync` delegate wired. The coordinator drives the staged online sequence (§8.2):
 
-1. **Phase 1 — data first.** Run the local DDL/backfill in `tx1` and **commit** it, so the
-   index KV entries (`{tableId}:i:{indexId}/…`) are durable and visible cluster-wide (KV is
-   itself Raft-replicated) *before* anything is announced.
-2. **Phase 2 — then announce.** Replicate an `AddIndex`/`DropIndex` `SchemaChangeLogEntry`
-   (`ReplicateIndexChangeAsync`). The `AddIndex` payload carries the completed
-   `TableIndexSchema`; `ApplyAddIndex`/`ApplyDropIndex` update every node's `TableSchema.Indexes`
-   (idempotent: remove-by-name then add / remove) and `SchemaReplicator` evicts each node's
-   cached `TableDescriptor` so the next open rebuilds with the new index.
+```
+AddIndex(DeleteOnly)  → ack gate → SetElementState(WriteOnly) → ack gate
+   → [backfill existing rows into the index, committed]        → SetElementState(Public) → ack gate
+```
 
-Ordering matters: committing the data before the delta means a failure between phases leaves at
-worst orphaned KV entries (harmless), never a *phantom* index (schema says it exists, no data).
-Index deltas advance the database `SchemaVersion` chain but **not** `TableSchema.Version`
-(indexes aren't part of row layout). `DROP INDEX` reclaims the data via
+- `ReplicateAddIndexInStateAsync` emits the initial `AddIndex` delta with `State = DeleteOnly`
+  (not a single jump to `Public`). Subsequent steps are `ReplicateElementStateAsync(…, Index)`
+  → `ApplyIndexElementState`, which updates `TableSchema.Indexes[i].State` in place and **does
+  not** bump `TableSchema.Version` (indexes aren't part of row layout). `SchemaReplicator` evicts
+  each node's cached `TableDescriptor` on `SetElementState(Index)` so DML rebuilds with the new
+  state.
+- **Backfill** (`CommandExecutor.BackfillIndexEntriesAsync`) fires exactly on the
+  `WriteOnly → Public` transition, on both the initial run and a leader-change resume that starts
+  from `WriteOnly`. It scans existing rows (`KvTableStore.ScanRows`), decodes them with
+  *writable* visibility, and writes index entries with `PutIndexEntry(backfillMode: true)`.
+  Backfilled entries replicate to followers through Kahuna's Raft KV (each node sees the index
+  via `FORCE_INDEX` without rebuilding); the metadata converges via the schema delta. Because the
+  backfill commits **before** the `Public` delta is proposed, the ack gate on the `Public`
+  version implies backfill-done cluster-wide.
+- **Idempotent backfill (no duplicates on resume).** `PutIndexEntry(backfillMode: true)` makes a
+  re-run safe: on a unique index a `NotSet` response triggers a read-back — same `rowId` ⇒ this
+  is an idempotent re-write of a row a previous partial run already indexed, so skip it; a
+  different `rowId` ⇒ a genuine duplicate-key violation, so throw `DuplicateUniqueKeyValue`.
+- **Failure compensation.** If the staged add throws before reaching `Public`,
+  `CompensateClusterAddIndexAsync` emits a `DropIndex` delta (removing the partial `DeleteOnly`/
+  `WriteOnly` index on every node) and deletes the persisted coordinator job, leaving the cluster
+  clean — there is never a *phantom* index (schema says it exists, no data) or a partially-public
+  one.
+
+A **drop** stays a single `DropIndex` delta (`ApplyDropIndex`, idempotent remove-by-name); no
+staging is needed to remove an index. `DROP INDEX` reclaims the data via
 `KvTableStore.DropIndexEntries`.
 
-The remaining gap is online-safety: the proposer backfills-then-publishes rather than driving a
-staged `WriteOnly → backfill → Public` sequence with the ack gate between steps, so concurrent
-writes during a build, and crash-resumable backfill, are still the DS9/coordinator (Workstream D)
-follow-up.
+**The backfill is checkpointed and resumable.** `BackfillIndexEntriesAsync` processes rows in
+bounded batches (`BackfillBatchSize`, currently 500 rows per Kahuna transaction). After each
+batch *commits*, it invokes a checkpoint callback supplied by the coordinator, which persists
+the last processed rowId into `PersistedCoordinatorJob.StartOffset`. A leader-change resume reads
+that offset and restarts the scan via `ScanRows(afterRowId:)`, skipping the rows already indexed
+rather than rebuilding from row zero. Two ordering/accounting details make this safe:
+
+- **Commit before checkpoint.** Each batch's index entries are committed *before* `StartOffset`
+  advances, so a crash in that window re-runs at most the last batch — and the idempotent
+  `backfillMode` re-write (above) makes that harmless (no duplicates, no skips).
+- **Attempts preserved.** The checkpoint write rebuilds the persisted job with the *current*
+  resume-attempt count, so persisting progress mid-resume does not reset the attempt budget that
+  bounds poison-job retries (§8.2).
+
+> **Note on the final batch.** Only full batches checkpoint; the trailing partial batch does not
+> (completion is signalled by the element reaching `Public`, not by a stored offset). A table
+> whose row count is an exact multiple of the batch size performs one extra empty scan/commit at
+> the end — harmless.
 
 ### 7.4 Positional row encoding & why renames are free (`RowEncoder`)
 
@@ -409,13 +555,62 @@ correctly read it as absent).
 
 `SchemaElementState { Absent, DeleteOnly, WriteOnly, Public }` models the CockroachDB/
 Yugabyte staged rollout of an add/drop so concurrent DML on other nodes never loses writes
-or sees half-built structures:
+or sees half-built structures.
+
+**The state diagram.** An element (a column or an index) moves through these four states. Each
+**edge is one `SetElementState` delta** (the very first edge of an add is the `AddColumn`/
+`AddIndex` delta that creates the element directly in `DeleteOnly`). The rule that lets you
+*take* an edge is always the same: the delta must be **committed in Raft and acked by every
+live node** — i.e. the cluster must converge on that step — before the next edge is taken. That
+convergence gate (driven by the coordinator, §8.2) is what keeps the cluster within the
+two-version window the whole time.
 
 ```
-AddColumn:  Absent → DeleteOnly → WriteOnly → Public
-DropColumn: Public → WriteOnly → DeleteOnly → Absent
-AddIndex:   Absent → DeleteOnly → WriteOnly → (backfill) → Public
+                     ADD  ───────────────────────────────────────────────►
+                 (1)              (2)                  (3) backfill + (4)
+        ┌────────┐      ┌────────────┐         ┌────────────┐         ┌────────┐
+        │ Absent │─────►│ DeleteOnly │────────►│ WriteOnly  │────────►│ Public │
+        │ r✗ w✗  │◄─────│  r✗ w✗(*)  │◄────────│  r✗ w✓     │◄────────│ r✓ w✓  │
+        └────────┘      └────────────┘         └────────────┘         └────────┘
+                     ◄───────────────────────────────────────────────  DROP
+        r = readable by user queries   w = writable by DML   (*) DeleteOnly: delete-time only
+
+  Edge        Delta emitted                 Extra work / why the step exists
+  ─────────────────────────────────────────────────────────────────────────────────────────
+  (1) →DelOnly  AddColumn / AddIndex         Element exists in the catalog but is invisible and
+                (State=DeleteOnly)           inert; no node reads or writes it. Establishes the
+                                             element on every node before anyone depends on it.
+  (2) →WriteOnly SetElementState(WriteOnly)  DML now *maintains* the element (writes the column,
+                                             updates the index) but no query *reads* it yet — so
+                                             new writes are captured before backfill runs.
+  (3) backfill   (no delta; a committed      With the element WriteOnly everywhere, existing rows
+                 data write before edge 4)   are filled in: column defaults are materialized /
+                                             index entries are built. Runs once, on the leader.
+  (4) →Public    SetElementState(Public)     Backfill is done and every new write is already
+                                             maintained, so the element is safe to read. It
+                                             becomes visible to queries.
+  DROP (reverse) SetElementState(…) per step Mirror image: Public→WriteOnly (stop reading)
+                                             →DeleteOnly (stop writing, delete-time only)
+                                             →Absent (DropColumn / DropIndex removes it).
 ```
+
+So the canonical sequences are:
+
+```
+AddColumn:  Absent → DeleteOnly → WriteOnly → (backfill defaults) → Public
+AddIndex:   Absent → DeleteOnly → WriteOnly → (backfill entries)  → Public
+DropColumn: Public → WriteOnly → DeleteOnly → Absent
+DropIndex:  Public → Absent          (single delta — removing an index needs no staging)
+```
+
+**Why each intermediate state is necessary.** The danger in a distributed add is the two-version
+window: while the change rolls out, one node may be a version ahead of another. `WriteOnly` exists
+so that a node already running the change *captures* writes the lagging node's clients still send,
+**before** backfill scans existing rows — otherwise a row inserted mid-backfill could be missed.
+`DeleteOnly` exists for the symmetric drop case (and the start of an add): the element must be
+*maintained-on-delete* before it can be fully writable, and fully gone only after no node still
+reads it. Skipping a state would reintroduce exactly the lost-write / half-built-read races the
+ladder is designed to prevent.
 
 State semantics (`SchemaElementStateRules`):
 
@@ -427,33 +622,90 @@ State semantics (`SchemaElementStateRules`):
 | `Absent` | ❌ | ❌ |
 
 `SetElementState` is the `SchemaOp` that advances one element across **adjacent** states
-(validated transitions; same-state is a no-op that does not bump version/history).
+(validated transitions; same-state is a no-op that does not bump version/history). It carries
+a `SchemaElementKind` so the same delta drives a column or an index (§3). Transitions are only
+ever adjacent — there is no "Absent → Public" shortcut, which is what forces every add/drop
+through the full convergence-gated ladder above.
 
-### What's wired today vs deferred
+### 8.1 DML honors states
 
-- **DS6 (foundation):** the state enum, the model fields, and `SetElementState` apply
-  + validation exist. **`AddColumn` currently lands directly in `Public`** (single step),
-  because nothing yet *drives* the staged sequence. Until the coordinator exists, a column
-  must never be left non-`Public`.
-- **DS8 (DML honors states):** all read/write paths respect the table above —
-  - `RowEncoder` encodes only writable columns; decodes with current-state visibility.
-  - Insert/update target validation rejects non-writable columns; update/delete reload a
-    **writable** row view so `WriteOnly` data survives a rewrite.
-  - Query binding/planning and `SHOW COLUMNS/INDEXES/CREATE TABLE` expose only `Public`
-    elements (`SchemaElementStateRules.IsReadableIndex/IsWritableIndex` centralize the
-    composite "index + all its columns" check).
-  - DML/read transactions **pin** each touched table's `(version, identity)` and the
-    commit path rejects the transaction if the schema moved underneath it (see §9).
-- **DS9 + B1/B2 (index backfill & replicated ownership):** `ADD INDEX` installs the index
-  `WriteOnly` in `TableSchema.Indexes`, streams existing rows via `KvTableStore.ScanRows`,
-  writes index entries, and flips to `Public` after the backfill completes; the checkpoint
-  (`StartOffset`) and `ScanRows(afterRowId:)` allow resume. B1 moved index ownership into the
-  replicated `TableSchema.Indexes`, and B2 routes `ADD/DROP INDEX` through the schema log
-  (data-first, then delta) so indexes converge cluster-wide without reopen — see §7.3.
-- **Deferred (DS7 coordinator / DS10 / DS11):** a resumable **coordinator job** that emits
-  the successive `SetElementState` deltas, waits for the `FromVersion` ack gate between each
-  one, runs the index backfill with independent checkpoint commits, drives cluster-wide
-  completion, and adds automatic retry on schema-version conflict.
+All read/write paths respect the visibility/writability table above:
+
+- `RowEncoder` encodes only writable columns; decodes with current-state visibility (§7.4).
+- Insert/update target validation rejects non-writable columns; update/delete reload a
+  **writable** row view so `WriteOnly` data survives a rewrite.
+- Query binding/planning and `SHOW COLUMNS/INDEXES/CREATE TABLE` expose only `Public`
+  elements (`SchemaElementStateRules.IsReadableIndex/IsWritableIndex` centralize the composite
+  "index + all its columns" check).
+- DML/read transactions **pin** each touched table's `(version, identity)` and the commit path
+  rejects the transaction if the schema moved underneath it (see §9).
+
+This is what makes the staged rollout safe: while a column is `WriteOnly` on the node running
+the change and `Public`/`DeleteOnly` on another (the two-version window), concurrent DML on
+either node neither loses a write nor reads a half-built element.
+
+### 8.2 The online-schema coordinator
+
+`SchemaChangeCoordinator` is the component that **drives** the staged sequence — it turns a
+high-level intent ("add column X", "build index Y") into the successive `SetElementState`
+deltas, waiting for the cluster ack gate between each one. It runs **on the schema leader**
+(followers forward DDL via §5.3) and only in cluster mode (`!OwnsKahuna`).
+
+**Job model & drive loop.** `RunJobAsync(database, SchemaChangeJob{ table, element, kind,
+targetState }, columnDefinition?, indexBuildInfo?)`:
+
+1. Compute `current = GetCurrentElementState(...)` (reads `Columns` or `Indexes` per kind) and
+   the adjacent-transition `path` from `current` to `targetState` (forward for adds, reverse
+   for drops). Empty path ⇒ already at target ⇒ no-op.
+2. Persist the job durably (`PersistCoordinatorJobAsync`, attempt 0) **before** driving, so a
+   leader change can resume it.
+3. `DriveToTargetAsync`: for each `nextState` in `path`, emit one delta and let
+   `ReplicateAndWaitLocalApplyAsync` enforce the `FromVersion` ack gate (§6.2) — so every live
+   node has applied step *k* before step *k+1* is proposed (the two-version invariant for
+   multi-step sequences). The first step of an add (`Absent → DeleteOnly`) calls
+   `ReplicateAddColumnInStateAsync` / `ReplicateAddIndexInStateAsync`; subsequent steps call
+   `ReplicateElementStateAsync(…, kind)`.
+4. On success the durable job is deleted; on failure it is left for resume (the `finally` only
+   deletes it once `current == targetState`).
+
+**Backfill hook.** Just before the `WriteOnly → Public` transition (while `current` is still
+`WriteOnly`, before reassignment), the coordinator invokes the matching delegate:
+
+- **Column:** `BackfillAsync(db, table, columnInfo)` →
+  `CommandExecutor.BackfillColumnDefaultsAsync` re-encodes existing rows so the new column's
+  default is physically materialized (not just read-time injected) before it becomes readable.
+- **Index:** `IndexBackfillAsync(db, table, indexBuildInfo, startOffset)` →
+  `CommandExecutor.BackfillIndexEntriesAsync` (see §7.3).
+
+Firing the backfill at exactly this point means it runs **after** `WriteOnly` is committed (so
+`RowEncoder.Encode` already includes the column / the index accepts writes) and **before**
+`Public` is committed (so existing rows carry the value before the element is visible). It fires
+on both the initial run and a `WriteOnly`-start resume, closing the crash window between the
+`WriteOnly` ack and the backfill commit.
+
+**Persistence & leader-change resume.** The durable job is `PersistedCoordinatorJob`
+(`{db}/meta/coordinator/...`): table, element, `targetState`, `ElementKind`, the column fields
+(`ColumnType/NotNull/Default`) or index fields (`IndexId/IndexColumnIds/IndexType/StartOffset`),
+and an `Attempts` counter. `SchemaReplicator` registers a leader-change callback
+(`RegisterSchemaLeaderCallback` → `EmbeddedKahuna.OnLeaderChanged`); when this node wins
+schema leadership it runs `ResumeJobsAsync`:
+
+- Loads all persisted jobs (with bounded retry/backoff — `OnLeaderChanged` can fire before the
+  new leader's KV state machine has applied every committed entry, so the job written by the
+  previous leader may not be visible on the first read).
+- For each job: reconstructs `ColumnInfo`/`IndexBuildInfo` (index column **names** are resolved
+  from the persisted immutable `ColumnIds` against the current schema), recomputes the remaining
+  path from the *current* element state, bumps and persists `Attempts` **before** driving (so a
+  crash mid-resume still counts against the budget), and re-drives to target.
+- A job that keeps failing is abandoned after `MaxResumeAttempts` (5): it is deleted and logged
+  loudly rather than retried on every future election — a poison job can't loop forever.
+
+**Adds start in `DeleteOnly`.** Because the coordinator exists, `AddColumn`/`AddIndex` never
+land directly in `Public`. The cluster entry points
+(`ExecuteClusterAddColumnAsync` / `ExecuteClusterAddIndexAsync`) hand the coordinator a job with
+`targetState = Public`, and the staged path carries the element through
+`Absent → DeleteOnly → WriteOnly → [backfill] → Public`. An interrupted add therefore leaves the
+element in a valid intermediate state that resume completes — never a stuck half-add.
 
 ---
 
@@ -480,8 +732,8 @@ At commit, `KvTransactionsManager.CommitAsync` calls `tx.ValidateSchemaPins()`, 
 2. compares `currentVersion()` against the pinned version → catches **add/drop column,
    element-state** changes.
 
-If either check fails the commit is rejected. (Automatic retry against the new version is a
-deferred carry-forward; today the transaction simply fails.)
+If either check fails the commit is rejected. (Transparent retry against the new version is a
+future-work item — see §13; today the transaction simply fails with a typed error.)
 
 Why this works without extra plumbing: `ApplyAlterColumn`/`ApplyElementState` mutate the
 **same `TableSchema` instance** the cached `TableDescriptor` holds (`Version++` in place),
@@ -503,56 +755,83 @@ SELECTs don't run the commit-time validation step (they have a consistent snapsh
   in-memory cluster-wide. The proposer's `PersistSchemaCheckpointWithRetryAsync` retries the
   KV write with bounded backoff; on exhaustion it throws a typed `CamusDBException`. Because
   the committed schema log is the source of truth, a failed checkpoint is not divergence — it
-  is a stale load-time cache that the committed log reconciles. (Wiring schema-log replay to
-  be authoritative on restart, plus a richer policy — retry / step-down / mark-unhealthy — is
-  Workstream F.)
+  is a stale load-time cache that the committed log reconciles. (A richer policy — making
+  schema-log replay authoritative on restart, plus retry / step-down / mark-unhealthy — is
+  future work; see §13.)
 - **Out-of-order / gap on apply:** thrown (apply) or logged+skipped (restore). A gap means a
   node is missing a delta; restore replays in order.
-- **DDL transaction abort (`ExecuteDdlInTransaction` / `ExecuteClusteredIndexDdlAsync`):**
-  rolls back the KV transaction, then runs an optional `onAbort` compensation. `ADD INDEX`
-  uses this to remove the phantom in-memory index — it mutates `table.Indexes` and
-  `table.Schema.Indexes` *before* commit, so a failed backfill must undo both
-  (`CompensateAbortedAddIndexAsync`). On the cluster path the schema delta is published only
-  *after* the data transaction commits, so an abort never leaves a replicated phantom index.
-  Compensation errors are swallowed+logged so they never mask the original exception. Hard
-  crashes need no compensation — the node reloads from persisted (rolled-back) metadata.
+- **DDL transaction abort (`ExecuteDdlInTransaction`):** rolls back the KV transaction, then
+  runs an optional `onAbort` compensation. Compensation errors are swallowed+logged so they
+  never mask the original exception. Hard crashes need no compensation — the node reloads from
+  persisted (rolled-back) metadata.
+- **Cluster `ADD INDEX` failure (coordinator path):** if the staged add throws before reaching
+  `Public`, `CompensateClusterAddIndexAsync` emits a `DropIndex` delta (removing the partial
+  `DeleteOnly`/`WriteOnly` index on every node) and deletes the persisted coordinator job. Since
+  the element is published incrementally but only becomes *usable* at `Public`, an abort never
+  leaves a usable phantom index, and the next leader has no stale job to resume (§7.3, §8.2).
+- **Coordinator interruption (leader loss mid-sequence):** the durable job survives; the new
+  schema leader's `ResumeJobsAsync` re-drives the element to `Public` (re-running backfill
+  idempotently), or abandons the job after `MaxResumeAttempts` and logs loudly — never a column
+  or index left stuck in an intermediate state (§8.2).
 - **Two-version gate timeout:** if a live node never acks `FromVersion`/`ToVersion` within
   `SchemaAckWaitTimeout`, the DDL throws. With the infinite live-node lease this is also how
-  a dead-but-un-evicted member surfaces (a DS11 test target).
+  a dead-but-un-evicted member surfaces.
 
 ---
 
-## 11. End-to-end example: `ALTER TABLE robots ADD COLUMN age INT` on a 3-node cluster
+## 11. End-to-end example: `ALTER TABLE robots ADD COLUMN age INT DEFAULT 0` on a 3-node cluster
+
+This is the full staged path: a follower forwards to the leader, and the coordinator drives
+three adjacent deltas (`DeleteOnly → WriteOnly → [backfill] → Public`), gating on the cluster
+ack between each.
 
 ```
 Client → Node B (a follower)
   CommandExecutor.AlterTable
     TryForwardAlterTableAsync: B is not the schema leader for `mydb`
-      → forward ticket to leader Node A via ISchemaDdlForwarder
-      → await forwarded apply locally, return
+      → operationId = G; HttpSchemaDdlForwarder POSTs the ticket to leader A's /internal/schema-ddl
+      → SchemaDdlForwardController on A: leader-check ✔, DdlOperationIdCache.TryGetOrReserve(G) ✔
+      → A executes the DDL as leader (below); B awaits the result and returns it to the client
 
-Node A (schema leader)
-  ExecuteDdlInTransaction (holds SchemaDdlSemaphore, opens tx)
-    AlterTableReplicatedAsync
-      under Schema.Semaphore: build entry {From: 7, To: 8, AddColumn age(id=X), Public}
-                              ValidateSchemaDelta on a clone → ok
-      ReplicateAndWaitLocalApplyAsync:
-        1. WaitForPreviousVersionAcks(7): A, B, C all already applied v7 ✔
-        2. ReplicateSchemaChangeAsync:
-             Raft propose (partition = hash("mydb/meta"), not 0)
-             Raft commit (quorum)
-             InvokeLocalSchemaApply on A  → ApplyAsync: mutate in-memory, ack v8 (no persist)
-           (B and C receive via OnReplicationReceived → ApplyAsync → mutate in-memory, ack v8)
-        3. spin until A.SchemaVersion >= 8 && column age present ✔
-        4. persist checkpoint (A, proposer context — outside the partition pipeline)
-        5. WaitForSchemaAcks(8): A, B, C all acked v8 ✔
-    commit tx, release semaphore
+Node A (schema leader): ExecuteClusterAddColumnAsync (holds SchemaDdlSemaphore)
+  coordinator = new SchemaChangeCoordinator; coordinator.BackfillAsync = BackfillColumnDefaultsAsync
+  RunJobAsync(job{ robots, age, kind=Column, target=Public }, columnDefinition=age INT DEFAULT 0)
+    current = Absent;  path = [DeleteOnly, WriteOnly, Public]
+    PersistCoordinatorJob(attempt 0)                         // durable, for leader-change resume
+
+    ── step 1: Absent → DeleteOnly ──
+      ReplicateAddColumnInStateAsync(age, DeleteOnly)
+        entry {From: 7, To: 8, AddColumn age(id=X), DeleteOnly}; ValidateSchemaDelta(clone) ✔
+        ReplicateAndWaitLocalApplyAsync: ack-gate v7 → Raft propose+commit (partition=hash("mydb/meta"))
+          → InvokeLocalSchemaApply on A; B,C via OnReplicationReceived → ApplyAsync (in-memory, ack v8)
+          → spin until A.SchemaVersion ≥ 8 → persist checkpoint (proposer ctx) → WaitForSchemaAcks(8) ✔
+
+    ── step 2: DeleteOnly → WriteOnly ──
+      ReplicateElementStateAsync(age, WriteOnly, Column)     // SetElementState; v8 → v9, ack-gated
+
+    ── backfill (current==WriteOnly, next==Public) ──
+      BackfillColumnDefaultsAsync: re-encode existing rows so `age = 0` is physically stored
+        (committed in its own txn, before age becomes readable)
+
+    ── step 3: WriteOnly → Public ──
+      ReplicateElementStateAsync(age, Public, Column)        // v9 → v10, ack-gated
+
+    DeleteCoordinatorJob                                     // reached target → durable job removed
   return success → forwarded back to B → back to client
 ```
 
-After this returns, every node has `age` at `Public`, schema version 8, and the column's
-immutable id `X` baked identically everywhere. Existing rows (written at v7) decode with
-the v7 layout but are read with v8 visibility: `age` reads as absent/null until updated.
+After this returns, every node has `age` at `Public`, the column's immutable id `X` baked
+identically everywhere, and the database schema version advanced by three (one per delta). The
+two-version gate guarantees no node was ever more than one version behind during the sequence.
+Rows that existed before the change were physically backfilled to `age = 0` during the
+`WriteOnly` window (so the value is materialized, not only injected at read time); rows still
+on an older layout decode with their own version and read `age` with current visibility.
+
+> If A had crashed after, say, the `WriteOnly` ack but before `Public`, the durable job survives:
+> whichever node wins schema leadership runs `ResumeJobsAsync`, recomputes the remaining path
+> (`[Public]`), re-runs the (idempotent) backfill, and drives `age` to `Public` — the client's
+> forwarded call either gets the completed result or a typed error that re-forwards to the new
+> leader (dedup by `operationId`).
 
 ---
 
@@ -570,39 +849,75 @@ the v7 layout but are read with v8 visibility: `age` reads as absent/null until 
 5. **The two-version gate is checked *before proposing*** the next change.
 6. **Row bytes are positional and ID-keyed.** Names are metadata; renames never rewrite data.
 7. **Decode layout = row's version; decode visibility = current/pinned version.**
-8. **No element may be left in a non-`Public` state** until the staged coordinator drives it
-   to completion; treat any pre-existing non-`Public` element as `Public` on load as a safety
-   net.
+8. **An add must reach `Public` via the coordinator, or be compensated/resumed** — it begins in
+   `DeleteOnly` and is driven through `WriteOnly → [backfill] → Public` with the ack gate
+   between steps. A failed add is compensated (`DropIndex` / rollback); an interrupted one is
+   resumed by the next leader. Still treat any pre-existing non-`Public` element as `Public` on
+   load as a safety net for legacy data.
+9. **Index state changes do NOT bump `TableSchema.Version`** (indexes aren't in the row layout),
+   but they DO advance the database `SchemaVersion` chain. After a `SetElementState(Index)`,
+   evict the cached `TableDescriptor` so DML rebuilds with the new index state.
+10. **Index backfill writes must be idempotent** (`PutIndexEntry(backfillMode: true)`): a resume
+    re-runs the backfill, and re-indexing the same `(key → rowId)` must be a no-op, not a
+    duplicate-key error.
+11. **A forwarded DDL is applied at most once**: forward with a stable `operationId` and dedup
+    on the leader (`DdlOperationIdCache`) so a lost-response retry never double-bumps the
+    schema version.
 
 ---
 
 ## 13. Where to look next
 
-- Tests that double as executable documentation:
-  - `CamusDB.Tests/Storage/TestRowEncoder.cs` — positional encode/decode, visibility,
-    history layout, drop+re-add identity.
-  - `CamusDB.Tests/Storage/TestKvTableStore.cs` — scan ordering + `afterRowId` resume.
-  - `CamusDB.Tests/Catalogs/TestSchemaReplicator.cs`, `TestEmbeddedKahuna.cs` — ack gate,
-    leader/follower apply, follower forwarding.
-  - `CamusDB.Tests/CommandsExecutor/TestTableAlterer.cs` — online index add + backfill.
-  - `CamusDB.Tests/CommandsExecutor/TestPersistentIndexSchema.cs` — B1 index persist →
-    reopen → deserialize round-trip; new path stands alone with `SystemSchema` cleared.
-  - `CamusDB.Tests/Cluster/InProcessSchemaCluster.cs` — N distinct-node fixture with
-    ack-based convergence await and fault injection (pause/kill/force-leader);
-    `TestInProcessSchemaCluster.cs` — cluster create-table + B2 `ADD/DROP INDEX` convergence.
-  - `CamusDB.Tests/Cluster/TestMultiPartitionRouting.cs` — partition routing.
+### Tests that double as executable documentation
 
-### Key carry-forwards still open
+- `CamusDB.Tests/Storage/TestRowEncoder.cs` — positional encode/decode, visibility,
+  history layout, drop+re-add identity.
+- `CamusDB.Tests/Storage/TestKvTableStore.cs` — scan ordering + `afterRowId` resume.
+- `CamusDB.Tests/Storage/TestEmbeddedKahuna.cs` — ack gate, Raft-sourced live membership,
+  leader/follower apply.
+- `CamusDB.Tests/Catalogs/TestSchemaReplicator.cs` — apply ordering, idempotency, descriptor
+  eviction.
+- `CamusDB.Tests/CommandsExecutor/TestTableAlterer.cs` — online index add + backfill (local).
+- `CamusDB.Tests/CommandsExecutor/TestClusterAddColumn.cs` — coordinator-driven staged
+  `AddColumn` across nodes, including physical backfill materialization.
+- `CamusDB.Tests/CommandsExecutor/TestPersistentIndexSchema.cs` — index persist → reopen →
+  deserialize round-trip; the new path stands alone with `SystemSchema` cleared.
+- `CamusDB.Tests/Cluster/InProcessSchemaCluster.cs` — N distinct-node fixture with real Raft,
+  ack-based convergence await, and fault injection (pause/kill/force-leader);
+  `TestInProcessSchemaCluster.cs` — cluster create-table, paused-node catch-up, force-leader-
+  change convergence, and staged `ADD/DROP INDEX` + column-backfill convergence.
+- `CamusDB.Tests/Cluster/TestMultiPartitionRouting.cs` — partition routing.
 
-- **DS5R:** rename ops (`RenameTable`/`RenameIndex`/`RenameColumn`) end-to-end.
-- **DS5 / Workstream C:** production follower→leader DDL forwarder + endpoint map +
-  idempotent retries (the in-process `ISchemaReplicationForwarder` is test-only).
-- **DS7 coordinator / Workstream D:** drive staged `SetElementState` sequences with the ack
-  gate between each (so `AddColumn`/`ADD INDEX` go through `DeleteOnly → WriteOnly → Public`
-  with concurrent-write safety and crash-resumable backfill); auto-retry on schema-version
-  conflict. B2 replicates indexes but still backfills-then-publishes (not staged).
-- **Workstream E/F:** replace the in-process static `SchemaAckTracker` with real
-  heartbeat/membership before enabling timed lease expiry; make schema-log replay
-  authoritative on restart + a richer checkpoint-persist-failure policy.
-- **Index cleanup:** `SystemSchema` index storage is now read-only legacy; remove it once all
-  databases are known to be migrated.
+### Known limitations & future work
+
+- **Renames.** `RenameTable`/`RenameIndex`/`RenameColumn` are not yet implemented. They should
+  be metadata-only (mutate `Name`, leave the immutable `Id` so no rows/indexes move) and drain
+  old names across the two-version window. The positional/ID-keyed encoding (§7.4) already makes
+  the data side free.
+- **Membership heartbeat.** The ack-gate live set is sourced from Raft (§6.2), but the lease is
+  *apply-derived*, not a true heartbeat. Enabling timed lease expiry safely in production needs
+  a real heartbeat so an alive-but-idle node isn't falsely evicted. The `SchemaAckTracker` is
+  also process-`static`; a per-`EmbeddedKahuna` instance would model multi-node state honestly.
+- **Checkpoint persist-failure policy.** Define what a node does when it commits a delta in Raft
+  but cannot persist its KV checkpoint — retry-with-backoff then step-down/mark-unhealthy, never
+  ack an unpersisted version (§6.1, §10). The committed log remains the source of truth, so a
+  natural design is to make schema-log replay authoritative on restart.
+- **Backfill-resume test coverage.** The index backfill is checkpointed and resumable (§7.3), but
+  there is no test yet that interrupts a backfill mid-way, forces a leader change, and asserts the
+  resumed build is complete with no duplicate entries and actually started from the checkpoint.
+  A table large enough to span several `BackfillBatchSize` batches would exercise the cursor and
+  the unique read-back idempotency under a real resume.
+- **Index column-state validation on the cluster path.** `GetColumnIdsForIndex` validates that
+  index columns *exist* but not that they are `Public`; the single-node `TableIndexAdder.Validate`
+  additionally rejected a non-readable/non-writable column. The cluster add-index path should
+  apply the same guard so an index cannot be built over a column that is itself mid-add.
+- **Auto-retry on schema-version conflict.** A DML/read transaction whose pin is invalidated by a
+  concurrent `ALTER` currently fails (§9) rather than transparently retrying against the new
+  version.
+- **Staged `DROP INDEX`.** Drops are a single delta; an online-safe
+  `Public → WriteOnly → DeleteOnly → Absent` drop is a possible future refinement.
+- **Legacy index cleanup.** `SystemSchema` index storage is read-only legacy (§7.3); remove it
+  once all databases are known to be migrated.
+- **Broader failure-injection coverage.** The in-process harness supports concurrent DML during
+  ALTER, coordinator failover mid-sequence, node rejoin replay, dead-member lease, and persist-
+  failure recovery scenarios — worth expanding into a standing suite.

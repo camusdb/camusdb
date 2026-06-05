@@ -5,12 +5,16 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -220,6 +224,248 @@ internal sealed class TestPersistentIndexSchema : BaseTest
 
         Assert.AreEqual(5, rows.Count,
             "FORCE_INDEX on re-added unique index must return exactly 5 rows");
+    }
+
+    /// <summary>
+    /// <summary>
+    /// Proves that BackfillIndexEntriesAsync fires its onCheckpoint callback exactly once
+    /// when the row count crosses the BackfillBatchSize boundary (600 rows → 2 batches:
+    /// batch 1 = 500 rows + checkpoint, batch 2 = 100 rows + no checkpoint because the
+    /// scan returns fewer than BackfillBatchSize entries, signalling completion).
+    ///
+    /// Calls BackfillIndexEntriesAsync directly (bypassing the coordinator) so the
+    /// checkpoint batching logic is tested independent of the cluster DDL path.
+    /// The unique-index type exercises the backfill-mode idempotency read-back (NotSet
+    /// on SetIfNotExists → read back to confirm same rowId, not a genuine duplicate).
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task BackfillCheckpointFiresOnceForTwoBatches()
+    {
+        const int RowCount = 600;
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: TableName,
+            columns:
+            [
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64)
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            ],
+            ifNotExists: false
+        ));
+
+        for (int i = 0; i < RowCount; i++)
+        {
+            KvTransaction tx = await database.Transactions.BeginAsync();
+            await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                txnState: tx,
+                database: dbname,
+                sql: $"INSERT INTO {TableName} (id, name, year) VALUES (gen_id(), 'robot_{i:D5}', {2000 + i})",
+                parameters: null
+            ));
+            await database.Transactions.CommitAsync(tx);
+        }
+
+        // Resolve the 'name' column ID from the persisted schema so IndexBuildInfo is valid.
+        database.Schema.Tables.TryGetValue(TableName, out TableSchema? tableSchema);
+        string nameColId = tableSchema!.Columns!.First(c => c.Name == "name").Id!;
+
+        // Use a unique index to exercise the SetIfNotExists + read-back idempotency path.
+        IndexBuildInfo indexInfo = new(
+            IndexId: "000000000000000000000001",
+            IndexName: "name_backfill_test",
+            ColumnIds: [nameColId],
+            ColumnNames: ["name"],
+            IndexType: IndexType.Unique
+        );
+
+        // Track intermediate checkpoint fires and record a captured onCheckpoint offset
+        // to confirm the checkpoint write callback is also invoked.
+        int checkpointFires = 0;
+        string? capturedCheckpointOffset = null;
+        executor.TestInterceptAfterBackfillCheckpoint = () =>
+        {
+            Interlocked.Increment(ref checkpointFires);
+            return Task.CompletedTask;
+        };
+
+        try
+        {
+            // Call BackfillIndexEntriesAsync directly so we can supply our own onCheckpoint.
+            // This tests the batching + checkpoint logic without the full coordinator path.
+            await executor.BackfillIndexEntriesAsync(
+                database,
+                TableName,
+                indexInfo,
+                startOffset: null,
+                onCheckpoint: offset =>
+                {
+                    capturedCheckpointOffset = offset;
+                    return Task.CompletedTask;
+                }
+            );
+        }
+        finally
+        {
+            executor.TestInterceptAfterBackfillCheckpoint = null;
+        }
+
+        // Exactly one intermediate checkpoint: after batch 1 (500 rows). Batch 2 has
+        // 100 rows < BackfillBatchSize, so the loop exits with no further checkpoint.
+        Assert.AreEqual(1, checkpointFires,
+            "Expected exactly one intermediate checkpoint for 600 rows with batch size 500");
+
+        // The onCheckpoint callback must also have been called with a non-empty offset
+        // (this is the value that would be persisted to Kahuna for leader-change resume).
+        Assert.IsNotNull(capturedCheckpointOffset,
+            "onCheckpoint callback must be invoked with the last rowId of batch 1");
+        Assert.IsNotEmpty(capturedCheckpointOffset,
+            "Checkpoint offset must be a non-empty rowId string");
+    }
+
+    /// <summary>
+    /// Re-running the backfill over rows it already indexed must be a no-op, not a duplicate-key
+    /// error. This is the leader-change-resume safety net: the checkpoint advances only AFTER a
+    /// batch commits, so a crash in that window leaves a committed batch whose offset was never
+    /// recorded — on resume the backfill re-processes those rows. For a unique index each re-write
+    /// returns <c>NotSet</c>, and <c>backfillMode</c> reads the existing entry back: same rowId ⇒
+    /// idempotent skip (no throw). Running the backfill twice from the start reproduces exactly
+    /// that overlap and exercises the read-back skip arm for every row.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task UniqueIndexBackfillRerunIsIdempotent()
+    {
+        const int RowCount = 50;
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: TableName,
+            columns:
+            [
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true)
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            ],
+            ifNotExists: false
+        ));
+
+        for (int i = 0; i < RowCount; i++)
+        {
+            KvTransaction tx = await database.Transactions.BeginAsync();
+            await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                txnState: tx,
+                database: dbname,
+                sql: $"INSERT INTO {TableName} (id, name) VALUES (gen_id(), 'robot_{i:D5}')",
+                parameters: null
+            ));
+            await database.Transactions.CommitAsync(tx);
+        }
+
+        database.Schema.Tables.TryGetValue(TableName, out TableSchema? tableSchema);
+        string nameColId = tableSchema!.Columns!.First(c => c.Name == "name").Id!;
+
+        IndexBuildInfo indexInfo = new(
+            IndexId: "000000000000000000000001",
+            IndexName: "name_idempotent",
+            ColumnIds: [nameColId],
+            ColumnNames: ["name"],
+            IndexType: IndexType.Unique
+        );
+
+        // First pass: indexes all rows (every PutIndexEntry returns Set).
+        await executor.BackfillIndexEntriesAsync(database, TableName, indexInfo, startOffset: null);
+
+        // Second pass over the SAME rows: every key now exists, so each PutIndexEntry returns
+        // NotSet and backfillMode reads it back. Same rowId ⇒ skip. Must not throw.
+        Assert.DoesNotThrowAsync(
+            async () => await executor.BackfillIndexEntriesAsync(database, TableName, indexInfo, startOffset: null),
+            "Re-running the unique-index backfill over already-indexed rows must be idempotent (no DuplicateUniqueKeyValue)");
+
+        // The index must remain intact — exactly RowCount entries, no duplicates introduced.
+        TableDescriptor table = await executor.OpenTable(new OpenTableTicket(dbname, TableName));
+        KvTransaction scanTx = await database.Transactions.BeginAsync();
+        int entries = 0;
+        await foreach (var _ in table.Store.ScanIndex(
+            scanTx.TransactionId, indexInfo.IndexName, [ColumnType.String], from: null, to: null, unique: true))
+        {
+            entries++;
+        }
+        await database.Transactions.CommitAsync(scanTx);
+
+        Assert.AreEqual(RowCount, entries,
+            "The unique index must hold exactly one entry per row after a re-run (no duplicate entries)");
+    }
+
+    /// <summary>
+    /// The complementary arm of the <c>backfillMode</c> read-back: a *genuine* duplicate (two
+    /// distinct rows sharing the same unique-key value) must still be rejected. The read-back sees
+    /// a different rowId for the existing entry and throws <c>DuplicateUniqueKeyValue</c> — backfill
+    /// mode relaxes idempotent re-writes, not uniqueness itself.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task UniqueIndexBackfillRejectsGenuineDuplicate()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: TableName,
+            columns:
+            [
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true)
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            ],
+            ifNotExists: false
+        ));
+
+        // Two distinct rows (distinct rowIds) with the SAME name — a real uniqueness violation.
+        foreach (int _ in new[] { 1, 2 })
+        {
+            KvTransaction tx = await database.Transactions.BeginAsync();
+            await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                txnState: tx,
+                database: dbname,
+                sql: $"INSERT INTO {TableName} (id, name) VALUES (gen_id(), 'duplicate')",
+                parameters: null
+            ));
+            await database.Transactions.CommitAsync(tx);
+        }
+
+        database.Schema.Tables.TryGetValue(TableName, out TableSchema? tableSchema);
+        string nameColId = tableSchema!.Columns!.First(c => c.Name == "name").Id!;
+
+        IndexBuildInfo indexInfo = new(
+            IndexId: "000000000000000000000002",
+            IndexName: "name_dup_reject",
+            ColumnIds: [nameColId],
+            ColumnNames: ["name"],
+            IndexType: IndexType.Unique
+        );
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await executor.BackfillIndexEntriesAsync(database, TableName, indexInfo, startOffset: null),
+            "A unique-index backfill over genuinely duplicate values must throw");
+        Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, ex!.Code,
+            "The rejection must be a DuplicateUniqueKeyValue (different rowId for the same key)");
     }
 
     /// <summary>

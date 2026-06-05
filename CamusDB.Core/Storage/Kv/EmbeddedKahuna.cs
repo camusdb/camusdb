@@ -212,6 +212,17 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     }
 
     /// <summary>
+    /// Voluntarily steps down from schema-partition leadership for <paramref name="db"/>.
+    /// The node remains online as a follower and can vote in the next election.
+    /// Called on F1a persist exhaustion so a healthy peer can take over.
+    /// </summary>
+    public async Task StepDownSchemaPartitionAsync(string db, CancellationToken cancellationToken = default)
+    {
+        int partitionId = SchemaLogPartition(db);
+        await Raft.StepDownAsync(partitionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Replicates a serialized <see cref="Catalogs.Models.SchemaChangeLogEntry"/> for a database.
     /// If this node is the schema leader it proposes → commits → fans the entry out to local
     /// apply subscribers (<c>autoCommit: false</c> so apply runs only after the quorum commit).

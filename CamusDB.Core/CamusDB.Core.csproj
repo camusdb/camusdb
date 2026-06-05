@@ -71,8 +71,8 @@
   </ItemGroup>
   
   <ItemGroup>
-    <PackageReference Include="Kahuna.Core" Version="0.1.17" />
-    <PackageReference Include="Kahuna.Shared" Version="0.1.11" />
+    <PackageReference Include="Kahuna.Core" Version="0.1.18" />
+    <PackageReference Include="Kahuna.Shared" Version="0.1.12" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.16" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
