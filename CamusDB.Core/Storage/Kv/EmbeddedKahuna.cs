@@ -45,6 +45,34 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     private readonly List<SchemaApplySubscription> schemaSubscriptions = new();
     private ISchemaReplicationForwarder? schemaReplicationForwarder;
 
+    // F1b late-subscriber buffer: WAL restore events (OnLogRestored / OnRestoreFinished) fire
+    // during Raft.StartAsync() — before any OpenDatabase → RegisterSchemaApply call registers
+    // a subscriber. To deliver those events to late subscribers, we buffer schema-log entries
+    // per-partition until the first RegisterSchemaApply call for that partition consumes them.
+    //
+    // Correctness assumption: OnRestoreFinished fires synchronously within StartAsync so that
+    // WaitForLeaderAsync (which follows StartAsync) returns only after all partitions are fully
+    // restored. OpenDatabase is always called after WaitForLeaderAsync, so by the time
+    // RegisterSchemaApply runs, _walRestoreCompletedPartitions already contains the partition.
+    // If restore were ever made async-after-StartAsync, a subscriber registered mid-restore
+    // would find alreadyCompleted==false, the already-buffered early entries would never replay,
+    // and RestoreAsync's gap check would throw loudly rather than silently diverge.
+    //
+    // Drain-once invariant: _walRestoreDrainedPartitions prevents a second open of the same
+    // database from re-firing onRestoreFinished (and thus PersistFullSchemaCheckpointAsync) on
+    // an already-current checkpoint. Without it alreadyCompleted stays true forever (the set is
+    // never cleared), so every OpenDatabase would trigger a needless full re-persist.
+    //
+    // Thread safety: all reads/writes protected by _walRestoreBufferLock.
+    // Concurrency note: between buffer replay entries the schema semaphore is released, so a
+    // live OnReplicationReceived delta could interleave. Both ApplyAsync and RestoreAsync are
+    // idempotent for already-applied versions, so the worst-case outcome is a benign skip or
+    // a loud "out of order" throw rather than silent corruption.
+    private readonly object _walRestoreBufferLock = new();
+    private readonly Dictionary<int, List<byte[]>> _walRestoreBuffer = new();
+    private readonly HashSet<int> _walRestoreCompletedPartitions = new();
+    private readonly HashSet<int> _walRestoreDrainedPartitions = new();
+
     /// <summary>
     /// The Kahuna KV API. Used by KvTableStore and the transaction layer.
     /// </summary>
@@ -74,6 +102,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(options);
         node = new EmbeddedKahunaNode(options, loggerFactory);
         isClusterMode = false;
+        WireWalRestoreBuffer();
     }
 
     /// <summary>
@@ -90,6 +119,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(options);
         node = new EmbeddedKahunaNode(options, interNode, raftComm, discovery, loggerFactory);
         isClusterMode = true;
+        WireWalRestoreBuffer();
     }
 
     /// <summary>
@@ -212,6 +242,15 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     }
 
     /// <summary>
+    /// Returns the current leader endpoint for <paramref name="partitionId"/>, waiting up to
+    /// the Raft election timeout if no leader is currently elected.
+    /// </summary>
+    public async ValueTask<string> GetPartitionLeaderAsync(int partitionId, CancellationToken cancellationToken = default)
+    {
+        return await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Voluntarily steps down from schema-partition leadership for <paramref name="db"/>.
     /// The node remains online as a follower and can vote in the next election.
     /// Called on F1a persist exhaustion so a healthy peer can take over.
@@ -220,6 +259,56 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     {
         int partitionId = SchemaLogPartition(db);
         await Raft.StepDownAsync(partitionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Transfers schema-partition leadership for <paramref name="db"/> to <paramref name="targetEndpoint"/>.
+    /// The local node must currently be the leader and the target must have an up-to-date log.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public async Task TransferSchemaLeadershipAsync(
+        string db,
+        string targetEndpoint,
+        CancellationToken cancellationToken = default)
+    {
+        int partitionId = SchemaLogPartition(db);
+        await Raft.TransferLeadershipAsync(partitionId, targetEndpoint, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Suspends outbound heartbeats for the schema partition of <paramref name="db"/>.
+    /// Followers will time out and elect a new leader. Used in fault-injection tests.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public async Task SuspendSchemaHeartbeatsAsync(string db, CancellationToken cancellationToken = default)
+    {
+        int partitionId = SchemaLogPartition(db);
+        await Raft.SuspendHeartbeatsAsync(partitionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Resumes outbound heartbeats for the schema partition of <paramref name="db"/>.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public async Task ResumeSchemaHeartbeatsAsync(string db, CancellationToken cancellationToken = default)
+    {
+        int partitionId = SchemaLogPartition(db);
+        await Raft.ResumeHeartbeatsAsync(partitionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Waits until the schema partition for <paramref name="db"/> has had a stable leader
+    /// for at least <paramref name="minStableFor"/>. Useful after a forced step-down or
+    /// leadership transfer to confirm the cluster has re-stabilized.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public async ValueTask<string> WaitForSchemaLeaderStableAsync(
+        string db,
+        TimeSpan minStableFor,
+        CancellationToken cancellationToken = default)
+    {
+        int partitionId = SchemaLogPartition(db);
+        return await Raft.WaitForLeaderStableAsync(partitionId, minStableFor, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -340,36 +429,181 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
     public IDisposable RegisterSchemaApply(
         Func<int, byte[], Task<bool>> onApply,
-        Func<int, byte[], Task<bool>> onRestore
+        Func<int, byte[], Task<bool>> onRestore,
+        string? db = null,
+        Func<Task>? onRestoreFinished = null
     )
     {
         ArgumentNullException.ThrowIfNull(onApply);
         ArgumentNullException.ThrowIfNull(onRestore);
 
-        Func<int, RaftLog, Task<bool>> applyHandler = (partitionId, log) =>
+        // Call onApply / onRestore directly rather than via Task.Run. Kommander awaits
+        // the returned Task from its Raft state machine thread (a Nixie actor thread that is
+        // already a thread pool thread). Dispatching another Task.Run from that context adds
+        // a redundant thread pool hop and causes starvation when many partitions commit
+        // concurrently: all state machines block waiting for Task.Run slots that other
+        // blocked state machines are consuming, matching the thread pool injector rate (~1/s).
+        // Calling inline is safe because onApply/onRestore are async and yield on their own
+        // internal awaits (semaphores, KV writes) without ever blocking the thread pool.
+        Func<int, RaftLog, Task<bool>> applyHandler = async (partitionId, log) =>
         {
             if (log.LogType != SchemaChangeLogType)
-                return Task.FromResult(true);
+                return true;
 
-            return Task.Run(() => onApply(partitionId, log.LogData ?? []));
+            return await onApply(partitionId, log.LogData ?? []).ConfigureAwait(false);
         };
 
-        Func<int, RaftLog, Task<bool>> restoreHandler = (partitionId, log) =>
+        Func<int, RaftLog, Task<bool>> restoreHandler = async (partitionId, log) =>
         {
             if (log.LogType != SchemaChangeLogType)
-                return Task.FromResult(true);
+                return true;
 
-            return Task.Run(() => onRestore(partitionId, log.LogData ?? []));
+            return await onRestore(partitionId, log.LogData ?? []).ConfigureAwait(false);
         };
 
         Raft.OnReplicationReceived += applyHandler;
         Raft.OnLogRestored += restoreHandler;
 
-        SchemaApplySubscription subscription = new(this, Raft, applyHandler, restoreHandler);
+        // Wire the restore-finished callback. Two cases:
+        //
+        // A) Restore not yet complete when we subscribe (mid-restore or pre-restore):
+        //    The subscriber's OnLogRestored handler receives live entries as they arrive.
+        //    When restore completes, OnRestoreFinished fires → drain any entries that were
+        //    buffered before this subscriber registered (mid-restore early entries), replay
+        //    them, then call onRestoreFinished. Drain-once guard prevents a second open from
+        //    re-firing onRestoreFinished on an already-current checkpoint.
+        //
+        // B) Restore already complete when we subscribe (post-StartAsync open, the common case):
+        //    Handled below after subscription registration — drain buffer + fire callback there.
+        Action<int>? restoreFinishedHandler = null;
+        if (onRestoreFinished is not null && db is not null)
+        {
+            int schemaPartition = SchemaLogPartition(db);
+            restoreFinishedHandler = (partitionId) =>
+            {
+                if (partitionId != schemaPartition)
+                    return;
+
+                // Drain buffered entries that arrived before this subscriber registered
+                // (mid-restore case: subscriber saw only the tail via OnLogRestored).
+                List<byte[]>? buffered;
+                bool shouldFire;
+                lock (_walRestoreBufferLock)
+                {
+                    shouldFire = !_walRestoreDrainedPartitions.Contains(schemaPartition);
+                    if (shouldFire)
+                    {
+                        _walRestoreBuffer.TryGetValue(schemaPartition, out buffered);
+                        _walRestoreBuffer.Remove(schemaPartition);
+                        _walRestoreDrainedPartitions.Add(schemaPartition);
+                    }
+                    else
+                    {
+                        buffered = null;
+                    }
+                }
+
+                if (!shouldFire)
+                    return;
+
+                _ = Task.Run(async () =>
+                {
+                    if (buffered is not null)
+                        foreach (byte[] entry in buffered)
+                            await onRestore(schemaPartition, entry).ConfigureAwait(false);
+                    await onRestoreFinished().ConfigureAwait(false);
+                });
+            };
+            Raft.OnRestoreFinished += restoreFinishedHandler;
+        }
+
+        SchemaApplySubscription subscription = new(this, Raft, applyHandler, restoreHandler, restoreFinishedHandler);
         lock (schemaSubscriptionsSync)
             schemaSubscriptions.Add(subscription);
 
+        // F1b late-subscriber replay (case B): if the schema partition's WAL restore already
+        // completed before this subscriber registered (the common cluster startup order where
+        // OpenDatabase runs after WaitForLeaderAsync), drain the buffer and fire onRestoreFinished
+        // so the subscriber catches up to the WAL head.
+        // Drain-once guard: if a previous open already consumed this partition's buffer, skip.
+        if (db is not null)
+        {
+            int schemaPartition = SchemaLogPartition(db);
+            List<byte[]>? buffered;
+            bool shouldDrain;
+            lock (_walRestoreBufferLock)
+            {
+                shouldDrain = _walRestoreCompletedPartitions.Contains(schemaPartition) &&
+                              !_walRestoreDrainedPartitions.Contains(schemaPartition);
+                if (shouldDrain)
+                {
+                    _walRestoreBuffer.TryGetValue(schemaPartition, out buffered);
+                    _walRestoreBuffer.Remove(schemaPartition);
+                    _walRestoreDrainedPartitions.Add(schemaPartition);
+                }
+                else
+                {
+                    buffered = null;
+                }
+            }
+
+            if (shouldDrain)
+            {
+                // Replay buffered WAL restore entries then fire restore-finished.  Runs on a
+                // separate task so RegisterSchemaApply returns promptly and the caller (e.g.
+                // DatabaseOpener.LoadDatabase) can proceed.  The schema semaphore inside
+                // RestoreAsync serialises each entry; a concurrent live OnReplicationReceived
+                // delta that interleaves is handled by ApplyAsync's idempotency checks
+                // (benign skip or loud "out of order" throw — not silent corruption).
+                _ = Task.Run(async () =>
+                {
+                    if (buffered is not null)
+                        foreach (byte[] entry in buffered)
+                            await onRestore(schemaPartition, entry).ConfigureAwait(false);
+
+                    if (onRestoreFinished is not null)
+                        await onRestoreFinished().ConfigureAwait(false);
+                });
+            }
+        }
+
         return subscription;
+    }
+
+    /// <summary>
+    /// Subscribes internal buffer handlers so that schema-log WAL restore entries that fire
+    /// before any <see cref="RegisterSchemaApply"/> subscriber is registered are captured and
+    /// replayed to the late subscriber by <see cref="RegisterSchemaApply"/>. Called once from
+    /// each constructor immediately after the <see cref="EmbeddedKahunaNode"/> is created.
+    /// </summary>
+    private void WireWalRestoreBuffer()
+    {
+        Raft.OnLogRestored += (partitionId, log) =>
+        {
+            if (log.LogType != SchemaChangeLogType || log.LogData is null)
+                return Task.FromResult(true);
+
+            lock (_walRestoreBufferLock)
+            {
+                // Stop buffering once a subscriber has already drained this partition
+                // (_walRestoreDrainedPartitions is set when the buffer is consumed).
+                if (_walRestoreDrainedPartitions.Contains(partitionId))
+                    return Task.FromResult(true);
+
+                if (!_walRestoreBuffer.TryGetValue(partitionId, out List<byte[]>? list))
+                    _walRestoreBuffer[partitionId] = list = new();
+
+                list.Add(log.LogData);
+            }
+
+            return Task.FromResult(true);
+        };
+
+        Raft.OnRestoreFinished += (partitionId) =>
+        {
+            lock (_walRestoreBufferLock)
+                _walRestoreCompletedPartitions.Add(partitionId);
+        };
     }
 
     public ValueTask DisposeAsync() => node.DisposeAsync();
@@ -463,19 +697,22 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         private readonly IRaft raft;
         private readonly Func<int, RaftLog, Task<bool>> applyHandler;
         private readonly Func<int, RaftLog, Task<bool>> restoreHandler;
+        private readonly Action<int>? restoreFinishedHandler;
         private bool disposed;
 
         public SchemaApplySubscription(
             EmbeddedKahuna owner,
             IRaft raft,
             Func<int, RaftLog, Task<bool>> applyHandler,
-            Func<int, RaftLog, Task<bool>> restoreHandler
+            Func<int, RaftLog, Task<bool>> restoreHandler,
+            Action<int>? restoreFinishedHandler = null
         )
         {
             this.owner = owner;
             this.raft = raft;
             this.applyHandler = applyHandler;
             this.restoreHandler = restoreHandler;
+            this.restoreFinishedHandler = restoreFinishedHandler;
         }
 
         public Task<bool> Apply(int partitionId, byte[] entry)
@@ -490,6 +727,8 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             owner.RemoveSchemaSubscription(this);
             raft.OnReplicationReceived -= applyHandler;
             raft.OnLogRestored -= restoreHandler;
+            if (restoreFinishedHandler is not null)
+                raft.OnRestoreFinished -= restoreFinishedHandler;
         }
     }
 

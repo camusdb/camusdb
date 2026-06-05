@@ -55,7 +55,8 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         int nodeCount = 3,
         int partitions = 1,
         ILoggerFactory? loggerFactory = null,
-        ILogger<ICamusDB>? logger = null
+        ILogger<ICamusDB>? logger = null,
+        bool wireLeaderForwarder = false
     )
     {
         if (nodeCount < 1)
@@ -128,6 +129,13 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 continue;
             }
 
+            // DS10.5: opt-in forwarder that routes a follower's DDL ticket to the current schema
+            // leader node. Shared across nodes (it resolves the leader dynamically); only
+            // followers invoke it (the leader handles DDL locally). Off by default so the rest of
+            // the suite keeps the "follower DDL throws leader-required" behaviour that
+            // RunOnSchemaLeaderAsync relies on.
+            ClusterLeaderForwarder? forwarder = wireLeaderForwarder ? new ClusterLeaderForwarder() : null;
+
             Node[] nodes = kahunaNodes
                 .Select((kahuna, index) =>
                 {
@@ -138,15 +146,43 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                         catalogs,
                         logger,
                         loggerFactory: loggerFactory,
-                        clusterNode: kahuna
+                        clusterNode: kahuna,
+                        schemaDdlForwarder: forwarder
                     );
 
                     return new Node(index, kahuna, executor);
                 })
                 .ToArray();
 
-            return new(nodes, faultComm);
+            InProcessSchemaCluster cluster = new(nodes, faultComm);
+            if (forwarder is not null)
+                forwarder.Cluster = cluster;
+            return cluster;
         }
+    }
+
+    // DS10.5: in-process equivalent of HttpSchemaDdlForwarder — re-runs a forwarded DDL ticket on
+    // the current schema-leader node's executor (the normal leader replicated path) and returns
+    // its applied result. No HTTP, no op-id dedup (tests don't retry); the leader executor's own
+    // AmISchemaLeader check prevents any re-forward loop.
+    private sealed class ClusterLeaderForwarder : ISchemaDdlForwarder
+    {
+        public InProcessSchemaCluster? Cluster;
+
+        private async Task<Node> LeaderAsync(string db)
+            => await Cluster!.WaitForSchemaLeaderNodeAsync(db).ConfigureAwait(false);
+
+        public async Task<bool?> ForwardCreateTableAsync(string leader, CreateTableTicket ticket, string operationId, CancellationToken ct)
+            => (await (await LeaderAsync(ticket.DatabaseName)).Executor.CreateTable(ticket).ConfigureAwait(false)).Success;
+
+        public async Task<bool?> ForwardAlterTableAsync(string leader, AlterTableTicket ticket, string operationId, CancellationToken ct)
+            => await (await LeaderAsync(ticket.DatabaseName)).Executor.AlterTable(ticket).ConfigureAwait(false);
+
+        public async Task<bool?> ForwardAlterIndexAsync(string leader, AlterIndexTicket ticket, string operationId, CancellationToken ct)
+            => await (await LeaderAsync(ticket.DatabaseName)).Executor.AlterIndex(ticket).ConfigureAwait(false);
+
+        public async Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, string operationId, CancellationToken ct)
+            => await (await LeaderAsync(ticket.DatabaseName)).Executor.DropTable(ticket).ConfigureAwait(false);
     }
 
     public string NextSchemaLogDatabaseName()
@@ -206,7 +242,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         TimeSpan? timeout = null
     )
     {
-        TimeSpan waitTimeout = timeout ?? TimeSpan.FromSeconds(5);
+        TimeSpan waitTimeout = timeout ?? TimeSpan.FromSeconds(10);
         bool acked = await Nodes[0].Kahuna.WaitForSchemaAcksAsync(
             databaseName,
             version,
@@ -335,12 +371,11 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     }
 
     /// <summary>
-    /// Makes <paramref name="targetNode"/> start an immediate election for the schema-log
-    /// partition of <paramref name="databaseName"/>.  Waits until that node has actually
-    /// become the schema leader.  Because Raft log-freshness rules still apply the node must
-    /// have an up-to-date log (call after schema convergence to guarantee this).
-    /// No transport blocking — the previous leader steps down gracefully and all nodes
-    /// remain live, so the cluster stays stable.
+    /// Transfers schema-log leadership for <paramref name="databaseName"/> to
+    /// <paramref name="targetNode"/> and waits until that node has actually become the
+    /// schema leader.  Uses Kommander's <c>TransferLeadershipAsync</c> so the current leader
+    /// actively hands off rather than the target campaigning via a forced election.
+    /// All nodes remain live; no transport blocking.
     /// </summary>
     public async Task TransferSchemaLeadershipAsync(
         string databaseName,
@@ -349,10 +384,16 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     {
         TimeSpan searchTimeout = timeout ?? TimeSpan.FromSeconds(15);
 
-        await targetNode.Kahuna.ForceSchemaLeaderForTestingAsync(databaseName, CancellationToken.None)
+        Node currentLeader = await WaitForSchemaLeaderNodeAsync(databaseName, searchTimeout).ConfigureAwait(false);
+        string targetEndpoint = targetNode.Kahuna.Raft.GetLocalEndpoint();
+
+        if (currentLeader.Index == targetNode.Index)
+            return; // already there
+
+        await currentLeader.Kahuna.TransferSchemaLeadershipAsync(databaseName, targetEndpoint, CancellationToken.None)
             .ConfigureAwait(false);
 
-        // Wait until the target node has won the election.
+        // Wait until the target node has won the transfer.
         DateTime deadline = DateTime.UtcNow.Add(searchTimeout);
         while (DateTime.UtcNow < deadline)
         {

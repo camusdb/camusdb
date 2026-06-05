@@ -1173,6 +1173,54 @@ public sealed class CatalogsManager
         await DeleteMetaKey(kahuna, tx, TableKey(database.Name, tableId)).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Re-persists the complete in-memory schema (all live tables + current version) in a
+    /// single KV transaction. Called by F1b after log replay completes (<c>OnRestoreFinished</c>)
+    /// to bring the on-disk checkpoint up to the committed head. Respects
+    /// <see cref="TestPersistCheckpointException"/> so F1a fault-injection tests are not
+    /// accidentally fired here.
+    /// </summary>
+    public async Task PersistFullSchemaCheckpointAsync(DatabaseDescriptor database)
+    {
+        if (TestPersistCheckpointException is { } fault)
+            throw fault;
+
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        long schemaVersion = database.Schema.SchemaVersion;
+
+        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        try
+        {
+            byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
+            await WriteMetaKey(kahuna, tx, VersionKey(database.Name), versionBytes).ConfigureAwait(false);
+
+            foreach (TableSchema table in database.Schema.Tables.Values)
+            {
+                if (string.IsNullOrWhiteSpace(table.Id))
+                    continue;
+
+                byte[] tableBytes = MetaJsonSerializer.Serialize(WithoutHistory(table), MetaJsonContext.Default.TableSchema);
+                await WriteMetaKey(kahuna, tx, TableKey(database.Name, table.Id), tableBytes).ConfigureAwait(false);
+
+                if (table.SchemaHistory is not null)
+                {
+                    TableSchemaHistory? current = table.SchemaHistory.FirstOrDefault(x => x.Version == table.Version);
+                    if (current is not null)
+                    {
+                        byte[] historyBytes = MetaJsonSerializer.Serialize(current, MetaJsonContext.Default.TableSchemaHistory);
+                        await WriteMetaKey(kahuna, tx, HistoryKey(database.Name, table.Id, current.Version), historyBytes).ConfigureAwait(false);
+                    }
+                }
+            }
+
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Coordinator job persistence (D2)
     // -----------------------------------------------------------------------

@@ -27,7 +27,16 @@ namespace CamusDB.Core.Catalogs;
 /// the committed schema log is the source of truth and the checkpoint is a load-time
 /// optimization. Acks (per node, per database) are recorded only after a delta is actually
 /// applied — they drive the two-version invariant gate in <see cref="SchemaAckTracker"/>.
-/// See <c>docs/distributed-schema-architecture.md</c> §6.
+///
+/// F1b (restart-replay durability): <see cref="OnSchemaRestoreFinishedAsync"/> re-persists the
+/// KV checkpoint after WAL replay so a node whose checkpoint was behind (F1a persist exhaustion)
+/// recovers without manual intervention. The callback reaches <see cref="OnSchemaRestoreFinishedAsync"/>
+/// via <see cref="EmbeddedKahuna.RegisterSchemaApply"/>'s late-subscriber buffer: Raft WAL restore
+/// fires <c>OnLogRestored</c>/<c>OnRestoreFinished</c> during <c>StartAsync</c> before any
+/// <c>OpenDatabase</c> subscriber exists; <see cref="EmbeddedKahuna"/> buffers those entries and
+/// replays them to the first <c>RegisterSchemaApply</c> caller for that partition, so
+/// <see cref="OnSchemaRestoreFinishedAsync"/> always fires after the schema is at the WAL head.
+/// See <c>docs/distributed-schema-architecture.md</c> §6, §F1b.
 /// </summary>
 public sealed class SchemaReplicator
 {
@@ -49,7 +58,9 @@ public sealed class SchemaReplicator
 
         IDisposable applySubscription = database.Kahuna.RegisterSchemaApply(
             (partitionId, bytes) => ApplyAsync(database, partitionId, bytes),
-            (_, bytes) => RestoreAsync(database, bytes)
+            (_, bytes) => RestoreAsync(database, bytes),
+            db: database.Name,
+            onRestoreFinished: () => OnSchemaRestoreFinishedAsync(database)
         );
 
         IDisposable? leaderSubscription = coordinator is not null
@@ -180,6 +191,44 @@ public sealed class SchemaReplicator
         }
     }
 
+    /// <summary>
+    /// Fired after WAL restore entries have been replayed into this subscriber's schema
+    /// (delivered either in real-time during startup if the subscription was registered before
+    /// <c>OnRestoreFinished</c> fired, or via the late-subscriber buffer in
+    /// <see cref="EmbeddedKahuna.RegisterSchemaApply"/> otherwise). Re-persists the full
+    /// in-memory schema to bring the KV checkpoint up to the committed WAL head, then clears
+    /// <see cref="DatabaseDescriptor.SchemaSubsystemDegraded"/> so F1a-degraded nodes recover
+    /// on the next open without manual intervention.
+    /// </summary>
+    private async Task OnSchemaRestoreFinishedAsync(DatabaseDescriptor database)
+    {
+        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await catalogs.PersistFullSchemaCheckpointAsync(database).ConfigureAwait(false);
+
+            database.ClearSchemaSubsystemDegraded();
+
+            logger.LogInformation(
+                "F1b: schema checkpoint re-persisted at version {Version} for database {DbName} after log restore",
+                database.Schema.SchemaVersion,
+                database.Name
+            );
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "F1b: failed to re-persist schema checkpoint after restore for database {DbName}; node will retry on next restart",
+                database.Name
+            );
+        }
+        finally
+        {
+            database.Schema.Semaphore.Release();
+        }
+    }
+
     public async Task<bool> RestoreAsync(DatabaseDescriptor database, byte[] bytes)
     {
         ArgumentNullException.ThrowIfNull(database);
@@ -201,15 +250,16 @@ public sealed class SchemaReplicator
 
             if (entry.FromVersion != database.Schema.SchemaVersion)
             {
-                logger.LogError(
-                    "Skipping out-of-order restored schema change for database {DbName}: expected from-version {CurrentVersion}, got {FromVersion}, target version {ToVersion}",
-                    database.Name,
-                    database.Schema.SchemaVersion,
-                    entry.FromVersion,
-                    entry.ToVersion
+                // OnLogRestored delivers the full committed tail deterministically and in order.
+                // A FromVersion mismatch here is a genuine gap — data corruption or a bug — not
+                // a normal condition. Throw so the caller (Kommander) fires a replication-error
+                // event and the node is left in a visibly inconsistent state rather than silently
+                // behind. F1b does NOT silently skip: the committed log is the source of truth
+                // and a missing delta must surface loudly.
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"Schema restore for database '{database.Name}' has a gap: expected from-version {database.Schema.SchemaVersion}, got {entry.FromVersion} (target {entry.ToVersion}). OnLogRestored must deliver entries in order; this is a bug."
                 );
-
-                return true;
             }
 
             CatalogsManager.ApplySchemaDelta(database.Schema, entry);

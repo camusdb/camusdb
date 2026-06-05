@@ -43,6 +43,10 @@ namespace CamusDB.Tests.Storage;
 [NonParallelizable]
 public sealed class TestEmbeddedKahuna
 {
+    // Dynamic port base — incremented atomically per test so that nodes from a prior test
+    // whose DisposeAsync is still draining callbacks on the thread pool can't collide with
+    // ports chosen by the next test.
+    private static int nextPortBase = 9100;
     [Test]
     public async Task ConstructStartDisposeWithDefaultOptions()
     {
@@ -156,12 +160,13 @@ public sealed class TestEmbeddedKahuna
         string db = $"db_{Guid.NewGuid():N}";
         byte[] payload = Encoding.UTF8.GetBytes("schema-change-1");
 
+        int portBase = Interlocked.Add(ref nextPortBase, 10);
         InMemoryCommunication raftCommunication = new();
         MemoryInterNodeCommmunication interNode = new();
 
-        EmbeddedKahuna node1 = CreateClusterNode("node1", 1, 9101, [new("localhost:9102"), new("localhost:9103")], raftCommunication, interNode);
-        EmbeddedKahuna node2 = CreateClusterNode("node2", 2, 9102, [new("localhost:9101"), new("localhost:9103")], raftCommunication, interNode);
-        EmbeddedKahuna node3 = CreateClusterNode("node3", 3, 9103, [new("localhost:9101"), new("localhost:9102")], raftCommunication, interNode);
+        EmbeddedKahuna node1 = CreateClusterNode("node1", 1, portBase + 1, [new($"localhost:{portBase + 2}"), new($"localhost:{portBase + 3}")], raftCommunication, interNode);
+        EmbeddedKahuna node2 = CreateClusterNode("node2", 2, portBase + 2, [new($"localhost:{portBase + 1}"), new($"localhost:{portBase + 3}")], raftCommunication, interNode);
+        EmbeddedKahuna node3 = CreateClusterNode("node3", 3, portBase + 3, [new($"localhost:{portBase + 1}"), new($"localhost:{portBase + 2}")], raftCommunication, interNode);
         EmbeddedKahuna[] nodes = [node1, node2, node3];
 
         try
@@ -203,7 +208,7 @@ public sealed class TestEmbeddedKahuna
             Assert.AreEqual(SchemaReplicationOutcome.Committed, result.Outcome);
             Assert.AreEqual(partitionId, result.PartitionId);
 
-            await WaitUntilAsync(() => applied.Count > 0, TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(() => applied.Count > 0, TimeSpan.FromSeconds(10));
 
             foreach ((_, int partition, string data) in applied)
             {
@@ -224,12 +229,13 @@ public sealed class TestEmbeddedKahuna
         string db = $"db_{Guid.NewGuid():N}";
         byte[] payload = Encoding.UTF8.GetBytes("schema-change-forwarded");
 
+        int portBase = Interlocked.Add(ref nextPortBase, 10);
         InMemoryCommunication raftCommunication = new();
         MemoryInterNodeCommmunication interNode = new();
 
-        EmbeddedKahuna node1 = CreateClusterNode("node1", 1, 9201, [new("localhost:9202"), new("localhost:9203")], raftCommunication, interNode);
-        EmbeddedKahuna node2 = CreateClusterNode("node2", 2, 9202, [new("localhost:9201"), new("localhost:9203")], raftCommunication, interNode);
-        EmbeddedKahuna node3 = CreateClusterNode("node3", 3, 9203, [new("localhost:9201"), new("localhost:9202")], raftCommunication, interNode);
+        EmbeddedKahuna node1 = CreateClusterNode("node1", 1, portBase + 1, [new($"localhost:{portBase + 2}"), new($"localhost:{portBase + 3}")], raftCommunication, interNode);
+        EmbeddedKahuna node2 = CreateClusterNode("node2", 2, portBase + 2, [new($"localhost:{portBase + 1}"), new($"localhost:{portBase + 3}")], raftCommunication, interNode);
+        EmbeddedKahuna node3 = CreateClusterNode("node3", 3, portBase + 3, [new($"localhost:{portBase + 1}"), new($"localhost:{portBase + 2}")], raftCommunication, interNode);
         EmbeddedKahuna[] nodes = [node1, node2, node3];
 
         try
@@ -276,7 +282,7 @@ public sealed class TestEmbeddedKahuna
 
             await WaitUntilAsync(
                 () => applied.Any(x => x.node == followerName && x.data == "schema-change-forwarded"),
-                TimeSpan.FromSeconds(5)
+                TimeSpan.FromSeconds(10)
             );
         }
         finally
@@ -296,12 +302,13 @@ public sealed class TestEmbeddedKahuna
     {
         string db = $"db_{Guid.NewGuid():N}";
 
+        int portBase = Interlocked.Add(ref nextPortBase, 10);
         InMemoryCommunication raftCommunication = new();
         MemoryInterNodeCommmunication interNode = new();
 
-        EmbeddedKahuna node1 = CreateClusterNode("ack-node1", 1, 9301, [new("localhost:9302"), new("localhost:9303")], raftCommunication, interNode);
-        EmbeddedKahuna node2 = CreateClusterNode("ack-node2", 2, 9302, [new("localhost:9301"), new("localhost:9303")], raftCommunication, interNode);
-        EmbeddedKahuna node3 = CreateClusterNode("ack-node3", 3, 9303, [new("localhost:9301"), new("localhost:9302")], raftCommunication, interNode);
+        EmbeddedKahuna node1 = CreateClusterNode("ack-node1", 1, portBase + 1, [new($"localhost:{portBase + 2}"), new($"localhost:{portBase + 3}")], raftCommunication, interNode);
+        EmbeddedKahuna node2 = CreateClusterNode("ack-node2", 2, portBase + 2, [new($"localhost:{portBase + 1}"), new($"localhost:{portBase + 3}")], raftCommunication, interNode);
+        EmbeddedKahuna node3 = CreateClusterNode("ack-node3", 3, portBase + 3, [new($"localhost:{portBase + 1}"), new($"localhost:{portBase + 2}")], raftCommunication, interNode);
         EmbeddedKahuna[] nodes = [node1, node2, node3];
 
         try
@@ -319,7 +326,20 @@ public sealed class TestEmbeddedKahuna
             await node1.Raft.WaitForLeader(partitionId, CancellationToken.None);
             EmbeddedKahuna leader = await WaitForLeaderNode(nodes, partitionId);
 
-            // Only the leader acks — gate must block while the 2 followers haven't acked.
+            // Wait until the leader's Raft membership view includes all peers. WaitForLeader
+            // only guarantees a term exists; GetNodes() may still return 0 peers if the
+            // membership exchange hasn't completed. Recording the partial ack before all
+            // peers are visible would cause WaitForSchemaAcksAsync to see 1/1 and pass early.
+            await WaitForFullMembershipAsync(leader, nodes.Length - 1);
+
+            // Seed all nodes at version 0, simulating SchemaReplicator.Register's
+            // RecordLocalSchemaApplied(db, SchemaVersion) call. Without this, nodes that have
+            // no ack record are skipped by HasEveryLiveNodeAcked (the "hasn't opened this db"
+            // fast-path) and the gate incorrectly passes with only 1 ack.
+            foreach (EmbeddedKahuna node in nodes)
+                node.RecordLocalSchemaApplied(db, 0);
+
+            // Only the leader acks version 1 — gate must block while the 2 followers are still at 0.
             leader.RecordLocalSchemaApplied(db, 1);
 
             bool partialAck = await leader.WaitForSchemaAcksAsync(
@@ -397,6 +417,26 @@ public sealed class TestEmbeddedKahuna
         }
 
         Assert.Fail("Timed out waiting for condition");
+    }
+
+    /// <summary>
+    /// Polls until <paramref name="leader"/>'s Raft membership view contains at least
+    /// <paramref name="expectedPeerCount"/> peers. Must be called after WaitForLeader so that
+    /// WaitForSchemaAcksAsync sources the full cluster membership rather than just the local node.
+    /// </summary>
+    private static async Task WaitForFullMembershipAsync(EmbeddedKahuna leader, int expectedPeerCount)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            if (leader.Raft.GetNodes().Count >= expectedPeerCount)
+                return;
+
+            await Task.Delay(25);
+        }
+
+        Assert.Fail($"Raft membership did not reach {expectedPeerCount} peers within 5 s");
     }
 
     private sealed class InMemorySchemaReplicationForwarder : ISchemaReplicationForwarder

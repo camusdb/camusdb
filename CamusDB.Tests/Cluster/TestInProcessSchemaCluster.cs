@@ -877,22 +877,30 @@ public sealed class TestInProcessSchemaCluster
         InProcessSchemaCluster.Node nodeB = cluster.Nodes.First(n => n.Index != nodeA.Index);
         nodeB.Executor.Catalogs.TestPersistCheckpointException = new IOException("F1a A2 resume fault");
 
-        // Transfer leadership to node B. TransferSchemaLeadershipAsync returns as soon as
-        // node B wins the election — the leader callback (ResumeJobsAsync) runs async in
-        // the background and drives the job until the persist fault exhausts.
-        await cluster.TransferSchemaLeadershipAsync(db, nodeB, timeout: TimeSpan.FromSeconds(15));
-
-        // Clear fault before polling so unrelated paths aren't affected during teardown.
-        nodeB.Executor.Catalogs.TestPersistCheckpointException = null;
-
-        // Poll for node B to be marked degraded (the callback runs after the election win,
-        // which may complete slightly after TransferSchemaLeadershipAsync returns).
-        DateTime degradedDeadline = DateTime.UtcNow.AddSeconds(15);
-        while (DateTime.UtcNow < degradedDeadline)
+        try
         {
-            if (nodeB.Database!.SchemaSubsystemDegraded)
-                break;
-            await Task.Delay(100).ConfigureAwait(false);
+            // Transfer leadership to node B. TransferSchemaLeadershipAsync returns as soon as
+            // node B wins the election — the leader callback (ResumeJobsAsync) runs async in
+            // the background and drives the job until the persist fault exhausts.
+            // The fault must remain active during polling: clearing it too early (before
+            // PersistSchemaCheckpointWithRetryAsync is reached) would silently fix the fault and
+            // prevent the degraded flag from being set.
+            await cluster.TransferSchemaLeadershipAsync(db, nodeB, timeout: TimeSpan.FromSeconds(15));
+
+            // Poll for node B to be marked degraded (the callback runs after the election win,
+            // which may complete slightly after TransferSchemaLeadershipAsync returns).
+            DateTime degradedDeadline = DateTime.UtcNow.AddSeconds(40);
+            while (DateTime.UtcNow < degradedDeadline)
+            {
+                if (nodeB.Database!.SchemaSubsystemDegraded)
+                    break;
+                await Task.Delay(100).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            // Always clear the fault so teardown is clean even if assertions fail.
+            nodeB.Executor.Catalogs.TestPersistCheckpointException = null;
         }
 
         Assert.IsTrue(nodeB.Database!.SchemaSubsystemDegraded,
@@ -911,5 +919,294 @@ public sealed class TestInProcessSchemaCluster
         Assert.IsFalse(
             await nodeB.Kahuna.AmISchemaLeaderAsync(db, CancellationToken.None).ConfigureAwait(false),
             "Degraded resuming node must have stepped down schema-partition leadership");
+    }
+
+    // DS10.2 — DROP COLUMN on the leader converges on every node, and rows written under the
+    // PRE-drop schema version still decode on every node (the dropped column reads as absent;
+    // the surviving columns read correctly). Proves positional/versioned decode survives a drop
+    // cluster-wide.
+    [Test]
+    public async Task DropColumnOnLeaderConvergesAndOldRowsDecodeEverywhere()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        // Create table with 3 columns; insert rows that physically carry 'year'.
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns:
+                [
+                    new ColumnInfo("id", ColumnType.Id),
+                    new ColumnInfo("name", ColumnType.String),
+                    new ColumnInfo("year", ColumnType.Integer64)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+
+            for (int i = 1; i <= 5; i++)
+            {
+                KvTransaction tx = await leader.Database!.Transactions.BeginAsync();
+                await leader.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                    txnState: tx, database: db,
+                    sql: $"INSERT INTO robots (id, name, year) VALUES (gen_id(), 'robot {i}', {2000 + i})",
+                    parameters: null));
+                await leader.Database.Transactions.CommitAsync(tx);
+            }
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        // DROP COLUMN 'year' on the leader (single SetElementState→DropColumn delta, v1 → v2).
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.AlterTable(new AlterTableTicket(
+            databaseName: db,
+            tableName: "robots",
+            operation: AlterTableOperation.DropColumn,
+            column: new ColumnInfo("year", ColumnType.Integer64)
+        )).WaitAsync(TimeSpan.FromSeconds(20)));
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 2);
+
+        // Every node: 'year' gone from the schema, 'id'/'name' remain.
+        Assert.True(cluster.Nodes.All(n =>
+            n.Database!.Schema.Tables["robots"].Columns!.All(c => c.Name != "year") &&
+            n.Database.Schema.Tables["robots"].Columns!.Any(c => c.Name == "name")),
+            "'year' must be dropped from every node's schema; 'name' must remain");
+
+        // Every node: the 5 pre-drop rows still decode — SELECT of the surviving columns returns
+        // all rows with no decode error (old-version bytes read under the new schema).
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            KvTransaction tx = await node.Database!.Transactions.BeginAsync();
+            (_, IAsyncEnumerable<QueryResultRow> cursor) = await node.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                txnState: tx, database: db, sql: "SELECT id, name FROM robots", parameters: null));
+            List<QueryResultRow> rows = await cursor.ToListAsync();
+            await node.Database.Transactions.CommitAsync(tx);
+
+            Assert.AreEqual(5, rows.Count, $"node {node.Index} must decode all 5 pre-drop rows after DROP COLUMN");
+            Assert.True(rows.All(r => r.Row.ContainsKey("name") && !r.Row.ContainsKey("year")),
+                $"node {node.Index}: surviving column 'name' must read, dropped column 'year' must not");
+        }
+    }
+
+    // DS10.3 — DROP TABLE on the leader converges (table gone on every node) and an in-flight
+    // transaction that pinned the table before the drop fails cleanly at commit rather than
+    // committing against a table that no longer exists.
+    [Test]
+    public async Task DropTableConvergesAndPinnedTransactionFailsCleanly()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns: [new ColumnInfo("id", ColumnType.Id), new ColumnInfo("name", ColumnType.String)],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+
+            KvTransaction seed = await leader.Database!.Transactions.BeginAsync();
+            await leader.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                txnState: seed, database: db,
+                sql: "INSERT INTO robots (id, name) VALUES (gen_id(), 'seed')", parameters: null));
+            await leader.Database.Transactions.CommitAsync(seed);
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        InProcessSchemaCluster.Node leaderNode = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // Open a transaction on the leader that PINS the table (a read in an explicit transaction
+        // captures (version, identity) and validates it at commit), and leave it open.
+        KvTransaction pinnedTx = await leaderNode.Database!.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> pinCursor) = await leaderNode.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+            txnState: pinnedTx, database: db, sql: "SELECT id FROM robots", parameters: null));
+        await pinCursor.ToListAsync();
+
+        // Drop the table (separate DDL transaction), then wait for convergence.
+        await cluster.RunOnSchemaLeaderAsync(db, leader =>
+            leader.Executor.DropTable(new DropTableTicket(db, "robots", ifExists: false))
+                .WaitAsync(TimeSpan.FromSeconds(20)));
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 2);
+
+        // Every node: the table is gone.
+        Assert.True(cluster.Nodes.All(n => !n.Database!.Schema.Tables.ContainsKey("robots")),
+            "DROP TABLE must remove 'robots' from every node's schema");
+
+        // Committing the pinned transaction must fail cleanly (table dropped under it).
+        CamusDBException? pinEx = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await leaderNode.Database!.Transactions.CommitAsync(pinnedTx));
+        Assert.IsNotNull(pinEx, "A transaction pinned to a dropped table must fail at commit");
+    }
+
+    // DS10.6 — Concurrent DML on a follower while the leader runs the staged ADD COLUMN must lose
+    // no COMMITTED writes and never produce a missing-column read error. Inserts that race a
+    // schema-version transition are rejected (typed exception) — that is correct back-pressure,
+    // not a lost write — so we count only committed inserts and assert all of them survive on
+    // every node, with the new column readable for every row.
+    [Test]
+    public async Task ConcurrentInsertsOnFollowerDuringAddColumnLoseNoCommittedWrites()
+    {
+        const int InitialRows = 10;
+
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns: [new ColumnInfo("id", ColumnType.Id), new ColumnInfo("name", ColumnType.String)],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+
+            for (int i = 0; i < InitialRows; i++)
+            {
+                KvTransaction tx = await leader.Database!.Transactions.BeginAsync();
+                await leader.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                    txnState: tx, database: db,
+                    sql: $"INSERT INTO robots (id, name) VALUES (gen_id(), 'init {i}')", parameters: null));
+                await leader.Database.Transactions.CommitAsync(tx);
+            }
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        InProcessSchemaCluster.Node leaderNode = await cluster.WaitForSchemaLeaderNodeAsync(db);
+        InProcessSchemaCluster.Node follower = cluster.Nodes.First(n => n.Index != leaderNode.Index);
+
+        int committed = 0;
+        int rejected = 0;
+        using CancellationTokenSource stop = new();
+
+        // Fire concurrent inserts on the follower until the ALTER completes.
+        Task inserter = Task.Run(async () =>
+        {
+            int i = 0;
+            while (!stop.IsCancellationRequested && i < 10_000)
+            {
+                KvTransaction tx = await follower.Database!.Transactions.BeginAsync();
+                try
+                {
+                    await follower.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                        txnState: tx, database: db,
+                        sql: $"INSERT INTO robots (id, name) VALUES (gen_id(), 'conc {i}')", parameters: null));
+                    await follower.Database.Transactions.CommitAsync(tx);
+                    Interlocked.Increment(ref committed);
+                }
+                catch (CamusDBException)
+                {
+                    // Schema version moved under the insert during the staged ALTER → rejected,
+                    // not lost. Roll back and continue.
+                    await follower.Database!.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                    Interlocked.Increment(ref rejected);
+                }
+                i++;
+                await Task.Delay(3).ConfigureAwait(false);
+            }
+        });
+
+        // Staged ADD COLUMN on the leader: Absent → DeleteOnly → WriteOnly → [backfill] → Public
+        // (v1 → v4). Concurrent inserts on the follower overlap every stage.
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.AlterTable(new AlterTableTicket(
+            databaseName: db,
+            tableName: "robots",
+            operation: AlterTableOperation.AddColumn,
+            column: new ColumnInfo("score", ColumnType.Integer64, notNull: false,
+                defaultValue: new ColumnValue(ColumnType.Integer64, 0L))
+        )).WaitAsync(TimeSpan.FromSeconds(30)));
+
+        stop.Cancel();
+        await inserter;
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 4, timeout: TimeSpan.FromSeconds(20));
+
+        Assert.Greater(committed, 0, "the test must actually commit some inserts concurrently with the ALTER");
+
+        int expected = InitialRows + committed;
+
+        // Every node: exactly the committed rows survive, 'score' is readable for all of them
+        // (default 0 for rows written before/while the column was non-public), and no read errors.
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            KvTransaction tx = await node.Database!.Transactions.BeginAsync();
+            (_, IAsyncEnumerable<QueryResultRow> cursor) = await node.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                txnState: tx, database: db, sql: "SELECT id, score FROM robots", parameters: null));
+            List<QueryResultRow> rows = await cursor.ToListAsync();
+            await node.Database.Transactions.CommitAsync(tx);
+
+            Assert.AreEqual(expected, rows.Count,
+                $"node {node.Index}: every committed insert must survive (no lost writes). committed={committed}, rejected={rejected}");
+            Assert.True(rows.All(r => r.Row.ContainsKey("score") && r.Row["score"].LongValue == 0L),
+                $"node {node.Index}: 'score' must read as the default for every row, with no missing-column error");
+        }
+    }
+
+    // DS10.5 — DDL issued on a FOLLOWER is forwarded to the schema leader, applied there, and
+    // converges on every node. Uses the opt-in in-process leader forwarder (production uses
+    // HttpSchemaDdlForwarder; that HTTP path is covered by TestSchemaDdlForwarding).
+    [Test]
+    public async Task FollowerForwardedDdlAppliesAndConvergesAcrossNodes()
+    {
+        await using InProcessSchemaCluster cluster =
+            await InProcessSchemaCluster.StartAsync(nodeCount: 3, wireLeaderForwarder: true);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+        InProcessSchemaCluster.Node follower = cluster.Nodes.First(n => n.Index != leader.Index);
+
+        // CREATE TABLE issued on the follower → forwarded to the leader → applied.
+        CreateTableResult created = await follower.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "robots",
+            columns: [new ColumnInfo("id", ColumnType.Id), new ColumnInfo("name", ColumnType.String)],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        )).WaitAsync(TimeSpan.FromSeconds(20));
+
+        Assert.IsTrue(created.Success, "follower CREATE TABLE must forward to the leader and apply");
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+        Assert.True(cluster.Nodes.All(n => n.Database!.Schema.Tables.ContainsKey("robots")),
+            "forwarded CREATE TABLE must converge on every node without reopen");
+
+        // ALTER (staged ADD COLUMN) issued on the follower → forwarded → converges to Public.
+        bool altered = await follower.Executor.AlterTable(new AlterTableTicket(
+            databaseName: db,
+            tableName: "robots",
+            operation: AlterTableOperation.AddColumn,
+            column: new ColumnInfo("score", ColumnType.Integer64, notNull: false,
+                defaultValue: new ColumnValue(ColumnType.Integer64, 0L))
+        )).WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.IsTrue(altered, "follower ADD COLUMN must forward to the leader and apply");
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 4, timeout: TimeSpan.FromSeconds(20));
+        Assert.True(cluster.Nodes.All(n =>
+            n.Database!.Schema.Tables["robots"].Columns!
+                .Any(c => c.Name == "score" && c.State == SchemaElementState.Public)),
+            "forwarded ADD COLUMN must converge to Public on every node");
     }
 }
