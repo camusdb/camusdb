@@ -1287,4 +1287,89 @@ public sealed class TestInProcessSchemaCluster
             "every live (idle-but-alive) node must have acked v2 before the DDL returned — no false eviction. " +
             $"Versions: {string.Join(", ", cluster.Nodes.Select(n => $"node{n.Index}={n.Database?.Schema.SchemaVersion}"))}");
     }
+
+    private static CreateTableTicket SimpleTable(string db, string name) => new(
+        databaseName: db,
+        tableName: name,
+        columns: [new ColumnInfo("id", ColumnType.Id)],
+        constraints:
+        [
+            new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])
+        ],
+        ifNotExists: false
+    );
+
+    // DS11.2 — Replication failure → typed exception, nothing committed. When the leader cannot
+    // reach a commit quorum (both followers isolated), a DDL must fail with a typed
+    // CamusDBException and leave every node's schema version unchanged — the entry is rolled back,
+    // never half-applied.
+    [Test]
+    public async Task ReplicationWithoutQuorumThrowsTypedExceptionAndLeavesVersionsUnchanged()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.SchemaAckLiveNodeLease = TimeSpan.FromSeconds(2);
+
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // Isolate BOTH followers — the leader is left with only itself (1 of 3), so a proposal
+        // cannot reach majority and must time out / fail rather than commit.
+        int[] followerIndexes = cluster.Nodes.Where(n => n.Index != leader.Index).Select(n => n.Index).ToArray();
+        foreach (int idx in followerIndexes)
+            cluster.PauseDelivery(idx);
+
+        try
+        {
+            // The DDL is issued directly on the (now quorum-less) leader and must throw a typed
+            // CamusDBException — either ProposalTimeout (couldn't commit) or leader-required
+            // (the leader stepped down under us). Both mean: not committed.
+            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+                await leader.Executor.CreateTable(SimpleTable(db, "ds11_2"))
+                    .WaitAsync(TimeSpan.FromSeconds(30)));
+            Assert.IsNotNull(ex, "a DDL that cannot reach quorum must fail with a typed CamusDBException");
+
+            // Nothing committed anywhere: no node has the table and no version advanced past 0.
+            Assert.True(cluster.Nodes.All(n =>
+                n.Database is not null &&
+                !n.Database.Schema.Tables.ContainsKey("ds11_2") &&
+                n.Database.Schema.SchemaVersion == 0),
+                "a failed replication must leave every node's schema version unchanged. " +
+                $"Versions: {string.Join(", ", cluster.Nodes.Select(n => $"node{n.Index}={n.Database?.Schema.SchemaVersion}"))}");
+        }
+        finally
+        {
+            foreach (int idx in followerIndexes)
+                cluster.ResumeDelivery(idx);
+        }
+    }
+
+    // DS11.3 — Node rejoin / catch-up is covered by PausedNodeLagsAndCatchesUpOnResume (pause a
+    // node, commit DDL with quorum, resume + reopen, assert it catches up). A multi-DDL variant
+    // was prototyped but is fixture-flaky for a Raft reason, not a schema one: a fully-isolated
+    // node bumps its term while paused (it times out and campaigns even with outbound blocked), so
+    // on rejoin it can disrupt the cluster (a higher term forces a re-election), and the catch-up
+    // read races the resulting churn (MustRetry). The catch-up *mechanism* (reopen → LoadMeta reads
+    // the replicated checkpoint from the KV-partition leader) is identical regardless of how many
+    // DDLs were missed, so the single-DDL test exercises the same path deterministically.
+
+    // DS11.5b — Checkpoint-rollback recovery (F1b) is NOT a cluster test here, by design.
+    //
+    // Recovering a delta whose checkpoint persist faulted (and which no other node re-persisted)
+    // requires replaying that committed entry from the Raft log via OnLogRestored — which fires
+    // only on a node *restart* (StartAsync), not on a database reopen. The in-process fixture
+    // shares one long-lived Kahuna node per process and cannot restart it mid-test, so the
+    // un-persisted delta cannot be reconstructed through the reopen path (LoadMeta reads only the
+    // replicated KV checkpoint, which never contains that delta). This is the documented F1b
+    // restore-trigger limitation of InProcessSchemaCluster.
+    //
+    // The F1b recovery *mechanics* are therefore unit-tested in
+    // CamusDB.Tests/CommandsExecutor/TestSchemaRestoreF1b.cs instead:
+    //   • ReopenRestoresSchemaVersionFromWal            — close+reopen restores schema from KV.
+    //   • PersistFullCheckpointIsIdempotentAndLoadableAfterReopen — PersistFullSchemaCheckpointAsync
+    //     (the F1b re-persist) yields a valid, loadable checkpoint.
+    //   • GapInRestoreThrowsTypedCamusDbException        — restore fails loud on a gap (never silent).
 }

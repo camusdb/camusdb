@@ -156,7 +156,15 @@ if (config.IsClusterMode)
         };
 
         ILoggerFactory loggerFactory = services.GetRequiredService<ILoggerFactory>();
-        return EmbeddedKahuna.CreateCluster(options, config.Peers, loggerFactory);
+        EmbeddedKahuna kahuna = EmbeddedKahuna.CreateCluster(options, config.Peers, loggerFactory);
+
+        // Apply the validated schema two-version-gate tunables from config.
+        kahuna.SchemaAckWaitTimeout = TimeSpan.FromMilliseconds(config.SchemaAckWaitTimeoutMs);
+        kahuna.SchemaAckLiveNodeLease = config.SchemaAckLiveNodeLeaseMs == -1
+            ? Timeout.InfiniteTimeSpan
+            : TimeSpan.FromMilliseconds(config.SchemaAckLiveNodeLeaseMs);
+
+        return kahuna;
     });
 
     // Expose Raft and Kahuna interfaces so gRPC services can resolve them via DI.

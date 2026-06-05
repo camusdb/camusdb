@@ -1,10 +1,12 @@
-﻿
+
 /**
- * This file is part of CamusDB  
+ * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
  */
+
+using CamusDB.Core;
 
 namespace CamusDB.Core.Config.Models;
 
@@ -35,5 +37,80 @@ public class ConfigDefinition
     /// </summary>
     public List<string> HttpPeers { get; set; } = [];
 
+    /// <summary>
+    /// How long a DDL proposer waits for every live node to ack the previous schema
+    /// version before giving up (the two-version gate). Milliseconds; must be &gt; 0.
+    /// Maps to <c>EmbeddedKahuna.SchemaAckWaitTimeout</c>.
+    /// </summary>
+    public int SchemaAckWaitTimeoutMs { get; set; } = 30_000;
+
+    /// <summary>
+    /// How long since a live member's last ack before the gate presumes it down and
+    /// stops blocking on it. Milliseconds, or <c>-1</c> for an infinite lease (the
+    /// conservative default — wait on every member). Must be &gt; 0 or exactly -1.
+    /// Maps to <c>EmbeddedKahuna.SchemaAckLiveNodeLease</c>.
+    /// </summary>
+    public int SchemaAckLiveNodeLeaseMs { get; set; } = -1;
+
     public bool IsClusterMode => Mode == "cluster" || Peers.Count > 0;
+
+    /// <summary>
+    /// Validates the configuration, throwing <see cref="CamusDBException"/> with
+    /// <see cref="CamusDBErrorCodes.InvalidConfig"/> on the first problem found.
+    /// Called by <c>ConfigReader.Read</c> so a malformed config fails fast at startup
+    /// rather than producing confusing behaviour later (e.g. a zero ack timeout that
+    /// makes the two-version gate give up instantly).
+    /// </summary>
+    public void Validate()
+    {
+        if (Mode is not ("standalone" or "cluster"))
+            throw Invalid($"'mode' must be 'standalone' or 'cluster', got '{Mode}'");
+
+        if (RaftPort is <= 0 or > 65535)
+            throw Invalid($"'raft_port' must be in 1..65535, got {RaftPort}");
+
+        if (InitialPartitions < 1)
+            throw Invalid($"'initial_partitions' must be >= 1, got {InitialPartitions}");
+
+        if (SchemaAckWaitTimeoutMs <= 0)
+            throw Invalid(
+                $"'schema_ack_wait_timeout_ms' must be > 0, got {SchemaAckWaitTimeoutMs}");
+
+        if (SchemaAckLiveNodeLeaseMs is not (-1 or > 0))
+            throw Invalid(
+                "'schema_ack_live_node_lease_ms' must be > 0 or -1 (infinite), got " +
+                SchemaAckLiveNodeLeaseMs);
+
+        // Forwarding endpoints: http_peers, when supplied, must be parallel to peers so
+        // the raft-endpoint → HTTP base-URI map in Program.cs is unambiguous. An entry
+        // count mismatch silently disables the explicit map and falls back to the
+        // uniform-port heuristic, which is a misconfiguration we should surface here.
+        if (HttpPeers.Count > 0 && HttpPeers.Count != Peers.Count)
+            throw Invalid(
+                $"'http_peers' has {HttpPeers.Count} entr{(HttpPeers.Count == 1 ? "y" : "ies")} " +
+                $"but 'peers' has {Peers.Count}; they must be parallel (one http address per peer)");
+
+        foreach (string peer in Peers)
+            ValidateHostPort(peer, "peers");
+
+        foreach (string httpPeer in HttpPeers)
+            ValidateHostPort(httpPeer, "http_peers");
+    }
+
+    private static void ValidateHostPort(string value, string field)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw Invalid($"'{field}' contains an empty entry");
+
+        int colon = value.LastIndexOf(':');
+        if (colon <= 0 || colon == value.Length - 1)
+            throw Invalid($"'{field}' entry '{value}' must be in 'host:port' format");
+
+        string portPart = value[(colon + 1)..];
+        if (!int.TryParse(portPart, out int port) || port is <= 0 or > 65535)
+            throw Invalid($"'{field}' entry '{value}' has an invalid port '{portPart}'");
+    }
+
+    private static CamusDBException Invalid(string message)
+        => new(CamusDBErrorCodes.InvalidConfig, message);
 }

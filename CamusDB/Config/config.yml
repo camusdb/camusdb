@@ -23,3 +23,12 @@ data_dir: /tmp/camusdb/
 #   - 192.168.1.10:5095
 #   - 192.168.1.11:5095
 #   - 192.168.1.12:5095
+#
+# Schema two-version gate tunables (cluster mode). A DDL proposer waits for every
+# live node to ack the previous schema version before proposing the next.
+# schema_ack_wait_timeout_ms: how long to wait for all acks before giving up (> 0).
+# schema_ack_live_node_lease_ms: how long since a member's last ack before the gate
+#   presumes it down and stops blocking on it. -1 = infinite (conservative default:
+#   wait on every member); a positive value enables apply-derived liveness expiry.
+# schema_ack_wait_timeout_ms: 30000
+# schema_ack_live_node_lease_ms: -1

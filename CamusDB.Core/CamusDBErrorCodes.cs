@@ -40,4 +40,6 @@ public static class CamusDBErrorCodes
     
     public const string TransactionAlreadyCompleted = "CADB0501";
     public const string TransactionConflict = "CADB0502";
+
+    public const string InvalidConfig = "CADB0600";
 }

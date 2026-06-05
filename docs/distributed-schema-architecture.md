@@ -403,10 +403,14 @@ member on its own apply-derived `LastSeen`. This is what prevents false eviction
 schema-idle node has no fresh ack, but it is still in the active set, so the gate keeps waiting for
 it. (The tracker's `LastSeen` field is retained as a recorded version stamp but no longer drives
 liveness.) `SchemaAckLiveNodeLease` defaults to `Timeout.InfiniteTimeSpan`; both it and
-`SchemaAckWaitTimeout` are tunable on `EmbeddedKahuna`.
+`SchemaAckWaitTimeout` are tunable on `EmbeddedKahuna` and via the
+`schema_ack_live_node_lease_ms` / `schema_ack_wait_timeout_ms` config keys (validated at startup).
 
-> **Remaining limitation.** The tracker is still process-`static` (shared across in-process test
-> nodes); a per-`EmbeddedKahuna` instance would model multi-node state more honestly. See §13.
+> **Remaining limitation.** The ack *data* does not yet cross process boundaries: the tracker is
+> process-`static` and each node records only its own ack, so the gate is only effective in-process
+> (the test fixture). Multi-process, the leader sees only its own ack and the gate degrades to a
+> timeout. Needs a follower→leader ack transport plus a per-`EmbeddedKahuna` tracker — see §13 and
+> `docs/distributed-schema-ack-transport-spec.md`.
 
 ---
 
@@ -916,18 +920,24 @@ on an older layout decode with their own version and read `age` with current vis
   be metadata-only (mutate `Name`, leave the immutable `Id` so no rows/indexes move) and drain
   old names across the two-version window. The positional/ID-keyed encoding (§7.4) already makes
   the data side free.
-- **Per-instance ack tracker.** The ack-gate live set is now sourced from real Raft per-follower
-  liveness (`GetActiveNodes`, §6.2), so a finite lease evicts only genuinely-dead nodes and never
-  false-evicts an alive-but-idle one. The one remaining membership cleanup is that
-  `SchemaAckTracker` is still process-`static` (shared across in-process test nodes); a
-  per-`EmbeddedKahuna` instance would model multi-node state more honestly.
-- **Restart-replay durability.** The persist-failure *policy* is implemented (degrade +
-  step-down, §10), but recovery still relies on restart. The remaining piece is making the
-  restart path provably reconcile a stale or failed checkpoint against the committed schema log
-  — read the persisted checkpoint version as a *floor*, replay committed entries to head, and
-  re-persist — so a degraded node recovers without operator action and a node that missed DDLs
-  while offline always converges on reopen. This is the durability backing that lets the §10
-  policy lean on restart.
+- **Ack transport / per-instance tracker.** The ack-gate live *set* is now sourced from real Raft
+  per-follower liveness (`GetActiveNodes`, §6.2), so a finite lease evicts only genuinely-dead
+  nodes and never false-evicts an alive-but-idle one. But the ack *data* itself does not yet cross
+  process boundaries: `RecordLocalSchemaApplied` records only the local endpoint, and
+  `SchemaAckTracker` is process-`static`. In the in-process test fixture all nodes share that one
+  static tracker, so the leader sees follower acks — but in a real multi-process deployment each
+  process has its own tracker holding only its own ack, so the two-version gate blocks to its
+  timeout and then proceeds **without** the guarantee. Closing this requires (1) a real
+  follower→leader ack transport and (2) making the tracker a per-`EmbeddedKahuna` instance. Design
+  in `docs/distributed-schema-ack-transport-spec.md`.
+- **Auto-recovery without restart.** Restart-replay durability is now implemented: on open,
+  the restore path reads the persisted checkpoint version as a *floor*, replays committed schema
+  entries to head, re-persists the checkpoint, and clears the degraded flag (`SchemaReplicator.
+  OnSchemaRestoreFinishedAsync`, covered by `TestSchemaRestoreF1b`). A degraded node therefore
+  reconciles a stale/failed checkpoint against the committed log on reopen, and a node that
+  missed DDLs while offline converges. The remaining gap is doing the same reconciliation
+  **without** a restart (a live degraded node re-persisting in place); today recovery still
+  rides the reopen path.
 - **Auto-retry on schema-version conflict.** A DML/read transaction whose pin is invalidated by a
   concurrent `ALTER` currently fails (§9) rather than transparently retrying against the new
   version.
