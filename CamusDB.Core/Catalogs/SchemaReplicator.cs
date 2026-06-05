@@ -55,7 +55,30 @@ public sealed class SchemaReplicator
         IDisposable? leaderSubscription = coordinator is not null
             ? database.Kahuna.RegisterSchemaLeaderCallback(
                 database.Name,
-                () => coordinator.ResumeJobsAsync(database))
+                async () =>
+                {
+                    try
+                    {
+                        await coordinator.ResumeJobsAsync(database).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        // F1a: if persist exhaustion occurred during resume, fire the deferred
+                        // step-down so a healthy peer can take over via the next leader election.
+                        try
+                        {
+                            await database.FireDeferredSchemaStepDownAsync().ConfigureAwait(false);
+                        }
+                        catch (Exception stepDownEx)
+                        {
+                            logger.LogError(
+                                stepDownEx,
+                                "Schema partition step-down after persist exhaustion during resume failed for database {DbName}",
+                                database.Name
+                            );
+                        }
+                    }
+                })
             : null;
 
         IDisposable composite = leaderSubscription is not null

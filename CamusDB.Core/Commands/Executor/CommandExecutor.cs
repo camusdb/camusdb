@@ -495,19 +495,15 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
     }
 
-    // F1a: shared helper — fires the deferred schema-partition step-down if it was requested by
-    // PersistSchemaCheckpointWithRetryAsync on persist exhaustion. Called from the finally blocks
+    // F1a: shared helper — delegates to DatabaseDescriptor.FireDeferredSchemaStepDownAsync,
+    // adding the caller's logger for the step-down failure case. Called from the finally blocks
     // of ExecuteDdlInTransaction, ExecuteClusterAddColumnAsync, ExecuteClusterAddIndexAsync, and
     // ExecuteClusteredIndexDdlAsync so all DDL paths release leadership on degradation.
     private async Task FireDeferredStepDownIfRequestedAsync(DatabaseDescriptor database)
     {
-        if (!database.DeferredSchemaStepDown)
-            return;
-
-        database.ClearDeferredSchemaStepDown();
         try
         {
-            await database.Kahuna.StepDownSchemaPartitionAsync(database.Name, CancellationToken.None).ConfigureAwait(false);
+            await database.FireDeferredSchemaStepDownAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {

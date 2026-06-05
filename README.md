@@ -124,6 +124,11 @@ Query Planner
 
 See [docs/query-planner.md](docs/query-planner.md) for a full developer reference: pipeline stages, physical plan nodes, predicate analysis, index scan selection, join execution, optimization passes, file map, and a checklist for adding new SQL features.
 
+Distributed Schema
+------------------
+
+See [docs/distributed-schema-architecture.md](docs/distributed-schema-architecture.md) for a full developer reference on how DDL works across a cluster: schema as a replicated state machine over an ordered Raft log, the schema-change delta and the two-version invariant, ack-based convergence, the staged online-schema state machine (`DeleteOnly → WriteOnly → Public`) with a convergence gate between steps, the resumable change coordinator and crash-safe index backfill, follower→leader DDL forwarding with idempotent dedup, positional row encoding (why renames are free), schema-version pinning, the checkpoint persist-failure policy, an invariants checklist, and known limitations.
+
 ## Requirements
 - .NET 9 (SDK 9.0.100)
 - Docker (optional, for cluster setup)

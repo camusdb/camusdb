@@ -118,7 +118,20 @@ internal sealed class SchemaAckTracker
         foreach (string node in liveMembers)
         {
             if (acks is null || !acks.Nodes.TryGetValue(node, out NodeAck ack))
-                return false; // never reported — can't time-expire without a LastSeen; wait for it.
+            {
+                // A node with no ack record for this database hasn't opened it yet and isn't
+                // serving it. It will catch up via RestoreAsync when it does open.
+                // - schemaVersion == 0: the cluster is at version 0 (pre-first-DDL); all nodes
+                //   are implicitly at 0 even without a record — gate must not block.
+                // - acks != null: at least one node has opened the database and recorded an ack,
+                //   so the node in question simply hasn't opened it yet — skip it.
+                // - acks == null && schemaVersion > 0: shouldn't happen in normal operation (the
+                //   proposing leader always acks before calling the gate), but return false as a
+                //   conservative fallback so we don't silently pass a corrupted state.
+                if (schemaVersion == 0 || acks is not null)
+                    continue;
+                return false;
+            }
 
             if (ack.Version >= schemaVersion)
                 continue; // acked the target version.

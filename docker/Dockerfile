@@ -11,6 +11,7 @@ WORKDIR /app
 
 EXPOSE 5095
 EXPOSE 7070
+EXPOSE 7141
 
 COPY --from=build-env /app .
 COPY docker/config.cluster.yml /app/Config/config.yml
@@ -42,6 +43,7 @@ ENTRYPOINT ["sh", "-c", "exec dotnet CamusDB.dll \
   --raft-nodeid=${CAMUS_RAFT_NODEID:-1} \
   --raft-host=${CAMUS_RAFT_HOST} \
   --raft-port=${CAMUS_RAFT_PORT:-7070} \
+  --https-certificate=/app/certificate.pfx \
   --raft-certificate=/app/certificate.pfx \
   --initial-cluster-partitions=${CAMUS_INITIAL_CLUSTER_PARTITIONS:-3} \
   --initial-cluster ${CAMUS_INITIAL_CLUSTER}"]

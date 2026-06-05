@@ -45,7 +45,8 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(kestrel =>
 {
     kestrel.ListenAnyIP(opts.HttpPort);
-    kestrel.ListenAnyIP(opts.HttpsPort, o => o.UseHttps());
+    if (!string.IsNullOrEmpty(opts.HttpsCertificate))
+        kestrel.ListenAnyIP(opts.HttpsPort, o => o.UseHttps(opts.HttpsCertificate));
     if (config.IsClusterMode)
     {
         kestrel.ListenAnyIP(config.RaftPort, o =>
@@ -188,7 +189,7 @@ if (!app.Environment.IsDevelopment())
     app.UseHsts();
 }
 
-if (!config.IsClusterMode)
+if (!config.IsClusterMode && !string.IsNullOrEmpty(opts.HttpsCertificate))
     app.UseHttpsRedirection();
 app.UseStaticFiles();
 

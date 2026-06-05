@@ -336,13 +336,16 @@ mutate in-memory, invalidate descriptor, ack.
 
 **The proposer persists the checkpoint** in `ReplicateAndWaitLocalApplyAsync`, *after*
 `ReplicateSchemaChangeAsync` returns and local apply is observed — i.e. outside the partition
-pipeline. Persist uses its own KV transaction with bounded retry; on exhaustion it throws a
-typed `CamusDBException`. This inverts the older "persist-before-advance" ordering: in-memory
-now advances first (in the apply callback) and the checkpoint is written just after. That is
-safe because the **committed schema log is the source of truth** and the KV checkpoint is a
-load-time optimization — a node whose checkpoint write fails is not divergent, it rebuilds
-from the committed log. (See §13 for the still-open question of making schema-log replay
-authoritative on restart and adding a richer persist-failure policy.)
+pipeline. Persist uses its own KV transaction with bounded retry. This inverts the older
+"persist-before-advance" ordering: in-memory now advances first (in the apply callback) and the
+checkpoint is written just after. That is safe because the **committed schema log is the source
+of truth** and the KV checkpoint is a load-time optimization — a node whose checkpoint write
+fails is not divergent, it rebuilds from the committed log. If the retries are **exhausted** the
+proposer does *not* fail the DDL (the change is already committed and live cluster-wide); instead
+it marks the node's schema subsystem **degraded** and steps down its schema-partition leadership
+so a healthy peer can take over — see the persist-failure policy in §10. (Making schema-log
+replay authoritative on restart, so a degraded node provably recovers without operator action, is
+the remaining piece — see §13.)
 
 `RestoreAsync` (log recovery) is a separate, simpler path: it applies in version order and
 logs+skips out-of-order entries; it likewise only mutates in-memory.
@@ -751,13 +754,28 @@ SELECTs don't run the commit-time validation step (they have a consistent snapsh
 
 ## 10. Failure handling & compensation
 
-- **Checkpoint persist-failure:** the schema delta is already committed in Raft and applied
-  in-memory cluster-wide. The proposer's `PersistSchemaCheckpointWithRetryAsync` retries the
-  KV write with bounded backoff; on exhaustion it throws a typed `CamusDBException`. Because
-  the committed schema log is the source of truth, a failed checkpoint is not divergence — it
-  is a stale load-time cache that the committed log reconciles. (A richer policy — making
-  schema-log replay authoritative on restart, plus retry / step-down / mark-unhealthy — is
-  future work; see §13.)
+- **Checkpoint persist-failure (degrade + step-down policy):** the schema delta is already
+  committed in Raft and applied in-memory cluster-wide, so a failed checkpoint is never
+  divergence — it is a stale load-time cache the committed log reconciles. The proposer's
+  `PersistSchemaCheckpointWithRetryAsync` retries the KV write with bounded backoff; on
+  **exhaustion** it applies a defined policy rather than failing the (already-live) DDL:
+  - It marks the node **degraded** (`DatabaseDescriptor.MarkSchemaSubsystemDegraded`). The
+    degraded flag gates *all* further DDL on this node — both the proposer path
+    (`ReplicateAndWaitLocalApplyAsync` throws up front) and the forwarder
+    (`TryForwardDdlAsync` throws *before* the leader check, so post-step-down DDL returns a
+    typed "degraded" error rather than a confusing "not leader").
+  - It requests a **deferred schema-partition step-down** (`RequestDeferredSchemaStepDown`),
+    fired from a `finally` *after* the in-flight KV transaction commits/rolls back — the defer
+    is essential because, in single-partition clusters, schema and KV share one Raft partition,
+    so stepping down before the commit would invalidate the in-flight transaction. Every DDL
+    exit path fires it: the four `CommandExecutor` entry points and the leader-change resume
+    callback. A healthy peer then wins the next election and takes over.
+  - The committed DDL still returns success to the client. The degraded node does not ack any
+    *new* version it cannot persist, because it refuses to propose while degraded.
+  - **Recovery is by restart** today: a fresh `DatabaseDescriptor` opens non-degraded, and the
+    node rebuilds from the committed log. Making that restart provably reconcile a stale/failed
+    checkpoint against the committed log (replay-to-head) is the remaining durability piece —
+    see §13.
 - **Out-of-order / gap on apply:** thrown (apply) or logged+skipped (restore). A gap means a
   node is missing a delta; restore replays in order.
 - **DDL transaction abort (`ExecuteDdlInTransaction`):** rolls back the KV transaction, then
@@ -898,19 +916,13 @@ on an older layout decode with their own version and read `age` with current vis
   *apply-derived*, not a true heartbeat. Enabling timed lease expiry safely in production needs
   a real heartbeat so an alive-but-idle node isn't falsely evicted. The `SchemaAckTracker` is
   also process-`static`; a per-`EmbeddedKahuna` instance would model multi-node state honestly.
-- **Checkpoint persist-failure policy.** Define what a node does when it commits a delta in Raft
-  but cannot persist its KV checkpoint — retry-with-backoff then step-down/mark-unhealthy, never
-  ack an unpersisted version (§6.1, §10). The committed log remains the source of truth, so a
-  natural design is to make schema-log replay authoritative on restart.
-- **Backfill-resume test coverage.** The index backfill is checkpointed and resumable (§7.3), but
-  there is no test yet that interrupts a backfill mid-way, forces a leader change, and asserts the
-  resumed build is complete with no duplicate entries and actually started from the checkpoint.
-  A table large enough to span several `BackfillBatchSize` batches would exercise the cursor and
-  the unique read-back idempotency under a real resume.
-- **Index column-state validation on the cluster path.** `GetColumnIdsForIndex` validates that
-  index columns *exist* but not that they are `Public`; the single-node `TableIndexAdder.Validate`
-  additionally rejected a non-readable/non-writable column. The cluster add-index path should
-  apply the same guard so an index cannot be built over a column that is itself mid-add.
+- **Restart-replay durability.** The persist-failure *policy* is implemented (degrade +
+  step-down, §10), but recovery still relies on restart. The remaining piece is making the
+  restart path provably reconcile a stale or failed checkpoint against the committed schema log
+  — read the persisted checkpoint version as a *floor*, replay committed entries to head, and
+  re-persist — so a degraded node recovers without operator action and a node that missed DDLs
+  while offline always converges on reopen. This is the durability backing that lets the §10
+  policy lean on restart.
 - **Auto-retry on schema-version conflict.** A DML/read transaction whose pin is invalidated by a
   concurrent `ALTER` currently fails (§9) rather than transparently retrying against the new
   version.

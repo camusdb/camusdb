@@ -56,6 +56,20 @@ public sealed record DatabaseDescriptor : IDisposable
     public void ClearDeferredSchemaStepDown()
         => Interlocked.Exchange(ref _deferredSchemaStepDown, 0);
 
+    /// <summary>
+    /// If a deferred step-down was requested (F1a persist exhaustion), clears the flag and
+    /// steps down schema-partition leadership. Throws on step-down failure — callers should
+    /// catch and log with their own logger. No-op if no step-down was requested.
+    /// </summary>
+    internal async Task FireDeferredSchemaStepDownAsync()
+    {
+        if (!DeferredSchemaStepDown)
+            return;
+
+        ClearDeferredSchemaStepDown();
+        await Kahuna.StepDownSchemaPartitionAsync(Name, CancellationToken.None).ConfigureAwait(false);
+    }
+
     public Schema Schema { get; } = new();
 
     public SystemSchema SystemSchema { get; set; } = new();
