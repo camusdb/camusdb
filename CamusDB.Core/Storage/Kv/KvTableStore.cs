@@ -57,6 +57,12 @@ public sealed class KvTableStore
     private const int MaxKahunaRetries = 32;
     private const int MaxRetryDelayMs   = 50;
 
+    // Safety-net expiry for an exclusive range (prefix) lock. The lock is released explicitly when
+    // the owning transaction commits or rolls back; this expiry only bounds a leak if the client
+    // dies mid-transaction. A range scan that needs serializable isolation should comfortably
+    // finish inside this window.
+    private const int RangeLockExpiresMs = 30_000;
+
     // Exponential back-off: 1 ms, 2 ms, 4 ms, … capped at MaxRetryDelayMs.
     private static int RetryDelayMs(int attempt) => Math.Min(1 << attempt, MaxRetryDelayMs);
 
@@ -70,6 +76,75 @@ public sealed class KvTableStore
         this.tableName = tableName;
         rowBucketPrefix = $"{tableId}:r";
         rowKeyPrefix    = $"{tableId}:r/";
+    }
+
+    // -----------------------------------------------------------------------
+    // Range (prefix) locking — opt-in serializable scans
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Acquires an exclusive lock over the table's entire row range for <paramref name="tx"/>,
+    /// giving a serializable, phantom-free view: a concurrent transaction cannot insert, update,
+    /// delete, or read-lock any row in this table until <paramref name="tx"/> commits or rolls
+    /// back. Call this <b>before</b> a cursor scan (<see cref="ScanRows"/>) that must not observe
+    /// concurrent mutations across page boundaries — the default scan path only guarantees a
+    /// snapshot, not serializability. The lock is tracked on the transaction and released
+    /// automatically on commit/rollback.
+    /// </summary>
+    public Task AcquireRowRangeLockAsync(KvTransaction tx, CancellationToken cancellationToken = default)
+        => AcquirePrefixLockAsync(tx, rowBucketPrefix, cancellationToken);
+
+    /// <summary>
+    /// Exclusive-locks an index's entire key range for <paramref name="tx"/> (serializable index
+    /// scan / phantom protection over the index bucket). See <see cref="AcquireRowRangeLockAsync"/>.
+    /// </summary>
+    public Task AcquireIndexRangeLockAsync(KvTransaction tx, string indexId, CancellationToken cancellationToken = default)
+        => AcquirePrefixLockAsync(tx, BuildIndexBucketPrefix(indexId), cancellationToken);
+
+    private async Task AcquirePrefixLockAsync(KvTransaction tx, string bucketPrefix, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(tx);
+
+        KeyValueResponseType type = await RetryOnMustRetry(
+            () => kahuna.LocateAndTryAcquireExclusivePrefixLock(
+                tx.TransactionId, bucketPrefix, RangeLockExpiresMs, KeyValueDurability.Persistent, cancellationToken),
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        if (type == KeyValueResponseType.Locked)
+        {
+            // Track so the transaction releases it on commit/rollback — a read-only prefix lock is
+            // not finalized by the 2PC, which only clears intents on modified keys.
+            tx.TrackPrefixLock(bucketPrefix, KeyValueDurability.Persistent);
+            return;
+        }
+
+        if (type == KeyValueResponseType.AlreadyLocked)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionConflict,
+                $"Range '{bucketPrefix}' is exclusively locked by another transaction");
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Failed to acquire exclusive range lock on '{bucketPrefix}': {type}");
+    }
+
+    private static async Task<KeyValueResponseType> RetryOnMustRetry(
+        Func<Task<KeyValueResponseType>> fn,
+        CancellationToken ct)
+    {
+        KeyValueResponseType type;
+        int retries = 0;
+
+        do
+        {
+            type = await fn().ConfigureAwait(false);
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+
+        return type;
     }
 
     // -----------------------------------------------------------------------

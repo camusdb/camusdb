@@ -369,15 +369,39 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// In standalone mode: only the local endpoint — <c>GetNodes()</c> returns phantom witness
     /// nodes used by the embedded Raft for quorum and must not appear in the ack gate.
     /// </summary>
+    /// <summary>
+    /// The set of nodes the schema ack gate must wait on. Always includes the local node.
+    /// <para>
+    /// <b>E1 (default, infinite lease):</b> every configured Raft peer — the gate waits for
+    /// every member, so a crashed-but-configured node freezes DDL until the ack timeout. Safe
+    /// (never false-evicts) but not live.
+    /// </para>
+    /// <para>
+    /// <b>E2 (finite lease):</b> live peers are sourced from the leader's real Raft activity view
+    /// (<see cref="Kommander.IRaft.GetActiveNodes"/>) within the lease window. A peer the leader
+    /// has not heard from within the lease is presumed dead and excluded from the gate, so DDL
+    /// completes without it; a slow-but-alive peer (still answering Raft, even if not applying
+    /// schema deltas) stays active and must still ack — no false eviction. The gate runs on the
+    /// schema leader (the proposer), so <c>GetActiveNodes</c> reflects its follower reachability.
+    /// </para>
+    /// </summary>
     private IReadOnlyCollection<string> GetLiveSchemaNodes()
     {
         if (!isClusterMode)
             return [Raft.GetLocalEndpoint()];
 
-        IList<RaftNode> peers = Raft.GetNodes();
-        List<string> members = new(peers.Count + 1) { Raft.GetLocalEndpoint() };
-        foreach (RaftNode peer in peers)
-            members.Add(peer.Endpoint);
+        List<string> members = [Raft.GetLocalEndpoint()];
+
+        if (SchemaAckLiveNodeLease == Timeout.InfiniteTimeSpan)
+        {
+            foreach (RaftNode peer in Raft.GetNodes())
+                members.Add(peer.Endpoint);
+        }
+        else
+        {
+            members.AddRange(Raft.GetActiveNodes(SchemaAckLiveNodeLease));
+        }
+
         return members;
     }
 
@@ -394,7 +418,11 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             schemaVersion,
             timeout,
             GetLiveSchemaNodes,
-            liveNodeLease ?? SchemaAckLiveNodeLease,
+            // Liveness is now carried by membership (GetLiveSchemaNodes filters dead peers out of
+            // the set via Raft activity, E2). The tracker must NOT also expire members on its
+            // apply-derived LastSeen — that would false-evict a Raft-alive node that is merely slow
+            // to apply a schema delta. So the tracker simply waits for every live member to ack.
+            Timeout.InfiniteTimeSpan,
             cancellationToken
         );
     }

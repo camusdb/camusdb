@@ -378,31 +378,35 @@ Implemented by `SchemaAckTracker` (per-db `{node → NodeAck{Version, LastSeen}}
   every endpoint returned by `getLiveMembers()` has acked `version`, or throws on timeout.
 
 **Live membership comes from Raft, not a manual register set.**
-`EmbeddedKahuna.GetLiveSchemaNodes()` supplies the live set:
+`EmbeddedKahuna.GetLiveSchemaNodes()` supplies the live set, and the lease controls which Raft
+signal it uses:
 
-- **Cluster mode:** the local endpoint plus every peer from `Raft.GetNodes()`. Removing a node
-  from the cluster removes it from the gate; a deregistered-but-up node no longer counts as
-  live.
 - **Standalone mode** (`isClusterMode == false`): only `Raft.GetLocalEndpoint()`, because
   `GetNodes()` returns phantom witness endpoints that would otherwise wedge the gate forever.
+- **Cluster mode, infinite lease (default):** the local endpoint plus every peer from
+  `Raft.GetNodes()` — the gate waits for **every configured** member. Safe (never false-evicts)
+  but a crashed-but-configured node freezes DDL until `SchemaAckWaitTimeout`.
+- **Cluster mode, finite lease:** the local endpoint plus the peers in
+  `Raft.GetActiveNodes(lease)` — the leader's **real per-follower liveness** view (Kommander
+  tracks each follower's last `AppendLogs` response). A peer the leader has not heard from within
+  the lease is presumed dead and dropped from the gate, so DDL completes without it; a
+  **slow-but-alive** peer (still answering Raft, even if it has applied no schema delta) stays in
+  the active set and must still ack. The gate runs on the schema leader (the proposer), so
+  `GetActiveNodes` reflects its follower reachability.
 
 Acks are keyed on `Raft.GetLocalEndpoint()`, so each node reports under its real Raft identity.
 
-**Liveness vs correctness trade-off (interim lease).** `SchemaAckLiveNodeLease` defaults to
-`Timeout.InfiniteTimeSpan`: with an infinite lease the gate waits for **every** live Raft
-member, choosing correctness (never silently drop a slow-but-alive follower) over liveness (a
-crashed member freezes DDL until `SchemaAckWaitTimeout`). Setting a **finite** lease activates
-apply-derived expiry: a live member whose last ack (`LastSeen`) is older than the lease is
-presumed down and stops blocking the gate, while a member that has *never* acked still blocks
-(it has no `LastSeen` to expire). Tests use a short finite lease to commit DDL with quorum
-while one node is paused; production keeps the strict infinite-lease behaviour. Both timeouts
-are tunable on `EmbeddedKahuna` (`SchemaAckWaitTimeout`, `SchemaAckLiveNodeLease`).
+**Liveness is sourced from Raft activity, not from acks.** Because membership already filters out
+dead peers via `GetActiveNodes`, the `SchemaAckTracker` is given an **infinite** lease and simply
+waits for every member of the (already liveness-filtered) set to ack — it does **not** expire a
+member on its own apply-derived `LastSeen`. This is what prevents false eviction: a Raft-alive but
+schema-idle node has no fresh ack, but it is still in the active set, so the gate keeps waiting for
+it. (The tracker's `LastSeen` field is retained as a recorded version stamp but no longer drives
+liveness.) `SchemaAckLiveNodeLease` defaults to `Timeout.InfiniteTimeSpan`; both it and
+`SchemaAckWaitTimeout` are tunable on `EmbeddedKahuna`.
 
-> **Limitation.** The lease is *apply-derived*, not a true heartbeat — a node that is alive
-> but doing no schema work emits no fresh `LastSeen`, so enabling a finite lease in production
-> safely needs a real heartbeat as the liveness signal. The tracker is also currently
-> process-`static` (shared across in-process test nodes); a per-`EmbeddedKahuna` instance
-> would model multi-node state more honestly. See §13.
+> **Remaining limitation.** The tracker is still process-`static` (shared across in-process test
+> nodes); a per-`EmbeddedKahuna` instance would model multi-node state more honestly. See §13.
 
 ---
 
@@ -912,10 +916,11 @@ on an older layout decode with their own version and read `age` with current vis
   be metadata-only (mutate `Name`, leave the immutable `Id` so no rows/indexes move) and drain
   old names across the two-version window. The positional/ID-keyed encoding (§7.4) already makes
   the data side free.
-- **Membership heartbeat.** The ack-gate live set is sourced from Raft (§6.2), but the lease is
-  *apply-derived*, not a true heartbeat. Enabling timed lease expiry safely in production needs
-  a real heartbeat so an alive-but-idle node isn't falsely evicted. The `SchemaAckTracker` is
-  also process-`static`; a per-`EmbeddedKahuna` instance would model multi-node state honestly.
+- **Per-instance ack tracker.** The ack-gate live set is now sourced from real Raft per-follower
+  liveness (`GetActiveNodes`, §6.2), so a finite lease evicts only genuinely-dead nodes and never
+  false-evicts an alive-but-idle one. The one remaining membership cleanup is that
+  `SchemaAckTracker` is still process-`static` (shared across in-process test nodes); a
+  per-`EmbeddedKahuna` instance would model multi-node state more honestly.
 - **Restart-replay durability.** The persist-failure *policy* is implemented (degrade +
   step-down, §10), but recovery still relies on restart. The remaining piece is making the
   restart path provably reconcile a stale or failed checkpoint against the committed schema log

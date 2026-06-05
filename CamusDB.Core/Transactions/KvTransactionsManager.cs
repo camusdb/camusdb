@@ -139,12 +139,16 @@ public sealed class KvTransactionsManager
             tx.TransactionId,
             tx.GetAcquiredLocks(),
             tx.GetModifiedKeys(),
+            // CamusDB does not yet track per-transaction read keys (no read-key validation);
+            // pass an empty set to preserve current commit semantics under the new Kahuna API.
+            [],
             cancellationToken
         ).ConfigureAwait(false);
 
         if (result == KeyValueResponseType.Committed)
         {
             tx.Status = KvTransactionStatus.Committed;
+            await ReleasePrefixLocksAsync(tx, cancellationToken).ConfigureAwait(false);
             Untrack(tx);
             return;
         }
@@ -152,6 +156,7 @@ public sealed class KvTransactionsManager
         // Kahuna aborted — the transaction is dead; mark it rolled back so
         // a subsequent RollbackIfNotCompletedAsync is a no-op.
         tx.Status = KvTransactionStatus.RolledBack;
+        await ReleasePrefixLocksAsync(tx, cancellationToken).ConfigureAwait(false);
         Untrack(tx);
 
         throw new CamusDBException(
@@ -183,6 +188,35 @@ public sealed class KvTransactionsManager
             tx.GetModifiedKeys(),
             cancellationToken
         ).ConfigureAwait(false);
+
+        await ReleasePrefixLocksAsync(tx, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Releases the exclusive prefix (range) locks the transaction acquired for serializable
+    /// scans. The 2PC commit/rollback only finalizes intents on <em>modified</em> keys, so a
+    /// read-only prefix lock must be released here or it would linger until its safety-net expiry.
+    /// Release is idempotent (a no-op if Kahuna already cleared it); failures are swallowed so a
+    /// best-effort cleanup never masks the commit/rollback outcome (the expiry is the backstop).
+    /// </summary>
+    private async Task ReleasePrefixLocksAsync(KvTransaction tx, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<(string prefix, KeyValueDurability durability)> prefixLocks = tx.GetAcquiredPrefixLocks();
+        if (prefixLocks.Count == 0)
+            return;
+
+        foreach ((string prefix, KeyValueDurability durability) in prefixLocks)
+        {
+            try
+            {
+                await kahuna.LocateAndTryReleaseExclusivePrefixLock(
+                    tx.TransactionId, prefix, durability, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best-effort: the lock's safety-net expiry releases it if this fails.
+            }
+        }
     }
 
     /// <summary>

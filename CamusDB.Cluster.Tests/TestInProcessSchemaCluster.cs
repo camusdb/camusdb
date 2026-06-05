@@ -1209,4 +1209,82 @@ public sealed class TestInProcessSchemaCluster
                 .Any(c => c.Name == "score" && c.State == SchemaElementState.Public)),
             "forwarded ADD COLUMN must converge to Public on every node");
     }
+
+    // E2 — no false eviction of an idle-but-alive node. With a finite ack lease, liveness is now
+    // sourced from real Raft activity (GetActiveNodes), not from an apply-derived "last applied"
+    // signal. So a follower that is alive (still answering Raft heartbeats) but has applied no
+    // schema delta for longer than the lease must STILL be waited on by the ack gate. The proof:
+    // after an idle period longer than the lease, the next DDL's gate must wait for every live
+    // node, so when the call returns every node — including the idle followers — is already at the
+    // new version. Under the old apply-derived lease the idle followers would have gone "stale" and
+    // been dropped from the gate, so the DDL could have returned before they applied.
+    [Test]
+    public async Task IdleButAliveFollowersAreNotFalselyEvictedFromAckGate()
+    {
+        TimeSpan lease = TimeSpan.FromMilliseconds(1500);
+
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.SchemaAckLiveNodeLease = lease;
+
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "first",
+            columns: [new ColumnInfo("id", ColumnType.Id)],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        )).WaitAsync(TimeSpan.FromSeconds(20)));
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        // Stay idle (no schema activity) for longer than the lease. The apply-derived "last
+        // applied" timestamp for every node now exceeds the lease, while Raft heartbeats keep the
+        // nodes genuinely active — exactly the case the old mechanism would have false-evicted.
+        await Task.Delay(lease + TimeSpan.FromMilliseconds(1000)).ConfigureAwait(false);
+
+        // Direct proof of the E2 membership source: despite being schema-idle for longer than the
+        // lease, both followers are still in the leader's Raft active set within the lease window,
+        // so the ack gate will keep waiting on them (the apply-derived signal would have dropped
+        // them here).
+        InProcessSchemaCluster.Node leaderNode = await cluster.WaitForSchemaLeaderNodeAsync(db);
+        string[] followerEndpoints = cluster.Nodes
+            .Where(n => n.Index != leaderNode.Index)
+            .Select(n => n.Kahuna.Raft.GetLocalEndpoint())
+            .ToArray();
+        IReadOnlyList<string> active = leaderNode.Kahuna.Raft.GetActiveNodes(lease);
+        Assert.True(followerEndpoints.All(active.Contains),
+            "idle-but-alive followers must remain in the leader's Raft active set within the lease. " +
+            $"active=[{string.Join(",", active)}] followers=[{string.Join(",", followerEndpoints)}]");
+
+        // Second DDL — do NOT wait for convergence afterwards; the ack gate itself must have waited
+        // for every live node before returning.
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "second",
+            columns: [new ColumnInfo("id", ColumnType.Id)],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        )).WaitAsync(TimeSpan.FromSeconds(20)));
+
+        // Immediately: every node — including the idle followers — must be at v2 with the new
+        // table. If an idle-but-alive follower had been evicted from the gate, the DDL could have
+        // returned before that node applied, and it would still be at v1 here.
+        Assert.True(cluster.Nodes.All(n =>
+            n.Database is not null &&
+            n.Database.Schema.SchemaVersion >= 2 &&
+            n.Database.Schema.Tables.ContainsKey("second")),
+            "every live (idle-but-alive) node must have acked v2 before the DDL returned — no false eviction. " +
+            $"Versions: {string.Join(", ", cluster.Nodes.Select(n => $"node{n.Index}={n.Database?.Schema.SchemaVersion}"))}");
+    }
 }

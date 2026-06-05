@@ -54,6 +54,7 @@ public sealed class TestKvTableStoreIndex
             tx.TransactionId,
             tx.GetAcquiredLocks(),
             tx.GetModifiedKeys(),
+            [],
             CancellationToken.None
         );
         Assert.AreEqual(KeyValueResponseType.Committed, result);

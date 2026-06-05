@@ -49,6 +49,7 @@ public sealed class KvTransaction
 
     private readonly Lock trackSync = new();
     private HashSet<(string key, KeyValueDurability durability)>? acquiredLocks;
+    private HashSet<(string prefix, KeyValueDurability durability)>? acquiredPrefixLocks;
     private HashSet<(string key, KeyValueDurability durability)>? modifiedKeys;
     private Dictionary<string, SchemaVersionPin>? schemaPins;
 
@@ -68,6 +69,33 @@ public sealed class KvTransaction
         {
             acquiredLocks ??= [];
             acquiredLocks.Add((key, durability));
+        }
+    }
+
+    /// <summary>
+    /// Records that an exclusive <b>prefix</b> (range) lock was acquired for this transaction.
+    /// Unlike per-key write intents, a read-only prefix lock is not cleared by the commit/rollback
+    /// 2PC (which only finalizes <em>modified</em> keys), so <see cref="KvTransactionsManager"/>
+    /// releases these explicitly on commit and rollback. Idempotent.
+    /// </summary>
+    public void TrackPrefixLock(string prefix, KeyValueDurability durability)
+    {
+        lock (trackSync)
+        {
+            acquiredPrefixLocks ??= [];
+            acquiredPrefixLocks.Add((prefix, durability));
+        }
+    }
+
+    /// <summary>Snapshot of the prefix (range) locks acquired by this transaction.</summary>
+    public IReadOnlyList<(string prefix, KeyValueDurability durability)> GetAcquiredPrefixLocks()
+    {
+        lock (trackSync)
+        {
+            if (acquiredPrefixLocks is null || acquiredPrefixLocks.Count == 0)
+                return [];
+
+            return [.. acquiredPrefixLocks];
         }
     }
 

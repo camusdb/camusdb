@@ -19,6 +19,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
@@ -77,6 +78,7 @@ public sealed class TestKvTableStore
             tx.TransactionId,
             tx.GetAcquiredLocks(),
             tx.GetModifiedKeys(),
+            [],
             CancellationToken.None
         );
 
@@ -341,5 +343,39 @@ public sealed class TestKvTableStore
         Assert.AreEqual(1, tx.GetAcquiredLocks().Count, "One acquired lock must be tracked");
 
         await CommitTransaction(node.Kahuna, tx);
+    }
+
+    // Exclusive range (prefix) lock: serializable scans. A transaction that acquires the table's
+    // row range lock blocks any other transaction from locking the same range, and the lock is
+    // released when the owning transaction commits (a read-only prefix lock is not finalized by
+    // the 2PC, so KvTransactionsManager releases it explicitly).
+    [Test]
+    public async Task AcquireRowRangeLock_IsExclusive_AndReleasedOnCommit()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("trangelock");
+        await using EmbeddedKahuna __ = node;
+
+        KvTransactionsManager transactions = new(node.Kahuna);
+
+        KvTransaction tx1 = await transactions.BeginAsync();
+        await store.AcquireRowRangeLockAsync(tx1);
+        Assert.AreEqual(1, tx1.GetAcquiredPrefixLocks().Count, "tx1 must track its range lock");
+
+        // A second transaction cannot acquire the same range while tx1 holds it.
+        KvTransaction tx2 = await transactions.BeginAsync();
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await store.AcquireRowRangeLockAsync(tx2));
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex!.Code,
+            "a concurrent range lock must be rejected as a conflict");
+
+        // Committing tx1 releases the range lock.
+        await transactions.CommitAsync(tx1);
+
+        // tx2 can now acquire it.
+        Assert.DoesNotThrowAsync(async () => await store.AcquireRowRangeLockAsync(tx2),
+            "the range must be lockable again once the holder commits");
+        Assert.AreEqual(1, tx2.GetAcquiredPrefixLocks().Count);
+
+        await transactions.CommitAsync(tx2);
     }
 }
