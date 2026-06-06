@@ -1372,4 +1372,112 @@ public sealed class TestInProcessSchemaCluster
     //   • PersistFullCheckpointIsIdempotentAndLoadableAfterReopen — PersistFullSchemaCheckpointAsync
     //     (the F1b re-persist) yields a valid, loadable checkpoint.
     //   • GapInRestoreThrowsTypedCamusDbException        — restore fails loud on a gap (never silent).
+
+    // ── E3: Schema Ack Transport ──────────────────────────────────────────────
+
+    // E3-1: the two-version gate blocks on a behind follower and releases once the
+    // relayed ack from that follower arrives. This verifies that SchemaAckTracker is
+    // per-instance (not static) and that InProcessSchemaAckRelay delivers remote acks
+    // to the leader's tracker — the full production ack-transport path in-process.
+    [Test]
+    public async Task AckTransport_GateBlocksUntilFollowerRelayArrives()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // Seed all nodes at version 0 (simulates SchemaReplicator.Register).
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.RecordLocalSchemaApplied(db, 0);
+
+        // Only the leader acks version 1 — gate must block while followers are still at 0.
+        leader.Kahuna.RecordLocalSchemaApplied(db, 1);
+
+        bool partialAck = await leader.Kahuna.WaitForSchemaAcksAsync(
+            db, 1, TimeSpan.FromMilliseconds(100), Timeout.InfiniteTimeSpan, CancellationToken.None);
+        Assert.IsFalse(partialAck, "Gate must block when followers have not yet acked");
+
+        // Simulate follower applies arriving via the in-process ack relay: each follower
+        // calls RecordAndPublishSchemaApplied (which fires the relay), and the relay delivers
+        // the ack directly to the leader's per-instance tracker.
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+        {
+            if (n.Index == leader.Index)
+                continue;
+            // RecordAndPublishSchemaApplied records locally on the follower and fires
+            // the relay that calls leader.RecordRemoteSchemaAck.
+            n.Kahuna.RecordAndPublishSchemaApplied(db, 1);
+        }
+
+        // Give the fire-and-forget relay tasks time to execute.
+        await Task.Delay(TimeSpan.FromMilliseconds(200)).ConfigureAwait(false);
+
+        bool allAcked = await leader.Kahuna.WaitForSchemaAcksAsync(
+            db, 1, TimeSpan.FromSeconds(3), Timeout.InfiniteTimeSpan, CancellationToken.None);
+        Assert.IsTrue(allAcked, "Gate must release once all follower acks are relayed to the leader");
+    }
+
+    // E3-2: each node's SchemaAckTracker is independent — a follower's per-instance
+    // tracker is not visible to the leader's tracker without the relay. This test
+    // verifies that the per-instance isolation is real (no shared static remains).
+    [Test]
+    public async Task AckTransport_PerInstanceTrackerIsolation()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // Seed v0 on all nodes.
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.RecordLocalSchemaApplied(db, 0);
+
+        // Ack version 1 ONLY on each follower's own local tracker (not via relay).
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+        {
+            if (n.Index == leader.Index)
+                continue;
+            n.Kahuna.RecordLocalSchemaApplied(db, 1);
+        }
+
+        // Leader has not acked yet, and follower acks did not reach the leader's tracker.
+        bool gateResult = await leader.Kahuna.WaitForSchemaAcksAsync(
+            db, 1, TimeSpan.FromMilliseconds(100), Timeout.InfiniteTimeSpan, CancellationToken.None);
+        Assert.IsFalse(gateResult,
+            "Gate must still block: follower local acks must not bleed into the leader's per-instance tracker");
+    }
+
+    // E3-3: gate proceeds on timeout when an ack is dropped (no relay for one follower).
+    // The lease-based liveness gate (finite SchemaAckLiveNodeLease) is the backstop.
+    [Test]
+    public async Task AckTransport_GateTimeoutWhenAckDropped()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        TimeSpan shortLease = TimeSpan.FromMilliseconds(300);
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.SchemaAckLiveNodeLease = shortLease;
+
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // Seed v0 and advance leader to v1; followers remain at v0 (dropped ack).
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.RecordLocalSchemaApplied(db, 0);
+
+        leader.Kahuna.RecordLocalSchemaApplied(db, 1);
+
+        // Wait for the lease to expire so behind followers are considered expired.
+        await Task.Delay(shortLease + TimeSpan.FromMilliseconds(100)).ConfigureAwait(false);
+
+        bool timedOut = await leader.Kahuna.WaitForSchemaAcksAsync(
+            db, 1, TimeSpan.FromSeconds(2), shortLease, CancellationToken.None);
+        Assert.IsTrue(timedOut,
+            "Gate must proceed once the lease expires for behind followers (dropped ack backstop)");
+    }
 }

@@ -54,7 +54,7 @@ public sealed class SchemaReplicator
     {
         ArgumentNullException.ThrowIfNull(database);
 
-        database.Kahuna.RecordLocalSchemaApplied(database.Name, database.Schema.SchemaVersion);
+        database.Kahuna.RecordAndPublishSchemaApplied(database.Name, database.Schema.SchemaVersion);
 
         IDisposable applySubscription = database.Kahuna.RegisterSchemaApply(
             (partitionId, bytes) => ApplyAsync(database, partitionId, bytes),
@@ -116,7 +116,7 @@ public sealed class SchemaReplicator
             {
                 if (entry.ToVersion <= database.Schema.SchemaVersion && WasSchemaDeltaApplied(database.Schema, entry))
                 {
-                    database.Kahuna.RecordLocalSchemaApplied(database.Name, entry.ToVersion);
+                    database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
                     return true;
                 }
 
@@ -128,7 +128,7 @@ public sealed class SchemaReplicator
 
             if (entry.ToVersion <= database.Schema.SchemaVersion)
             {
-                database.Kahuna.RecordLocalSchemaApplied(database.Name, entry.ToVersion);
+                database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
                 return true;
             }
 
@@ -151,7 +151,7 @@ public sealed class SchemaReplicator
                 entry.ToVersion
             );
 
-            database.Kahuna.RecordLocalSchemaApplied(database.Name, entry.ToVersion);
+            database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
 
             return true;
         }
@@ -244,7 +244,7 @@ public sealed class SchemaReplicator
         {
             if (entry.ToVersion <= database.Schema.SchemaVersion)
             {
-                database.Kahuna.RecordLocalSchemaApplied(database.Name, entry.ToVersion);
+                database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
                 return true;
             }
 
@@ -272,7 +272,7 @@ public sealed class SchemaReplicator
                 entry.ToVersion
             );
 
-            database.Kahuna.RecordLocalSchemaApplied(database.Name, entry.ToVersion);
+            database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
 
             return true;
         }

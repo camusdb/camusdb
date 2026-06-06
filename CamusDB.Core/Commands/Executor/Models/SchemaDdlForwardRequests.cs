@@ -81,3 +81,15 @@ public sealed class SchemaDdlForwardResponse
     public string? Code { get; set; }
     public string? Message { get; set; }
 }
+
+/// <summary>
+/// Payload for the follower→leader schema-apply acknowledgement. A follower posts this
+/// to the leader's <c>/internal/schema-ddl/schema-ack</c> endpoint after applying each
+/// schema version, so the leader's <c>SchemaAckTracker</c> observes real follower progress.
+/// </summary>
+public sealed class SchemaAckRequest
+{
+    public string Database { get; set; } = "";
+    public string NodeEndpoint { get; set; } = "";
+    public long AppliedSchemaVersion { get; set; }
+}

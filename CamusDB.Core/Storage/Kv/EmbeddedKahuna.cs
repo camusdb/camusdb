@@ -32,7 +32,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 {
     public const string SchemaChangeLogType = "SchemaChange";
 
-    private static readonly SchemaAckTracker SchemaAcks = new();
+    private readonly SchemaAckTracker schemaAcks = new();
+
+    private ISchemaAckSender? schemaAckSender;
 
     private readonly EmbeddedKahunaNode node;
 
@@ -215,6 +217,28 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     }
 
     /// <summary>
+    /// Installs the ack transport used to deliver this node's applied-schema notifications to the
+    /// current schema-partition leader. Called once after DI is fully wired (production) or by
+    /// the in-process cluster fixture. A <c>null</c> value disables the ack transport — the node
+    /// still records acks locally but does not forward them; the gate falls back to its timeout.
+    /// </summary>
+    internal void SetSchemaAckSender(ISchemaAckSender? sender)
+    {
+        schemaAckSender = sender;
+    }
+
+    /// <summary>
+    /// Production entry point: wires the <see cref="ISchemaAckSender"/> from the DDL forwarder.
+    /// <see cref="CamusDB.Core.CommandsExecutor.HttpSchemaDdlForwarder"/> implements both
+    /// <c>ISchemaDdlForwarder</c> and <c>ISchemaAckSender</c>; this method performs the cast so
+    /// <c>Program.cs</c> (which cannot access the internal <c>ISchemaAckSender</c>) can wire it.
+    /// </summary>
+    public void SetSchemaAckForwarder(CamusDB.Core.CommandsExecutor.ISchemaDdlForwarder? forwarder)
+    {
+        schemaAckSender = forwarder as ISchemaAckSender;
+    }
+
+    /// <summary>
     /// Triggers this node to start an immediate election for the schema-log partition of
     /// <paramref name="db"/>.  The node still has to satisfy Raft log-freshness and quorum
     /// rules, so it is not guaranteed to win — but if it has an up-to-date log it will.
@@ -360,7 +384,48 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
     public void RecordLocalSchemaApplied(string db, long schemaVersion)
     {
-        SchemaAcks.RecordApplied(db, Raft.GetLocalEndpoint(), schemaVersion);
+        schemaAcks.RecordApplied(db, Raft.GetLocalEndpoint(), schemaVersion);
+    }
+
+    /// <summary>
+    /// Records a schema-apply ack received from a remote follower node. Called by the
+    /// ack transport endpoint when a follower posts its applied version to the leader.
+    /// </summary>
+    public void RecordRemoteSchemaAck(string db, string nodeEndpoint, long version)
+        => schemaAcks.RecordApplied(db, nodeEndpoint, version);
+
+    /// <summary>
+    /// Records the local apply ack and, if an <see cref="ISchemaAckSender"/> is wired, fires
+    /// a best-effort notification to the current schema-partition leader so it can observe this
+    /// follower's progress. The send is fire-and-forget; the gate's timeout is the backstop.
+    /// </summary>
+    internal void RecordAndPublishSchemaApplied(string db, long schemaVersion)
+    {
+        string localEndpoint = Raft.GetLocalEndpoint();
+        schemaAcks.RecordApplied(db, localEndpoint, schemaVersion);
+
+        ISchemaAckSender? sender = schemaAckSender;
+        if (sender is null)
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                int partitionId = SchemaLogPartition(db);
+                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
+                string leader = await Raft.WaitForLeader(partitionId, cts.Token).ConfigureAwait(false);
+
+                if (string.Equals(leader, localEndpoint, StringComparison.Ordinal))
+                    return; // we are the leader; local record is sufficient
+
+                await sender.SendSchemaAckAsync(leader, db, localEndpoint, schemaVersion, cts.Token).ConfigureAwait(false);
+            }
+            catch
+            {
+                // best-effort; gate timeout is the backstop
+            }
+        });
     }
 
     /// <summary>
@@ -413,7 +478,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         CancellationToken cancellationToken = default
     )
     {
-        return SchemaAcks.WaitForAllLiveAsync(
+        return schemaAcks.WaitForAllLiveAsync(
             db,
             schemaVersion,
             timeout,

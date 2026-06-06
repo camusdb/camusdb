@@ -11,6 +11,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Storage.Kv;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor;
@@ -19,13 +20,17 @@ namespace CamusDB.Core.CommandsExecutor;
 /// Production <see cref="ISchemaDdlForwarder"/> that posts DDL tickets to the
 /// schema leader's <c>/internal/schema-ddl/*</c> HTTP endpoints.
 ///
+/// Also implements <see cref="ISchemaAckSender"/> so that <see cref="EmbeddedKahuna"/>
+/// can deliver follower schema-apply acknowledgements to the leader over the same
+/// HTTP channel without a second transport dependency.
+///
 /// <paramref name="endpointResolver"/> maps a Raft leader endpoint string
 /// (e.g. <c>"node1:7070"</c>) to the CamusDB HTTP base URI
 /// (e.g. <c>http://node1:5095</c>).  In production, register via
 /// <c>Program.cs</c> with a resolver that substitutes the HTTP port; in tests,
 /// inject the fake server URI directly.
 /// </summary>
-public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder
+public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSender
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -100,6 +105,47 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder
         };
 
         return await PostAsync(leader, "drop-table", request, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Posts a schema-apply ack from the local follower to the current leader's ack endpoint.
+    /// Fire-and-forget semantics: transport failures are logged at Debug and swallowed; the
+    /// gate's own timeout is the correctness backstop.
+    /// </summary>
+    async Task ISchemaAckSender.SendSchemaAckAsync(
+        string leaderEndpoint,
+        string database,
+        string nodeEndpoint,
+        long schemaVersion,
+        CancellationToken cancellationToken)
+    {
+        SchemaAckRequest request = new()
+        {
+            Database = database,
+            NodeEndpoint = nodeEndpoint,
+            AppliedSchemaVersion = schemaVersion,
+        };
+
+        Uri baseUri = endpointResolver(leaderEndpoint);
+        Uri endpoint = new(baseUri, "/internal/schema-ddl/schema-ack");
+
+        HttpResponseMessage? response = null;
+        try
+        {
+            response = await httpClient.PostAsJsonAsync(endpoint, request, JsonOptions, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex)
+        {
+            logger.LogDebug(ex, "Schema ack to {Endpoint} failed (transport error); will retry on next apply", endpoint);
+        }
+        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogDebug(ex, "Schema ack to {Endpoint} timed out; will retry on next apply", endpoint);
+        }
+        finally
+        {
+            response?.Dispose();
+        }
     }
 
     private async Task<bool?> PostAsync<TRequest>(string leader, string operation, TRequest request, CancellationToken cancellationToken)

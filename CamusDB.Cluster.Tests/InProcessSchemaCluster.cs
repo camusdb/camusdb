@@ -136,6 +136,14 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             // RunOnSchemaLeaderAsync relies on.
             ClusterLeaderForwarder? forwarder = wireLeaderForwarder ? new ClusterLeaderForwarder() : null;
 
+            // E3: in-process ack relay — routes each follower's RecordAndPublishSchemaApplied
+            // notification to the current leader's RecordRemoteSchemaAck, replacing the
+            // co-location side-effect of the old static SchemaAckTracker. Every node gets the
+            // relay so the leader's per-instance tracker receives real follower acks.
+            InProcessSchemaAckRelay ackRelay = new(kahunaNodes);
+            foreach (EmbeddedKahuna kahuna in kahunaNodes)
+                kahuna.SetSchemaAckSender(ackRelay);
+
             Node[] nodes = kahunaNodes
                 .Select((kahuna, index) =>
                 {
@@ -158,6 +166,32 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             if (forwarder is not null)
                 forwarder.Cluster = cluster;
             return cluster;
+        }
+    }
+
+    // E3: in-process equivalent of the HTTP schema-ack transport. Delivers a follower's applied
+    // version directly to the target leader node's RecordRemoteSchemaAck, replacing the
+    // co-location side effect of the old static SchemaAckTracker. Synchronous delivery ensures
+    // the leader's tracker is updated before the next WaitForSchemaAcksAsync poll fires.
+    internal sealed class InProcessSchemaAckRelay : ISchemaAckSender
+    {
+        private readonly Dictionary<string, EmbeddedKahuna> nodeMap;
+
+        public InProcessSchemaAckRelay(EmbeddedKahuna[] nodes)
+        {
+            nodeMap = nodes.ToDictionary(n => n.Raft.GetLocalEndpoint(), StringComparer.Ordinal);
+        }
+
+        public Task SendSchemaAckAsync(
+            string leaderEndpoint,
+            string database,
+            string nodeEndpoint,
+            long schemaVersion,
+            CancellationToken cancellationToken)
+        {
+            if (nodeMap.TryGetValue(leaderEndpoint, out EmbeddedKahuna? leader))
+                leader.RecordRemoteSchemaAck(database, nodeEndpoint, schemaVersion);
+            return Task.CompletedTask;
         }
     }
 
@@ -210,9 +244,6 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             node.Database = await node.Executor.OpenDatabase(databaseName).ConfigureAwait(false);
             Assert.False(node.Database.OwnsKahuna, "Cluster fixture descriptors must use their process-level Kahuna node");
         }
-
-        // SchemaAckTracker is process-global for now so this in-process fixture can share
-        // acks across nodes. Workstream E will replace that with per-instance membership.
     }
 
     public async Task<Node> WaitForSchemaLeaderNodeAsync(string databaseName, TimeSpan? timeout = null)

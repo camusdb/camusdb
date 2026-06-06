@@ -216,6 +216,11 @@ await app.StartAsync();
 if (config.IsClusterMode)
 {
     EmbeddedKahuna clusterNode = app.Services.GetRequiredService<EmbeddedKahuna>();
+
+    // Wire the ack transport so follower applies are delivered to the leader's tracker.
+    ISchemaDdlForwarder ddlForwarder = app.Services.GetRequiredService<ISchemaDdlForwarder>();
+    clusterNode.SetSchemaAckForwarder(ddlForwarder);
+
     await clusterNode.StartAsync();
 }
 

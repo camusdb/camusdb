@@ -332,12 +332,18 @@ public sealed class TestEmbeddedKahuna
             // peers are visible would cause WaitForSchemaAcksAsync to see 1/1 and pass early.
             await WaitForFullMembershipAsync(leader, nodes.Length - 1);
 
-            // Seed all nodes at version 0, simulating SchemaReplicator.Register's
-            // RecordLocalSchemaApplied(db, SchemaVersion) call. Without this, nodes that have
-            // no ack record are skipped by HasEveryLiveNodeAcked (the "hasn't opened this db"
-            // fast-path) and the gate incorrectly passes with only 1 ack.
+            // Seed all nodes at version 0, simulating RecordAndPublishSchemaApplied.
+            // Each node records locally; followers also relay to the leader's per-instance
+            // tracker via RecordRemoteSchemaAck so the gate knows about them (without the
+            // relay the leader's tracker would have no record for followers and the
+            // "hasn't-opened" fast-path would silently skip them, allowing the gate to pass
+            // with only 1/N acks, which is what the old shared-static tracker masked).
             foreach (EmbeddedKahuna node in nodes)
+            {
                 node.RecordLocalSchemaApplied(db, 0);
+                if (node != leader)
+                    leader.RecordRemoteSchemaAck(db, node.Raft.GetLocalEndpoint(), 0);
+            }
 
             // Only the leader acks version 1 — gate must block while the 2 followers are still at 0.
             leader.RecordLocalSchemaApplied(db, 1);
@@ -346,9 +352,15 @@ public sealed class TestEmbeddedKahuna
                 db, 1, TimeSpan.FromMilliseconds(100), TimeSpan.FromMinutes(1), CancellationToken.None);
             Assert.IsFalse(partialAck, "Gate must block until all Raft members ack");
 
-            // All nodes ack — gate must now pass.
+            // Deliver follower acks to the leader's per-instance tracker via RecordRemoteSchemaAck
+            // (the path that RecordAndPublishSchemaApplied + InProcessSchemaAckRelay would take in
+            // the full fixture). The leader records its own ack; followers relay to the leader.
             foreach (EmbeddedKahuna node in nodes)
-                node.RecordLocalSchemaApplied(db, 1);
+            {
+                if (node == leader)
+                    continue;
+                leader.RecordRemoteSchemaAck(db, node.Raft.GetLocalEndpoint(), 1);
+            }
 
             bool allAcked = await leader.WaitForSchemaAcksAsync(
                 db, 1, TimeSpan.FromSeconds(2), TimeSpan.FromMinutes(1), CancellationToken.None);

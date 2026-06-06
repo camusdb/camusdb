@@ -406,11 +406,14 @@ liveness.) `SchemaAckLiveNodeLease` defaults to `Timeout.InfiniteTimeSpan`; both
 `SchemaAckWaitTimeout` are tunable on `EmbeddedKahuna` and via the
 `schema_ack_live_node_lease_ms` / `schema_ack_wait_timeout_ms` config keys (validated at startup).
 
-> **Remaining limitation.** The ack *data* does not yet cross process boundaries: the tracker is
-> process-`static` and each node records only its own ack, so the gate is only effective in-process
-> (the test fixture). Multi-process, the leader sees only its own ack and the gate degrades to a
-> timeout. Needs a follower→leader ack transport plus a per-`EmbeddedKahuna` tracker — see §13 and
-> `docs/distributed-schema-ack-transport-spec.md`.
+> **E3 (implemented).** `SchemaAckTracker` is now a per-`EmbeddedKahuna` instance field (no
+> `static`). After each local apply, `RecordAndPublishSchemaApplied` records the ack locally and
+> fires a best-effort notification to the current schema-partition leader via `ISchemaAckSender`
+> (`HttpSchemaDdlForwarder` in production, `InProcessSchemaAckRelay` in tests). The leader records
+> the remote ack via `RecordRemoteSchemaAck`, so `WaitForAllLiveAsync` observes real follower
+> progress in multi-process deployments. The in-process fixture exercises the same transport path
+> through `InProcessSchemaAckRelay` rather than relying on co-location. The gate's existing
+> timeout remains the correctness backstop for dropped acks (leader change, network loss).
 
 ---
 
@@ -920,16 +923,10 @@ on an older layout decode with their own version and read `age` with current vis
   be metadata-only (mutate `Name`, leave the immutable `Id` so no rows/indexes move) and drain
   old names across the two-version window. The positional/ID-keyed encoding (§7.4) already makes
   the data side free.
-- **Ack transport / per-instance tracker.** The ack-gate live *set* is now sourced from real Raft
-  per-follower liveness (`GetActiveNodes`, §6.2), so a finite lease evicts only genuinely-dead
-  nodes and never false-evicts an alive-but-idle one. But the ack *data* itself does not yet cross
-  process boundaries: `RecordLocalSchemaApplied` records only the local endpoint, and
-  `SchemaAckTracker` is process-`static`. In the in-process test fixture all nodes share that one
-  static tracker, so the leader sees follower acks — but in a real multi-process deployment each
-  process has its own tracker holding only its own ack, so the two-version gate blocks to its
-  timeout and then proceeds **without** the guarantee. Closing this requires (1) a real
-  follower→leader ack transport and (2) making the tracker a per-`EmbeddedKahuna` instance. Design
-  in `docs/distributed-schema-ack-transport-spec.md`.
+- ~~**Ack transport / per-instance tracker.**~~ **Implemented (E3).** `SchemaAckTracker` is now
+  a per-`EmbeddedKahuna` instance. `RecordAndPublishSchemaApplied` sends follower acks to the
+  leader via `ISchemaAckSender` (HTTP in production, in-process relay in tests). See §6.2 and
+  `docs/distributed-schema-ack-transport-spec.md`.
 - **Auto-recovery without restart.** Restart-replay durability is now implemented: on open,
   the restore path reads the persisted checkpoint version as a *floor*, replays committed schema
   entries to head, re-persists the checkpoint, and clears the degraded flag (`SchemaReplicator.

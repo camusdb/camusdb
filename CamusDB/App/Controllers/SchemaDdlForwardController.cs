@@ -230,6 +230,38 @@ public sealed class SchemaDdlForwardController : CommandsController
         }
     }
 
+    /// <summary>
+    /// Receives a schema-apply acknowledgement from a follower node and records it in the
+    /// local <see cref="EmbeddedKahuna"/>'s tracker. This makes the follower's progress
+    /// visible to the leader's two-version gate (<c>WaitForAllLiveAsync</c>) in real
+    /// multi-process deployments. The endpoint always returns 200 OK so that ack delivery
+    /// failures on the follower side are treated as best-effort transport errors rather
+    /// than hard failures — the gate's own timeout is the correctness backstop.
+    /// </summary>
+    [HttpPost]
+    [Route("/internal/schema-ddl/schema-ack")]
+    public async Task<JsonResult> ForwardSchemaAck()
+    {
+        SchemaAckRequest? req;
+        try
+        {
+            req = await ReadJsonBodyAsync<SchemaAckRequest>().ConfigureAwait(false);
+            if (req is null)
+                return BadDdlRequest("SchemaAck request is null");
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+
+        EmbeddedKahuna? clusterNode = HttpContext.RequestServices.GetService<EmbeddedKahuna>();
+        if (clusterNode is not null)
+            clusterNode.RecordRemoteSchemaAck(req.Database, req.NodeEndpoint, req.AppliedSchemaVersion);
+
+        return new JsonResult(new SchemaDdlForwardResponse { Status = "ok" });
+    }
+
     [HttpPost]
     [Route("/internal/schema-ddl/drop-table")]
     public async Task<JsonResult> ForwardDropTable()
