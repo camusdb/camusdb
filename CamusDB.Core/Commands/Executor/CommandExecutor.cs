@@ -119,7 +119,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         rowUpdater = new(logger);
         rowDeleter = new(logger);
         statisticsManager = new(logger);
-        queryExecutor = new(logger);
+        queryExecutor = new(logger, statisticsManager);
         sqlExecutor = new(logger);
         schemaQuerier = new(catalogs, logger);
         queryBinder = new QueryBinder(tableOpener);
@@ -129,7 +129,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             new ScalarSubqueryExecutor(subqueryQueryExecutor),
             new InSubqueryExecutor(subqueryQueryExecutor));
         existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder);
-        explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor);
+        explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor, statisticsManager);
     }
 
     #region database

@@ -219,6 +219,11 @@ public sealed class StatisticsManager
         }
         catch (Exception ex)
         {
+            // Release the one-shot guard so a transient failure does not permanently wedge
+            // this table's stats (no load → never Loaded → never flushed) for the session.
+            if (_cache.TryGetValue(key, out Entry? failed))
+                Interlocked.Exchange(ref failed.LoadAttempted, 0);
+
             _logger.LogWarning(ex, "Stats load failed for table id {TableId} — estimates will be unavailable", tableId);
         }
     }
@@ -397,6 +402,11 @@ public sealed class StatisticsManager
         }
         catch (Exception ex)
         {
+            // Release the one-shot guard so a transient failure does not permanently wedge
+            // this table's stats (no load → never Loaded → never flushed) for the session.
+            if (_cache.TryGetValue(key, out Entry? failed))
+                Interlocked.Exchange(ref failed.LoadAttempted, 0);
+
             _logger.LogWarning(ex, "Stats load failed for table {Table} — estimates will be unavailable", table.Name);
         }
     }

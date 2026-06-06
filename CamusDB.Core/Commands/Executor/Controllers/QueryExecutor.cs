@@ -13,6 +13,7 @@ using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.Statistics;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -25,7 +26,7 @@ internal sealed class QueryExecutor
 
     private readonly RowDeserializer rowDeserializer = new();
 
-    private readonly QueryPlanner queryPlanner = new();
+    private readonly QueryPlanner queryPlanner;
 
     private readonly QueryFilterer queryFilterer = new(new ExistsSubqueryExecutor());
 
@@ -43,10 +44,11 @@ internal sealed class QueryExecutor
 
     private readonly QueryScanner queryScanner;
 
-    public QueryExecutor(ILogger<ICamusDB> logger)
+    public QueryExecutor(ILogger<ICamusDB> logger, StatisticsManager? stats = null)
     {
         this.logger = logger;
-        queryJoinExecutor = new QueryJoinExecutor(this);
+        queryPlanner = new QueryPlanner(stats);
+        queryJoinExecutor = new QueryJoinExecutor(this, stats);
         this.queryScanner = new(logger);
     }
 

@@ -11,6 +11,7 @@ using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Statistics;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -39,6 +40,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// </summary>
 internal sealed class JoinQueryPlanner
 {
+    private readonly StatisticsManager? _stats;
+
+    public JoinQueryPlanner(StatisticsManager? stats = null)
+    {
+        _stats = stats;
+    }
+
     public QueryPlan GetPlan(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket)
     {
         if (!bound.IsMultiSource)
@@ -73,6 +81,11 @@ internal sealed class JoinQueryPlanner
 
         QueryPlanStepAdapter.PopulateLinearSteps(plan);
         ProjectionPushdownPlanner.Apply(plan);
+
+        // R9: annotate the join plan tree with cardinality and cost estimates.
+        // Join plans use null for the primary table (multi-source); each scan node is
+        // independently costed inside CostEstimator.AnnotatePlan.
+        CostEstimator.AnnotatePlan(plan.Root, database, table: null, _stats);
 
         return plan;
     }

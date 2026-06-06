@@ -49,6 +49,12 @@ public abstract class PhysicalPlanNode
     // ── R5: EXPLAIN ANALYZE runtime counters ───────────────────────────────
 
     /// <summary>
+    /// Cost estimate assigned by the R9 cost model after plan construction.
+    /// Null during normal query execution (only populated when the planner runs with stats).
+    /// </summary>
+    public PlanCost? Cost { get; internal set; }
+
+    /// <summary>
     /// Runtime counters populated when the query is executed under EXPLAIN ANALYZE (R5).
     /// Null during normal query execution and plain EXPLAIN.
     /// </summary>

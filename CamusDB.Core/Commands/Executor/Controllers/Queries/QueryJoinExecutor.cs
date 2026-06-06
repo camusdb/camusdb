@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Statistics;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
@@ -37,9 +38,12 @@ internal sealed class QueryJoinExecutor
 
     private readonly QueryDistincter queryDistincter = new();
 
-    public QueryJoinExecutor(QueryExecutor queryExecutor)
+    private readonly StatisticsManager? _stats;
+
+    public QueryJoinExecutor(QueryExecutor queryExecutor, StatisticsManager? stats = null)
     {
         this.queryExecutor = queryExecutor;
+        _stats = stats;
         derivedTableExecutor = new DerivedTableExecutor(queryExecutor, this);
     }
 
@@ -48,7 +52,7 @@ internal sealed class QueryJoinExecutor
         BoundSelectQuery bound,
         QueryTicket ticket)
     {
-        JoinQueryPlanner planner = new();
+        JoinQueryPlanner planner = new(_stats);
         QueryPlan plan = planner.GetPlan(database, bound, ticket);
 
         IAsyncEnumerable<QueryResultRow> cursor = ExecuteJoinTree(plan.Root, plan);

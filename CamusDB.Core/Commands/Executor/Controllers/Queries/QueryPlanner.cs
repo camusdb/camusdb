@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Statistics;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -22,8 +23,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// </summary>
 public sealed class QueryPlanner
 {
-    public QueryPlanner()
+    private readonly StatisticsManager? _stats;
+
+    public QueryPlanner(StatisticsManager? stats = null)
     {
+        _stats = stats;
     }
 
     public QueryPlan GetPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
@@ -35,7 +39,7 @@ public sealed class QueryPlanner
             : PredicateAnalyzer.AnalyzeTicket(ticket);
         plan.PredicateAnalysis = analysis;
 
-        (PhysicalPlanNode scanNode, QueryPlanStep? scanStep) = BuildScanNode(table, ticket, analysis);
+        (PhysicalPlanNode scanNode, QueryPlanStep? scanStep) = BuildScanNode(database, table, ticket, analysis);
         plan.ExecutionFilter = PredicateAnalyzer.BuildExecutionFilter(analysis, scanStep, table);
 
         // Populate OutputOrdering on the scan node when the chosen index scan guarantees the
@@ -156,6 +160,9 @@ public sealed class QueryPlanner
         QueryPlanStepAdapter.PopulateLinearSteps(plan);
         ProjectionPushdownPlanner.Apply(plan);
 
+        // R9: annotate every node with EstimatedCardinality and PlanCost using R8 statistics.
+        CostEstimator.AnnotatePlan(plan.Root, database, table, _stats);
+
         return plan;
     }
 
@@ -210,12 +217,33 @@ public sealed class QueryPlanner
         return scanLimit;
     }
 
-    private static (PhysicalPlanNode ScanNode, QueryPlanStep? ScanStep) BuildScanNode(
+    private (PhysicalPlanNode ScanNode, QueryPlanStep? ScanStep) BuildScanNode(
+        DatabaseDescriptor database,
         TableDescriptor table,
         QueryTicket ticket,
         PredicateAnalysis analysis)
     {
         QueryPlanStep? scanStep = IndexScanSelector.TrySelectScan(table, analysis, ticket.OrderBy);
+
+        // R9 cost-model override: if a predicate-driven range scan is selected but the cost model
+        // estimates it would touch more rows than the breakeven fraction of the table, prefer a full
+        // primary table scan instead. Only apply when:
+        //   1. Stats are available (row count known).
+        //   2. The step is a predicate-driven RangeScanFromIndex (has at least one bound).
+        //      Skip ORDER BY-driven unbounded scans to preserve sort elision.
+        //   3. The scan is not already a unique point lookup (those always win).
+        if (scanStep is { Type: QueryPlanStepType.RangeScanFromIndex } step
+            && (step.FromBound is not null || step.ToBound is not null)
+            && _stats is not null)
+        {
+            long? tableRowCount = _stats.GetRowCountEstimate(database, table);
+            if (tableRowCount is { } trc && trc > 0)
+            {
+                var tempRangeNode = (IndexRangeScanNode)ToScanNode(scanStep.Value);
+                if (CostEstimator.ShouldPreferFullScan(tempRangeNode, trc))
+                    scanStep = null; // fall through to full table scan
+            }
+        }
 
         if (scanStep is not null)
             return (ToScanNode(scanStep.Value), scanStep);

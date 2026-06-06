@@ -80,10 +80,14 @@ There are two ways to choose a plan:
 - **Cost-based (CBO):** estimate the cost of several candidate plans using table statistics (row counts,
   selectivity) and pick the cheapest. More powerful, but needs statistics and a cost model.
 
-**CamusDB is heuristic-based today.** This is intentional: the project follows the "heuristics before
-CBO" path. The plumbing for a cost model exists as placeholders (`PhysicalPlanNode.EstimatedCardinality`,
-the `estimated_rows`/`estimated_cost` columns in `EXPLAIN`), but they are not yet populated — see
-[Part VI](#part-vi--current-capabilities--roadmap).
+**CamusDB is primarily heuristic-based, with a small cost model bolted on.** This is intentional: the
+project follows the "heuristics before CBO" path. A first cost model (R9) now exists — `CostEstimator`
+annotates every plan node with an estimated row count and a `PlanCost`, fed by R8 row-count statistics —
+but it currently drives exactly **one** decision: whether a predicate-driven index range scan should be
+replaced by a full table scan. Everything else (which index, join algorithm, operator order) is still
+decided by deterministic rules. So the accurate mental model is: *rules choose the plan; the cost model
+vetoes one specific index-vs-scan choice.* See [Part V](#part-v--optimization-passes) for the cost model
+and [Part VI](#part-vi--current-capabilities--roadmap) for what remains.
 
 ## The core data structures and how they flow
 
@@ -437,8 +441,10 @@ verbose `includeDistributedProperties` flag appends R4 metadata (`order=[…]`, 
 `CommandExecutor.ExecuteSQLQuery`.
 
 `EXPLAIN [(LOGICAL|PHYSICAL)] SELECT …` runs **parse → bind → plan but not execution**, then returns one
-result row per plan node with columns: `stage`, `node`, `detail`, `estimated_rows` (NULL until R9),
-`estimated_cost` (NULL until R9). `(LOGICAL)` and `(PHYSICAL)` currently render the same physical tree
+result row per plan node with columns: `stage`, `node`, `detail`, `estimated_rows`
+(`PhysicalPlanNode.EstimatedCardinality` from the R9 cost model), and `estimated_cost`
+(`PhysicalPlanNode.Cost.Total`). These are now populated for single-table plans; for join plans they are
+rough placeholders (see the cost-model caveats in Part V). `(LOGICAL)` and `(PHYSICAL)` currently render the same physical tree
 (there is no separate logical-plan representation yet); they differ only in the `stage` label.
 An unknown option word (e.g. `EXPLAIN (VERBOSE)`) is rejected with `InvalidInput` rather than silently
 treated as a plain explain.
@@ -474,7 +480,8 @@ blocked. On `PhysicalPlanNode`:
 | Property | Meaning | Status today |
 |----------|---------|--------------|
 | `OutputOrdering` | The ordering this node guarantees on its output | Set on index scans that satisfy ORDER BY and on `SortNode`; drives sort elision |
-| `EstimatedCardinality` | Estimated output rows | `null` until the R9 cost model exists |
+| `EstimatedCardinality` | Estimated output rows | Populated by the R9 `CostEstimator` (single-table accurate; join estimates are placeholders) |
+| `Cost` (`PlanCost?`) | Weighted cost estimate for the node | Populated by the R9 `CostEstimator`; `null` if the plan was not costed |
 | `PartitionLocality` | Partition affinity hint | `null` (single-partition placeholder) |
 | `CanDecomposeToLocalPlusMerge` | Whether the operator splits into per-partition local work + a merge | `true` for scan/filter/project; `AggregateNode` only for `COUNT`/`SUM`/`MIN`/`MAX` (not `AVG`); `false` for sort/limit/distinct/join |
 
@@ -494,6 +501,42 @@ They are descriptive metadata — no execution behavior depends on them yet exce
 | **Filter absorption** | `IndexScanBoundAnalysis` | Drop residual comparisons already implied by the scan's key bounds (e.g. `col >= 3` when the scan seeks from `5`). |
 | **Join predicate pushdown (QP4.4)** | `JoinPredicatePushdown` | Single-source WHERE predicates run during that table's scan; cross-source predicates become the post-join filter. |
 | **Join-order heuristics (R7)** | `JoinOrderOptimizer` | Reorder inner-join sources before tree construction. |
+| **Cost-based scan choice (R9)** | `CostEstimator` | Annotate every node with `EstimatedCardinality` + `PlanCost`; replace a predicate-driven index range scan with a full table scan when it would touch too much of the table. |
+
+## Cost model (R9) in detail
+
+**Files:** `Models/Plans/PlanCost.cs`, `Controllers/Queries/CostEstimator.cs`. This is CamusDB's first
+(deliberately small) cost model. It does two things:
+
+1. **Annotates the plan.** `CostEstimator.AnnotatePlan(root, db, table, stats)` walks the tree bottom-up
+   and assigns each node an `EstimatedCardinality` and a `PlanCost`. Row counts come from R8
+   (`StatisticsManager.GetRowCountEstimate`); when stats are absent it degrades to a fixed
+   `DefaultTableRowCount` (10 000) and fixed selectivity constants (range with both bounds → 10 %, one
+   bound → 40 %, filter → 10 %, group-by → 20 %, distinct → 70 %). `PlanCost.Total` is a weighted sum of
+   KV point lookups, range-scan entries, post-index row fetches (all weight 1.0) and in-memory rows
+   (0.1); `NetworkFactor` is reserved for sharding and always 0. These annotations feed `EXPLAIN`'s
+   `estimated_rows` / `estimated_cost`.
+2. **Vetoes one plan choice.** In `QueryPlanner`, after `IndexScanSelector` picks a predicate-driven
+   `RangeScanFromIndex`, `CostEstimator.ShouldPreferFullScan` replaces it with a full table scan when the
+   estimated index entries reach the breakeven fraction (40 %) of the table. It only fires when row-count
+   stats exist, never touches unique point lookups, and skips ORDER-BY-driven unbounded scans (so sort
+   elision is preserved). Results are always identical — only the access path (and speed) changes.
+
+**Important limitations to know before relying on it:**
+
+- **One-bound range scans flip to full scan on large tables, regardless of true selectivity.** Because the
+  one-bound selectivity assumption (40 %) equals the breakeven fraction (40 %), any single-bound range
+  predicate (`WHERE year > 2020`) on a table with stats is estimated to touch 40 % and is converted to a
+  full scan. For a genuinely selective bound (e.g. `id > <near-max>` returning a handful of rows) this is
+  pessimistic — the index is abandoned. This is intentional and tested for now, but it is exactly what
+  R9b's real per-column min/max selectivity will fix.
+- **Join costs are placeholders.** `JoinQueryPlanner` calls `AnnotatePlan` with `table: null`, so every
+  source in a join is costed with the default 10 000 row count — `EstimatedCardinality`/`estimated_cost`
+  for join plans are not meaningful yet. Join-order (R7) and algorithm choice do not consume the cost
+  model; they remain heuristic.
+- **The cost model is advisory and single-decision.** It computes costs for all nodes but only the
+  range-scan-vs-full-scan choice consumes them. Unique-lookup-vs-scan and nested-loop-vs-index-nested-loop
+  remain rule-based.
 
 ## Join-order heuristics (R7) in detail
 
@@ -526,8 +569,9 @@ Parse, bind, plan, and execute for: single-table SELECT with index selection (un
 `WHERE` with predicate analysis and filter absorption, `GROUP BY` + `HAVING`, global and grouped
 aggregates (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `SELECT DISTINCT`, `ORDER BY` (with index-based sort
 elision), `LIMIT`/`OFFSET` (with pushdown), `[INNER]`/comma joins (nested-loop and index-nested-loop),
-derived tables, scalar/`IN`/`NOT IN`/`EXISTS` subqueries, projection pushdown, join-order heuristics, and
-full plan inspection via `EXPLAIN` / `EXPLAIN ANALYZE`.
+derived tables, scalar/`IN`/`NOT IN`/`EXISTS` subqueries, projection pushdown, join-order heuristics,
+advisory row-count statistics (persisted, configurable flush cadence), a small cost model that vetoes
+low-selectivity index range scans, and full plan inspection via `EXPLAIN` / `EXPLAIN ANALYZE`.
 
 ## Gaps and where to contribute
 
@@ -536,8 +580,9 @@ These are the meaningful missing pieces. The detailed task breakdown lives in
 
 | Area | State | Notes |
 |------|-------|-------|
-| **Table statistics** [R8] | **Stub** — `Statistics/StatisticsManager.cs` and `Models/TableStatistics.cs` are empty | No row counts / selectivity. Must be persisted (Kahuna meta KV) to survive restart. Prerequisite for cost-based planning. |
-| **Cost model** [R9] | **Missing** | No `PlanCost`; choices are pure heuristics. Would populate `EstimatedCardinality` and `estimated_rows`/`estimated_cost`, and choose among scan/join alternatives. Depends on R8. |
+| **Table statistics — row counts** [R8] | **Done** | `StatisticsManager` tracks/persists `RowCount` per table (Kahuna meta KV `{db}:stats:{tableId}`), with a configurable flush cadence (`stats_flush_interval_ms`) and a close-hook flush. |
+| **Index counts & column min/max** [R9b] | **Missing** | `TableStatistics.IndexEntryCounts` declared but never populated; no min/max. Needed for real selectivity — would fix R9's coarse fixed-percentage range estimates. Sequenced right before being consumed. |
+| **Cost model** [R9] | **Done (small)** | `PlanCost` + `CostEstimator` populate `EstimatedCardinality`/`Cost` and veto low-selectivity index range scans. Limits: one-bound ranges always flip to full scan (fixed 40 % assumption), join costs are placeholders, only one decision is cost-driven. |
 | **Plan-cache hooks** [R10] | **Partial** | Plans record `TableSchemaVersion`; no stable query-shape identifier yet. No plan reuse. |
 | **Semi-/anti-join rewrite** [R11] | **Missing** | `IN`/`NOT IN` are always materialized (correct but not optimized into semi/anti joins). NULL-aware `NOT IN` must be preserved. |
 | **DISTINCT streaming** [R12] | **Missing** | `QueryDistincter` is hash-only; no index-ordered streaming dedup. |
@@ -567,6 +612,7 @@ execution.
 | EXISTS preparation / execution | `ExistsSubqueryPreparer.cs`, `ExistsSubqueryExecutor.cs` |
 | Physical plan nodes | `Commands/Executor/Models/Plans/` |
 | Plan node runtime stats | `Commands/Executor/Models/Plans/PlanNodeStats.cs` |
+| Cost model | `Commands/Executor/Models/Plans/PlanCost.cs`, `Controllers/Queries/CostEstimator.cs` |
 | Single-table planner | `Commands/Executor/Controllers/Queries/QueryPlanner.cs` |
 | Join planner | `Commands/Executor/Controllers/Queries/JoinQueryPlanner.cs` |
 | Join-order heuristics | `Commands/Executor/Controllers/Queries/JoinOrderOptimizer.cs` |
@@ -582,11 +628,11 @@ execution.
 | Scan / filter / sort / aggregate / project / distinct / having / limit | `QueryScanner.cs`, `QueryFilterer.cs`, `QuerySorter.cs`, `QueryAggregator.cs`, `QueryProjector.cs`, `QueryDistincter.cs`, `QueryHavingEvaluator.cs`, `QueryLimiter.cs` |
 | Row merge for joins | `Commands/Executor/Controllers/Queries/QueryRowMerger.cs` |
 | Expression evaluator | `Commands/Executor/Controllers/SqlExecutor.cs` |
-| Table statistics (stub) | `Statistics/StatisticsManager.cs`, `Statistics/Models/TableStatistics.cs` |
+| Table statistics (row counts) | `Statistics/StatisticsManager.cs`, `Statistics/Models/TableStatistics.cs`; flush cadence `CamusDBConfig.StatsFlushIntervalMs` / `stats_flush_interval_ms` |
 | KV table access | `Storage/Kv/KvTableStore.cs` |
 | Row encoding / decoding | `CommandsExecutor/Models/RowEncoder.cs` |
 | Query plan model | `Commands/Executor/Models/QueryPlan.cs`, `QueryPlanStep.cs`, `QueryPlanStepType.cs` |
-| Planner / EXPLAIN tests | `TestQueryPlanner.cs`, `TestPredicateAnalyzer.cs`, `TestJoinQueryPlanner.cs`, `TestPlanRenderer.cs`, `TestPlanDistributedProperties.cs`, `TestExplainExecutor.cs`, `TestExplainAnalyzeExecutor.cs` |
+| Planner / EXPLAIN tests | `TestQueryPlanner.cs`, `TestPredicateAnalyzer.cs`, `TestJoinQueryPlanner.cs`, `TestPlanRenderer.cs`, `TestPlanDistributedProperties.cs`, `TestExplainExecutor.cs`, `TestExplainAnalyzeExecutor.cs`, `TestCostEstimator.cs`, `TestStatisticsManager.cs` |
 | Integration tests | `CamusDB.Tests/CommandsExecutor/TestExecuteSqlSelect.cs` |
 
 ---
@@ -627,7 +673,10 @@ execution.
 - **Nested-loop join / index-nested-loop join** — for each left row, scan the right source / probe the
   right index.
 - **Heuristic vs cost-based** — rule-driven plan choice vs statistics-driven cost comparison. CamusDB is
-  heuristic today.
+  mostly heuristic, with a small cost model (R9) that vetoes one index-vs-scan choice.
+- **`PlanCost` / cost model** — per-node estimated cardinality + weighted I/O cost (`CostEstimator`), fed
+  by R8 row-count stats; surfaced in `EXPLAIN` and used to prefer a full scan over a low-selectivity index
+  range scan.
 - **Streaming (`IAsyncEnumerable`)** — pulling rows one at a time without materializing the whole result.
 - **SQL-over-KV** — the architectural boundary where relational operations become Kahuna key/value reads.
 

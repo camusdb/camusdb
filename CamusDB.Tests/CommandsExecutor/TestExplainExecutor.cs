@@ -182,8 +182,11 @@ public class TestExplainExecutor : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
-    public async Task TestExplainNullEstimatedColumns()
+    public async Task TestExplainEstimatedColumnsPresent()
     {
+        // R9: estimated_rows and estimated_cost are now populated by the cost model.
+        // Verify the columns exist and are either Integer64/Float64 (when stats are loaded)
+        // or Null (when the background load hasn't completed yet) — both are valid.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
 
         List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
@@ -192,8 +195,14 @@ public class TestExplainExecutor : SharedNodeBaseTest
         Assert.IsNotEmpty(rows);
         foreach (QueryResultRow row in rows)
         {
-            Assert.AreEqual(ColumnType.Null, row.Row["estimated_rows"].Type, "estimated_rows should be NULL");
-            Assert.AreEqual(ColumnType.Null, row.Row["estimated_cost"].Type, "estimated_cost should be NULL");
+            Assert.IsTrue(row.Row.ContainsKey("estimated_rows"), "estimated_rows column must be present");
+            Assert.IsTrue(row.Row.ContainsKey("estimated_cost"), "estimated_cost column must be present");
+            ColumnType erType = row.Row["estimated_rows"].Type;
+            Assert.IsTrue(erType is ColumnType.Null or ColumnType.Integer64,
+                "estimated_rows must be Integer64 or Null");
+            ColumnType ecType = row.Row["estimated_cost"].Type;
+            Assert.IsTrue(ecType is ColumnType.Null or ColumnType.Float64,
+                "estimated_cost must be Float64 or Null");
         }
     }
 

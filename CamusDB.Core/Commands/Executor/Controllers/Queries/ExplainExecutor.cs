@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Statistics;
 using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -43,9 +44,9 @@ internal sealed class ExplainExecutor
 
     private readonly ExistsSubqueryPreparer existsSubqueryPreparer;
 
-    private readonly QueryPlanner queryPlanner = new();
+    private readonly QueryPlanner queryPlanner;
 
-    private readonly JoinQueryPlanner joinQueryPlanner = new();
+    private readonly JoinQueryPlanner joinQueryPlanner;
 
     private readonly QueryExecutor queryExecutor;
 
@@ -53,12 +54,15 @@ internal sealed class ExplainExecutor
         SubqueryRewriter subqueryRewriter,
         QueryBinder queryBinder,
         ExistsSubqueryPreparer existsSubqueryPreparer,
-        QueryExecutor queryExecutor)
+        QueryExecutor queryExecutor,
+        StatisticsManager? stats = null)
     {
         this.subqueryRewriter = subqueryRewriter;
         this.queryBinder = queryBinder;
         this.existsSubqueryPreparer = existsSubqueryPreparer;
         this.queryExecutor = queryExecutor;
+        queryPlanner = new QueryPlanner(stats);
+        joinQueryPlanner = new JoinQueryPlanner(stats);
     }
 
     /// <summary>
@@ -76,15 +80,29 @@ internal sealed class ExplainExecutor
     {
         QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket).ConfigureAwait(false);
 
-        foreach ((string name, string detail) in PlanRenderer.WalkNodes(plan.Root, plan))
+        // Zip rendered (name, detail) pairs with plan nodes so we can emit R9 cost estimates.
+        List<PhysicalPlanNode> orderedNodes = WalkNodesOrdered(plan.Root);
+        List<(string Name, string Detail)> rendered = PlanRenderer.WalkNodes(plan.Root, plan).ToList();
+
+        for (int i = 0; i < rendered.Count; i++)
         {
+            (string name, string detail) = rendered[i];
+            PhysicalPlanNode? physNode = i < orderedNodes.Count ? orderedNodes[i] : null;
+
+            long? estRows = physNode?.EstimatedCardinality;
+            double? estCost = physNode?.Cost?.Total;
+
             yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>
             {
-                { "stage",           new ColumnValue(ColumnType.String, stage) },
-                { "node",            new ColumnValue(ColumnType.String, name) },
-                { "detail",          new ColumnValue(ColumnType.String, detail) },
-                { "estimated_rows",  new ColumnValue(ColumnType.Null, 0L) },
-                { "estimated_cost",  new ColumnValue(ColumnType.Null, 0.0) },
+                { "stage",          new ColumnValue(ColumnType.String, stage) },
+                { "node",           new ColumnValue(ColumnType.String, name) },
+                { "detail",         new ColumnValue(ColumnType.String, detail) },
+                { "estimated_rows", estRows is not null
+                    ? new ColumnValue(ColumnType.Integer64, estRows.Value)
+                    : new ColumnValue(ColumnType.Null, 0L) },
+                { "estimated_cost", estCost is not null
+                    ? new ColumnValue(ColumnType.Float64, estCost.Value)
+                    : new ColumnValue(ColumnType.Null, 0.0) },
             });
         }
     }
@@ -159,8 +177,12 @@ internal sealed class ExplainExecutor
                 { "stage",             new ColumnValue(ColumnType.String, "analyze") },
                 { "node",              new ColumnValue(ColumnType.String, name) },
                 { "detail",            new ColumnValue(ColumnType.String, detail) },
-                { "estimated_rows",    new ColumnValue(ColumnType.Null, 0L) },
-                { "estimated_cost",    new ColumnValue(ColumnType.Null, 0.0) },
+                { "estimated_rows",    physNode?.EstimatedCardinality is { } er
+                    ? new ColumnValue(ColumnType.Integer64, er)
+                    : new ColumnValue(ColumnType.Null, 0L) },
+                { "estimated_cost",    physNode?.Cost?.Total is { } ec
+                    ? new ColumnValue(ColumnType.Float64, ec)
+                    : new ColumnValue(ColumnType.Null, 0.0) },
                 { "actual_rows",       stats is not null ? new ColumnValue(ColumnType.Integer64, stats.RowsEmitted) : new ColumnValue(ColumnType.Null, 0L) },
                 { "rows_read",         stats is not null ? new ColumnValue(ColumnType.Integer64, stats.RowsRead) : new ColumnValue(ColumnType.Null, 0L) },
                 { "actual_time_ms",    stats?.ElapsedMs is { } ms ? new ColumnValue(ColumnType.Float64, ms) : new ColumnValue(ColumnType.Null, 0.0) },
