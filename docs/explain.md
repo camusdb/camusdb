@@ -20,9 +20,9 @@ EXPLAIN (ANALYZE)  SELECT ...   -- executes the query and adds actual counters
 or read any row data. `EXPLAIN (ANALYZE)` executes the full query, drains the result, and
 reports actual runtime counters alongside the estimated columns.
 
-> **Join limitation (R7):** `EXPLAIN (ANALYZE)` is not yet supported for queries with
+> **Join limitation:** `EXPLAIN (ANALYZE)` is not yet supported for queries with
 > `JOIN`. Use plain `EXPLAIN` to inspect join plans; `EXPLAIN (ANALYZE)` on a join raises
-> an error. Full join instrumentation is planned for R7.
+> an error. Full join instrumentation is planned for a future release.
 
 ---
 

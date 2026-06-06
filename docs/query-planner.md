@@ -1,74 +1,180 @@
-# Query Planner
+# Query Planner — Concepts & Developer Guide
 
-This is a developer reference for the SQL query pipeline. It describes every stage from SQL text to result rows, with enough detail to locate and change any part without breaking correctness.
+This document explains how CamusDB turns a SQL `SELECT` string into result rows. It is written to be
+read top to bottom by someone new to the project: **Part I** builds the mental model and vocabulary,
+**Part II** walks the pipeline stage by stage, **Parts III–V** cover plan inspection, distributed-ready
+metadata, and optimizations, and **Part VI** is an honest map of what is *not* built yet so you know
+where to contribute. Parts VII–IX are reference material (file map, extension checklist, glossary).
 
-## Pipeline overview
-
-Every `SELECT` travels through five sequential stages before rows reach the caller:
-
-```
-SQL text
-  │
-  ▼
-[1] SQLParserProcessor.Parse()
-        produces NodeAst (raw AST)
-  │
-  ▼
-[2] SelectQueryCreator.CreateSelectQuery()
-        produces SelectQuery (typed logical model)
-  │
-  ▼
-[2b] SubqueryRewriter (optional)
-        rewrites IN / NOT IN subqueries into value-list AST nodes
-  │
-  ▼
-[3] QueryBinder.BindAsync()
-        opens tables, resolves aliases → BoundSelectQuery
-  │
-  ▼
-[3b] ExistsSubqueryPreparer (optional)
-        registers correlated EXISTS subquery executors
-  │
-  ▼
-[4] QueryPlanner.GetPlan()  (single-table)
-     or JoinQueryPlanner.GetPlan()  (joins / derived tables)
-        produces QueryPlan with a PhysicalPlanNode tree
-  │
-  ▼
-[5] QueryExecutor / QueryJoinExecutor
-        walks the plan tree, drives IAsyncEnumerable<QueryResultRow>
-```
-
-The entry point is `CommandExecutor.ExecuteSQLQuery` (around line 641 of `CommandExecutor.cs`). It orchestrates every stage and returns `(DatabaseDescriptor, IAsyncEnumerable<QueryResultRow>)` to the HTTP layer.
+If you only want to *use* `EXPLAIN`, see [`docs/explain.md`](./explain.md). This document is about how
+the planner works internally and how to change it.
 
 ---
+
+# Part I — Concepts
+
+## What a query planner is, and why it exists
+
+SQL is *declarative*: a query says **what** rows you want, not **how** to fetch them.
+`SELECT * FROM robots WHERE id = 5` does not say "use the primary-key index" — it just describes the
+result. The query planner is the component that decides the **how**: which index to use, whether to
+sort, in what order to join tables, where to evaluate each predicate. Its job is to produce a correct
+*execution plan* and, among the many correct plans, pick a fast one.
+
+CamusDB sits on top of **Kahuna**, an ordered, transactional key–value store. So the planner's deeper
+job is **translating relational operations into KV operations**: a table scan becomes an ordered range
+read over a key prefix; an indexed lookup becomes a point read; a join becomes nested reads. This is the
+same "SQL layer over a KV layer" split that CockroachDB and YugabyteDB use, and it is the single most
+important idea in this codebase. The planner knows about tables, indexes, rows, and expressions; Kahuna
+knows only about ordered keys and values.
+
+## The five-stage pipeline (the core mental model)
+
+Every `SELECT` flows through five stages. Keeping them separate is a deliberate design choice — it is
+what lets us add joins or subqueries without destabilizing single-table queries.
+
+```
+ SQL text
+    │  "SELECT email FROM users WHERE id = 5"
+    ▼
+[1] PARSE            SQLParserProcessor.Parse()              → NodeAst        (raw syntax tree)
+    ▼
+[2] BUILD MODEL      SelectQueryCreator.CreateSelectQuery()  → SelectQuery    (typed logical query)
+    ▼
+[3] BIND            QueryBinder.BindAsync()                  → BoundSelectQuery (names resolved, tables opened)
+    ▼
+[4] PLAN            QueryPlanner / JoinQueryPlanner          → QueryPlan      (physical operator tree)
+    ▼
+[5] EXECUTE         QueryExecutor / QueryJoinExecutor        → IAsyncEnumerable<QueryResultRow>
+```
+
+Each stage has a single responsibility and a distinct data type as its output. A useful way to remember
+it: **parse** turns text into a tree, **bind** attaches meaning (which table is `u`? does column `email`
+exist? is it ambiguous?), **plan** decides the strategy, **execute** runs it.
+
+The entry point that orchestrates all five stages is `CommandExecutor.ExecuteSQLQuery`
+(`CommandExecutor.cs:1146`). It returns `(DatabaseDescriptor, IAsyncEnumerable<QueryResultRow>)` to the
+HTTP layer.
+
+## Logical vs physical plans
+
+This distinction trips up newcomers, so it is worth stating plainly:
+
+- A **logical plan** says *what* relational result is wanted: "the rows of `users` where `id = 5`,
+  projected to `email`." It says nothing about indexes. In CamusDB the logical model is `SelectQuery`
+  (and its bound form `BoundSelectQuery`).
+- A **physical plan** says *how* to compute it: "point-lookup `users` by primary key `id = 5`, then
+  project `email`." In CamusDB the physical plan is a tree of `PhysicalPlanNode` objects rooted at
+  `QueryPlan.Root`.
+
+The planner (stage 4) is exactly the function `logical plan → physical plan`. Two physical plans can be
+*logically equivalent* (return the same rows) but wildly different in cost — choosing between them is the
+planner's reason to exist.
+
+## Heuristics vs cost-based optimization (where CamusDB is today)
+
+There are two ways to choose a plan:
+
+- **Rule/heuristic-based:** deterministic rules — "if an equality predicate matches a unique index, use
+  a point lookup"; "put the most selective table first in a join." Fast, predictable, easy to test.
+- **Cost-based (CBO):** estimate the cost of several candidate plans using table statistics (row counts,
+  selectivity) and pick the cheapest. More powerful, but needs statistics and a cost model.
+
+**CamusDB is heuristic-based today.** This is intentional: the project follows the "heuristics before
+CBO" path. The plumbing for a cost model exists as placeholders (`PhysicalPlanNode.EstimatedCardinality`,
+the `estimated_rows`/`estimated_cost` columns in `EXPLAIN`), but they are not yet populated — see
+[Part VI](#part-vi--current-capabilities--roadmap).
+
+## The core data structures and how they flow
+
+Five types carry the query through the pipeline. Understanding their relationship is most of
+understanding the planner:
+
+| Stage output | Type | What it is | Key shape |
+|---|---|---|---|
+| 1 | `NodeAst` | Raw syntax tree | One mutable class; `nodeType` + `leftAst`/`rightAst` + `extendedOne..Five` + `yytext` |
+| 2 | `SelectQuery` | Typed logical query | Immutable record: `Source`, `Projections`, `Where`, `GroupBy`, `Having`, `OrderBy`, `Limit`, `Offset`, `IsDistinct` |
+| 3 | `BoundSelectQuery` | Logical query + resolved names | Adds opened `BoundTableSource`s, `QueryRowNameResolver`, `IsMultiSource` |
+| 4 | `QueryPlan` | Physical plan | `Root` (a `PhysicalPlanNode` tree) + `Steps` (a flattened linear list) |
+| 5 | `QueryResultRow` | A result row | `readonly struct`: `ObjectIdValue RowId` + `Dictionary<string,ColumnValue> Row` (keyed by column name) |
+
+Two subtleties worth internalizing early:
+
+1. **`NodeAst` never disappears.** Even after stage 2, expressions (the `WHERE` predicate, projection
+   expressions, `ON` conditions) are still raw `NodeAst` subtrees — they are evaluated at runtime by
+   `SqlExecutor.EvalExpr`. The models wrap *structure* (which table, which projection) in typed objects
+   but keep *expressions* as AST. So you will see `NodeAst` flowing all the way into the executor.
+2. **A `QueryPlan` holds the plan twice.** `Root` is the real tree (used by the renderer, EXPLAIN, the
+   join executor, and all the R4 metadata). `Steps` is a flattened, leaf-first linear list produced by
+   `QueryPlanStepAdapter`, consumed by the *single-table* executor, which predates the tree. They share
+   the same node instances (the linear list points at the same `PhysicalPlanNode` objects), so per-node
+   data like runtime stats is visible through both. When you add a node type, you touch both the tree
+   builder and the flattener.
+
+## Two execution paths, and why there are two
+
+CamusDB has **two executors**, and knowing which one runs is essential:
+
+- **Single-table path** (`QueryExecutor`): the original, linear, step-by-step executor. Runs when the
+  query has exactly one source. Walks `plan.Steps`.
+- **Join / multi-source path** (`QueryJoinExecutor`): runs when `BoundSelectQuery.IsMultiSource` is true
+  (any join, comma join, or derived table). Walks the `plan.Root` tree recursively, then hands the
+  merged cursor to `QueryPostScanPipeline` for the shared aggregate/sort/project/distinct/limit stages.
+
+This duality is historical: the single-table linear path came first; the tree-based join path was added
+on top. Both deliberately produce identical post-scan behavior because the join path reuses
+`QueryPostScanPipeline`, which mirrors the single-table operator ordering. When you change post-scan
+behavior (e.g. how `DISTINCT` works), change it in a way that both paths see.
+
+## The streaming model
+
+Every operator is an `IAsyncEnumerable<QueryResultRow>` transformer, so the pipeline is **lazy by
+default**: rows are pulled one at a time from storage through the operator chain to the caller, without
+materializing the whole result set. The exceptions are operators that *must* see all input before
+emitting anything: `SortNode` (needs all rows to sort) and a grouped `AggregateNode` (needs all rows to
+finish each group). Keep this in mind when adding operators — prefer streaming; materialize only when the
+relational semantics force it.
+
+---
+
+# Part II — The pipeline, stage by stage
 
 ## Stage 1 — Parser
 
-**File:** `CamusDB.Core/SQLParser/SQLParser.Language.grammar.y` (source), regenerated into `SQLParser.Parser.Generated.cs`
+**Files:** `CamusDB.Core/SQLParser/SQLParser.Language.grammar.y` (grammar),
+`SQLParser.Language.analyzer.lex` (lexer), regenerated into `SQLParser.Parser.Generated.cs` /
+`SQLParser.Scanner.Generated.cs`.
 
-`SQLParserProcessor.Parse(sql)` runs the LALR(1) parser and returns a `NodeAst`. Every AST node is a single mutable `NodeAst` class with:
+`SQLParserProcessor.Parse(sql)` runs the generated LALR(1) parser and returns a `NodeAst`. Every node is
+the same mutable `NodeAst` class:
 
-- `NodeType nodeType` — what kind of node this is (e.g. `Select`, `ExprEquals`, `Identifier`)
+- `NodeType nodeType` — the kind of node (`Select`, `ExprEquals`, `Identifier`, …; see `NodeType.cs`)
 - `NodeAst? leftAst`, `rightAst` — primary children
-- `NodeAst? extendedOne` … `extendedFive` — extra slots for clauses that don't fit left/right (GROUP BY uses `extendedOne`, ORDER BY uses `extendedTwo`, HAVING uses `extendedThree`, etc.)
-- `string? yytext` — leaf value (column name, string literal, number)
+- `NodeAst? extendedOne … extendedFive` — extra slots for clauses that don't fit left/right. The
+  `select_stmt` grammar rule assigns: projection, table, where, order, limit, offset, group, distinct
+  flag, having across these slots — **read the `select_stmt` rule before adding a clause** so you claim a
+  free slot correctly.
+- `string? yytext` — leaf value (a column name, string literal, or number)
 
-**Parser regeneration:** the grammar and lexer files are MSBuild items (`YaccFile` / `LexFile`). Running `dotnet build CamusDB.Core/CamusDB.Core.csproj` automatically regenerates the two `Generated.cs` files. Commit the regenerated files together with any grammar change. Never hand-edit them.
+**Parser regeneration is automatic at build.** The grammar/lexer are MSBuild `YaccFile`/`LexFile` items.
+Running `dotnet build CamusDB.Core/CamusDB.Core.csproj` regenerates the two `Generated.cs` files. They
+**are committed** — stage the regenerated files with your grammar change, and never hand-edit them.
 
----
+**What the parser already understands:** `SELECT [DISTINCT]`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`,
+`LIMIT`/`OFFSET`, `[INNER] JOIN … ON …`, comma joins, dotted identifiers (`u.email`), scalar / `IN` /
+`NOT IN` / `EXISTS` subqueries, and `EXPLAIN [(LOGICAL|PHYSICAL|ANALYZE)]`.
 
 ## Stage 2 — Logical Query Model
 
-**Files:**
-- `SelectQueryCreator.cs` — converts AST → `SelectQuery`
-- `CamusDB.Core/Commands/Executor/Models/Queries/` — all logical model types
+**Files:** `Controllers/DML/SelectQueryCreator.cs` (builder),
+`Models/Queries/` (all logical model types).
 
-`SelectQueryCreator.CreateSelectQuery(ast)` visits the `NodeAst.Select` node and produces an immutable `SelectQuery` record:
+`SelectQueryCreator.CreateSelectQuery(ast)` visits the `NodeAst.Select` node and produces an immutable
+`SelectQuery` record:
 
 ```csharp
 public sealed record SelectQuery(
-    QuerySource Source,       // FROM clause tree
+    QuerySource Source,                       // FROM clause as a tree
     IReadOnlyList<ProjectionItem> Projections,
     BoundPredicate? Where,
     IReadOnlyList<NodeAst>? GroupBy,
@@ -79,76 +185,86 @@ public sealed record SelectQuery(
     bool IsDistinct);
 ```
 
-The `QuerySource` hierarchy represents the FROM clause as a tree:
+The `QuerySource` hierarchy models the FROM clause as a tree:
 
 | Type | Meaning |
 |------|---------|
 | `TableSource` | `FROM users` or `FROM users u` |
-| `JoinSource` | `… JOIN posts p ON p.user_id = u.id` — wraps a left `QuerySource` and a right `QuerySource` |
+| `JoinSource` | `… JOIN posts p ON p.user_id = u.id` — wraps left + right `QuerySource` and an `ON` predicate |
 | `DerivedTableSource` | `FROM (SELECT …) alias` |
 
-`JoinSource` nodes nest left-deep: `A JOIN B JOIN C` becomes `JoinSource(JoinSource(A, B), C)`.
+`JoinSource` nests left-deep: `A JOIN B JOIN C` becomes `JoinSource(JoinSource(A, B), C)`.
 
-`QueryTicketAdapter.ToQueryTicket` bridges the new `SelectQuery` → legacy `QueryTicket` for the single-table executor path. The legacy `QueryTicket` carries the same data but in a flat shape that the original operators understand.
+`QueryTicketAdapter.ToQueryTicket` bridges `SelectQuery` → the legacy `QueryTicket` that the single-table
+executor consumes. `QueryTicket` carries the same data in a flatter shape understood by the original
+operators.
 
-**Subquery rewriting (stage 2b):** before binding, `SubqueryRewriter` walks the WHERE predicate and, for uncorrelated `IN`/`NOT IN` subqueries, executes the inner query once, materializes the result set into a `SubqueryValueListAst` node, and replaces the subquery AST. This lets the downstream filterer treat `IN` as a value-list membership check without special subquery execution on every outer row. `EXISTS` subqueries are left in place for stage 3b.
-
----
+**Stage 2b — Subquery rewriting (`SubqueryRewriter`).** Before binding, the rewriter walks the `WHERE`
+predicate and, for **uncorrelated** scalar / `IN` / `NOT IN` subqueries, *executes the inner query once*,
+materializes its result, and replaces the subquery AST with a constant or a `SubqueryValueListAst`
+membership node. This lets the downstream filterer treat `IN` as a plain value-list check.
+`NOT IN` carries three-valued (NULL-aware) semantics. `EXISTS` is left in place for stage 3b.
+*Note:* because this stage executes inner subqueries, a query with a subquery does touch storage during
+planning — relevant to `EXPLAIN` (see Part III).
 
 ## Stage 3 — Binding
 
-**File:** `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryBinder.cs`
+**File:** `Controllers/Queries/QueryBinder.cs`
 
-`QueryBinder.BindAsync(database, selectQuery)` produces a `BoundSelectQuery`:
+`QueryBinder.BindAsync(database, selectQuery)` resolves names against the catalog and produces a
+`BoundSelectQuery`:
 
 ```csharp
 public sealed class BoundSelectQuery
 {
     public SelectQuery Query { get; }
-    public IReadOnlyList<BoundTableSource> Sources { get; }      // opened TableDescriptors
+    public IReadOnlyList<BoundTableSource> Sources { get; }          // opened TableDescriptors + alias
     public IReadOnlyList<BoundDerivedTableSource> DerivedSources { get; }
     public QueryRowNameResolver RowNames { get; }
-    public bool IsMultiSource { get; }   // true when joins or derived tables exist
+    public bool IsMultiSource { get; }   // true → joins/derived tables → join executor path
 }
 ```
 
-Binding does the following in order:
+Binding, in order:
 
-1. **Open all table sources** — `TableOpener.OpenAsync` is called for every `TableSource` in the `QuerySource` tree, left-to-right. The opened `TableDescriptor` is stored in a `BoundTableSource` which also records the alias.
-2. **Detect duplicate aliases** — throws `CamusDBException(InvalidInput)` on alias reuse.
-3. **Build `QueryRowNameResolver`** — records which alias owns which column names and detects ambiguous unqualified references. A column name that appears in only one source can be referenced unqualified; one that appears in multiple sources requires `alias.column` notation.
-4. **Validate projections** — ensures column references in `SELECT` items resolve in the row name map.
-5. **Validate GROUP BY and ORDER BY** — checks that group expressions and sort keys resolve.
-6. **Validate projection / grouping consistency** — non-aggregate projections in a grouped query must appear in `GROUP BY`.
-7. **Validate JOIN predicates** — ensures `ON` predicate column references resolve to the correct sources.
+1. **Open all table sources** — `TableOpener` opens every `TableSource` in the FROM tree, left to right;
+   each opened `TableDescriptor` + alias becomes a `BoundTableSource`.
+2. **Detect duplicate aliases** — `CamusDBException(InvalidInput)` on reuse.
+3. **Build `QueryRowNameResolver`** — records which alias owns which columns. A column unique across all
+   sources may be referenced unqualified; a name in multiple sources requires `alias.column`, else
+   "ambiguous column."
+4. **Validate projections, GROUP BY, ORDER BY** — every referenced column must resolve.
+5. **Projection/grouping consistency** — non-aggregate projected columns in a grouped query must appear
+   in `GROUP BY`.
+6. **Validate JOIN `ON` predicates** — column references must resolve to the joined sources.
 
-For subqueries, `QueryBinder.BindSubqueryAsync` performs the same steps but skips HAVING validation (the caller validates separately).
-
-**Stage 3b — EXISTS preparation:** `ExistsSubqueryPreparer` walks the `WHERE` and `HAVING` predicates, finds `EXISTS(subquery)` nodes, and registers an `ExistsSubqueryExecutor` for each. The executor is stored in the `ExistsSubqueryRegistry` threaded into `QueryTicket`. During row filtering, `QueryFilterer` calls the executor per outer row for correlated EXISTS.
-
----
+**Stage 3b — EXISTS preparation (`ExistsSubqueryPreparer`).** Walks `WHERE`/`HAVING` for `EXISTS(...)`
+nodes and registers an executor per subquery in an `ExistsSubqueryRegistry` threaded into `QueryTicket`.
+Uncorrelated `EXISTS` is evaluated once; correlated `EXISTS` is evaluated per outer row by
+`QueryFilterer`, with the outer row's qualified columns injected into the subquery scope.
 
 ## Stage 4 — Physical Planning
 
-The planner converts a bound query into a tree of `PhysicalPlanNode` objects. There are two planners: one for single-table queries and one for joins.
+The planner converts a bound query into a `PhysicalPlanNode` tree. There are two planners: single-table
+and join.
 
 ### 4a. Single-table planner — `QueryPlanner`
 
-**File:** `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryPlanner.cs`
-
-`QueryPlanner.GetPlan(database, table, ticket)` works in three phases:
+**File:** `Controllers/Queries/QueryPlanner.cs`. `QueryPlanner.GetPlan(database, table, ticket)`:
 
 **Phase A — Scan selection**
 
-1. Calls `PredicateAnalyzer.AnalyzeTicket(ticket)` to classify every WHERE predicate (described below).
-2. Calls `IndexScanSelector.TrySelectScan(table, analysis, orderBy)` to pick the best scan node.
-3. Calls `PredicateAnalyzer.BuildExecutionFilter(analysis, scanStep, table)` to assemble the runtime filter — predicates not absorbed by the chosen scan are combined into a single `NodeAst` AND tree that `QueryFilterer` evaluates per row.
-4. Checks whether the chosen scan already satisfies the ORDER BY, so `SortNode` can be elided.
-5. Calls `TryComputeScanRowLimit` to push LIMIT down into the scan when it is safe (no filter, no aggregation, no DISTINCT, no unsatisfied ORDER BY).
+1. `PredicateAnalyzer.Analyze` classifies the WHERE predicate (§4b).
+2. `IndexScanSelector` picks the best scan node (§4c).
+3. `PredicateAnalyzer.BuildExecutionFilter` assembles the residual runtime filter (predicates the scan
+   did not absorb) into one `NodeAst` AND-tree stored as `QueryPlan.ExecutionFilter`.
+4. If the chosen index scan already satisfies `ORDER BY`, the scan node's `OutputOrdering` is set
+   (R4) and the `SortNode` is **elided** — this is the single source of truth for sort elision.
+5. `TryComputeScanRowLimit` pushes `LIMIT` (+ `OFFSET`) into the scan when safe (no filter, no
+   aggregation, no GROUP BY/HAVING, no DISTINCT, and ORDER BY satisfied by the scan).
 
-**Phase B — Plan tree construction**
-
-The planner builds a linear operator chain from leaf (scan) to root (outermost operator). The shape depends on the query:
+**Phase B — Plan tree construction.** The planner builds a leaf→root operator chain. Order depends on
+the query shape:
 
 | Query shape | Operator chain (leaf → root) |
 |-------------|------------------------------|
@@ -156,28 +272,33 @@ The planner builds a linear operator chain from leaf (scan) to root (outermost o
 | GROUP BY | `Scan → [Filter] → Aggregate → [HavingFilter] → [Sort] → [Project] → [Limit]` |
 | SELECT DISTINCT | `Scan → [Filter] → [Aggregate] → [HavingFilter] → [Project] → Distinct → [Sort] → [Limit]` |
 
-`FilterNode` is a plan-tree node but does not become a `QueryPlanStep` — instead its predicate becomes `QueryPlan.ExecutionFilter`, which scan operators apply inline during row decoding (this avoids a separate streaming pass).
+(The "Plain SELECT" row applies to *global* aggregates with no `GROUP BY`: limit is applied before the
+single-group aggregate.) `FilterNode` is a tree node but never becomes a step — its predicate is the
+inline `ExecutionFilter` applied during the scan, avoiding a separate streaming pass.
 
 **Phase C — Post-plan passes**
 
-After the tree is built:
-- `QueryPlanStepAdapter.PopulateLinearSteps(plan)` flattens the tree into `plan.Steps` (a `List<QueryPlanStep>`) that the legacy linear executor in `QueryExecutor` walks.
-- `ProjectionPushdownPlanner.Apply(plan)` annotates scan nodes with `RequiredColumns` (QP6.1) so `RowEncoder.DecodeAsync` only deserializes the columns actually needed downstream.
+- `QueryPlanStepAdapter.PopulateLinearSteps(plan)` flattens `Root` into `plan.Steps` (leaf-first) for the
+  linear executor. It also fills `plan.StepNodes` with the *same* node instances (used by EXPLAIN ANALYZE
+  to attach stats). Filter/join/derived nodes produce no step.
+- `ProjectionPushdownPlanner.Apply(plan)` annotates scan nodes with `RequiredColumns` (§Part V) so the
+  row decoder only deserializes needed columns.
 
 ### Physical plan nodes
 
-All nodes extend `PhysicalPlanNode` (`Models/Plans/PhysicalPlanNode.cs`), which has `PhysicalPlanNode? Input` (single child) and `IReadOnlySet<string>? RequiredColumns` (set by pushdown).
+All extend `PhysicalPlanNode` (`Models/Plans/PhysicalPlanNode.cs`): a single `Input` child, plus
+`RequiredColumns` (projection pushdown) and the R4 distributed-ready properties (Part IV).
 
 | Node | Step type | Meaning |
 |------|-----------|---------|
-| `TableScanNode(PrimaryRows)` | `FullScanFromTableIndex` | Full table scan via primary KV rows |
-| `TableScanNode(ForcedIndex)` | `FullScanFromIndex` | Forced index scan (via `USE INDEX` hint) |
-| `IndexLookupNode` | `QueryFromIndex` | Point lookup on a unique or multi-column index |
+| `TableScanNode(PrimaryRows)` | `FullScanFromTableIndex` | Full scan over primary KV rows |
+| `TableScanNode(ForcedIndex)` | `FullScanFromIndex` | Forced index scan (`@{FORCE_INDEX=…}`) |
+| `IndexLookupNode` | `QueryFromIndex` | Point lookup on a unique index |
 | `IndexRangeScanNode` | `RangeScanFromIndex` | Bounded range scan on an index |
-| `FilterNode` | _(inline as ExecutionFilter)_ | Row predicate applied during scan |
+| `FilterNode` | _(inline ExecutionFilter)_ | Residual row predicate applied during scan |
 | `AggregateNode` | `Aggregate` | Grouped or global aggregation |
 | `HavingFilterNode` | `HavingFilter` | Post-aggregate row filter |
-| `SortNode` | `SortBy` | In-memory sort (N-key comparator) |
+| `SortNode` | `SortBy` | In-memory N-key sort |
 | `ProjectNode` | `ReduceToProjections` | Column projection / aliasing |
 | `DistinctNode` | `Distinct` | Duplicate elimination over projection tuples |
 | `LimitNode` | `Limit` | LIMIT / OFFSET |
@@ -187,198 +308,328 @@ All nodes extend `PhysicalPlanNode` (`Models/Plans/PhysicalPlanNode.cs`), which 
 
 ### 4b. PredicateAnalyzer
 
-**File:** `CamusDB.Core/Commands/Executor/Controllers/Queries/PredicateAnalyzer.cs`
+**File:** `Controllers/Queries/PredicateAnalyzer.cs`. Classifies the WHERE predicate into:
 
-`PredicateAnalyzer` classifies the WHERE predicate into three buckets:
+1. **Indexable comparisons** — column-vs-constant (`=`, `<`, `>`, `<=`, `>=`, `BETWEEN`). Can drive index
+   selection; once absorbed by a scan they are dropped from the execution filter.
+2. **Column comparisons** — column-vs-column (join `ON`, cross-table WHERE). Currently always residual.
+3. **Residual conjuncts** — everything else (`OR`, `LIKE`, `ILIKE`, non-deterministic, subquery
+   predicates). Always re-evaluated per row.
 
-1. **`IndexableComparisons`** (`List<AnalyzedComparison>`) — column-vs-constant comparisons (`=`, `!=`, `<`, `>`, `<=`, `>=`, `BETWEEN`). These can drive index selection and, once absorbed by a scan, are removed from the execution filter.
-2. **`ColumnComparisons`** (`List<AnalyzedColumnComparison>`) — column-vs-column comparisons (used in join ON predicates and cross-table WHERE filters). Always become residual filters for now; a future pass may push them into join predicates.
-3. **`ResidualConjuncts`** (`List<NodeAst>`) — everything else: OR, LIKE, ILIKE, non-deterministic expressions, subquery predicates. Always re-evaluated at runtime.
-
-`CollectAndConjuncts` recursively splits any `AND` tree into individual terms before classification. This means `year >= 2001 AND year < 2005` produces two `AnalyzedComparison` entries that `IndexScanSelector` can combine into a single range scan.
-
-`BuildExecutionFilter` reconstructs an AND tree from whichever comparisons were **not** absorbed by the chosen scan. Absorbed comparisons are suppressed using `IndexScanBoundAnalysis.IsComparisonAbsorbedByScan`, which checks that the scan key bounds make the predicate logically redundant.
-
-The analyzer also accepts structured `QueryFilter` objects (the programmatic filter API) and merges them with the AST-derived analysis via `AnalyzeFilters` / `Merge`.
+`CollectAndConjuncts` splits an `AND` tree into individual terms first, so `year >= 2001 AND year < 2005`
+yields two comparisons that `IndexScanSelector` fuses into one range scan. `BuildExecutionFilter`
+reconstructs an AND-tree from the *unabsorbed* comparisons;
+`IndexScanBoundAnalysis.IsComparisonAbsorbedByScan` decides which are made redundant by the scan bounds.
 
 ### 4c. IndexScanSelector
 
-**File:** `CamusDB.Core/Commands/Executor/Controllers/Queries/IndexScanSelector.cs`
-
-`TrySelectScan` iterates all indexes on the table and scores each one:
+**File:** `Controllers/Queries/IndexScanSelector.cs`. `TrySelectScan` scores every index and picks the
+best (ties → fewer columns = more selective):
 
 | Match type | Score |
 |-----------|-------|
-| Full equality on all index columns, unique index | `10000 + column_count` |
-| Full equality on all index columns, non-unique index | `5000 + column_count × 10` |
+| Full equality on all columns, unique index | `10000 + column_count` |
+| Full equality on all columns, non-unique index | `5000 + column_count × 10` |
 | Equality prefix + range on next column | `5000 + prefix_length × 10 + 1` |
 | Equality prefix only | `5000 + prefix_length` |
 | ORDER BY prefix match (no predicate) | `1000` |
 
-The highest-scoring index wins. Ties are broken by choosing the index with fewer columns (more selective).
+**Composite matching:** walk index columns left to right, accumulate the equality prefix; if fully
+covered, emit `QueryFromIndex` (unique) or a prefix-bounded `RangeScanFromIndex` (non-unique, upper bound
+via `BuildPrefixScanUpperBound`). Note **equality on a non-unique index is a single-value range scan**,
+not a point lookup — `WHERE year = 2000` on a multi index renders as
+`index-range-scan(... from>=2000, to<2001)`, while `WHERE id = …` on the unique PK renders as
+`index-lookup`. If a partial prefix is followed by a range predicate on the next column, both bounds are
+combined.
 
-**Composite index matching** (implemented in `TryMatchPredicateIndex`):
-
-1. Walk index columns left to right.
-2. For each column in order, check whether there is an equality predicate (`=`). Accumulate equality prefix length.
-3. If the full index is covered by equality: produce `QueryFromIndex` (unique) or a prefix-bounded `RangeScanFromIndex` (non-unique). The upper bound is computed by `BuildPrefixScanUpperBound`, which increments the last equality value by one ULP/integer to create an exclusive upper bound. String and Id column types cannot form an exclusive upper bound by increment, so they fall back to a full scan.
-4. If the prefix is partial: check for a range predicate (`>`, `>=`, `<`, `<=`) on the next column and produce `RangeScanFromIndex` with both an equality prefix cap and the range bounds. The tighter of the two upper bounds wins (`TightenUpperBound`).
-
-**ORDER BY scan elision:** if no predicate matches any index, `TrySelectOrderByScan` looks for an index whose leading columns match the ORDER BY columns exactly (ascending only). If found, a full `RangeScanFromIndex` (unbounded) is returned. `ScanSatisfiesOrderBy` confirms the match so `QueryPlanner` knows to omit `SortNode`.
+**ORDER BY scan elision:** if no predicate matches, `TrySelectOrderByScan` looks for an index whose
+leading columns equal the ORDER BY columns (ascending only) and returns an unbounded range scan;
+`ScanSatisfiesOrderBy` confirms so the planner omits `SortNode`. Descending order is not satisfiable by
+the ascending index encoding and forces a real `SortNode`.
 
 ### 4d. Join planner — `JoinQueryPlanner`
 
-**File:** `CamusDB.Core/Commands/Executor/Controllers/Queries/JoinQueryPlanner.cs`
+**File:** `Controllers/Queries/JoinQueryPlanner.cs`. Runs when `IsMultiSource`:
 
-When `BoundSelectQuery.IsMultiSource` is true, `JoinQueryPlanner.GetPlan` builds a join tree instead:
-
-1. **Predicate pushdown** — `JoinPredicatePushdown.Analyze(bound, where)` splits the WHERE predicate into per-source scan filters (single-source predicates that can run during the table scan) and a post-join filter (cross-source predicates applied after row merging). The result is a `JoinPredicatePushdown.Result` with `ScanFiltersByAlias` and `PostJoinFilter`.
-2. **Tree construction** — `BuildJoinTree` recurses the `QuerySource` tree:
+1. **Join-order heuristics (R7)** — `JoinOrderOptimizer.Reorder` may reorder sources first (§Part V).
+2. **Predicate pushdown** — `JoinPredicatePushdown.Analyze` splits WHERE into per-source scan filters
+   (`ScanFiltersByAlias`) and a cross-source `PostJoinFilter`.
+3. **Tree construction** — `BuildJoinTree` recurses the (possibly reordered) `QuerySource`:
    - `TableSource` → `TableScanNode` with its pushed-down filter
-   - `DerivedTableSource` → `DerivedTableScanNode` (inner query materialized lazily)
-   - `JoinSource` → left child is built recursively; right source is examined for equi-join opportunities by `JoinEquiJoinAnalyzer.TryMatch`. If the right join column has an index, the node is `IndexNestedLoopJoinNode`; otherwise it is `NestedLoopJoinNode`.
-3. `QueryPlanStepAdapter.PopulateLinearSteps` and `ProjectionPushdownPlanner.Apply` run exactly as in the single-table planner.
-
----
+   - `DerivedTableSource` → `DerivedTableScanNode` (inner query materialized lazily at execution)
+   - `JoinSource` → left built recursively; the right source is checked by `JoinEquiJoinAnalyzer`. If the
+     right join key is indexed → `IndexNestedLoopJoinNode`; else `NestedLoopJoinNode`.
+4. Same Phase-C passes as the single-table planner.
 
 ## Stage 5 — Execution
 
-### 5a. Single-table execution — `QueryExecutor`
+### 5a. Single-table — `QueryExecutor`
 
-**File:** `CamusDB.Core/Commands/Executor/Controllers/QueryExecutor.cs`
+**File:** `Controllers/QueryExecutor.cs`. `ExecuteQueryPlanInternal` walks `plan.Steps`, chaining
+`IAsyncEnumerable<QueryResultRow>` through each operator:
 
-`ExecuteQueryPlanInternal` walks `plan.Steps` in order and pipes `IAsyncEnumerable<QueryResultRow>` through each operator:
+- **Scans** (`FullScanFromTableIndex` / `FullScanFromIndex` / `QueryFromIndex` / `RangeScanFromIndex`) →
+  `QueryScanner` / `QueryUsingIndex` / `QueryUsingRangeIndex`: read from `KvTableStore`, decode each row
+  with `RowEncoder.DecodeAsync(schema, txId, rowId, data, requiredColumns)`, apply the inline filter,
+  honor `ScanRowLimit`.
+- **`SortBy`** → `QuerySorter` — materializes, sorts by an N-key comparator over the actual ORDER BY
+  columns, streams.
+- **`Aggregate`** → `QueryAggregator` — groups by the GROUP BY key (or one global group), accumulates
+  `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, emits one row per group.
+- **`HavingFilter`** → `QueryFilterer.FilterHavingResultset` — evaluates HAVING against aggregated rows
+  in the `QueryHavingWorkspace` scope (so `HAVING x > 0` resolves an aggregate alias `x`).
+- **`ReduceToProjections`** → `QueryProjector`.
+- **`Distinct`** → `QueryDistincter` — dedups output tuples; NULLs compare equal.
+- **`Limit`** → `QueryLimiter` — skips OFFSET, stops after LIMIT.
 
-- **`FullScanFromTableIndex`** → `QueryScanner.ScanUsingTableIndex` — iterates all rows via `KvTableStore.ScanRows`, decodes each row with `RowEncoder.DecodeAsync(schema, txId, rowId, data, requiredColumns)`, applies the execution filter inline.
-- **`FullScanFromIndex`** → `QueryScanner.ScanUsingIndex` — iterates via the forced index.
-- **`QueryFromIndex`** → `QueryUsingIndex` — unique index: `LookupUnique` → single row fetch. Non-unique index: builds a prefix upper bound and falls through to `QueryUsingRangeIndex`.
-- **`RangeScanFromIndex`** → `QueryUsingRangeIndexInternal` — `KvTableStore.ScanIndex(txId, indexName, keyTypes, fromBound, toBound, unique, fromInclusive, toInclusive, maxRows: plan.ScanRowLimit)` → fetch + decode each matching row.
-- **`SortBy`** → `QuerySorter.SortResultset` — materializes the full cursor into memory, sorts by the `OrderBy` columns using an N-key comparator, streams the sorted result.
-- **`Aggregate`** → `QueryAggregator.AggregateResultset` — groups rows by the GROUP BY key (or global aggregate if no GROUP BY), accumulates COUNT / SUM / AVG / MIN / MAX, emits one result row per group.
-- **`HavingFilter`** → `QueryFilterer.FilterHavingResultset` — evaluates the HAVING predicate against aggregated rows using the `QueryHavingWorkspace` scope (allows aggregate aliases like `x` in `HAVING x > 0`).
-- **`ReduceToProjections`** → `QueryProjector.ProjectResultset` — evaluates each projection expression and renames columns to their output aliases.
-- **`Distinct`** → `QueryDistincter.DistinctResultset` — hashes output row tuples, suppresses duplicates. NULL values compare equal for deduplication purposes.
-- **`Limit`** → `QueryLimiter.LimitResultset` — skips OFFSET rows, stops after LIMIT rows.
+### 5b. Join — `QueryJoinExecutor`
 
-All operators return `IAsyncEnumerable<QueryResultRow>`, so the chain is fully lazy — rows are streamed one at a time from storage to the caller without materializing the full result set, except where an operator requires full materialization (Sort, grouped Aggregate).
+**File:** `Controllers/Queries/QueryJoinExecutor.cs`. `ExecuteJoinQuery` drives `ExecuteJoinTree(Root)`,
+applies the `PostJoinFilter`, then hands the cursor to `QueryPostScanPipeline.Apply`.
+`ExecuteJoinTree` matches node type:
 
-### 5b. Join execution — `QueryJoinExecutor`
+- `TableScanNode` → full scan with per-alias inline filter.
+- `DerivedTableScanNode` → materializes the inner query once, caches in `plan.DerivedMaterializations`.
+- `NestedLoopJoinNode` → for each left row, scan the full right source, merge, evaluate `ON`.
+- `IndexNestedLoopJoinNode` → for each left row, probe the right index (unique → point lookup;
+  non-unique → equality-prefix scan).
 
-**File:** `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryJoinExecutor.cs`
-
-`ExecuteJoinQuery` drives `ExecuteJoinTree(plan.Root, plan)`, then applies the post-join WHERE filter (if any), then hands the cursor to `QueryPostScanPipeline.Apply` for aggregation, sort, project, distinct, and limit.
-
-`ExecuteJoinTree` pattern-matches on the plan node type:
-
-- **`TableScanNode` with `BoundSource`** → `ScanBoundTable` — full table scan with inline per-alias execution filter.
-- **`DerivedTableScanNode`** → `ScanDerivedTable` — lazily materializes the inner `BoundSelectQuery` the first time it is encountered (result is cached in `plan.DerivedMaterializations` so repeated scans within the same query see the same rows).
-- **`NestedLoopJoinNode`** → `ExecuteNestedLoopJoin` — for each left row, scans the full right source, merges rows, evaluates the ON predicate.
-- **`IndexNestedLoopJoinNode`** → `ExecuteIndexNestedLoopJoin` — for each left row, extracts the join key and probes the right index:
-  - unique index → `LookupUnique` → single row
-  - non-unique index → `ScanIndex` with equality prefix → iterate matching rows, stop when key changes
-
-Row merging is handled by `QueryRowMerger.MergeRows` and `QualifyRow`:
-- All right-side column names are stored with the qualified key `alias.column` and also as unqualified if no collision with the left side.
-- Joined rows carry `RowId = default(ObjectIdValue)` — there is no single source row ID for a merged row.
+Row merging (`QueryRowMerger`): right columns are stored as `alias.column` and also unqualified when
+there is no collision; **merged rows carry `RowId = default`** — there is no single source row id.
 
 ### 5c. Post-scan pipeline — `QueryPostScanPipeline`
 
-**File:** `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryPostScanPipeline.cs`
+**File:** `Controllers/Queries/QueryPostScanPipeline.cs`. `Apply` reproduces the planner's operator order
+for the join path so both executors agree:
 
-`Apply` mirrors the `QueryPlanner` operator order for joins and derived-table queries. It applies the same aggregation / HAVING / sort / project / distinct / limit chain that `QueryExecutor` applies for single-table queries, so the two paths produce identical results.
-
-Operator ordering rules enforced here:
-
-| Has GROUP BY | Has DISTINCT | Order |
-|-------------|-------------|-------|
+| GROUP BY | DISTINCT | Order |
+|----------|----------|-------|
 | yes | — | scan → where → aggregate → having → sort → project → limit |
 | no | yes | scan → where → [aggregate → having] → project → distinct → sort → limit |
 | no | no | scan → where → sort → limit → [aggregate → having] → project |
 
 ---
 
-## Optimization passes
+# Part III — Inspecting plans: PlanRenderer & EXPLAIN
 
-### Projection pushdown (QP6.1)
+Being able to *see* a plan is essential for debugging the planner. CamusDB has an internal renderer and a
+user-facing `EXPLAIN`. (User-facing reference: [`docs/explain.md`](./explain.md).)
 
-**File:** `CamusDB.Core/Commands/Executor/Controllers/Queries/ProjectionPushdownPlanner.cs`
+## PlanRenderer (R1)
 
-`ProjectionPushdownPlanner.Apply` runs after the plan tree is built. `RequiredColumnAnalyzer.ComputeSingleTable(ticket)` walks the projection list, WHERE filter, ORDER BY, GROUP BY, and HAVING to collect every column name that any operator will need. For join plans, `ComputeJoinPlan` does the same per alias. The resulting `IReadOnlySet<string>?` is stored on every scan node as `RequiredColumns` and passed to `RowEncoder.DecodeAsync` so it skips decoding unreferenced columns. `null` means "all columns" (e.g. `SELECT *`).
+**File:** `Controllers/Queries/PlanRenderer.cs`. Walks a `PhysicalPlanNode` tree and produces a
+deterministic, indented, multi-line string with one **canonical node name** per node — these names are
+the stable vocabulary reused everywhere:
 
-### Limit pushdown (QP6.3)
+```
+table-scan, index-lookup, index-range-scan, filter, having-filter, aggregate, sort,
+limit, project, distinct, nested-loop-join, index-nested-loop-join, derived-table-scan
+```
 
-**File:** `QueryPlanner.cs`, method `TryComputeScanRowLimit`
+`PlanRenderer.Render(plan, includeRequiredColumns, includeDistributedProperties)` produces the string
+form; `PlanRenderer.WalkNodes(root, plan)` yields `(name, detail)` pairs in depth-first, parent-before-
+child order. Both share one `GetRenderLine` so the string form and the EXPLAIN rows never diverge. The
+verbose `includeDistributedProperties` flag appends R4 metadata (`order=[…]`, `decomposable=…`).
 
-When all of these hold, the LIMIT value (plus OFFSET) is pushed to `QueryPlan.ScanRowLimit`:
-- No runtime filter (`ExecutionFilter is null`)
-- No aggregation in the projection
-- No GROUP BY / HAVING
-- No DISTINCT
-- ORDER BY is satisfied by the scan (so the scan already emits rows in the correct order)
+## EXPLAIN (R2 parse, R3 execute)
 
-Scan operators pass `maxRows: plan.ScanRowLimit` to `KvTableStore.ScanIndex`, which stops iterating after that many entries. This avoids fetching rows from storage that LIMIT would discard.
+**Files:** grammar `explain_stmt`, `Controllers/Queries/ExplainExecutor.cs`, wired in
+`CommandExecutor.ExecuteSQLQuery`.
 
-### Filter absorption by scan bounds
+`EXPLAIN [(LOGICAL|PHYSICAL)] SELECT …` runs **parse → bind → plan but not execution**, then returns one
+result row per plan node with columns: `stage`, `node`, `detail`, `estimated_rows` (NULL until R9),
+`estimated_cost` (NULL until R9). `(LOGICAL)` and `(PHYSICAL)` currently render the same physical tree
+(there is no separate logical-plan representation yet); they differ only in the `stage` label.
+An unknown option word (e.g. `EXPLAIN (VERBOSE)`) is rejected with `InvalidInput` rather than silently
+treated as a plain explain.
 
-**File:** `CamusDB.Core/Commands/Executor/Controllers/Queries/IndexScanBoundAnalysis.cs`
+*Caveat:* because stage 2b/3b execute uncorrelated subqueries during planning, `EXPLAIN` of a query that
+contains a subquery does read storage for the inner query. The outer query is never executed.
 
-`IndexScanBoundAnalysis.IsComparisonAbsorbedByScan` checks whether an `AnalyzedComparison` is logically implied by the scan's key bounds. For example, if a scan has `fromBound=5, fromInclusive=true` for an integer column, a filter `col >= 3` is trivially true for all rows the scan returns and can be dropped from the execution filter. This avoids redundant per-row evaluation for comparisons already encoded in the index seek.
+## EXPLAIN ANALYZE (R5)
+
+`EXPLAIN (ANALYZE) SELECT …` actually executes the query, drains the cursor, and adds **actual** runtime
+counters per node. Counters live in `PlanNodeStats` (`Models/Plans/PlanNodeStats.cs`):
+`RowsRead`, `RowsEmitted`, `KvPointLookups`, `KvScanEntries`, and `ElapsedMs` (root-only).
+Extra result columns: `actual_rows`, `rows_read`, `actual_time_ms` (NULL on non-root nodes),
+`kv_lookups`, `kv_scan_entries`.
+
+Design points worth knowing:
+
+- **Gated and zero-cost when off.** Counters are only allocated/updated when `QueryPlan.CollectRuntimeStats`
+  is set (only EXPLAIN ANALYZE sets it). Normal `SELECT` pays nothing.
+- **Filter rows are folded into the scan.** A `filter` row reports `actual_rows` from the child scan's
+  post-filter emit count; its KV counters are 0 (storage cost is charged to the scan).
+- **Joins are not yet supported under ANALYZE** — it throws `InvalidInput`, because the linear executor it
+  uses emits no step for join nodes. Use plain `EXPLAIN` for joins. (Join instrumentation is future work.)
 
 ---
 
-## File map for maintainers
+# Part IV — Distributed-ready plan properties (R4)
+
+Even though execution is single-process today, plan nodes carry optional metadata so a future
+distributed executor (CockroachDB-style "do local work near data, merge at a coordinator") is not
+blocked. On `PhysicalPlanNode`:
+
+| Property | Meaning | Status today |
+|----------|---------|--------------|
+| `OutputOrdering` | The ordering this node guarantees on its output | Set on index scans that satisfy ORDER BY and on `SortNode`; drives sort elision |
+| `EstimatedCardinality` | Estimated output rows | `null` until the R9 cost model exists |
+| `PartitionLocality` | Partition affinity hint | `null` (single-partition placeholder) |
+| `CanDecomposeToLocalPlusMerge` | Whether the operator splits into per-partition local work + a merge | `true` for scan/filter/project; `AggregateNode` only for `COUNT`/`SUM`/`MIN`/`MAX` (not `AVG`); `false` for sort/limit/distinct/join |
+
+These are populated only by the single-table `QueryPlanner` today; join plans leave them at defaults.
+They are descriptive metadata — no execution behavior depends on them yet except sort elision (which uses
+`OutputOrdering`).
+
+---
+
+# Part V — Optimization passes
+
+| Pass | Where | What it does |
+|------|-------|--------------|
+| **Sort elision (QP6.2)** | `IndexScanSelector` + `QueryPlanner` | If an index scan emits rows already in ORDER BY order, set `OutputOrdering` and skip `SortNode`. |
+| **Projection pushdown (QP6.1)** | `ProjectionPushdownPlanner` + `RequiredColumnAnalyzer` | Compute the set of columns any operator needs and store it on scan nodes as `RequiredColumns`; `RowEncoder.DecodeAsync` then skips unreferenced columns. `null` = all columns (`SELECT *`). |
+| **Limit pushdown (QP6.3)** | `QueryPlanner.TryComputeScanRowLimit` | Push `LIMIT`+`OFFSET` into the scan (`ScanRowLimit`) when no filter/aggregation/GROUP BY/HAVING/DISTINCT and ORDER BY is scan-satisfied. Scans stop reading early. |
+| **Filter absorption** | `IndexScanBoundAnalysis` | Drop residual comparisons already implied by the scan's key bounds (e.g. `col >= 3` when the scan seeks from `5`). |
+| **Join predicate pushdown (QP4.4)** | `JoinPredicatePushdown` | Single-source WHERE predicates run during that table's scan; cross-source predicates become the post-join filter. |
+| **Join-order heuristics (R7)** | `JoinOrderOptimizer` | Reorder inner-join sources before tree construction. |
+
+## Join-order heuristics (R7) in detail
+
+**File:** `Controllers/Queries/JoinOrderOptimizer.cs`. A deterministic, rule-based reorder applied to
+**inner joins only** (it bails to the declared order if any `JoinSource.Kind != Inner`, since outer joins
+are not commutative). It flattens the join tree into leaves plus a pool of `ON` predicates, scores each
+leaf, and rebuilds a left-deep tree:
+
+| Score | Source has… | Effect |
+|-------|-------------|--------|
+| 0 | equality predicate on a **unique-indexed** column (point lookup, ≤1 row) | placed outermost (drives the loop fewest times) |
+| 1 | any predicate on an indexed column | next |
+| 2 | no pushable predicate | last |
+
+A stable secondary sort on declared position keeps results deterministic. Two safety properties: a
+**feasibility guard** ensures every rebuilt join edge still has a connecting predicate (a chain join with
+no connecting predicate after reordering falls back to the declared order), and reordering is semantics-
+preserving because all `ON` predicates are kept and re-applied where their referenced aliases are in
+scope. Scoring is by *scan selectivity*, not by which side holds the indexed join key — INL-join
+placement is left to `JoinEquiJoinAnalyzer` and the declared order; a future cost model (R9) can unify
+the two.
+
+---
+
+# Part VI — Current capabilities & roadmap
+
+## What works today
+
+Parse, bind, plan, and execute for: single-table SELECT with index selection (unique/composite/range),
+`WHERE` with predicate analysis and filter absorption, `GROUP BY` + `HAVING`, global and grouped
+aggregates (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `SELECT DISTINCT`, `ORDER BY` (with index-based sort
+elision), `LIMIT`/`OFFSET` (with pushdown), `[INNER]`/comma joins (nested-loop and index-nested-loop),
+derived tables, scalar/`IN`/`NOT IN`/`EXISTS` subqueries, projection pushdown, join-order heuristics, and
+full plan inspection via `EXPLAIN` / `EXPLAIN ANALYZE`.
+
+## Gaps and where to contribute
+
+These are the meaningful missing pieces. The detailed task breakdown lives in
+`QUERY_PLANNER_REMAINING.md` (task IDs in brackets).
+
+| Area | State | Notes |
+|------|-------|-------|
+| **Table statistics** [R8] | **Stub** — `Statistics/StatisticsManager.cs` and `Models/TableStatistics.cs` are empty | No row counts / selectivity. Must be persisted (Kahuna meta KV) to survive restart. Prerequisite for cost-based planning. |
+| **Cost model** [R9] | **Missing** | No `PlanCost`; choices are pure heuristics. Would populate `EstimatedCardinality` and `estimated_rows`/`estimated_cost`, and choose among scan/join alternatives. Depends on R8. |
+| **Plan-cache hooks** [R10] | **Partial** | Plans record `TableSchemaVersion`; no stable query-shape identifier yet. No plan reuse. |
+| **Semi-/anti-join rewrite** [R11] | **Missing** | `IN`/`NOT IN` are always materialized (correct but not optimized into semi/anti joins). NULL-aware `NOT IN` must be preserved. |
+| **DISTINCT streaming** [R12] | **Missing** | `QueryDistincter` is hash-only; no index-ordered streaming dedup. |
+| **EXPLAIN ANALYZE for joins** | **Missing** | Throws today; needs the join executor instrumented with `PlanNodeStats`. |
+| **Logical EXPLAIN** | **Cosmetic** | `(LOGICAL)` renders the physical tree relabeled; there is no distinct logical-plan rendering. |
+| **Per-node timing** | **Root-only** | `actual_time_ms` is only measured for the whole plan, not per operator. |
+| **Error/semantics matrix** [R13] | **Thin** | Few negative tests for ambiguous columns, bad HAVING refs, multi-column subqueries, etc. |
+| **Query microbenchmarks** [R14] | **Missing** | No benchmarks for grouped aggregation, join algorithms, or subquery materialization. |
+
+Explicitly deferred (by design): OUTER joins, window functions, CTEs, quantified predicates beyond
+`IN`/`NOT IN` (`ANY`/`ALL`/`SOME`), `COUNT(DISTINCT …)`, full cost-based join reordering, and distributed
+execution.
+
+---
+
+# Part VII — File map for maintainers
 
 | Concern | File(s) |
 |---------|---------|
-| SQL grammar and lexer | `CamusDB.Core/SQLParser/SQLParser.Language.grammar.y`, `SQLParser.Language.analyzer.lex` |
-| AST node types | `CamusDB.Core/SQLParser/NodeAst.cs`, `NodeType.cs` |
-| Logical query model | `CamusDB.Core/Commands/Executor/Models/Queries/` |
-| Logical model builder | `CamusDB.Core/Commands/Executor/Controllers/DML/SelectQueryCreator.cs` |
-| Legacy query ticket bridge | `CamusDB.Core/Commands/Executor/Controllers/DML/QueryTicketAdapter.cs` |
-| Binder | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryBinder.cs` |
-| Subquery rewriting | `CamusDB.Core/Commands/Executor/Controllers/Queries/SubqueryRewriter.cs` |
-| Subquery execution | `CamusDB.Core/Commands/Executor/Controllers/Queries/SubqueryQueryExecutor.cs` |
-| EXISTS preparation | `ExistsSubqueryPreparer.cs`, `ExistsSubqueryExecutor.cs` |
-| Physical plan nodes | `CamusDB.Core/Commands/Executor/Models/Plans/` |
-| Single-table planner | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryPlanner.cs` |
-| Join planner | `CamusDB.Core/Commands/Executor/Controllers/Queries/JoinQueryPlanner.cs` |
-| Predicate classification | `CamusDB.Core/Commands/Executor/Controllers/Queries/PredicateAnalyzer.cs` |
-| Index scan selection | `CamusDB.Core/Commands/Executor/Controllers/Queries/IndexScanSelector.cs` |
-| Scan bound absorption | `CamusDB.Core/Commands/Executor/Controllers/Queries/IndexScanBoundAnalysis.cs` |
-| Join predicate pushdown | `CamusDB.Core/Commands/Executor/Controllers/Queries/JoinPredicatePushdown.cs` |
-| Join equi-join analysis | `CamusDB.Core/Commands/Executor/Controllers/Queries/JoinEquiJoinAnalyzer.cs` |
-| Plan tree → linear steps | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryPlanStepAdapter.cs` |
-| Projection pushdown | `CamusDB.Core/Commands/Executor/Controllers/Queries/ProjectionPushdownPlanner.cs` |
-| Post-scan pipeline | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryPostScanPipeline.cs` |
-| Single-table executor | `CamusDB.Core/Commands/Executor/Controllers/QueryExecutor.cs` |
-| Join executor | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryJoinExecutor.cs` |
-| Derived table executor | `CamusDB.Core/Commands/Executor/Controllers/Queries/DerivedTableExecutor.cs` |
-| Row scanning | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryScanner.cs` |
-| Row filtering | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryFilterer.cs` |
-| Sorting | `CamusDB.Core/Commands/Executor/Controllers/Queries/QuerySorter.cs` |
-| Aggregation | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryAggregator.cs` |
-| Projection | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryProjector.cs` |
-| DISTINCT | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryDistincter.cs` |
-| HAVING evaluation | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryHavingEvaluator.cs` |
-| LIMIT / OFFSET | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryLimiter.cs` |
-| Row merge for joins | `CamusDB.Core/Commands/Executor/Controllers/Queries/QueryRowMerger.cs` |
-| Expression evaluator | `CamusDB.Core/SQLParser/SqlExecutor.cs` |
-| KV table access | `CamusDB.Core/Storage/Kv/KvTableStore.cs` |
-| Row encoding / decoding | `CamusDB.Core/CommandsExecutor/Models/RowEncoder.cs` |
-| Query plan model | `CamusDB.Core/Commands/Executor/Models/QueryPlan.cs`, `QueryPlanStep.cs`, `QueryPlanStepType.cs` |
-| Planner tests | `CamusDB.Tests/CommandsExecutor/TestQueryPlanner.cs`, `TestPredicateAnalyzer.cs`, `TestJoinQueryPlanner.cs` |
+| SQL grammar and lexer | `SQLParser/SQLParser.Language.grammar.y`, `SQLParser.Language.analyzer.lex` |
+| AST node types | `SQLParser/NodeAst.cs`, `NodeType.cs` |
+| Logical query model | `Commands/Executor/Models/Queries/` |
+| Logical model builder | `Commands/Executor/Controllers/DML/SelectQueryCreator.cs` |
+| Legacy query ticket bridge | `Commands/Executor/Controllers/DML/QueryTicketAdapter.cs` |
+| Binder | `Commands/Executor/Controllers/Queries/QueryBinder.cs` |
+| Subquery rewriting / execution | `SubqueryRewriter.cs`, `SubqueryQueryExecutor.cs`, `ScalarSubqueryExecutor.cs`, `InSubqueryExecutor.cs` |
+| EXISTS preparation / execution | `ExistsSubqueryPreparer.cs`, `ExistsSubqueryExecutor.cs` |
+| Physical plan nodes | `Commands/Executor/Models/Plans/` |
+| Plan node runtime stats | `Commands/Executor/Models/Plans/PlanNodeStats.cs` |
+| Single-table planner | `Commands/Executor/Controllers/Queries/QueryPlanner.cs` |
+| Join planner | `Commands/Executor/Controllers/Queries/JoinQueryPlanner.cs` |
+| Join-order heuristics | `Commands/Executor/Controllers/Queries/JoinOrderOptimizer.cs` |
+| Predicate classification | `Commands/Executor/Controllers/Queries/PredicateAnalyzer.cs` |
+| Index scan selection / bound absorption | `IndexScanSelector.cs`, `IndexScanBoundAnalysis.cs` |
+| Join predicate pushdown / equi-join analysis | `JoinPredicatePushdown.cs`, `JoinEquiJoinAnalyzer.cs` |
+| Plan tree → linear steps | `Commands/Executor/Controllers/Queries/QueryPlanStepAdapter.cs` |
+| Projection pushdown | `ProjectionPushdownPlanner.cs`, `RequiredColumnAnalyzer.cs` |
+| Plan rendering / EXPLAIN | `PlanRenderer.cs`, `ExplainExecutor.cs` |
+| Post-scan pipeline | `Commands/Executor/Controllers/Queries/QueryPostScanPipeline.cs` |
+| Single-table executor | `Commands/Executor/Controllers/QueryExecutor.cs` |
+| Join / derived executor | `QueryJoinExecutor.cs`, `DerivedTableExecutor.cs` |
+| Scan / filter / sort / aggregate / project / distinct / having / limit | `QueryScanner.cs`, `QueryFilterer.cs`, `QuerySorter.cs`, `QueryAggregator.cs`, `QueryProjector.cs`, `QueryDistincter.cs`, `QueryHavingEvaluator.cs`, `QueryLimiter.cs` |
+| Row merge for joins | `Commands/Executor/Controllers/Queries/QueryRowMerger.cs` |
+| Expression evaluator | `Commands/Executor/Controllers/SqlExecutor.cs` |
+| Table statistics (stub) | `Statistics/StatisticsManager.cs`, `Statistics/Models/TableStatistics.cs` |
+| KV table access | `Storage/Kv/KvTableStore.cs` |
+| Row encoding / decoding | `CommandsExecutor/Models/RowEncoder.cs` |
+| Query plan model | `Commands/Executor/Models/QueryPlan.cs`, `QueryPlanStep.cs`, `QueryPlanStepType.cs` |
+| Planner / EXPLAIN tests | `TestQueryPlanner.cs`, `TestPredicateAnalyzer.cs`, `TestJoinQueryPlanner.cs`, `TestPlanRenderer.cs`, `TestPlanDistributedProperties.cs`, `TestExplainExecutor.cs`, `TestExplainAnalyzeExecutor.cs` |
 | Integration tests | `CamusDB.Tests/CommandsExecutor/TestExecuteSqlSelect.cs` |
 
 ---
 
-## Adding a new SQL feature — checklist
+# Part VIII — Adding a new SQL feature — checklist
 
-1. **Lexer / grammar** — add tokens in `analyzer.lex`, extend rules in `grammar.y`, rebuild to regenerate `Generated.cs` files.
-2. **AST → logical model** — update `SelectQueryCreator` (and `NodeAst` slot assignments if a new clause needs a slot) to populate the new field on `SelectQuery` or a model type under `Models/Queries/`.
-3. **`QueryTicketAdapter`** — if the legacy `QueryTicket` path still runs (single-table queries), carry the new field through the adapter.
-4. **Binder** — add validation in `QueryBinder` (scope rules, ambiguity, type checks).
-5. **Planner** — add a plan node if needed, update `QueryPlanner.GetPlan` and/or `JoinQueryPlanner.GetPlan` to insert the new node in the correct position in the operator chain.
-6. **`QueryPlanStepAdapter`** — add the new node's `Flatten` case to emit the correct `QueryPlanStep`.
-7. **Executor** — add the new step type to the `switch` in `QueryExecutor.ExecuteQueryPlanInternal` and/or the corresponding operator in `QueryPostScanPipeline.Apply`.
-8. **Operator implementation** — implement the operator as an `IAsyncEnumerable<QueryResultRow>` transformer (or a new operator class following the pattern of `QuerySorter`, `QueryAggregator`, etc.).
-9. **Tests** — add parser tests, planner unit tests asserting the correct plan shape, and execution tests with exact expected rows.
+1. **Lexer / grammar** — add tokens in `analyzer.lex`, extend rules in `grammar.y`, rebuild to regenerate
+   the `Generated.cs` files, and stage them.
+2. **AST → logical model** — update `SelectQueryCreator` (and claim a `NodeAst` slot if a new clause needs
+   one) to populate `SelectQuery` or a new `Models/Queries/` type.
+3. **`QueryTicketAdapter`** — carry the new field through if the single-table path needs it.
+4. **Binder** — add scope/ambiguity/type validation in `QueryBinder`.
+5. **Planner** — add a `PhysicalPlanNode` if needed; insert it at the correct point in `QueryPlanner` and
+   `JoinQueryPlanner`. Set R4 properties (`CanDecomposeToLocalPlusMerge`, `OutputOrdering`) where they
+   apply.
+6. **`QueryPlanStepAdapter`** — add the node's `Flatten` case (emit a step, or skip like Filter/joins).
+7. **Executor** — handle the new step in `QueryExecutor` **and** the corresponding stage in
+   `QueryPostScanPipeline` so single-table and join paths agree.
+8. **Operator** — implement it as an `IAsyncEnumerable<QueryResultRow>` transformer (follow
+   `QuerySorter`/`QueryAggregator`). Stream unless semantics force materialization.
+9. **Renderer** — add a canonical node name + detail in `PlanRenderer` so `EXPLAIN` shows it; if it has
+   runtime cost, wire `PlanNodeStats` for EXPLAIN ANALYZE.
+10. **Tests** — parser tests, planner tests asserting plan shape (via `PlanRenderer`), and execution
+    tests with exact expected rows. Validate per `QUERY_PLANNER_PLAN.md` → Validation Policy.
+
+---
+
+# Part IX — Glossary
+
+- **AST (`NodeAst`)** — the raw syntax tree from the parser; expressions stay in this form through
+  execution.
+- **Logical plan (`SelectQuery` / `BoundSelectQuery`)** — *what* result is wanted, names resolved.
+- **Physical plan (`QueryPlan.Root`)** — *how* to compute it: a tree of `PhysicalPlanNode`.
+- **Binding** — resolving column/table names against the catalog and opening table descriptors.
+- **Predicate** — a boolean expression (`WHERE`/`ON`/`HAVING`). *Residual* = must be evaluated per row.
+- **Pushdown** — moving work (filters, projections, limits) closer to the scan to do less.
+- **Sort elision** — skipping a sort because an index already yields rows in the requested order.
+- **Nested-loop join / index-nested-loop join** — for each left row, scan the right source / probe the
+  right index.
+- **Heuristic vs cost-based** — rule-driven plan choice vs statistics-driven cost comparison. CamusDB is
+  heuristic today.
+- **Streaming (`IAsyncEnumerable`)** — pulling rows one at a time without materializing the whole result.
+- **SQL-over-KV** — the architectural boundary where relational operations become Kahuna key/value reads.
+
+For the remaining-work task breakdown, see `QUERY_PLANNER_REMAINING.md`. For `EXPLAIN` output as a user
+feature, see [`docs/explain.md`](./explain.md).

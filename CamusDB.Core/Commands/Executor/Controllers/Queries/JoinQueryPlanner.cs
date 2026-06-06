@@ -31,9 +31,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// implementation.
 /// </para>
 /// <para>
-/// This is intentional for the current single-partition deployment. A future R7 join-order
-/// heuristics pass and any distributed sharding work must extend this planner to populate
-/// these properties when join-side scans are index-selected.
+/// This is intentional for the current single-partition deployment. The R7 join-order
+/// heuristics pass (<see cref="JoinOrderOptimizer"/>) reorders sources but does not yet
+/// populate these distributed properties on join-side scan nodes. Any distributed sharding
+/// work must extend this planner to set them when join-side scans are index-selected.
 /// </para>
 /// </summary>
 internal sealed class JoinQueryPlanner
@@ -56,12 +57,15 @@ internal sealed class JoinQueryPlanner
 
         JoinPredicatePushdown.Result pushdown = JoinPredicatePushdown.Analyze(bound, ticket.Where);
 
+        // R7: apply heuristic join-order rewriting before building the physical plan tree.
+        QuerySource orderedSource = JoinOrderOptimizer.Reorder(bound.Query.Source, bound, pushdown);
+
         QueryPlan plan = new(database, ResolvePlanTable(bound), ticket)
         {
             BoundQuery = bound,
             PredicateAnalysis = PredicateAnalyzer.Analyze(ticket.Where, ticket.Parameters),
             ExecutionFilter = pushdown.PostJoinFilter,
-            Root = BuildJoinTree(bound.Query.Source, bound, pushdown),
+            Root = BuildJoinTree(orderedSource, bound, pushdown),
         };
 
         foreach (BoundTableSource source in bound.Sources)
