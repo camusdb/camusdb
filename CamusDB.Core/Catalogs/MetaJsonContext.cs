@@ -9,6 +9,7 @@
 using System.Text.Json.Serialization;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Statistics.Models;
 using Kommander.Time;
 
 namespace CamusDB.Core.Catalogs;
@@ -37,4 +38,5 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(Dictionary<string, DatabaseTableObject>))]
 [JsonSerializable(typeof(Dictionary<string, DatabaseIndexObject>))]
 [JsonSerializable(typeof(HLCTimestamp))]
+[JsonSerializable(typeof(TableStatistics))]
 internal sealed partial class MetaJsonContext : JsonSerializerContext;

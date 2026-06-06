@@ -21,6 +21,7 @@ using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 using CamusDB.Core.CommandsExecutor.Models.Results;
+using CamusDB.Core.Statistics;
 
 namespace CamusDB.Core.CommandsExecutor;
 
@@ -58,6 +59,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     private readonly RowUpdater rowUpdater;
 
     private readonly RowDeleter rowDeleter;
+
+    private readonly StatisticsManager statisticsManager;
+
+    public StatisticsManager Statistics => statisticsManager;
 
     private readonly QueryExecutor queryExecutor;
 
@@ -113,6 +118,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         rowInserter = new(logger);
         rowUpdater = new(logger);
         rowDeleter = new(logger);
+        statisticsManager = new(logger);
         queryExecutor = new(logger);
         sqlExecutor = new(logger);
         schemaQuerier = new(catalogs, logger);
@@ -145,6 +151,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async Task CloseDatabase(CloseDatabaseTicket ticket)
     {
         validator.Validate(ticket);
+
+        // Flush tail stats before the descriptor is torn down so debounced deltas survive shutdown.
+        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        await statisticsManager.FlushAllAsync(database).ConfigureAwait(false);
 
         await databaseCloser.Close(ticket.DatabaseName).ConfigureAwait(false);
     }
@@ -1016,7 +1026,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
         PinSchemaVersion(database, table, ticket.TxnState);
 
-        return new(database, table, await rowInserter.Insert(database, table, ticket).ConfigureAwait(false));
+        int inserted = await rowInserter.Insert(database, table, ticket).ConfigureAwait(false);
+        statisticsManager.TrackInsert(database, table, inserted);
+        return new(database, table, inserted);
     }
 
     /// <summary>
@@ -1033,7 +1045,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
         PinSchemaVersion(database, table, ticket.TxnState);
 
-        return new(database, table, await rowUpdater.Update(queryExecutor, database, table, ticket).ConfigureAwait(false));
+        int updated = await rowUpdater.Update(queryExecutor, database, table, ticket).ConfigureAwait(false);
+        statisticsManager.TrackUpdate(database, table, updated);
+        return new(database, table, updated);
     }
 
     /// <summary>
@@ -1050,7 +1064,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
         PinSchemaVersion(database, table, ticket.TxnState);
 
-        return new(database, table, await rowDeleter.Delete(queryExecutor, database, table, ticket).ConfigureAwait(false));
+        int deleted = await rowDeleter.Delete(queryExecutor, database, table, ticket).ConfigureAwait(false);
+        statisticsManager.TrackDelete(database, table, deleted);
+        return new(database, table, deleted);
     }
 
     /// <summary>

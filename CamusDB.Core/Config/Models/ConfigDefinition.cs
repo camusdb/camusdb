@@ -52,6 +52,14 @@ public class ConfigDefinition
     /// </summary>
     public int SchemaAckLiveNodeLeaseMs { get; set; } = -1;
 
+    /// <summary>
+    /// Minimum interval between background flushes of advisory table statistics (R8) to
+    /// durable storage, in milliseconds, per table. <c>0</c> flushes after every change;
+    /// <c>-1</c> disables auto-flush (persist only on explicit flush / close); a positive
+    /// value caps flush frequency. Maps to <c>CamusDBConfig.StatsFlushIntervalMs</c>.
+    /// </summary>
+    public int StatsFlushIntervalMs { get; set; } = 5000;
+
     public bool IsClusterMode => Mode == "cluster" || Peers.Count > 0;
 
     /// <summary>
@@ -80,6 +88,11 @@ public class ConfigDefinition
             throw Invalid(
                 "'schema_ack_live_node_lease_ms' must be > 0 or -1 (infinite), got " +
                 SchemaAckLiveNodeLeaseMs);
+
+        if (StatsFlushIntervalMs < -1)
+            throw Invalid(
+                "'stats_flush_interval_ms' must be >= 0 (interval), 0 (immediate), or -1 " +
+                $"(disabled), got {StatsFlushIntervalMs}");
 
         // Forwarding endpoints: http_peers, when supplied, must be parallel to peers so
         // the raft-endpoint → HTTP base-URI map in Program.cs is unambiguous. An entry

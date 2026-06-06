@@ -21,6 +21,22 @@ public static class CamusDBConfig
     public static int BufferPoolSize = 65536 / Environment.ProcessorCount;
 
     /// <summary>
+    /// Minimum interval, in milliseconds, between background flushes of advisory table
+    /// statistics (R8) to durable Kahuna storage, per table. Statistics are updated in
+    /// memory on every DML but only persisted at most once per this interval, so a write
+    /// burst produces a single disk write rather than one per row.
+    ///
+    /// Special values:
+    ///   <c>0</c>  — flush as soon as possible after each change (overlapping flushes are
+    ///              still coalesced); highest durability, highest write amplification.
+    ///   <c>-1</c> — never auto-flush; statistics are persisted only by an explicit
+    ///              <c>FlushAsync</c> (e.g. on database close). Lowest write amplification,
+    ///              but in-memory deltas are lost on a crash.
+    /// Any positive value caps flush frequency to roughly once per interval per table.
+    /// </summary>
+    public static int StatsFlushIntervalMs = 5000;
+
+    /// <summary>
     /// The internal name used to identify primary key indices.
     /// This name should only be changed in a new installation. Changing it after
     /// having databases with tables and data can cause unexpected problems.

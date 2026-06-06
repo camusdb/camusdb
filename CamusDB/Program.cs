@@ -40,6 +40,9 @@ if (opts.RaftPort != 7070) config.RaftPort = opts.RaftPort;
 if (opts.InitialClusterPartitions > 1) config.InitialPartitions = opts.InitialClusterPartitions;
 if (opts.InitialCluster.Any()) config.Peers = [.. opts.InitialCluster];
 
+// Apply process-wide tunables (all modes) before the engine starts.
+CamusDBConfig.StatsFlushIntervalMs = config.StatsFlushIntervalMs;
+
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 builder.WebHost.ConfigureKestrel(kestrel =>

@@ -32,3 +32,11 @@ data_dir: /tmp/camusdb/
 #   wait on every member); a positive value enables apply-derived liveness expiry.
 # schema_ack_wait_timeout_ms: 30000
 # schema_ack_live_node_lease_ms: -1
+
+# Advisory table statistics (R8). Row-count estimates are updated in memory on every
+# DML and flushed to durable storage at most once per this interval (milliseconds),
+# per table, so a write burst costs a single disk write instead of one per row.
+#   0  = flush after every change (highest durability, highest write amplification)
+#   -1 = never auto-flush; persist only on explicit flush / database close
+#   >0 = cap flush frequency to roughly once per interval per table (default 5000)
+# stats_flush_interval_ms: 5000
