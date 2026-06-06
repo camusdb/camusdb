@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
@@ -29,14 +30,16 @@ internal static class QueryTicketAdapter
     public static QueryTicket ToQueryTicket(
         BoundSelectQuery bound,
         ExecuteSQLTicket ticket,
-        ExistsSubqueryRegistry? existsSubqueries) =>
-        ToQueryTicketInternal(bound.Query, ticket, bound.RowNames, existsSubqueries);
+        ExistsSubqueryRegistry? existsSubqueries,
+        IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null) =>
+        ToQueryTicketInternal(bound.Query, ticket, bound.RowNames, existsSubqueries, semiJoinSpecs);
 
     private static QueryTicket ToQueryTicketInternal(
         SelectQuery query,
         ExecuteSQLTicket ticket,
         QueryRowNameResolver? rowNameResolver,
-        ExistsSubqueryRegistry? existsSubqueries = null)
+        ExistsSubqueryRegistry? existsSubqueries = null,
+        IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null)
     {
         TableSource tableSource = GetPrimaryTableSource(query.Source);
         NodeAst? where = query.Where?.Expression;
@@ -63,7 +66,9 @@ internal static class QueryTicketAdapter
             rowNameResolver: rowNameResolver,
             analyzedWhere: analyzedWhere,
             existsSubqueries: existsSubqueries,
-            isDistinct: query.IsDistinct);
+            isDistinct: query.IsDistinct,
+            selectQuery: query,
+            semiJoinSpecs: semiJoinSpecs);
     }
 
     /// <summary>

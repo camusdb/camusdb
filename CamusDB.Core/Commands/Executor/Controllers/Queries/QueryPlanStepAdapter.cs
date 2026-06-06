@@ -99,6 +99,11 @@ internal static class QueryPlanStepAdapter
                 stepNodes.Add(node);
                 return;
 
+            case SemiJoinNode:
+                steps.Add(new QueryPlanStep(QueryPlanStepType.SemiJoinProbe));
+                stepNodes.Add(node);
+                return;
+
             default:
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,

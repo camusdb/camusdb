@@ -87,7 +87,35 @@ internal sealed class JoinQueryPlanner
         // independently costed inside CostEstimator.AnnotatePlan.
         CostEstimator.AnnotatePlan(plan.Root, database, table: null, _stats);
 
+        // R10: record the plan's query-shape ID and schema-version dependencies.
+        // CollectSchemaDeps walks the full BoundSelectQuery tree recursively so that tables
+        // referenced only inside derived-table subqueries are included — a schema change to
+        // any of them must invalidate a future cached plan.
+        plan.QueryShapeId = QueryShapeComputer.Compute(bound.Query);
+        plan.SchemaDeps = CollectSchemaDeps(bound);
+
         return plan;
+    }
+
+    // Recursively collects (TableName, SchemaVersion) pairs from every table referenced in
+    // the bound query, including tables that appear only inside derived-table subqueries.
+    // Without the recursion, a schema change to such a table would not invalidate a cached plan.
+    private static List<(string TableName, int SchemaVersion)> CollectSchemaDeps(BoundSelectQuery bound)
+    {
+        var deps = new List<(string, int)>();
+        CollectSchemaDepsInto(bound, deps);
+        return deps;
+    }
+
+    private static void CollectSchemaDepsInto(
+        BoundSelectQuery bound,
+        List<(string TableName, int SchemaVersion)> deps)
+    {
+        foreach (BoundTableSource s in bound.Sources)
+            deps.Add((s.Table.Name, s.Table.Schema.Version));
+
+        foreach (BoundDerivedTableSource d in bound.DerivedSources)
+            CollectSchemaDepsInto(d.InnerBound, deps);
     }
 
     private static PhysicalPlanNode BuildJoinTree(

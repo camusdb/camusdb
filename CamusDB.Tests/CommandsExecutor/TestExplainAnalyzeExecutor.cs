@@ -107,6 +107,11 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
         return rows;
     }
 
+    // R10: the last row of EXPLAIN ANALYZE output is now a "plan-info" metadata row.
+    // Use this helper to get the last *physical node* row (scan, filter, etc.) for stats checks.
+    private static QueryResultRow LastDataRow(List<QueryResultRow> rows) =>
+        rows.Last(r => r.Row.TryGetValue("node", out ColumnValue n) && n.StrValue != "plan-info");
+
     // ── Column schema tests ───────────────────────────────────────────────────
 
     [Test]
@@ -193,7 +198,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
             "EXPLAIN (ANALYZE) SELECT * FROM robots");
 
         // The scan node is the last row in the DFS walk (leaf = innermost).
-        QueryResultRow scanRow = rows.Last();
+        QueryResultRow scanRow = LastDataRow(rows);
         Assert.That(scanRow.Row["node"].StrValue, Does.Contain("table-scan"),
             "Last EXPLAIN ANALYZE node should be the table-scan");
 
@@ -225,7 +230,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
             "EXPLAIN (ANALYZE) SELECT * FROM robots");
 
         // The scan node (last row) always has stats.
-        QueryResultRow scanRow = rows.Last();
+        QueryResultRow scanRow = LastDataRow(rows);
         Assert.That(scanRow.Row["actual_rows"].Type, Is.Not.EqualTo(ColumnType.Null),
             "scan node actual_rows must not be NULL after EXPLAIN ANALYZE");
     }
@@ -241,7 +246,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
         List<QueryResultRow> rows = await ExplainAnalyzeAsync(executor, database, dbname,
             "EXPLAIN (ANALYZE) SELECT * FROM robots");
 
-        QueryResultRow scanRow = rows.Last();
+        QueryResultRow scanRow = LastDataRow(rows);
         Assert.That(scanRow.Row["kv_scan_entries"].Type, Is.EqualTo(ColumnType.Integer64));
         Assert.That(scanRow.Row["kv_scan_entries"].LongValue, Is.EqualTo(rowCount),
             "kv_scan_entries should count one entry per row visited in the table scan");
@@ -257,7 +262,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
 
         // With a unique or non-unique equality lookup, the scan is either index-lookup or
         // index-range-scan. Either way, the scan node should have non-null actual_rows.
-        QueryResultRow scanRow = rows.Last();
+        QueryResultRow scanRow = LastDataRow(rows);
         Assert.That(scanRow.Row["actual_rows"].Type, Is.EqualTo(ColumnType.Integer64),
             "scan node should have actual_rows after index-based EXPLAIN ANALYZE");
 
@@ -277,7 +282,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
         List<QueryResultRow> rows = await ExplainAnalyzeAsync(executor, database, dbname,
             "EXPLAIN (ANALYZE) SELECT * FROM robots WHERE year >= 2020 AND year <= 2024");
 
-        QueryResultRow scanRow = rows.Last();
+        QueryResultRow scanRow = LastDataRow(rows);
         Assert.That(scanRow.Row["kv_scan_entries"].Type, Is.EqualTo(ColumnType.Integer64));
         Assert.That(scanRow.Row["kv_scan_entries"].LongValue, Is.GreaterThan(0),
             "Range scan over 5 years should have at least 1 kv_scan_entry");
@@ -437,7 +442,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
             "EXPLAIN (ANALYZE) SELECT * FROM empty_table");
 
         Assert.That(rows, Is.Not.Empty);
-        QueryResultRow scanRow = rows.Last();
+        QueryResultRow scanRow = LastDataRow(rows);
         Assert.That(scanRow.Row["actual_rows"].Type, Is.EqualTo(ColumnType.Integer64));
         Assert.That(scanRow.Row["actual_rows"].LongValue, Is.EqualTo(0),
             "actual_rows must be 0 when the table is empty");
@@ -469,7 +474,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
         List<QueryResultRow> rows = await ExplainAnalyzeAsync(executor, database, dbname,
             "EXPLAIN (ANALYZE) SELECT * FROM robots");
 
-        QueryResultRow scanRow = rows.Last();
+        QueryResultRow scanRow = LastDataRow(rows);
         Assert.That(scanRow.Row["rows_read"].Type, Is.EqualTo(ColumnType.Integer64));
         Assert.That(scanRow.Row["rows_read"].LongValue, Is.EqualTo(rowCount),
             "rows_read should equal the row count when no entries are skipped");
@@ -487,7 +492,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
         List<QueryResultRow> rows = await ExplainAnalyzeAsync(executor, database, dbname,
             "EXPLAIN (ANALYZE) SELECT * FROM robots WHERE name = 'robot 1'");
 
-        QueryResultRow scanRow = rows.Last();
+        QueryResultRow scanRow = LastDataRow(rows);
         long rowsRead    = scanRow.Row["rows_read"].Type    == ColumnType.Integer64 ? scanRow.Row["rows_read"].LongValue    : -1;
         long rowsEmitted = scanRow.Row["actual_rows"].Type == ColumnType.Integer64 ? scanRow.Row["actual_rows"].LongValue : -1;
 
@@ -504,7 +509,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
         List<QueryResultRow> rows = await ExplainAnalyzeAsync(executor, database, dbname,
             "EXPLAIN (ANALYZE) SELECT * FROM robots WHERE year = 2020");
 
-        QueryResultRow scanRow = rows.Last();
+        QueryResultRow scanRow = LastDataRow(rows);
         if (scanRow.Row["rows_read"].Type != ColumnType.Integer64)
             Assert.Ignore("Scan node has no rows_read stat; likely a range scan, not a unique lookup.");
 

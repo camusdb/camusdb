@@ -64,6 +64,16 @@ public sealed class QueryPlanner
         if (plan.ExecutionFilter is not null)
             root = new FilterNode(plan.ExecutionFilter, root);
 
+        // R11: wrap the scan with SemiJoinNode(s) for each IN / NOT IN rewrite spec.
+        if (ticket.SemiJoinSpecs is { Count: > 0 })
+        {
+            foreach (SemiJoinSpec spec in ticket.SemiJoinSpecs)
+            {
+                root = new SemiJoinNode(root, spec.Mode, spec.InnerTable,
+                    spec.OuterColumn, spec.InnerColumn, spec.InnerIndex, spec.InnerFilter);
+            }
+        }
+
         bool hasGroupBy = ticket.GroupBy is { Count: > 0 };
 
         if (hasGroupBy)
@@ -163,6 +173,18 @@ public sealed class QueryPlanner
         // R9: annotate every node with EstimatedCardinality and PlanCost using R8 statistics.
         CostEstimator.AnnotatePlan(plan.Root, database, table, _stats);
 
+        // R10: record the plan's query-shape ID and schema-version dependencies.
+        if (ticket.SelectQuery is not null)
+            plan.QueryShapeId = QueryShapeComputer.Compute(ticket.SelectQuery);
+
+        List<(string, int)> schemaDeps = [(table.Name, table.Schema.Version)];
+        if (ticket.SemiJoinSpecs is { Count: > 0 })
+        {
+            foreach (SemiJoinSpec spec in ticket.SemiJoinSpecs)
+                schemaDeps.Add((spec.InnerTable.Name, spec.InnerTable.Schema.Version));
+        }
+        plan.SchemaDeps = schemaDeps;
+
         return plan;
     }
 
@@ -240,7 +262,7 @@ public sealed class QueryPlanner
             if (tableRowCount is { } trc && trc > 0)
             {
                 var tempRangeNode = (IndexRangeScanNode)ToScanNode(scanStep.Value);
-                if (CostEstimator.ShouldPreferFullScan(tempRangeNode, trc))
+                if (CostEstimator.ShouldPreferFullScan(tempRangeNode, trc, _stats, database, table))
                     scanStep = null; // fall through to full table scan
             }
         }

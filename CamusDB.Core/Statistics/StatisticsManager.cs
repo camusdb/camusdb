@@ -8,6 +8,7 @@
 
 using System.Collections.Concurrent;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Statistics.Models;
 using CamusDB.Core.Transactions;
@@ -18,30 +19,26 @@ using Microsoft.Extensions.Logging;
 namespace CamusDB.Core.Statistics;
 
 /// <summary>
-/// Manages lightweight advisory table statistics (R8).
+/// Manages lightweight advisory table statistics (R8 + R9b).
 ///
-/// Statistics are loaded lazily from Kahuna KV on the first call to
-/// <see cref="GetRowCountEstimate"/> and flushed back asynchronously after each DML
-/// operation that changes the row count.  All values are best-effort estimates —
-/// the planner uses them as hints and never relies on them for correctness.
+/// R8: row count per table.
+/// R9b: per-index entry counts and per-column (indexed columns only) running min/max.
 ///
-/// Thread-safety: the in-memory cache uses a <see cref="ConcurrentDictionary"/> and
-/// <see cref="Interlocked"/> for atomic counter updates.  Flushes are fire-and-forget
-/// background tasks; at most one flush per table runs at a time (guarded by a
-/// per-table <see cref="SemaphoreSlim"/>).
+/// All values are best-effort estimates — the planner uses them as hints and never relies
+/// on them for correctness.
+///
+/// Thread-safety:
+///   <see cref="Entry.RowCount"/> and <see cref="Entry.IndexEntries"/> values are updated
+///   with <see cref="Interlocked"/> operations.
+///   <see cref="Entry.ColumnStats"/> is protected by <see cref="Entry.ColumnStatsLock"/>
+///   (read-modify-write on struct fields requires a lock).
+///   Flushes are fire-and-forget; at most one runs per table at a time.
 ///
 /// Key layout in Kahuna: <c>{dbname}:stats:{tableId}</c>
-///
-/// R8 scope: only <see cref="TableStatistics.RowCount"/> is tracked. Index entry counts
-/// (<see cref="TableStatistics.IndexEntryCounts"/>) and per-column min/max histograms are
-/// declared in the model but never populated here. The R9 cost model will therefore only
-/// have row counts available; index selectivity estimates require a future pass that hooks
-/// the index writer path.
 /// </summary>
 public sealed class StatisticsManager
 {
     // Holds the mutable in-memory snapshot for one table.
-    // RowCount is accessed exclusively via Interlocked so no extra locking is needed.
     private sealed class Entry
     {
         // Semantics depend on Loaded:
@@ -53,17 +50,24 @@ public sealed class StatisticsManager
         public bool Loaded;
 
         // CAS one-shot guard: 0=no load attempted yet, 1=load in progress or done.
-        // Prevents two concurrent background loads from double-adding the base.
         public int LoadAttempted;
 
         // Environment.TickCount64 of the last completed flush. 0 = never flushed.
         public long LastFlushTicks;
 
-        // 1 while a flush cycle owns this table (debounce guard); 0 otherwise.
+        // 1 while a flush cycle owns this table; 0 otherwise.
         public int FlushPending;
+
+        // Per-index entry counts (R9b). Same Loaded/delta semantics as RowCount.
+        // Key = index name; value = entry count (or pending delta if !Loaded).
+        public readonly ConcurrentDictionary<string, long> IndexEntries = new(StringComparer.Ordinal);
+
+        // Per-column min/max (R9b). Only indexed columns are tracked.
+        // Key = column name; value = running min/max.
+        public readonly Dictionary<string, ColumnMinMax> ColumnStats = new(StringComparer.Ordinal);
+        public readonly object ColumnStatsLock = new();
     }
 
-    // Cache key → mutable in-memory entry.
     private readonly ConcurrentDictionary<string, Entry> _cache = new(StringComparer.Ordinal);
 
     private readonly ILogger<ICamusDB> _logger;
@@ -74,30 +78,21 @@ public sealed class StatisticsManager
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Public API
+    // Public query API
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Returns the estimated row count for <paramref name="table"/>, or <c>null</c> if no
-    /// statistics have been collected yet.  May trigger a lazy Kahuna load on the first call.
-    /// </summary>
+    /// <summary>Returns the estimated row count, or null if no statistics have been collected.</summary>
     public long? GetRowCountEstimate(DatabaseDescriptor database, TableDescriptor table)
     {
         string key = CacheKey(database.Name, table.Id);
         if (_cache.TryGetValue(key, out Entry? entry) && entry.Loaded)
             return entry.RowCount >= 0 ? entry.RowCount : null;
 
-        // Trigger a background load; return null for this call.
         _ = Task.Run(() => LoadAndCacheAsync(database, table));
         return null;
     }
 
-    /// <summary>
-    /// Returns the estimated row count using raw cache-key components, bypassing the need for a
-    /// fully-opened <see cref="TableDescriptor"/>. Useful when only the table ID is known
-    /// (e.g. after a database reopen before any table-opening DML).
-    /// Returns <c>null</c> when no in-memory entry has been loaded yet.
-    /// </summary>
+    /// <summary>Returns the estimated row count using raw cache-key components.</summary>
     public long? GetRowCountEstimate(string dbname, string tableId)
     {
         string key = CacheKey(dbname, tableId);
@@ -107,37 +102,147 @@ public sealed class StatisticsManager
     }
 
     /// <summary>
+    /// Returns the estimated entry count for <paramref name="indexName"/> in <paramref name="table"/>,
+    /// or null if no statistics have been collected yet (R9b).
+    /// </summary>
+    public long? GetIndexEntryCount(DatabaseDescriptor database, TableDescriptor table, string indexName)
+    {
+        string key = CacheKey(database.Name, table.Id);
+        if (!_cache.TryGetValue(key, out Entry? entry) || !entry.Loaded)
+            return null;
+
+        return entry.IndexEntries.TryGetValue(indexName, out long count) && count >= 0 ? count : null;
+    }
+
+    /// <summary>
+    /// Returns the persisted min/max bounds for <paramref name="columnName"/> in <paramref name="table"/>,
+    /// or null if no statistics have been observed for that column (R9b).
+    /// </summary>
+    public ColumnMinMax? GetColumnMinMax(DatabaseDescriptor database, TableDescriptor table, string columnName)
+    {
+        string key = CacheKey(database.Name, table.Id);
+        if (!_cache.TryGetValue(key, out Entry? entry) || !entry.Loaded)
+            return null;
+
+        lock (entry.ColumnStatsLock)
+        {
+            return entry.ColumnStats.TryGetValue(columnName, out ColumnMinMax? mm) ? mm : null;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Public DML tracking API
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
     /// Records that <paramref name="delta"/> rows were inserted and fires a background flush.
+    /// No index/column tracking — use the overload with <paramref name="rowValues"/> for R9b stats.
     /// </summary>
     public void TrackInsert(DatabaseDescriptor database, TableDescriptor table, int delta)
     {
-        if (delta <= 0)
-            return;
+        if (delta <= 0) return;
+        ApplyRowDelta(database, table, delta);
+        ScheduleFlush(database, table);
+    }
 
-        ApplyDelta(database, table, delta);
+    /// <summary>
+    /// Records that <paramref name="delta"/> rows were inserted, tracking per-index entry
+    /// counts and per-column min/max for all indexed columns (R9b).
+    /// </summary>
+    public void TrackInsert(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        int delta,
+        IReadOnlyList<Dictionary<string, ColumnValue>> rowValues)
+    {
+        if (delta <= 0) return;
+
+        ApplyRowDelta(database, table, delta);
+
+        string key = CacheKey(database.Name, table.Id);
+        Entry entry = GetOrCreateEntry(database, table, key);
+
+        // Collect the set of writable indexes once to avoid repeated dict lookup.
+        IReadOnlyList<TableIndexSchema> writableIndexes = GetWritableIndexes(table);
+
+        foreach (Dictionary<string, ColumnValue> row in rowValues)
+            ApplyInsertStats(entry, writableIndexes, row);
+
         ScheduleFlush(database, table);
     }
 
     /// <summary>
     /// Records that <paramref name="delta"/> rows were deleted and schedules a background flush.
+    /// Decrements entry counts for all writable indexes by <paramref name="delta"/> (approximate —
+    /// null-column rows may not have had entries for all indexes).
+    /// Min/max is not recomputed on delete (let drift; advisory only).
     /// </summary>
     public void TrackDelete(DatabaseDescriptor database, TableDescriptor table, int delta)
     {
-        if (delta <= 0)
-            return;
+        if (delta <= 0) return;
 
-        ApplyDelta(database, table, -delta);
+        ApplyRowDelta(database, table, -delta);
+
+        string key = CacheKey(database.Name, table.Id);
+        Entry entry = GetOrCreateEntry(database, table, key);
+
+        foreach (TableIndexSchema index in GetWritableIndexes(table))
+        {
+            entry.IndexEntries.AddOrUpdate(
+                index.Name,
+                addValue: -delta,
+                updateValueFactory: (_, cur) => Math.Max(0, cur - delta));
+        }
+
         ScheduleFlush(database, table);
     }
 
-    // Updates are row-preserving; no row-count change. Placeholder for index-count tracking later.
+    /// <summary>
+    /// Records that rows were updated.
+    /// Updates min/max for any indexed columns present in <paramref name="updatedValues"/>.
+    /// Entry counts are not changed: a non-null→non-null update keeps the same index entry.
+    /// (Updates from null→non-null or non-null→null require the old row value which is not
+    /// available at this call site; the count drift is acceptable for advisory stats.)
+    /// </summary>
+    public void TrackUpdate(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        int delta,
+        IReadOnlyDictionary<string, ColumnValue>? updatedValues)
+    {
+        if (updatedValues is null || updatedValues.Count == 0)
+            return;
+
+        string key = CacheKey(database.Name, table.Id);
+        Entry entry = GetOrCreateEntry(database, table, key);
+
+        IReadOnlyList<TableIndexSchema> writableIndexes = GetWritableIndexes(table);
+
+        lock (entry.ColumnStatsLock)
+        {
+            foreach (TableIndexSchema index in writableIndexes)
+            {
+                if (index.Columns is not { Length: > 0 })
+                    continue;
+
+                string col = index.Columns[0];
+                if (!updatedValues.TryGetValue(col, out ColumnValue? newVal))
+                    continue;
+
+                if (newVal.Type is ColumnType.Null)
+                    continue; // null does not produce an index entry; don't expand range
+
+                UpdateMinMax(entry.ColumnStats, col, newVal);
+            }
+        }
+
+        ScheduleFlush(database, table);
+    }
+
+    // Keep old no-op overload signature for callers that don't supply updated values.
     public void TrackUpdate(DatabaseDescriptor database, TableDescriptor table, int delta) { }
 
-    /// <summary>
-    /// Explicitly flushes the in-memory statistics for <paramref name="table"/> to Kahuna,
-    /// awaiting completion. Use before closing a database to guarantee persistence.
-    /// No-op if there is nothing cached for the table.
-    /// </summary>
+    /// <summary>Explicitly flushes statistics for one table to Kahuna, awaiting completion.</summary>
     public async Task FlushAsync(DatabaseDescriptor database, TableDescriptor table)
     {
         try
@@ -150,11 +255,7 @@ public sealed class StatisticsManager
         }
     }
 
-    /// <summary>
-    /// Flushes in-memory statistics for every table in <paramref name="database"/> that has
-    /// been opened and touched by DML in this session. Call this before closing a database
-    /// to guarantee the tail deltas are persisted even when the debounce cycle has not fired.
-    /// </summary>
+    /// <summary>Flushes in-memory statistics for every opened table before closing a database.</summary>
     public async Task FlushAllAsync(DatabaseDescriptor database)
     {
         string prefix = string.Concat(database.Name, ":");
@@ -164,15 +265,10 @@ public sealed class StatisticsManager
             if (!kv.Key.StartsWith(prefix, StringComparison.Ordinal))
                 continue;
 
-            // Extract the tableId portion after the db-name prefix.
             string tableId = kv.Key[prefix.Length..];
 
-            // Resolve the TableDescriptor only if the lazy has already been started
-            // (i.e. the table was opened during this session). We do not want to trigger
-            // a table open solely to flush stats for a table that was never accessed.
             if (!database.TableDescriptors.TryGetValue(tableId, out Nito.AsyncEx.AsyncLazy<TableDescriptor>? lazy))
             {
-                // TableDescriptors is keyed by table name; try to find by matching Id.
                 lazy = database.TableDescriptors.Values
                     .FirstOrDefault(l => l.IsStarted && l.Task.IsCompletedSuccessfully && l.Task.Result.Id == tableId);
             }
@@ -192,11 +288,7 @@ public sealed class StatisticsManager
         }
     }
 
-    /// <summary>
-    /// Loads persisted statistics from Kahuna for the given table ID and populates the
-    /// in-memory cache. Call this when only the table ID is available (e.g. after reopen)
-    /// and you need the estimate to be available for <see cref="GetRowCountEstimate(string,string)"/>.
-    /// </summary>
+    /// <summary>Loads persisted statistics from Kahuna for the given table ID into the cache.</summary>
     public async Task LoadByIdAsync(DatabaseDescriptor database, string tableId)
     {
         string key = CacheKey(database.Name, tableId);
@@ -208,36 +300,36 @@ public sealed class StatisticsManager
             Entry entry = _cache.GetOrAdd(key, _ => new Entry());
 
             if (Interlocked.CompareExchange(ref entry.LoadAttempted, 1, 0) != 0)
-                return; // another task already owns this load
+                return;
 
             TableStatistics? loaded = await LoadFromKahunaByIdAsync(database, tableId).ConfigureAwait(false);
 
             if (loaded is not null)
+            {
                 MergeBaseIntoEntry(entry, loaded.RowCount >= 0 ? loaded.RowCount : 0);
+                MergeIndexCounts(entry, loaded.IndexEntryCounts);
+                MergeColumnStats(entry, loaded.ColumnStats);
+            }
 
             entry.Loaded = true;
         }
         catch (Exception ex)
         {
-            // Release the one-shot guard so a transient failure does not permanently wedge
-            // this table's stats (no load → never Loaded → never flushed) for the session.
             if (_cache.TryGetValue(key, out Entry? failed))
                 Interlocked.Exchange(ref failed.LoadAttempted, 0);
 
-            _logger.LogWarning(ex, "Stats load failed for table id {TableId} — estimates will be unavailable", tableId);
+            _logger.LogWarning(ex, "Stats load failed for table id {TableId}", tableId);
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Internals
+    // Internal tracking helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    private void ApplyDelta(DatabaseDescriptor database, TableDescriptor table, long delta)
+    private void ApplyRowDelta(DatabaseDescriptor database, TableDescriptor table, long delta)
     {
         string key = CacheKey(database.Name, table.Id);
 
-        // New entries start with Loaded=false so the lazy load can later merge the Kahuna
-        // base onto this delta rather than discarding it.
         bool isFirstEntry = false;
         Entry entry = _cache.GetOrAdd(key, _ =>
         {
@@ -247,8 +339,6 @@ public sealed class StatisticsManager
 
         Interlocked.Add(ref entry.RowCount, delta);
 
-        // Clamp only when loaded (RowCount is absolute). Pre-load, RowCount is a pending
-        // delta that may legitimately be negative (e.g. deletes before the base is known).
         if (entry.Loaded)
         {
             long current = Interlocked.Read(ref entry.RowCount);
@@ -256,15 +346,73 @@ public sealed class StatisticsManager
                 Interlocked.CompareExchange(ref entry.RowCount, 0, current);
         }
 
-        // For newly-seen tables, kick off a background load so GetRowCountEstimate can
-        // return an estimate as soon as the load finishes (even if the Kahuna key is absent —
-        // the load will set Loaded=true with the pending delta as the absolute count).
         if (isFirstEntry)
             _ = Task.Run(() => LoadAndCacheAsync(database, table));
     }
 
-    // Atomically merges the loaded base onto the pending delta in one CAS loop.
-    // This is safe against concurrent DML updating RowCount mid-merge.
+    private Entry GetOrCreateEntry(DatabaseDescriptor database, TableDescriptor table, string key) =>
+        _cache.GetOrAdd(key, _ => new Entry());
+
+    private static IReadOnlyList<TableIndexSchema> GetWritableIndexes(TableDescriptor table)
+    {
+        if (table.Indexes is not { Count: > 0 })
+            return [];
+
+        var result = new List<TableIndexSchema>(table.Indexes.Count);
+        foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
+        {
+            if (SchemaElementStateRules.IsWritable(kv.Value))
+                result.Add(kv.Value);
+        }
+        return result;
+    }
+
+    private static void ApplyInsertStats(
+        Entry entry,
+        IReadOnlyList<TableIndexSchema> writableIndexes,
+        Dictionary<string, ColumnValue> row)
+    {
+        lock (entry.ColumnStatsLock)
+        {
+            foreach (TableIndexSchema index in writableIndexes)
+            {
+                if (index.Columns is not { Length: > 0 })
+                    continue;
+
+                string col = index.Columns[0];
+                if (!row.TryGetValue(col, out ColumnValue? val) || val.Type == ColumnType.Null)
+                    continue; // null-valued columns don't produce index entries
+
+                // Entry count: +1 for this row's contribution to this index.
+                entry.IndexEntries.AddOrUpdate(index.Name, addValue: 1, updateValueFactory: (_, c) => c + 1);
+
+                // Min/max: expand the tracked range.
+                UpdateMinMax(entry.ColumnStats, col, val);
+            }
+        }
+    }
+
+    // Must be called under entry.ColumnStatsLock.
+    private static void UpdateMinMax(Dictionary<string, ColumnMinMax> stats, string col, ColumnValue val)
+    {
+        if (val.Type is ColumnType.Null or ColumnType.Bool)
+            return; // unordered types: not useful for range selectivity
+
+        ScalarBound bound = ScalarBound.FromColumnValue(val);
+
+        if (!stats.TryGetValue(col, out ColumnMinMax? mm))
+        {
+            stats[col] = new ColumnMinMax { Min = bound, Max = bound };
+            return;
+        }
+
+        if (mm.Min is null || bound.CompareTo(mm.Min) < 0)
+            mm.Min = bound;
+
+        if (mm.Max is null || bound.CompareTo(mm.Max) > 0)
+            mm.Max = bound;
+    }
+
     private static void MergeBaseIntoEntry(Entry entry, long loadedBase)
     {
         long pending, merged;
@@ -275,19 +423,55 @@ public sealed class StatisticsManager
         } while (Interlocked.CompareExchange(ref entry.RowCount, merged, pending) != pending);
     }
 
-    /// <summary>
-    /// Schedules a background flush honoring <see cref="CamusDBConfig.StatsFlushIntervalMs"/>:
-    /// at most one flush cycle runs per table at a time, and when an interval is configured the
-    /// cycle waits out the remaining time since the last flush before persisting — so a write
-    /// burst collapses into roughly one disk write per interval. Changes that arrive while a
-    /// cycle is in flight are captured by it (the flush reads the latest count) or by the next
-    /// cycle the following DML schedules.
-    /// </summary>
+    private static void MergeIndexCounts(Entry entry, Dictionary<string, long>? persisted)
+    {
+        if (persisted is null) return;
+        foreach (KeyValuePair<string, long> kv in persisted)
+        {
+            entry.IndexEntries.AddOrUpdate(
+                kv.Key,
+                addValue: kv.Value,
+                // in-memory delta (accumulated before load) is added to the persisted base
+                updateValueFactory: (_, delta) => Math.Max(0, kv.Value + delta));
+        }
+    }
+
+    private static void MergeColumnStats(Entry entry, Dictionary<string, ColumnMinMax>? persisted)
+    {
+        if (persisted is null) return;
+
+        lock (entry.ColumnStatsLock)
+        {
+            foreach (KeyValuePair<string, ColumnMinMax> kv in persisted)
+            {
+                if (!entry.ColumnStats.TryGetValue(kv.Key, out ColumnMinMax? existing))
+                {
+                    // No in-memory obs yet — take the persisted value directly.
+                    entry.ColumnStats[kv.Key] = new ColumnMinMax
+                    {
+                        Min = kv.Value.Min,
+                        Max = kv.Value.Max,
+                    };
+                    continue;
+                }
+
+                // Merge: take the wider range of persisted vs. in-memory.
+                if (kv.Value.Min is not null && (existing.Min is null || kv.Value.Min.CompareTo(existing.Min) < 0))
+                    existing.Min = kv.Value.Min;
+
+                if (kv.Value.Max is not null && (existing.Max is null || kv.Value.Max.CompareTo(existing.Max) > 0))
+                    existing.Max = kv.Value.Max;
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Flush scheduling
+    // ─────────────────────────────────────────────────────────────────────────
+
     private void ScheduleFlush(DatabaseDescriptor database, TableDescriptor table)
     {
         int interval = CamusDBConfig.StatsFlushIntervalMs;
-
-        // -1 → never auto-flush; persistence happens only via an explicit FlushAsync (e.g. on close).
         if (interval < 0)
             return;
 
@@ -295,7 +479,6 @@ public sealed class StatisticsManager
         if (!_cache.TryGetValue(key, out Entry? entry))
             return;
 
-        // Debounce: only one in-flight flush cycle per table.
         if (Interlocked.CompareExchange(ref entry.FlushPending, 1, 0) != 0)
             return;
 
@@ -316,7 +499,7 @@ public sealed class StatisticsManager
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Stats flush failed for table {Table} — statistics may be stale", table.Name);
+                _logger.LogWarning(ex, "Stats flush failed for table {Table}", table.Name);
             }
             finally
             {
@@ -331,12 +514,39 @@ public sealed class StatisticsManager
         if (!_cache.TryGetValue(cacheKey, out Entry? entry))
             return;
 
-        // Do not flush while the base is unloaded. RowCount is a pending delta at this point,
-        // not an absolute count — writing it would corrupt the persisted base in Kahuna.
         if (!entry.Loaded)
             return;
 
-        TableStatistics snapshot = new() { RowCount = Interlocked.Read(ref entry.RowCount) };
+        // Snapshot all stats under the column-stats lock to avoid partial reads.
+        Dictionary<string, long>? indexSnapshot = null;
+        Dictionary<string, ColumnMinMax>? colSnapshot = null;
+
+        lock (entry.ColumnStatsLock)
+        {
+            if (entry.IndexEntries.Count > 0)
+                indexSnapshot = new Dictionary<string, long>(entry.IndexEntries, StringComparer.Ordinal);
+
+            if (entry.ColumnStats.Count > 0)
+            {
+                colSnapshot = new Dictionary<string, ColumnMinMax>(entry.ColumnStats.Count, StringComparer.Ordinal);
+                foreach (KeyValuePair<string, ColumnMinMax> kv in entry.ColumnStats)
+                {
+                    colSnapshot[kv.Key] = new ColumnMinMax
+                    {
+                        Min = kv.Value.Min,
+                        Max = kv.Value.Max,
+                    };
+                }
+            }
+        }
+
+        TableStatistics snapshot = new()
+        {
+            RowCount         = Interlocked.Read(ref entry.RowCount),
+            IndexEntryCounts = indexSnapshot,
+            ColumnStats      = colSnapshot,
+        };
+
         byte[] bytes = MetaJsonSerializer.Serialize(snapshot, MetaJsonContext.Default.TableStatistics);
 
         string kahunaKey = KahunaKey(database.Name, table.Id);
@@ -391,23 +601,25 @@ public sealed class StatisticsManager
             Entry entry = _cache.GetOrAdd(key, _ => new Entry());
 
             if (Interlocked.CompareExchange(ref entry.LoadAttempted, 1, 0) != 0)
-                return; // another task already owns this load
+                return;
 
             TableStatistics? loaded = await LoadFromKahunaAsync(database, table).ConfigureAwait(false);
 
             if (loaded is not null)
+            {
                 MergeBaseIntoEntry(entry, loaded.RowCount >= 0 ? loaded.RowCount : 0);
+                MergeIndexCounts(entry, loaded.IndexEntryCounts);
+                MergeColumnStats(entry, loaded.ColumnStats);
+            }
 
             entry.Loaded = true;
         }
         catch (Exception ex)
         {
-            // Release the one-shot guard so a transient failure does not permanently wedge
-            // this table's stats (no load → never Loaded → never flushed) for the session.
             if (_cache.TryGetValue(key, out Entry? failed))
                 Interlocked.Exchange(ref failed.LoadAttempted, 0);
 
-            _logger.LogWarning(ex, "Stats load failed for table {Table} — estimates will be unavailable", table.Name);
+            _logger.LogWarning(ex, "Stats load failed for table {Table}", table.Name);
         }
     }
 

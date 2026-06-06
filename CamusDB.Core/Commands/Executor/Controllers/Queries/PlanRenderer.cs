@@ -32,9 +32,29 @@ public static class PlanRenderer
     /// Append R4 distributed-plan metadata: <c>order=[...]</c> when <see cref="PhysicalPlanNode.OutputOrdering"/>
     /// is set, and <c>decomposable=true/false</c> from <see cref="PhysicalPlanNode.CanDecomposeToLocalPlusMerge"/>.
     /// </param>
-    public static string Render(QueryPlan plan, bool includeRequiredColumns = false, bool includeDistributedProperties = false)
+    /// <param name="includeShapeMetadata">
+    /// Prepend R10 plan-cache metadata: <c>shape=&lt;id&gt;</c> and <c>schema-deps=[table@v, ...]</c>
+    /// when <see cref="QueryPlan.QueryShapeId"/> is set.
+    /// </param>
+    public static string Render(
+        QueryPlan plan,
+        bool includeRequiredColumns = false,
+        bool includeDistributedProperties = false,
+        bool includeShapeMetadata = false)
     {
         var sb = new StringBuilder();
+
+        if (includeShapeMetadata && plan.QueryShapeId is not null)
+        {
+            sb.Append("-- shape=").Append(plan.QueryShapeId);
+            if (plan.SchemaDeps is { Count: > 0 })
+            {
+                string deps = string.Join(", ", plan.SchemaDeps.Select(d => $"{d.TableName}@{d.SchemaVersion}"));
+                sb.Append(" schema-deps=[").Append(deps).Append(']');
+            }
+            sb.Append('\n');
+        }
+
         RenderNode(plan.Root, plan, sb, 0, includeRequiredColumns, includeDistributedProperties);
         return sb.ToString().TrimEnd('\n');
     }
@@ -79,6 +99,7 @@ public static class PlanRenderer
             NestedLoopJoinNode n => RenderNestedLoopJoin(n),
             IndexNestedLoopJoinNode n => RenderIndexNestedLoopJoin(n),
             DerivedTableScanNode n => RenderDerivedTableScan(n),
+            SemiJoinNode n => RenderSemiJoin(n),
             _ => node.GetType().Name,
         };
 
@@ -225,6 +246,21 @@ public static class PlanRenderer
 
     private static string RenderDerivedTableScan(DerivedTableScanNode node) =>
         $"derived-table-scan(alias={node.BoundSource.Alias})";
+
+    private static string RenderSemiJoin(SemiJoinNode node)
+    {
+        string kind = node.Mode switch
+        {
+            SemiJoinMode.Semi => "semi-join",
+            SemiJoinMode.Anti => "anti-join",
+            SemiJoinMode.NullAwareAnti => "null-aware-anti-join",
+            _ => "semi-join",
+        };
+        string detail = $"outer={node.OuterColumn}, inner={node.InnerTable.Name}.{node.InnerColumn}";
+        if (node.InnerIndex is not null)
+            detail += $", index={node.InnerIndex.Name}";
+        return $"{kind}({detail})";
+    }
 
     // ── expression renderer ────────────────────────────────────────────────
 

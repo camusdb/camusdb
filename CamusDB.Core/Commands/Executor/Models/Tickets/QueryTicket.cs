@@ -11,6 +11,7 @@ using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Transactions;
+using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -53,6 +54,16 @@ public sealed class QueryTicket
     /// <summary>Prepared correlated EXISTS subqueries keyed by rewritten AST nodes (QP5.4).</summary>
     internal ExistsSubqueryRegistry? ExistsSubqueries { get; }
 
+    /// <summary>
+    /// The logical SELECT query this ticket was derived from (R10). Retained so that
+    /// <see cref="Controllers.Queries.QueryPlanner"/> can compute the query-shape ID without
+    /// re-parsing. Null for tickets created via the legacy (non-SQL) execution path.
+    /// </summary>
+    internal SelectQuery? SelectQuery { get; }
+
+    /// <summary>Semi/anti-join specs extracted by R11 SemiJoinAnalyzer. Null when there are none.</summary>
+    internal IReadOnlyList<SemiJoinSpec>? SemiJoinSpecs { get; }
+
     public QueryTicket(
         KvTransaction txnState,
         string databaseName,
@@ -70,7 +81,9 @@ public sealed class QueryTicket
         QueryRowNameResolver? rowNameResolver = null,
         PredicateAnalysis? analyzedWhere = null,
         ExistsSubqueryRegistry? existsSubqueries = null,
-        bool isDistinct = false)
+        bool isDistinct = false,
+        SelectQuery? selectQuery = null,
+        IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -89,5 +102,7 @@ public sealed class QueryTicket
         RowNameResolver = rowNameResolver;
         AnalyzedWhere = analyzedWhere;
         ExistsSubqueries = existsSubqueries;
+        SelectQuery = selectQuery;
+        SemiJoinSpecs = semiJoinSpecs;
     }
 }

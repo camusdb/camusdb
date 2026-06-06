@@ -11,10 +11,11 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 /// <summary>
 /// Cost estimate for a single physical plan node (R9).
 ///
-/// All fields count logical I/O units; a KV point lookup and a KV range-scan entry are both
-/// one unit, but they have different weights because random point lookups are heavier than
-/// sequential range reads. Row fetches from the primary store after an index scan are weighted
-/// like point lookups. In-memory rows (sort, group, distinct) are cheap but non-zero.
+/// All fields count logical I/O units. KV point lookups, range-scan entries, and primary-store
+/// row fetches each cost 1.0 unit — they are treated as equally expensive at this stage because
+/// the underlying KV store's read amplification is not yet profiled (R9b will differentiate
+/// random vs. sequential I/O once real access-pattern data is available). In-memory rows
+/// (sort, group, distinct) are cheap at 0.1 unit each.
 ///
 /// <c>NetworkFactor</c> is always 0 in the current single-partition deployment; reserved for
 /// distributed sharding.

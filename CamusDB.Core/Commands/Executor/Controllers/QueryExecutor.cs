@@ -40,6 +40,8 @@ internal sealed class QueryExecutor
 
     private readonly QueryDistincter queryDistincter = new();
 
+    private readonly SemiJoinExecutor semiJoinExecutor = new();
+
     private readonly QueryJoinExecutor queryJoinExecutor;
 
     private readonly QueryScanner queryScanner;
@@ -144,6 +146,14 @@ internal sealed class QueryExecutor
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
                     plan.DataCursor = queryLimiter.LimitResultset(plan.Ticket, plan.DataCursor);
+                    break;
+
+                case QueryPlanStepType.SemiJoinProbe:
+                    if (plan.DataCursor is null)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
+
+                    SemiJoinNode semiJoinNode = (SemiJoinNode)plan.StepNodes[i];
+                    plan.DataCursor = semiJoinExecutor.ExecuteAsync(plan.DataCursor, semiJoinNode, plan.Ticket);
                     break;
 
                 default:

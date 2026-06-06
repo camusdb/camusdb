@@ -40,6 +40,8 @@ internal sealed class ExplainExecutor
 
     private readonly SubqueryRewriter subqueryRewriter;
 
+    private readonly SemiJoinAnalyzer? semiJoinAnalyzer;
+
     private readonly QueryBinder queryBinder;
 
     private readonly ExistsSubqueryPreparer existsSubqueryPreparer;
@@ -55,9 +57,11 @@ internal sealed class ExplainExecutor
         QueryBinder queryBinder,
         ExistsSubqueryPreparer existsSubqueryPreparer,
         QueryExecutor queryExecutor,
-        StatisticsManager? stats = null)
+        StatisticsManager? stats = null,
+        SemiJoinAnalyzer? semiJoinAnalyzer = null)
     {
         this.subqueryRewriter = subqueryRewriter;
+        this.semiJoinAnalyzer = semiJoinAnalyzer;
         this.queryBinder = queryBinder;
         this.existsSubqueryPreparer = existsSubqueryPreparer;
         this.queryExecutor = queryExecutor;
@@ -103,6 +107,23 @@ internal sealed class ExplainExecutor
                 { "estimated_cost", estCost is not null
                     ? new ColumnValue(ColumnType.Float64, estCost.Value)
                     : new ColumnValue(ColumnType.Null, 0.0) },
+            });
+        }
+
+        // R10: emit one trailing plan-info row with shape and schema-dep metadata when available.
+        if (plan.QueryShapeId is not null)
+        {
+            string schemaDepsStr = plan.SchemaDeps is { Count: > 0 }
+                ? "[" + string.Join(", ", plan.SchemaDeps.Select(d => $"{d.TableName}@{d.SchemaVersion}")) + "]"
+                : "[]";
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>
+            {
+                { "stage",          new ColumnValue(ColumnType.String, stage) },
+                { "node",           new ColumnValue(ColumnType.String, "plan-info") },
+                { "detail",         new ColumnValue(ColumnType.String, $"shape={plan.QueryShapeId}, schema-deps={schemaDepsStr}") },
+                { "estimated_rows", new ColumnValue(ColumnType.Null, 0L) },
+                { "estimated_cost", new ColumnValue(ColumnType.Null, 0.0) },
             });
         }
     }
@@ -190,6 +211,28 @@ internal sealed class ExplainExecutor
                 { "kv_scan_entries",   stats is not null ? new ColumnValue(ColumnType.Integer64, stats.KvScanEntries) : new ColumnValue(ColumnType.Null, 0L) },
             });
         }
+
+        // R10: emit one trailing plan-info row with shape and schema-dep metadata when available.
+        if (plan.QueryShapeId is not null)
+        {
+            string schemaDepsStr = plan.SchemaDeps is { Count: > 0 }
+                ? "[" + string.Join(", ", plan.SchemaDeps.Select(d => $"{d.TableName}@{d.SchemaVersion}")) + "]"
+                : "[]";
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>
+            {
+                { "stage",           new ColumnValue(ColumnType.String, "analyze") },
+                { "node",            new ColumnValue(ColumnType.String, "plan-info") },
+                { "detail",          new ColumnValue(ColumnType.String, $"shape={plan.QueryShapeId}, schema-deps={schemaDepsStr}") },
+                { "estimated_rows",  new ColumnValue(ColumnType.Null, 0L) },
+                { "estimated_cost",  new ColumnValue(ColumnType.Null, 0.0) },
+                { "actual_rows",     new ColumnValue(ColumnType.Null, 0L) },
+                { "rows_read",       new ColumnValue(ColumnType.Null, 0L) },
+                { "actual_time_ms",  new ColumnValue(ColumnType.Null, 0.0) },
+                { "kv_lookups",      new ColumnValue(ColumnType.Null, 0L) },
+                { "kv_scan_entries", new ColumnValue(ColumnType.Null, 0L) },
+            });
+        }
     }
 
     private async Task<QueryPlan> BuildPlanAsync(
@@ -198,6 +241,16 @@ internal sealed class ExplainExecutor
         ExecuteSQLTicket ticket)
     {
         SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(selectAst);
+
+        // R11: extract semi/anti-join specs before SubqueryRewriter materialises IN/NOT IN.
+        List<SemiJoinSpec> semiJoinSpecs = [];
+        if (semiJoinAnalyzer is not null)
+        {
+            (selectQuery, semiJoinSpecs) = await semiJoinAnalyzer
+                .AnalyzeAsync(database, selectQuery, ticket)
+                .ConfigureAwait(false);
+        }
+
         selectQuery = await subqueryRewriter
             .RewriteSelectQueryAsync(database, selectQuery, ticket)
             .ConfigureAwait(false);
@@ -221,7 +274,8 @@ internal sealed class ExplainExecutor
             boundQuery.RowNames,
             boundQuery.DerivedSources);
 
-        QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(boundQuery, ticket, existsRegistry);
+        IReadOnlyList<SemiJoinSpec>? specs = semiJoinSpecs.Count > 0 ? semiJoinSpecs : null;
+        QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(boundQuery, ticket, existsRegistry, specs);
 
         if (boundQuery.IsMultiSource)
             return joinQueryPlanner.GetPlan(database, boundQuery, queryTicket);

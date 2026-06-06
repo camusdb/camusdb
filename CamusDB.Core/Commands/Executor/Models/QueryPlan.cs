@@ -66,6 +66,22 @@ public sealed class QueryPlan
     internal Dictionary<string, int> TableSchemaVersionByAlias { get; } = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// Stable query-shape identifier (R10). Derived from the logical query structure with all
+    /// literal and parameter values abstracted away. Two queries differing only in constant
+    /// values share the same shape; structurally different queries differ.
+    /// Null until set by <see cref="Controllers.Queries.QueryPlanner"/> /
+    /// <see cref="Controllers.Queries.JoinQueryPlanner"/>.
+    /// </summary>
+    public string? QueryShapeId { get; internal set; }
+
+    /// <summary>
+    /// Ordered schema-version dependencies for this plan (R10). Each entry names a table and
+    /// the schema version the plan was built against. Used to detect stale cached plans.
+    /// Null until set by the planner.
+    /// </summary>
+    public IReadOnlyList<(string TableName, int SchemaVersion)>? SchemaDeps { get; internal set; }
+
+    /// <summary>
     /// Optional scan-level row cap for LIMIT pushdown (QP6.3).
     /// When set, scan operators may stop after emitting this many rows.
     /// </summary>

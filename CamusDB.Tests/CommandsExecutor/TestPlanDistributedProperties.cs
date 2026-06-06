@@ -358,12 +358,15 @@ public class TestPlanDistributedProperties
     // ── Placeholder properties (EstimatedCardinality, PartitionLocality) ──────
 
     [Test]
-    public void EstimatedCardinality_IsNullByDefault()
+    public void EstimatedCardinality_IsPopulatedByR9CostModel()
     {
+        // R9: CostEstimator.AnnotatePlan now sets EstimatedCardinality on every node.
+        // When no live stats are available the planner falls back to a fixed default row count,
+        // so all nodes must have a non-null, positive estimate.
         QueryPlan plan = Plan("SELECT * FROM robots");
         foreach (PhysicalPlanNode node in AllNodes(plan))
-            Assert.IsNull(node.EstimatedCardinality,
-                $"{node.GetType().Name}.EstimatedCardinality must be null until R9 cost model");
+            Assert.IsNotNull(node.EstimatedCardinality,
+                $"{node.GetType().Name}.EstimatedCardinality must be non-null after R9 cost model");
     }
 
     [Test]

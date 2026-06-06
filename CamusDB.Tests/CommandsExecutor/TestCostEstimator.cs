@@ -195,10 +195,11 @@ public sealed class TestCostEstimator : BaseTest
     }
 
     [Test]
-    public void R9_CostModelPrefersFscanOverHalfOpenRange()
+    public void R9_CostModelKeepsIndexForHalfOpenRange()
     {
-        // Half-open range (one bound, 40 % default selectivity) ties the breakeven.
-        // At the breakeven the cost model picks full scan (>= comparison).
+        // Half-open range (one bound, 40 % default selectivity via OneBoundSelectivity).
+        // R9b raised BreakevenFraction from 0.40 → 0.50, so 40 % of 10,000 = 4,000 entries
+        // is below the breakeven of ceil(10,000 × 0.50) = 5,000 → index scan wins.
         var node = new IndexRangeScanNode(
             index: new TableIndexSchema("year_idx", ["year"], IndexType.Multi),
             fromBound: new CompositeColumnValue([new ColumnValue(ColumnType.Integer64, 2000L)]),
@@ -206,9 +207,9 @@ public sealed class TestCostEstimator : BaseTest
             toBound: null,
             toInclusive: true);
 
-        Assert.IsTrue(
+        Assert.IsFalse(
             CostEstimator.ShouldPreferFullScan(node, tableRowCount: 10_000),
-            "Half-open range (40 % selectivity) must lose to full table scan at the breakeven");
+            "Half-open range (40 % selectivity) is below the 50 % breakeven — index scan must win");
     }
 
     [Test]
@@ -289,11 +290,12 @@ public sealed class TestCostEstimator : BaseTest
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
-    public async Task R9_LowSelectivityHalfOpenRangeFallsBackToTableScan()
+    public async Task R9_HalfOpenRangeKeepsIndexBelowBreakevenFraction()
     {
-        // A half-open range (year > X, no upper bound) has 40 % default selectivity.
-        // With large stats (10,000 rows), the estimated index cost ties the full table
-        // scan cost → cost model switches to a primary table scan.
+        // A half-open range (year > X, no upper bound) has 40 % default selectivity
+        // when no column min/max stats are available (OneBoundSelectivity heuristic).
+        // R9b raised BreakevenFraction to 0.50, so 40 % of 10,000 = 4,000 entries is
+        // below the 5,000 breakeven → index scan is retained (full table scan is NOT chosen).
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableAsync();
 
         KvTransaction txn = await database.Transactions.BeginAsync();
@@ -308,21 +310,21 @@ public sealed class TestCostEstimator : BaseTest
 
         TableDescriptor table = await GetTableDescriptorAsync(executor, dbname, "robots");
 
-        // Seed a large row count so the cost model has stats to act on.
+        // Seed a large row count (no column min/max → heuristic applies).
         await SeedStatsAsync(executor, database, table, 10_000);
 
         List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
             "EXPLAIN SELECT * FROM robots WHERE year > 2000");
 
-        bool hasTableScan = rows.Any(r =>
-            r.Row.TryGetValue("node", out ColumnValue n) && n.StrValue == "table-scan");
-
         bool hasIndexRangeScan = rows.Any(r =>
             r.Row.TryGetValue("node", out ColumnValue n) && n.StrValue == "index-range-scan");
 
-        Assert.IsTrue(hasTableScan,
-            "Half-open range (40 % selectivity) with large table stats must fall back to table-scan");
-        Assert.IsFalse(hasIndexRangeScan,
-            "index-range-scan must not appear when cost model prefers the full table scan");
+        bool hasTableScan = rows.Any(r =>
+            r.Row.TryGetValue("node", out ColumnValue n) && n.StrValue == "table-scan");
+
+        Assert.IsTrue(hasIndexRangeScan,
+            "Half-open range (40 % < 50 % breakeven) must keep the index-range-scan");
+        Assert.IsFalse(hasTableScan,
+            "table-scan must not appear when the cost model keeps the index");
     }
 }

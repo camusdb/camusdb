@@ -82,6 +82,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly CommandValidator validator;
 
+    private readonly SemiJoinAnalyzer semiJoinAnalyzer;
+
     private readonly ISchemaDdlForwarder? schemaDdlForwarder;
 
     /// <summary>
@@ -129,7 +131,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             new ScalarSubqueryExecutor(subqueryQueryExecutor),
             new InSubqueryExecutor(subqueryQueryExecutor));
         existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder);
-        explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor, statisticsManager);
+        semiJoinAnalyzer = new SemiJoinAnalyzer(tableOpener);
+        explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor, statisticsManager, semiJoinAnalyzer);
     }
 
     #region database
@@ -1027,7 +1030,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         PinSchemaVersion(database, table, ticket.TxnState);
 
         int inserted = await rowInserter.Insert(database, table, ticket).ConfigureAwait(false);
-        statisticsManager.TrackInsert(database, table, inserted);
+        statisticsManager.TrackInsert(database, table, inserted, ticket.Values);
         return new(database, table, inserted);
     }
 
@@ -1046,7 +1049,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         PinSchemaVersion(database, table, ticket.TxnState);
 
         int updated = await rowUpdater.Update(queryExecutor, database, table, ticket).ConfigureAwait(false);
-        statisticsManager.TrackUpdate(database, table, updated);
+        statisticsManager.TrackUpdate(database, table, updated, ticket.PlainValues);
         return new(database, table, updated);
     }
 
@@ -1172,6 +1175,13 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.Select:
                 {
                     SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
+
+                    // R11: extract eligible IN / NOT IN subqueries as semi/anti-join specs
+                    // before SubqueryRewriter materialises them.
+                    (selectQuery, List<SemiJoinSpec> semiJoinSpecs) = await semiJoinAnalyzer
+                        .AnalyzeAsync(database, selectQuery, ticket)
+                        .ConfigureAwait(false);
+
                     selectQuery = await subqueryRewriter
                         .RewriteSelectQueryAsync(database, selectQuery, ticket)
                         .ConfigureAwait(false);
@@ -1189,7 +1199,8 @@ public sealed class CommandExecutor : IAsyncDisposable
                         boundQuery.Sources,
                         boundQuery.RowNames,
                         boundQuery.DerivedSources);
-                    QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(boundQuery, ticket, existsRegistry);
+                    IReadOnlyList<SemiJoinSpec>? specs = semiJoinSpecs.Count > 0 ? semiJoinSpecs : null;
+                    QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(boundQuery, ticket, existsRegistry, specs);
                     PinSchemaVersions(database, boundQuery.Sources, ticket.TxnState);
 
                     if (boundQuery.IsMultiSource)

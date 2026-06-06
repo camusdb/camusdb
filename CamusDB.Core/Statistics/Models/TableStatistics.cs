@@ -15,15 +15,8 @@ namespace CamusDB.Core.Statistics.Models;
 /// and reloaded on database open. All values are best-effort estimates — consumers must
 /// treat them as hints and never rely on them for correctness.
 ///
-/// R8 implementation scope: only <see cref="RowCount"/> is tracked and persisted.
-/// <see cref="IndexEntryCounts"/> is declared for schema compatibility but is never populated
-/// by the current <see cref="CamusDB.Core.Statistics.StatisticsManager"/>; all entries will
-/// be <c>null</c>.  Per-column <c>Min</c>/<c>Max</c> histograms were also deferred.
-///
-/// R9 cost-model note: the planner will only have row-count estimates available from R8.
-/// Index selectivity and column-value range estimates require a future statistics pass that
-/// populates <see cref="IndexEntryCounts"/> (e.g. by hooking <c>IndexWriter</c>) and adds
-/// column min/max fields.
+/// R8: <see cref="RowCount"/> tracked and persisted.
+/// R9b: <see cref="IndexEntryCounts"/> and <see cref="ColumnStats"/> fully populated.
 /// </summary>
 public sealed class TableStatistics
 {
@@ -36,9 +29,18 @@ public sealed class TableStatistics
 
     /// <summary>
     /// Approximate entry counts per index (key = index name).
-    /// Reserved for a future statistics pass — always <c>null</c> in the R8 implementation.
-    /// R9 cost-model callers must treat a missing entry as unknown selectivity.
+    /// Incremented on inserts, decremented on deletes (approximate — null-column entries
+    /// may differ slightly from reality). Null when no DML has been tracked yet.
     /// </summary>
     [JsonPropertyName("indexCounts")]
     public Dictionary<string, long>? IndexEntryCounts { get; set; }
+
+    /// <summary>
+    /// Per-column running min/max observed across inserts and updates (R9b).
+    /// Key = column name; value = <see cref="ColumnMinMax"/> with typed <see cref="ScalarBound"/>
+    /// fields. Only indexed columns are tracked; unindexed columns are absent from this dict.
+    /// May drift stale on deletes (drift is acceptable — conservative estimates are safe).
+    /// </summary>
+    [JsonPropertyName("colStats")]
+    public Dictionary<string, ColumnMinMax>? ColumnStats { get; set; }
 }

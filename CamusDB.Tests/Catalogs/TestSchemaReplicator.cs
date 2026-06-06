@@ -342,8 +342,10 @@ public sealed class TestSchemaReplicator
     }
 
     [Test]
-    public async Task RestoreAsync_OutOfOrderEntryIsSkippedWithoutFailingOpen()
+    public async Task RestoreAsync_OutOfOrderEntryThrowsGapException()
     {
+        // F1b policy: gaps in the committed log are data-corruption or bugs, not silent skips.
+        // RestoreAsync must throw CamusDBException so the caller surfaces the inconsistency.
         await using EmbeddedKahuna kahuna = new();
         await kahuna.StartAsync(CancellationToken.None);
 
@@ -352,7 +354,9 @@ public sealed class TestSchemaReplicator
         SchemaReplicator replicator = CreateReplicator();
         byte[] bytes = Serializator.Serialize(CreateTableEntry(db, 2, 3));
 
-        Assert.True(await replicator.RestoreAsync(database, bytes));
+        Assert.ThrowsAsync<CamusDBException>(
+            async () => await replicator.RestoreAsync(database, bytes),
+            "A gap in the committed schema log must throw, not silently skip (F1b fail-loud policy)");
 
         Assert.AreEqual(0, database.Schema.SchemaVersion);
         Assert.AreEqual(0, database.Schema.Tables.Count);

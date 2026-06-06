@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -29,6 +30,18 @@ internal static class RequiredColumnAnalyzer
         CollectFromOrderBy(ticket.OrderBy, required);
         CollectFromExpressionList(ticket.GroupBy, ticket.RowNameResolver, required, ticket);
         CollectFromHaving(ticket, required);
+
+        // Semi-join outer columns are stripped from WHERE by SemiJoinAnalyzer before binding,
+        // so they won't appear in ticket.Where. Add them explicitly so the scan fetches them.
+        if (ticket.SemiJoinSpecs is { Count: > 0 })
+        {
+            foreach (SemiJoinSpec spec in ticket.SemiJoinSpecs)
+            {
+                string col = spec.OuterColumn;
+                int dot = col.IndexOf('.');
+                required.Add(dot >= 0 ? col[(dot + 1)..] : col);
+            }
+        }
 
         return required;
     }
