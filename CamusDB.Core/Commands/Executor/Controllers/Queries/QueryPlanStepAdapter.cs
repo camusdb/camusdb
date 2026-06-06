@@ -20,26 +20,29 @@ internal static class QueryPlanStepAdapter
     public static void PopulateLinearSteps(QueryPlan plan)
     {
         plan.Steps.Clear();
+        plan.StepNodes.Clear();
 
         if (plan.Root is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Query plan root is null");
 
-        Flatten(plan.Root, plan.Steps);
+        Flatten(plan.Root, plan.Steps, plan.StepNodes);
     }
 
-    private static void Flatten(PhysicalPlanNode node, List<QueryPlanStep> steps)
+    private static void Flatten(PhysicalPlanNode node, List<QueryPlanStep> steps, List<PhysicalPlanNode> stepNodes)
     {
         if (node.Input is not null)
-            Flatten(node.Input, steps);
+            Flatten(node.Input, steps, stepNodes);
 
         switch (node)
         {
             case TableScanNode tableScan:
                 steps.Add(ToStep(tableScan));
+                stepNodes.Add(node);
                 return;
 
             case IndexLookupNode indexLookup:
                 steps.Add(new QueryPlanStep(QueryPlanStepType.QueryFromIndex, indexLookup.Index, indexLookup.LookupKey));
+                stepNodes.Add(node);
                 return;
 
             case IndexRangeScanNode rangeScan:
@@ -50,6 +53,7 @@ internal static class QueryPlanStepAdapter
                     rangeScan.FromInclusive,
                     rangeScan.ToBound,
                     rangeScan.ToInclusive));
+                stepNodes.Add(node);
                 return;
 
             case FilterNode:
@@ -67,26 +71,32 @@ internal static class QueryPlanStepAdapter
 
             case SortNode:
                 steps.Add(new QueryPlanStep(QueryPlanStepType.SortBy));
+                stepNodes.Add(node);
                 return;
 
             case LimitNode:
                 steps.Add(new QueryPlanStep(QueryPlanStepType.Limit));
+                stepNodes.Add(node);
                 return;
 
             case AggregateNode:
                 steps.Add(new QueryPlanStep(QueryPlanStepType.Aggregate));
+                stepNodes.Add(node);
                 return;
 
             case HavingFilterNode:
                 steps.Add(new QueryPlanStep(QueryPlanStepType.HavingFilter));
+                stepNodes.Add(node);
                 return;
 
             case ProjectNode:
                 steps.Add(new QueryPlanStep(QueryPlanStepType.ReduceToProjections));
+                stepNodes.Add(node);
                 return;
 
             case DistinctNode:
                 steps.Add(new QueryPlanStep(QueryPlanStepType.Distinct));
+                stepNodes.Add(node);
                 return;
 
             default:

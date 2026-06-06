@@ -17,6 +17,8 @@ public sealed class IndexLookupNode : PhysicalPlanNode
 
     public CompositeColumnValue LookupKey { get; }
 
+    public override bool CanDecomposeToLocalPlusMerge => true;
+
     public IndexLookupNode(TableIndexSchema index, CompositeColumnValue lookupKey)
     {
         Index = index;

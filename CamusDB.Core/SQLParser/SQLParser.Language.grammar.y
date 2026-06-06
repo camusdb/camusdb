@@ -26,7 +26,7 @@
 %token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL TCAST TINTEGER TDOUBLE
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
-%token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN
+%token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
 
 %%
 
@@ -34,6 +34,7 @@ list    : stat { $$.n = $1.n; }
         ;
 
 stat    : select_stmt { $$.n = $1.n; }
+        | explain_stmt { $$.n = $1.n; }
         | update_stmt { $$.n = $1.n; }
         | delete_stmt { $$.n = $1.n; }
         | insert_stmt { $$.n = $1.n; }
@@ -44,7 +45,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | create_index_stmt { $$.n = $1.n; }
         | begin_stmt { $$.n = $1.n; }
         | commit_stmt { $$.n = $1.n; }
-        | rollback_stmt { $$.n = $1.n; } 
+        | rollback_stmt { $$.n = $1.n; }
         ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
@@ -54,6 +55,29 @@ opt_distinct : TDISTINCT { $$.s = "1"; }
 select_stmt : TSELECT opt_distinct select_field_list TFROM select_table opt_where opt_group opt_having opt_order opt_limit opt_offset
             { $$.n = new(NodeType.Select, $3.n, $5.n, $6.n, $9.n, $10.n, $11.n, $7.n, $2.s, $8.n); }
             ;
+
+/* EXPLAIN [( LOGICAL | PHYSICAL | ANALYZE )] select_stmt
+   LOGICAL, PHYSICAL and ANALYZE are plain identifiers — no new reserved words needed.
+   The grammar action dispatches on the identifier text and rejects anything else
+   with an InvalidInput error so typos (e.g. ANALYZ, VERBOOSE) don't silently
+   degrade to a plain EXPLAIN. */
+explain_stmt : TEXPLAIN select_stmt
+             { $$.n = new(NodeType.Explain, $2.n, null, null, null, null, null, null, null); }
+             | TEXPLAIN LPAREN TIDENTIFIER RPAREN select_stmt
+             {
+               string opt = $3.s.ToUpperInvariant();
+               if (opt == "LOGICAL")
+                   $$.n = new(NodeType.ExplainLogical, $5.n, null, null, null, null, null, null, null);
+               else if (opt == "PHYSICAL")
+                   $$.n = new(NodeType.ExplainPhysical, $5.n, null, null, null, null, null, null, null);
+               else if (opt == "ANALYZE")
+                   $$.n = new(NodeType.ExplainAnalyze, $5.n, null, null, null, null, null, null, null);
+               else
+                   throw new CamusDB.Core.CamusDBException(
+                       CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                       "Unknown EXPLAIN option '" + $3.s + "'. Valid options are: LOGICAL, PHYSICAL, ANALYZE.");
+             }
+             ;
 
 opt_having : THAVING condition { $$.n = new(NodeType.Having, $2.n, null, null, null, null, null, null, null); }
            | { $$.n = null; }

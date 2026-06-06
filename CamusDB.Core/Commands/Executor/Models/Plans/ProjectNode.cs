@@ -11,6 +11,8 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 /// <summary>Evaluates SELECT projections over its input rows.</summary>
 public sealed class ProjectNode : PhysicalPlanNode
 {
+    public override bool CanDecomposeToLocalPlusMerge => true;
+
     public ProjectNode(PhysicalPlanNode input)
     {
         Input = input;

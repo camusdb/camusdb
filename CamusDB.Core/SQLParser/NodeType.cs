@@ -104,5 +104,9 @@ public enum NodeType
     ShowTables,
     ShowCreateTable,
     ShowDatabase,
-    ShowIndexes
+    ShowIndexes,
+    Explain,
+    ExplainLogical,
+    ExplainPhysical,
+    ExplainAnalyze,
 }

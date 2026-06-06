@@ -71,6 +71,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly ExistsSubqueryPreparer existsSubqueryPreparer;
 
+    private readonly ExplainExecutor explainExecutor;
+
     private readonly SelectQueryCreator selectQueryCreator = new();
 
     private readonly CommandValidator validator;
@@ -121,6 +123,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             new ScalarSubqueryExecutor(subqueryQueryExecutor),
             new InSubqueryExecutor(subqueryQueryExecutor));
         existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder);
+        explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor);
     }
 
     #region database
@@ -1213,6 +1216,22 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.ShowDatabase:
                 {
                     return (database, schemaQuerier.ShowDatabase(database));
+                }
+
+            case NodeType.Explain:
+            case NodeType.ExplainPhysical:
+                {
+                    return (database, explainExecutor.ExplainQuery(database, ast.leftAst!, ticket, "physical"));
+                }
+
+            case NodeType.ExplainLogical:
+                {
+                    return (database, explainExecutor.ExplainQuery(database, ast.leftAst!, ticket, "logical"));
+                }
+
+            case NodeType.ExplainAnalyze:
+                {
+                    return (database, explainExecutor.ExplainAnalyzeQuery(database, ast.leftAst!, ticket));
                 }
 
             default:

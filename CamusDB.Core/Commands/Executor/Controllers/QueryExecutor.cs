@@ -9,6 +9,7 @@
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -56,6 +57,13 @@ internal sealed class QueryExecutor
         return ExecuteQueryPlanInternal(plan);
     }
 
+    /// <summary>
+    /// Executes a pre-built <see cref="QueryPlan"/> directly.
+    /// Used by EXPLAIN ANALYZE to run a plan that already has <see cref="QueryPlan.CollectRuntimeStats"/> set.
+    /// </summary>
+    internal IAsyncEnumerable<QueryResultRow> ExecuteQueryPlan(QueryPlan plan)
+        => ExecuteQueryPlanInternal(plan);
+
     public IAsyncEnumerable<QueryResultRow> ExecuteJoinQuery(
         DatabaseDescriptor database,
         BoundSelectQuery bound,
@@ -64,8 +72,16 @@ internal sealed class QueryExecutor
 
     private IAsyncEnumerable<QueryResultRow> ExecuteQueryPlanInternal(QueryPlan plan)
     {
-        foreach (QueryPlanStep step in plan.Steps)
+        bool collectStats = plan.CollectRuntimeStats;
+        if (collectStats)
         {
+            foreach (PhysicalPlanNode stepNode in plan.StepNodes)
+                stepNode.Stats = new();
+        }
+
+        for (int i = 0; i < plan.Steps.Count; i++)
+        {
+            QueryPlanStep step = plan.Steps[i];
             logger.LogInformation("Executing step {Type}", step.Type);
 
             switch (step.Type)
@@ -131,12 +147,29 @@ internal sealed class QueryExecutor
                 default:
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown query plan step: " + step.Type);
             }
+
+            if (collectStats && i < plan.StepNodes.Count && plan.DataCursor is not null)
+            {
+                PlanNodeStats nodeStats = plan.StepNodes[i].Stats!;
+                plan.DataCursor = CountRowsEmitted(plan.DataCursor, nodeStats);
+            }
         }
 
         if (plan.DataCursor is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
         return plan.DataCursor;
+    }
+
+    private static async IAsyncEnumerable<QueryResultRow> CountRowsEmitted(
+        IAsyncEnumerable<QueryResultRow> source,
+        PlanNodeStats stats)
+    {
+        await foreach (QueryResultRow row in source.ConfigureAwait(false))
+        {
+            stats.RowsEmitted++;
+            yield return row;
+        }
     }
 
     private IAsyncEnumerable<QueryResultRow> QueryUsingIndex(
@@ -205,14 +238,22 @@ internal sealed class QueryExecutor
         TableDescriptor table = plan.Table;
         QueryTicket ticket = plan.Ticket;
         HLCTimestamp txId = ticket.TxnState.TransactionId;
+        PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
         ObjectIdValue? rowId = await table.Store.LookupUnique(txId, index.Name, lookupKey).ConfigureAwait(false);
+
+        if (scanStats is not null)
+            scanStats.KvPointLookups++;
+
         if (rowId is null)
             yield break;
 
         byte[]? data = await table.Store.GetRow(txId, rowId.Value).ConfigureAwait(false);
         if (data is null || data.Length == 0)
             yield break;
+
+        if (scanStats is not null)
+            scanStats.RowsRead++;
 
         ObjectIdValue resolvedRowId = rowId.Value;
         Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
@@ -255,6 +296,7 @@ internal sealed class QueryExecutor
         QueryTicket ticket = plan.Ticket;
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
+        PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             txId,
@@ -267,9 +309,15 @@ internal sealed class QueryExecutor
             toInclusive,
             maxRows: plan.ScanRowLimit))
         {
+            if (scanStats is not null)
+                scanStats.KvScanEntries++;
+
             byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
             if (data is null || data.Length == 0)
                 continue;
+
+            if (scanStats is not null)
+                scanStats.RowsRead++;
 
             Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
                 table.Schema,

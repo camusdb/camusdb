@@ -16,6 +16,25 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
 /// Builds a physical join plan tree for bound multi-source SELECT queries (QP4.3+).
+///
+/// R4 LIMITATION — distributed-ready properties are single-table only:
+/// The R4 distributed-ready properties (<see cref="PhysicalPlanNode.OutputOrdering"/>,
+/// <see cref="PhysicalPlanNode.CanDecomposeToLocalPlusMerge"/>, <see cref="PhysicalPlanNode.EstimatedCardinality"/>,
+/// <see cref="PhysicalPlanNode.PartitionLocality"/>) are populated by
+/// <see cref="QueryPlanner.GetPlan"/> only. This planner does not set <c>OutputOrdering</c>
+/// on child scan nodes (join-side scans are never index-selected for ORDER BY here), so join
+/// plans always have <c>null</c> <c>OutputOrdering</c> on their leaves.
+/// <para>
+/// As a result, any distributed-execution or sort-elision logic that reads
+/// <c>OutputOrdering</c> from a join plan will see <c>null</c> and must treat the ordering as
+/// undefined — which is the correct conservative assumption for the current single-partition
+/// implementation.
+/// </para>
+/// <para>
+/// This is intentional for the current single-partition deployment. A future R7 join-order
+/// heuristics pass and any distributed sharding work must extend this planner to populate
+/// these properties when join-side scans are index-selected.
+/// </para>
 /// </summary>
 internal sealed class JoinQueryPlanner
 {

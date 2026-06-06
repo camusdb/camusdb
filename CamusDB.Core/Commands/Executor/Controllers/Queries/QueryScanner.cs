@@ -9,6 +9,7 @@
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
@@ -34,11 +35,15 @@ internal sealed class QueryScanner
         TableDescriptor table = plan.Table;
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         int visibilityVersion = plan.TableSchemaVersion;
+        PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
         await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(txId, maxRows: plan.ScanRowLimit))
         {
             if (data.Length == 0)
                 continue;
+
+            if (scanStats is not null)
+                scanStats.KvScanEntries++;
 
             Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
                 table.Schema,
@@ -47,6 +52,9 @@ internal sealed class QueryScanner
                 data,
                 plan.ScanRequiredColumns,
                 visibilityVersion).ConfigureAwait(false);
+
+            if (scanStats is not null)
+                scanStats.RowsRead++;
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);
@@ -82,6 +90,7 @@ internal sealed class QueryScanner
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         bool unique = index.Type == IndexType.Unique;
+        PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             txId,
@@ -94,12 +103,18 @@ internal sealed class QueryScanner
             toInclusive: true,
             maxRows: plan.ScanRowLimit))
         {
+            if (scanStats is not null)
+                scanStats.KvScanEntries++;
+
             byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
             if (data is null || data.Length == 0)
             {
                 logger.LogWarning("Row {RowId} found in index {IndexName} but data is missing in table {TableName}", rowId, index.Name, table.Name);
                 continue;
             }
+
+            if (scanStats is not null)
+                scanStats.RowsRead++;
 
             Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
                 table.Schema,

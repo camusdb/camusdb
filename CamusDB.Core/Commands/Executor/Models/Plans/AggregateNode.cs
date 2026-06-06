@@ -6,11 +6,54 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.SQLParser;
+
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
 /// <summary>Computes aggregate projections over its input rows.</summary>
 public sealed class AggregateNode : PhysicalPlanNode
 {
+    private static readonly HashSet<string> DecomposableAggFunctions =
+        new(StringComparer.OrdinalIgnoreCase) { "count", "sum", "min", "max" };
+
+    /// <summary>GROUP BY expressions captured at plan time; null for global (ungrouped) aggregates.</summary>
+    public IReadOnlyList<NodeAst>? GroupByExpressions { get; init; }
+
+    /// <summary>Projection expressions that are aggregate calls (e.g. COUNT(*), SUM(x)), captured at plan time.</summary>
+    public IReadOnlyList<NodeAst>? AggregateProjections { get; init; }
+
+    /// <summary>
+    /// True when every aggregate call in this node uses a function that can be split into
+    /// per-partition local computation plus a coordinator merge: COUNT, SUM, MIN, MAX.
+    /// AVG is non-decomposable without SUM/COUNT splitting (deferred).
+    /// Nodes with no explicit aggregate projections (e.g. pure GROUP BY) are treated as decomposable.
+    /// </summary>
+    public bool IsDecomposableAggregate
+    {
+        get
+        {
+            if (AggregateProjections is null or { Count: 0 })
+                return true;
+
+            foreach (NodeAst proj in AggregateProjections)
+            {
+                // Unwrap alias: SELECT count(*) AS c → target is the count(*) call.
+                NodeAst target = proj.nodeType == NodeType.ExprAlias ? proj.leftAst! : proj;
+
+                if (target.nodeType != NodeType.ExprFuncCall)
+                    continue;
+
+                string? funcName = target.leftAst?.yytext;
+                if (!DecomposableAggFunctions.Contains(funcName ?? ""))
+                    return false;
+            }
+
+            return true;
+        }
+    }
+
+    public override bool CanDecomposeToLocalPlusMerge => IsDecomposableAggregate;
+
     public AggregateNode(PhysicalPlanNode input)
     {
         Input = input;

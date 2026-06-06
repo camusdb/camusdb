@@ -23,6 +23,8 @@ public sealed class IndexRangeScanNode : PhysicalPlanNode
 
     public bool ToInclusive { get; }
 
+    public override bool CanDecomposeToLocalPlusMerge => true;
+
     public IndexRangeScanNode(
         TableIndexSchema index,
         CompositeColumnValue? fromBound,

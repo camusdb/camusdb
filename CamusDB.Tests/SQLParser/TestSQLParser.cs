@@ -1727,4 +1727,88 @@ public class TestSQLParser
     }
 
     #endregion
+
+    #region EXPLAIN
+
+    [Test]
+    public void TestParseExplainSelect()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("EXPLAIN SELECT * FROM users");
+
+        Assert.AreEqual(NodeType.Explain, ast.nodeType);
+        Assert.IsNotNull(ast.leftAst, "Explain must carry the wrapped SELECT as its left child");
+        Assert.AreEqual(NodeType.Select, ast.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseExplainLogical()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("EXPLAIN (LOGICAL) SELECT * FROM users");
+
+        Assert.AreEqual(NodeType.ExplainLogical, ast.nodeType);
+        Assert.IsNotNull(ast.leftAst);
+        Assert.AreEqual(NodeType.Select, ast.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseExplainPhysical()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("EXPLAIN (PHYSICAL) SELECT * FROM users");
+
+        Assert.AreEqual(NodeType.ExplainPhysical, ast.nodeType);
+        Assert.IsNotNull(ast.leftAst);
+        Assert.AreEqual(NodeType.Select, ast.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseExplainLowercase()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("explain select id from robots");
+
+        Assert.AreEqual(NodeType.Explain, ast.nodeType);
+        Assert.AreEqual(NodeType.Select, ast.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseExplainLogicalLowercase()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("explain (logical) select * from robots");
+
+        Assert.AreEqual(NodeType.ExplainLogical, ast.nodeType);
+        Assert.AreEqual(NodeType.Select, ast.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseExplainWrapsFullSelect()
+    {
+        // The wrapped SELECT AST must carry the table and WHERE clause intact.
+        NodeAst ast = SQLParserProcessor.Parse(
+            "EXPLAIN SELECT id, name FROM robots WHERE year = 2000 ORDER BY year LIMIT 5");
+
+        Assert.AreEqual(NodeType.Explain, ast.nodeType);
+
+        NodeAst inner = ast.leftAst!;
+        Assert.AreEqual(NodeType.Select, inner.nodeType);
+        // FROM clause (rightAst of Select) must be a table reference.
+        Assert.AreEqual(NodeType.TableReference, inner.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseExplainUnknownOptionThrows()
+    {
+        // Unrecognised option words are rejected so typos don't silently degrade.
+        Assert.Throws<CamusDB.Core.CamusDBException>(() =>
+            SQLParserProcessor.Parse("EXPLAIN (VERBOOSE) SELECT * FROM users"));
+    }
+
+    [Test]
+    public void TestParseExplainAnalyzeParsesAsExplainAnalyzeNode()
+    {
+        // R5: ANALYZE is now a valid EXPLAIN option.
+        NodeAst? ast = SQLParserProcessor.Parse("EXPLAIN (ANALYZE) SELECT * FROM users");
+        Assert.That(ast, Is.Not.Null);
+        Assert.That(ast!.nodeType, Is.EqualTo(NodeType.ExplainAnalyze));
+    }
+
+    #endregion
 }

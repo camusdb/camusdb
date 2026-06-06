@@ -8,6 +8,7 @@
 
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
@@ -36,8 +37,22 @@ public sealed class QueryPlanner
 
         (PhysicalPlanNode scanNode, QueryPlanStep? scanStep) = BuildScanNode(table, ticket, analysis);
         plan.ExecutionFilter = PredicateAnalyzer.BuildExecutionFilter(analysis, scanStep, table);
-        bool scanSatisfiesOrderBy = scanStep is not null
-            && IndexScanSelector.ScanSatisfiesOrderBy(table, scanStep.Value, ticket.OrderBy);
+
+        // Populate OutputOrdering on the scan node when the chosen index scan guarantees the
+        // requested ORDER BY ordering (QP6.2 / R4). The planner then uses this property to
+        // decide whether to add a SortNode, keeping sort elision explicit and consistent.
+        // Guard: GROUP BY and DISTINCT both destroy scan-level ordering before plan output,
+        // so the scan's OutputOrdering is only meaningful in the plain (non-grouped,
+        // non-distinct) path. Setting it for grouped/distinct queries would be misleading in
+        // verbose EXPLAIN even though LIMIT-pushdown is already guarded independently.
+        if (scanStep is not null
+            && ticket.OrderBy is { Count: > 0 }
+            && ticket.GroupBy is not { Count: > 0 }
+            && !ticket.IsDistinct
+            && IndexScanSelector.ScanSatisfiesOrderBy(table, scanStep.Value, ticket.OrderBy))
+            scanNode.OutputOrdering = ticket.OrderBy;
+
+        bool scanSatisfiesOrderBy = scanNode.OutputOrdering is not null;
         plan.ScanRowLimit = TryComputeScanRowLimit(ticket, plan.ExecutionFilter, scanSatisfiesOrderBy);
 
         PhysicalPlanNode root = scanNode;
@@ -49,19 +64,27 @@ public sealed class QueryPlanner
 
         if (hasGroupBy)
         {
-            root = new AggregateNode(root);
+            root = new AggregateNode(root)
+            {
+                GroupByExpressions = ticket.GroupBy,
+                AggregateProjections = ExtractAggregateProjections(ticket),
+            };
 
             if (ticket.Having is not null)
                 root = new HavingFilterNode(ticket.Having, root);
 
             if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
-                root = new SortNode(root);
+                root = new SortNode(root) { OrderBy = ticket.OrderBy, OutputOrdering = ticket.OrderBy };
 
             if (ticket.Projection is not null && ticket.Projection.Count > 0 && !QueryPostScanPipeline.IsFullProjection(ticket.Projection))
                 root = new ProjectNode(root);
 
             if (ticket.Limit is not null || ticket.Offset is not null)
-                root = new LimitNode(root);
+                root = new LimitNode(root)
+                {
+                    LimitValue = EvalLong(ticket.Limit, ticket),
+                    OffsetValue = EvalLong(ticket.Offset, ticket),
+                };
         }
         else
         {
@@ -71,7 +94,11 @@ public sealed class QueryPlanner
                 {
                     if (QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
                     {
-                        root = new AggregateNode(root);
+                        root = new AggregateNode(root)
+                        {
+                            GroupByExpressions = ticket.GroupBy,
+                            AggregateProjections = ExtractAggregateProjections(ticket),
+                        };
 
                         if (ticket.Having is not null)
                             root = new HavingFilterNode(ticket.Having, root);
@@ -84,24 +111,36 @@ public sealed class QueryPlanner
                 root = new DistinctNode(root);
 
                 if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
-                    root = new SortNode(root);
+                    root = new SortNode(root) { OrderBy = ticket.OrderBy, OutputOrdering = ticket.OrderBy };
 
                 if (ticket.Limit is not null || ticket.Offset is not null)
-                    root = new LimitNode(root);
+                    root = new LimitNode(root)
+                    {
+                        LimitValue = EvalLong(ticket.Limit, ticket),
+                        OffsetValue = EvalLong(ticket.Offset, ticket),
+                    };
             }
             else
             {
                 if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0 && !scanSatisfiesOrderBy)
-                    root = new SortNode(root);
+                    root = new SortNode(root) { OrderBy = ticket.OrderBy, OutputOrdering = ticket.OrderBy };
 
                 if (ticket.Limit is not null || ticket.Offset is not null)
-                    root = new LimitNode(root);
+                    root = new LimitNode(root)
+                    {
+                        LimitValue = EvalLong(ticket.Limit, ticket),
+                        OffsetValue = EvalLong(ticket.Offset, ticket),
+                    };
 
                 if (ticket.Projection is not null && ticket.Projection.Count > 0)
                 {
                     if (QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
                     {
-                        root = new AggregateNode(root);
+                        root = new AggregateNode(root)
+                        {
+                            GroupByExpressions = ticket.GroupBy,
+                            AggregateProjections = ExtractAggregateProjections(ticket),
+                        };
 
                         if (ticket.Having is not null)
                             root = new HavingFilterNode(ticket.Having, root);
@@ -236,6 +275,29 @@ public sealed class QueryPlanner
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"Cannot convert plan step to scan node: {step.Type}");
         }
+    }
+
+    private static IReadOnlyList<NodeAst>? ExtractAggregateProjections(QueryTicket ticket)
+    {
+        if (ticket.Projection is not { Count: > 0 })
+            return null;
+
+        List<NodeAst>? result = null;
+        foreach (NodeAst proj in ticket.Projection)
+        {
+            if (QueryExpressionClassifier.IsAggregateProjection(proj))
+                (result ??= new()).Add(proj);
+        }
+        return result;
+    }
+
+    private static long? EvalLong(NodeAst? expr, QueryTicket ticket)
+    {
+        if (expr is null)
+            return null;
+
+        ColumnValue val = SqlExecutor.EvalExpr(expr, new(), ticket.Parameters);
+        return val.Type == ColumnType.Integer64 ? val.LongValue : null;
     }
 
 }

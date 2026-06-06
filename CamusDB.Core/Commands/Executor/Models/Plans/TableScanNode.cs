@@ -26,6 +26,8 @@ public sealed class TableScanNode : PhysicalPlanNode
     /// <summary>Single-table predicate pushed into this scan (QP4.4).</summary>
     public NodeAst? ExecutionFilter { get; init; }
 
+    public override bool CanDecomposeToLocalPlusMerge => true;
+
     public TableScanNode(TableScanSource source, TableIndexSchema? index = null)
     {
         Source = source;

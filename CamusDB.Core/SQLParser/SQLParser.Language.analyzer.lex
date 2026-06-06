@@ -68,6 +68,7 @@ TCast           (C|c)(A|a)(S|s)(T|t)
 TInteger        (I|i)(N|n)(T|t)(E|e)(G|g)(E|e)(R|r)
 TDouble         (D|d)(O|o)(U|u)(B|b)(L|l)(E|e)
 TConstraint     (C|c)(O|o)(N|n)(S|s)(T|t)(R|r)(A|a)(I|i)(N|n)(T|t)
+TExplain        (E|e)(X|x)(P|p)(L|l)(A|a)(I|i)(N|n)
 TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
 TStart          (S|s)(T|t)(A|a)(R|r)(T|t)
 TCommit         (C|c)(O|o)(M|m)(M|m)(I|i)(T|t)
@@ -228,6 +229,8 @@ TDot            \.
 {THaving} { return (int)Token.THAVING; }
 
 {TDistinct} { return (int)Token.TDISTINCT; }
+
+{TExplain} { return (int)Token.TEXPLAIN; }
 
 {TJoin} { return (int)Token.TJOIN; }
 

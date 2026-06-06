@@ -27,6 +27,13 @@ public sealed class QueryPlan
     /// <summary>Legacy linear steps derived from <see cref="Root"/>.</summary>
 	public List<QueryPlanStep> Steps { get; } = new();
 
+    /// <summary>
+    /// Physical plan nodes corresponding 1-to-1 with <see cref="Steps"/> (same DFS order).
+    /// Populated by <see cref="Controllers.Queries.QueryPlanStepAdapter"/> alongside <see cref="Steps"/>.
+    /// Used by the executor to update per-node runtime stats during EXPLAIN ANALYZE (R5).
+    /// </summary>
+    public List<PhysicalPlanNode> StepNodes { get; } = new();
+
     /// <summary>Centralized predicate analysis for the query WHERE clause.</summary>
     public PredicateAnalysis PredicateAnalysis { get; internal set; } = PredicateAnalysis.Empty;
 
@@ -63,6 +70,13 @@ public sealed class QueryPlan
     /// When set, scan operators may stop after emitting this many rows.
     /// </summary>
     public long? ScanRowLimit { get; internal set; }
+
+    /// <summary>
+    /// When true, the executor populates <see cref="Plans.PlanNodeStats"/> on each node
+    /// reachable via <see cref="StepNodes"/> as rows flow through the pipeline (R5).
+    /// Always false during normal execution; set by EXPLAIN ANALYZE.
+    /// </summary>
+    public bool CollectRuntimeStats { get; internal set; }
 
 	public QueryPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
 	{

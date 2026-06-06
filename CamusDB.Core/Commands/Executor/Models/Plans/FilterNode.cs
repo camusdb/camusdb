@@ -18,6 +18,8 @@ public sealed class FilterNode : PhysicalPlanNode
 {
     public NodeAst Predicate { get; }
 
+    public override bool CanDecomposeToLocalPlusMerge => true;
+
     public FilterNode(NodeAst predicate, PhysicalPlanNode input)
     {
         Predicate = predicate;
