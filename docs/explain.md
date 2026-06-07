@@ -20,32 +20,45 @@ EXPLAIN (ANALYZE)  SELECT ...   -- executes the query and adds actual counters
 or read any row data. `EXPLAIN (ANALYZE)` executes the full query, drains the result, and
 reports actual runtime counters alongside the estimated columns.
 
-> **Join limitation:** `EXPLAIN (ANALYZE)` is not yet supported for queries with
-> `JOIN`. Use plain `EXPLAIN` to inspect join plans; `EXPLAIN (ANALYZE)` on a join raises
-> an error. Full join instrumentation is planned for a future release.
+An unrecognized option word (e.g. `EXPLAIN (VERBOSE) ...`) is rejected with an error rather
+than silently treated as a plain `EXPLAIN`.
+
+> **Join limitation:** `EXPLAIN (ANALYZE)` is not yet supported for queries with `JOIN` — it
+> raises an error. Use plain `EXPLAIN` to inspect join plans; full join instrumentation is
+> planned for a future release.
+
+> **Subquery note:** planning a statement that contains an uncorrelated subquery executes that
+> inner subquery once (it is materialized during planning), so `EXPLAIN` of such a statement
+> does read storage for the inner query. The outer query is never executed by plain `EXPLAIN`.
 
 ---
 
 ## Result-row schema
 
-### Plain EXPLAIN (R3)
+### Plain EXPLAIN
 
 | Column           | Type      | Description |
 |------------------|-----------|-------------|
 | `stage`          | `STRING`  | `"physical"` for `EXPLAIN` / `EXPLAIN (PHYSICAL)`, `"logical"` for `EXPLAIN (LOGICAL)` |
 | `node`           | `STRING`  | Canonical node name (see table below) |
 | `detail`         | `STRING`  | Node-specific key facts (see table below) |
-| `estimated_rows` | `NULL`    | Reserved for the R9 cost model; always `NULL` today |
-| `estimated_cost` | `NULL`    | Reserved for the R9 cost model; always `NULL` today |
+| `estimated_rows` | `INT64`   | Cost-model estimate of the node's output cardinality. `NULL` when the plan was not costed. |
+| `estimated_cost` | `FLOAT64` | Cost-model weighted cost for the node (unitless; lower is cheaper). `NULL` when not costed. |
 
-### EXPLAIN ANALYZE (R5)
+`estimated_rows` / `estimated_cost` come from the cost model. Estimates use table statistics
+(row counts, per-column min/max) when available and fall back to fixed defaults otherwise, so
+the exact numbers depend on what statistics have been collected and will differ between
+deployments. Join-plan estimates are presently rough. `(LOGICAL)` and `(PHYSICAL)` currently
+render the same physical tree, differing only in the `stage` label.
+
+### EXPLAIN ANALYZE
 
 All columns from plain `EXPLAIN`, plus:
 
 | Column            | Type       | Description |
 |-------------------|------------|-------------|
-| `actual_rows`     | `INT64`    | Rows emitted (yielded) by this operator to its parent. `NULL` for operators without instrumentation. |
-| `rows_read`       | `INT64`    | Rows fetched and decoded from storage before filtering (scan operators only). `0` for pipeline operators (they read from a cursor, not storage). |
+| `actual_rows`     | `INT64`    | Rows emitted (yielded) by this operator to its parent. |
+| `rows_read`       | `INT64`    | Rows fetched and decoded from storage before filtering (scan operators). `0` for pipeline operators (they read from a cursor, not storage). |
 | `actual_time_ms`  | `FLOAT64`  | Total wall-clock milliseconds for the **entire plan** (root node only). `NULL` on all other nodes (per-node timing is planned for a future release). |
 | `kv_lookups`      | `INT64`    | KV point-lookups issued (unique-index lookups). |
 | `kv_scan_entries` | `INT64`    | KV scan entries visited (table or range-index scans). |
@@ -60,21 +73,35 @@ yielded upstream.
 
 One row is emitted per physical plan node, in depth-first order (parent before children).
 
-| Node name              | When it appears | Key detail fields |
-|------------------------|-----------------|-------------------|
-| `table-scan`           | Full table scan or forced-index scan | `table=<name>` (forced-index adds `, forced-index=<name>`) |
-| `index-lookup`         | Equality predicate on an indexed column(s) | `index=<name>, key=<value>` |
-| `index-range-scan`     | Range predicate (`<`, `>`, `BETWEEN`, prefix) on an index | `index=<name>, from>=<val>, to<<val>` |
-| `filter`               | Residual predicate not satisfied by the chosen index | `filter(<expr>)` |
-| `aggregate`            | `GROUP BY` or aggregate functions | `group=[<exprs>], aggs=[<calls>]` |
-| `having-filter`        | `HAVING` clause applied after aggregation | `having-filter(<expr>)` |
-| `sort`                 | `ORDER BY` not satisfied by scan ordering | `sort(<col> ASC/DESC, ...)` |
-| `limit`                | `LIMIT` / `OFFSET` | `limit(<n>)` or `limit(<n> offset <m>)` |
-| `project`              | Column projection (non-`SELECT *` after other pipeline stages) | _(no detail)_ |
-| `distinct`             | `SELECT DISTINCT` | _(no detail)_ |
-| `nested-loop-join`     | Inner join without a usable index on the right side | `on=<expr>, right=<alias>` |
+| Node name                | When it appears | Key detail fields |
+|--------------------------|-----------------|-------------------|
+| `table-scan`             | Full table scan or forced-index scan | `table=<name>` (forced-index adds `, forced-index=<name>`) |
+| `index-lookup`           | Equality on a **unique** index | `index=<name>, key=<value>` |
+| `index-range-scan`       | Range predicate (`<`, `>`, `BETWEEN`), or equality on a **non-unique** index | `index=<name>, from>=<val>, to<<val>` |
+| `filter`                 | Residual predicate not satisfied by the chosen index | `<expr>` |
+| `aggregate`              | `GROUP BY` or aggregate functions | `group=[<exprs>], aggs=[<calls>]` |
+| `having-filter`          | `HAVING` clause applied after aggregation | `<expr>` |
+| `sort`                   | `ORDER BY` not satisfied by scan ordering | `<col> ASC/DESC, ...` |
+| `limit`                  | `LIMIT` / `OFFSET` | `<n>` or `<n> offset <m>` |
+| `project`                | Column projection after other pipeline stages | _(no detail)_ |
+| `distinct`               | `SELECT DISTINCT` | `streaming: true` (index-ordered, O(1) memory) or `hash` |
+| `semi-join`              | `IN (subquery)` rewritten to a semi-join over an indexed inner column | `outer=<col>, inner=<table>.<col>, index=<name>` |
+| `anti-join`              | `NOT IN (subquery)` over a **NOT NULL** indexed inner column | `outer=<col>, inner=<table>.<col>, index=<name>` |
+| `null-aware-anti-join`   | `NOT IN (subquery)` over a **nullable** indexed inner column (SQL three-valued semantics) | `outer=<col>, inner=<table>.<col>, index=<name>` |
+| `nested-loop-join`       | Inner join without a usable index on the right side | `on=<expr>, right=<alias>` |
 | `index-nested-loop-join` | Inner join where the right side's join key is indexed | `on=<expr>, index=<name>, left=<col>, right=<col>` |
-| `derived-table-scan`   | Subquery in the `FROM` clause | `alias=<alias>` |
+| `derived-table-scan`     | Subquery in the `FROM` clause | `alias=<alias>` |
+
+Notes:
+- Uncorrelated `IN`/`NOT IN` over an **indexed** inner column become a `semi-join` /
+  `anti-join` / `null-aware-anti-join`. When the inner column is **not** indexed, the subquery
+  is materialized instead and no join node appears.
+- A `distinct` row reports `streaming: true` when the input arrives in index order covering
+  all (NOT NULL) DISTINCT columns; otherwise `hash`.
+
+The examples below focus on the `stage` / `node` / `detail` columns (the stable part of the
+output). Every row also carries `estimated_rows` / `estimated_cost` as described above; the
+`EXPLAIN ANALYZE` examples show the full column set.
 
 ---
 
@@ -87,8 +114,8 @@ EXPLAIN SELECT * FROM robots;
 ```
 
 ```
-stage     node        detail              estimated_rows  estimated_cost
-physical  table-scan  table=robots        NULL            NULL
+stage     node        detail
+physical  table-scan  table=robots
 ```
 
 The planner chose a full table scan — no usable index for the (empty) `WHERE` clause.
@@ -104,16 +131,13 @@ EXPLAIN SELECT * FROM robots WHERE year = 2023;
 (Assumes a non-unique `year_idx` on column `year`.)
 
 ```
-stage     node               detail                                         estimated_rows  estimated_cost
-physical  index-range-scan   index=year_idx, from>=2023, to<2024            NULL            NULL
+stage     node               detail
+physical  index-range-scan   index=year_idx, from>=2023, to<2024
 ```
 
 For a **non-unique** index, an equality predicate is rewritten as a half-open range scan
 (`>= value`, `< successor(value)`). The `index-lookup` node only appears for **unique**
-index equality (primary key or `UNIQUE` constraint), where the planner knows at most one
-row can match.
-
-No `filter` row appears because the index range fully covers the predicate.
+index equality (primary key or `UNIQUE` constraint), where at most one row can match.
 
 ---
 
@@ -123,36 +147,33 @@ No `filter` row appears because the index range fully covers the predicate.
 EXPLAIN SELECT * FROM robots WHERE id = '507f1f77bcf86cd799439011';
 ```
 
-(The primary-key index `~pk` is unique.)
-
 ```
-stage     node          detail                                                   estimated_rows  estimated_cost
-physical  index-lookup  index=~pk, key='507f1f77bcf86cd799439011'               NULL            NULL
+stage     node          detail
+physical  index-lookup  index=~pk, key='507f1f77bcf86cd799439011'
 ```
 
-Because `~pk` is a unique index, the planner issues a single point-lookup rather than a
-range scan. One KV read suffices to locate the row.
+Because `~pk` is unique, the planner issues a single point-lookup rather than a range scan.
 
 ---
 
 ### Range scan with residual filter
 
 ```sql
-EXPLAIN SELECT * FROM robots WHERE year >= 2020 AND name = 'R2';
+EXPLAIN SELECT * FROM robots WHERE year >= 2020 AND name = 'Bishop';
 ```
 
 ```
-stage     node               detail                      estimated_rows  estimated_cost
-physical  filter             name = 'R2'                 NULL            NULL
-physical  index-range-scan   index=year_idx, from>=2020  NULL            NULL
+stage     node               detail
+physical  filter             name = 'Bishop'
+physical  index-range-scan   index=year_idx, from>=2020
 ```
 
-The `year >= 2020` predicate drives an index range scan; `name = 'R2'` cannot be pushed
-into the index and appears as a residual `filter` above the scan.
+The `year >= 2020` predicate drives an index range scan; `name = 'Bishop'` cannot be pushed into
+the index and appears as a residual `filter` above the scan.
 
-> **Tree depth in result rows:** the `node` column contains the bare node name with no
-> leading spaces. Parent-before-child row order conveys tree depth; indentation is not
-> present in the actual result set.
+> **Tree depth in result rows:** the `node` column contains the bare node name with no leading
+> spaces. Parent-before-child row order conveys tree depth; indentation is not present in the
+> actual result set.
 
 ---
 
@@ -163,10 +184,47 @@ EXPLAIN SELECT year, COUNT(*) FROM robots GROUP BY year;
 ```
 
 ```
-stage     node        detail                            estimated_rows  estimated_cost
-physical  aggregate   group=[year], aggs=[count(*)]    NULL            NULL
-physical  table-scan  table=robots                     NULL            NULL
+stage     node        detail
+physical  aggregate   group=[year], aggs=[count(*)]
+physical  table-scan  table=robots
 ```
+
+---
+
+### SELECT DISTINCT — streaming vs hash
+
+```sql
+EXPLAIN SELECT DISTINCT code FROM teams;   -- code is NOT NULL with an index
+```
+
+```
+stage     node              detail
+physical  distinct          streaming: true
+physical  index-range-scan  index=code_idx
+```
+
+When the DISTINCT columns form an index set-prefix and are all NOT NULL, the scan emits rows
+in index order and `distinct` deduplicates adjacent rows with O(1) memory. Otherwise the
+`distinct` row shows `hash` and a hash set is used.
+
+---
+
+### IN subquery rewritten to a semi-join
+
+```sql
+EXPLAIN SELECT * FROM robots WHERE owner_id IN (SELECT id FROM owners);
+```
+
+```
+stage     node        detail
+physical  semi-join   outer=owner_id, inner=owners.id, index=~pk
+physical  table-scan  table=robots
+```
+
+Because the inner column `owners.id` is indexed, the `IN` is executed as an index-probing
+semi-join instead of materializing the subquery. `NOT IN` produces `anti-join`
+(NOT NULL inner column) or `null-aware-anti-join` (nullable inner column). When the inner
+column is not indexed, no join node appears — the subquery is materialized.
 
 ---
 
@@ -177,12 +235,12 @@ EXPLAIN SELECT * FROM robots ORDER BY year;
 ```
 
 ```
-stage     node              detail              estimated_rows  estimated_cost
-physical  index-range-scan  index=year_idx      NULL            NULL
+stage     node              detail
+physical  index-range-scan  index=year_idx
 ```
 
-No `sort` node appears: the index scan already guarantees the requested ordering
-(`OutputOrdering` is set on the scan node; the planner elides the `SortNode`).
+No `sort` node appears: the index scan already guarantees the requested ordering, so the sort
+is elided.
 
 ---
 
@@ -193,13 +251,12 @@ EXPLAIN SELECT * FROM robots LIMIT 10;
 ```
 
 ```
-stage     node        detail         estimated_rows  estimated_cost
-physical  limit       limit(10)      NULL            NULL
-physical  table-scan  table=robots   NULL            NULL
+stage     node        detail
+physical  limit       10
+physical  table-scan  table=robots
 ```
 
-The scan respects a `ScanRowLimit` pushed down from the planner — it stops reading after
-the first 10 rows rather than scanning the entire table.
+The scan stops reading after the first 10 rows rather than scanning the entire table.
 
 ---
 
@@ -210,13 +267,12 @@ EXPLAIN (ANALYZE) SELECT * FROM robots;
 ```
 
 ```
-stage    node        detail          estimated_rows  estimated_cost  actual_rows  rows_read  actual_time_ms  kv_lookups  kv_scan_entries
-analyze  table-scan  table=robots    NULL            NULL            42           42         NULL            0           42
+stage    node        detail        estimated_rows  estimated_cost  actual_rows  rows_read  actual_time_ms  kv_lookups  kv_scan_entries
+analyze  table-scan  table=robots  42              42.0            42           42         3.1             0           42
 ```
 
-`actual_rows` = `rows_read` = `kv_scan_entries` = 42 (the table contains 42 rows, no
-filter). `actual_time_ms` is `NULL` on the scan row — it is only populated on the **root**
-node (the outermost operator in the plan).
+The table contains 42 rows, no filter, so `actual_rows` = `rows_read` = `kv_scan_entries` =
+42. `actual_time_ms` is only populated on the **root** node (the outermost operator).
 
 ---
 
@@ -229,23 +285,24 @@ EXPLAIN (ANALYZE) SELECT * FROM robots WHERE year = 2022 LIMIT 5;
 (Assumes a non-unique `year_idx` on `year`; 3 robots have `year = 2022`.)
 
 ```
-stage    node               detail                                    estimated_rows  estimated_cost  actual_rows  rows_read  actual_time_ms  kv_scan_entries  kv_lookups
-analyze  limit              limit(5)                                  NULL            NULL            3            0          14.2             0                0
-analyze  index-range-scan   index=year_idx, from>=2022, to<2023      NULL            NULL            3            3          NULL             3                0
+stage    node               detail                                estimated_rows  estimated_cost  actual_rows  rows_read  actual_time_ms  kv_scan_entries  kv_lookups
+analyze  limit              5                                     5               6.0             3            0          14.2             0                0
+analyze  index-range-scan   index=year_idx, from>=2022, to<2023   ...             ...             3            3          NULL             3                0
 ```
 
 - `limit` node: emits 3 rows (fewer than the cap of 5); `actual_time_ms` = 14.2 ms (total
   plan time, root node only).
-- `index-range-scan` node: 3 `kv_scan_entries` (index entries visited in the `[2022, 2023)`
-  range), 3 `rows_read` (rows fetched from storage), 3 `actual_rows` (all passed the
-  filter, since no residual predicate exists).
+- `index-range-scan` node: 3 `kv_scan_entries` (index entries in `[2022, 2023)`), 3
+  `rows_read` (rows fetched), 3 `actual_rows` (all passed; no residual predicate).
+
+(`estimated_*` are cost-model estimates and vary with collected statistics.)
 
 ---
 
 ## Verbose / distributed-properties mode
 
-`PlanRenderer.Render(plan, includeDistributedProperties: true)` appends R4 metadata to each
-node line:
+`PlanRenderer.Render(plan, includeDistributedProperties: true)` appends distributed-ready
+metadata to each node line:
 
 ```
 table-scan(table=robots) order=[year ASC] decomposable=true
@@ -253,23 +310,22 @@ table-scan(table=robots) order=[year ASC] decomposable=true
 
 | Suffix            | Meaning |
 |-------------------|---------|
-| `order=[...]`     | `OutputOrdering` — the ordering this node guarantees on its output (e.g. an index scan that satisfies `ORDER BY`). Absent when ordering is undefined. |
-| `decomposable=true/false` | Whether the node's work can be split into per-partition local computation plus a coordinator-side merge. Always `false` for sort and limit nodes. `AggregateNode` is `true` only for `COUNT`/`SUM`/`MIN`/`MAX`; `AVG` is `false`. |
+| `order=[...]`     | The ordering this node guarantees on its output (e.g. an index scan that satisfies `ORDER BY`). Absent when ordering is undefined. |
+| `decomposable=true/false` | Whether the node's work can be split into per-partition local computation plus a coordinator-side merge. Always `false` for sort and limit nodes. `aggregate` is `true` only for `COUNT`/`SUM`/`MIN`/`MAX`; `AVG` is `false`. |
 
-This mode is used by internal tooling and tests; it is not exposed through the SQL
-`EXPLAIN` statement.
+This mode is used by internal tooling and tests; it is not exposed through the SQL `EXPLAIN`
+statement.
 
 ---
 
-## Notes on FilterNode stats in EXPLAIN ANALYZE
+## Notes on filter stats in EXPLAIN ANALYZE
 
-`FilterNode` is **folded into the scan** during execution: the predicate is evaluated
-inside the scan loop via `QueryPlan.ExecutionFilter`, not as a separate pipeline stage.
-As a result:
+A `filter` is **folded into the scan** during execution: the predicate is evaluated inside the
+scan loop, not as a separate pipeline stage. As a result:
 
-- `filter` rows in `EXPLAIN ANALYZE` output show `actual_rows` equal to the scan's
-  post-filter emit count (the rows that passed the predicate).
+- `filter` rows in `EXPLAIN ANALYZE` show `actual_rows` equal to the scan's post-filter emit
+  count (the rows that passed the predicate).
 - `kv_lookups` and `kv_scan_entries` are `0` on the filter row — all storage costs are
   attributed to the scan node directly below.
 - `actual_time_ms` is `NULL` (filter evaluation time is not separately measured; it is
-  included in the scan's wall clock, which is itself only reported on the root node).
+  included in the scan's wall clock, reported only on the root node).

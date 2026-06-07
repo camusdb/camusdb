@@ -8,6 +8,18 @@
 
 namespace CamusDB.Core.SQLParser;
 
+/// <summary>
+/// Represents a node in the SQL parse tree produced by <see cref="SQLParserProcessor.Parse"/>.
+/// </summary>
+/// <remarks>
+/// <b>Immutability invariant:</b> a <see cref="NodeAst"/> returned by
+/// <see cref="SQLParserProcessor.Parse"/> must be treated as immutable after it is returned.
+/// <see cref="SQLParser.SQLParserProcessor.Parse"/> applies <see cref="IdentifierNormalizer"/> before
+/// returning, so all identifier text is already normalized. Downstream transformations
+/// (<c>SubqueryRewriter</c>, binders, planners) must <b>construct new nodes</b> rather than
+/// modifying fields of an existing node. This invariant is what makes sharing a single cached
+/// <see cref="NodeAst"/> across concurrent executions of the same SQL text safe.
+/// </remarks>
 public sealed class NodeAst
 {
 	public NodeType nodeType;

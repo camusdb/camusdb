@@ -415,10 +415,19 @@ is_not_null_expr : condition TIS TNOT TNULL { $$.n = new(NodeType.ExprIsNotNull,
                  ;
 
 in_subquery_expr : condition TIN query_expr { $$.n = new(NodeType.ExprInSubquery, $1.n, $3.n, null, null, null, null, null, null); }
+                 | condition TIN LPAREN in_value_list RPAREN { $$.n = new(NodeType.ExprInMembership, $1.n, $4.n, null, null, null, null, null, null); }
                  ;
 
 not_in_subquery_expr : condition TNOT TIN query_expr { $$.n = new(NodeType.ExprNotInSubquery, $1.n, $4.n, null, null, null, null, null, null); }
+                     | condition TNOT TIN LPAREN in_value_list RPAREN { $$.n = new(NodeType.ExprNotInMembership, $1.n, $5.n, null, null, null, null, null, null); }
                      ;
+
+in_value_list : in_value_list TCOMMA in_value_item { $$.n = new(NodeType.ExprList, $1.n, $3.n, null, null, null, null, null, null); }
+              | in_value_item { $$.n = $1.n; $$.s = $1.s; }
+              ;
+
+in_value_item : simple_expr { $$.n = $1.n; $$.s = $1.s; }
+              ;
 
 exists_subquery_expr : TEXISTS query_expr { $$.n = new(NodeType.ExprExistsSubquery, $2.n, null, null, null, null, null, null, null); }
                      ;

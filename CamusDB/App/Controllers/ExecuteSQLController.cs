@@ -34,7 +34,7 @@ public sealed class ExecuteSQLController : CommandsController
     {
         try
         {
-            Stopwatch stopwatch = Stopwatch.StartNew();
+            //Stopwatch stopwatch = Stopwatch.StartNew();
 
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync().ConfigureAwait(false);
@@ -63,7 +63,7 @@ public sealed class ExecuteSQLController : CommandsController
                     parameters: request.Parameters
                 );
 
-                List<Dictionary<string, ColumnValue>> rows = new();
+                List<Dictionary<string, ColumnValue>> rows = [];
 
                 (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false);
 
@@ -73,7 +73,7 @@ public sealed class ExecuteSQLController : CommandsController
                 if (newTransaction)
                     await transactions.CommitAsync(database, txnState).ConfigureAwait(false);
 
-                Console.WriteLine("Elapsed={0}", stopwatch.ElapsedMilliseconds);
+                //Console.WriteLine("Elapsed={0}", stopwatch.ElapsedMilliseconds);
 
                 return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
             }

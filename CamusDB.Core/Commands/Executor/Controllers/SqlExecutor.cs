@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.SQLParser;
-using CamusDB.Core.Util.Time;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;

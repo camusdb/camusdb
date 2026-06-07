@@ -37,6 +37,20 @@ public static class CamusDBConfig
     public static int StatsFlushIntervalMs = 5000;
 
     /// <summary>
+    /// Sliding TTL for the SQL parser AST cache, in seconds (PC1).
+    /// A successfully-parsed <c>NodeAst</c> is kept in the cache for this many seconds after
+    /// the last hit; each cache hit extends the deadline by the same interval.
+    /// <para>
+    /// Special values:
+    ///   <c>&lt;= 0</c> — cache is disabled; every call to <c>SQLParserProcessor.Parse</c>
+    ///                    lexes and parses from scratch (pre-PC1 behaviour).
+    /// </para>
+    /// Default: <c>300</c> (5 minutes), matching Kahuna's script-cache TTL.
+    /// Wired to <c>config.yml</c> in PC3.
+    /// </summary>
+    public static int SqlParserCacheTtlSeconds = 300;
+
+    /// <summary>
     /// The internal name used to identify primary key indices.
     /// This name should only be changed in a new installation. Changing it after
     /// having databases with tables and data can cause unexpected problems.

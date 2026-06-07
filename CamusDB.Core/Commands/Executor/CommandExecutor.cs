@@ -86,6 +86,11 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly ISchemaDdlForwarder? schemaDdlForwarder;
 
+    // Number of rows indexed per Kahuna transaction during backfill.  Committing in bounded
+    // batches keeps transaction size manageable and allows a leader-change resume to skip
+    // already-indexed rows via the persisted StartOffset checkpoint.
+    private const int BackfillBatchSize = 500;
+
     /// <summary>
     /// Initializes the commands executor
     /// </summary>
@@ -335,12 +340,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
             throw;
         }
-    }
-
-    // Number of rows indexed per Kahuna transaction during backfill.  Committing in bounded
-    // batches keeps transaction size manageable and allows a leader-change resume to skip
-    // already-indexed rows via the persisted StartOffset checkpoint.
-    private const int BackfillBatchSize = 500;
+    }    
 
     /// <summary>
     /// Test-only hook: invoked after each intermediate batch checkpoint is persisted

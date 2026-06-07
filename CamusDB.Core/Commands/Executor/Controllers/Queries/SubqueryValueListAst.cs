@@ -91,16 +91,23 @@ internal static class SubqueryValueListAst
         if (isEmpty)
             return true;
 
+        bool sawNull = false;
         foreach (ColumnValue candidate in Enumerate(expr.rightAst))
         {
             if (candidate.Type == ColumnType.Null)
+            {
+                // Track nulls seen in the list; covers both subquery-materialized nodes
+                // (where extendedOne is pre-computed) and grammar-parsed literal lists
+                // (where extendedOne is null and containsNull defaults to false).
+                sawNull = true;
                 continue;
+            }
 
             if (lhs.Type != ColumnType.Null && lhs.CompareTo(candidate) == 0)
                 return false;
         }
 
-        if (containsNull)
+        if (containsNull || sawNull)
             return null;
 
         return true;
