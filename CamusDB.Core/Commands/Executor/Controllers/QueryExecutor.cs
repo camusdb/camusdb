@@ -162,6 +162,10 @@ internal sealed class QueryExecutor
                     plan.DataCursor = semiJoinExecutor.ExecuteAsync(plan.DataCursor, semiJoinNode, plan.Ticket);
                     break;
 
+                case QueryPlanStepType.InListScanFromIndex:
+                    plan.DataCursor = QueryUsingInListIndex(plan, (IndexInListScanNode)plan.StepNodes[i]);
+                    break;
+
                 default:
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown query plan step: " + step.Type);
             }
@@ -347,6 +351,98 @@ internal sealed class QueryExecutor
 
             if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                 yield return new(rowId, row);
+        }
+    }
+
+    private IAsyncEnumerable<QueryResultRow> QueryUsingInListIndex(QueryPlan plan, IndexInListScanNode inListNode)
+        => QueryUsingInListIndexInternal(plan, inListNode);
+
+    /// <summary>
+    /// Executes an IN-list scan by performing one index seek per distinct value and unioning
+    /// the results. Duplicate row IDs (repeated values or overlapping non-unique entries)
+    /// are suppressed so each matched row is emitted at most once (R15).
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> QueryUsingInListIndexInternal(
+        QueryPlan plan,
+        IndexInListScanNode inListNode)
+    {
+        TableDescriptor table = plan.Table;
+        QueryTicket ticket = plan.Ticket;
+        HLCTimestamp txId = ticket.TxnState.TransactionId;
+        TableIndexSchema index = inListNode.Index;
+        bool isUnique = index.Type == IndexType.Unique;
+        ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
+
+        HashSet<ObjectIdValue> seen = new();
+        PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+
+        foreach (ColumnValue value in inListNode.Values)
+        {
+            CompositeColumnValue lookupKey = new(new[] { value });
+
+            if (isUnique)
+            {
+                ObjectIdValue? rowId = await table.Store.LookupUnique(txId, index.Name, lookupKey).ConfigureAwait(false);
+
+                if (scanStats is not null)
+                    scanStats.KvPointLookups++;
+
+                if (rowId is null || !seen.Add(rowId.Value))
+                    continue;
+
+                byte[]? data = await table.Store.GetRow(txId, rowId.Value).ConfigureAwait(false);
+                if (data is null || data.Length == 0)
+                    continue;
+
+                if (scanStats is not null)
+                    scanStats.RowsRead++;
+
+                Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                    table.Schema, txId, rowId.Value, data,
+                    plan.ScanRequiredColumns, plan.TableSchemaVersion).ConfigureAwait(false);
+
+                if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
+                    yield return new(rowId.Value, row);
+            }
+            else
+            {
+                // Non-unique equality scan.
+                // Types with a computable successor (Integer64, Float64, Bool): [v, successor(v)) exclusive.
+                // String/Id: no total successor — use exact-match [v, v] inclusive instead.
+                // ScanIndex appends a high sentinel ("￿") to endKey for non-unique, so
+                // all "{encodedKey}{rowIdHex}" entries for key==v are captured by the raw scan,
+                // and the decoded-key bounds filter trims to exactly key==v (R15b).
+                CompositeColumnValue? upperBound = BuildPrefixScanUpperBound(table, index, lookupKey);
+                CompositeColumnValue toBound = upperBound ?? lookupKey;
+                bool toInclusive = upperBound is null; // inclusive only for exact-match (no successor)
+
+                await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+                    txId, index.Name, keyTypes,
+                    lookupKey, toBound, unique: false,
+                    fromInclusive: true, toInclusive: toInclusive,
+                    maxRows: null).ConfigureAwait(false))
+                {
+                    if (scanStats is not null)
+                        scanStats.KvScanEntries++;
+
+                    if (!seen.Add(rowId))
+                        continue;
+
+                    byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
+                    if (data is null || data.Length == 0)
+                        continue;
+
+                    if (scanStats is not null)
+                        scanStats.RowsRead++;
+
+                    Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                        table.Schema, txId, rowId, data,
+                        plan.ScanRequiredColumns, plan.TableSchemaVersion).ConfigureAwait(false);
+
+                    if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
+                        yield return new(rowId, row);
+                }
+            }
         }
     }
 

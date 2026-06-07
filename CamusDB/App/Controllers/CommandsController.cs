@@ -41,6 +41,7 @@ public abstract class CommandsController : ControllerBase
         string? databaseName,
         long txnIdPT,
         uint txnIdCounter,
+        bool readOnly = false,
         CancellationToken cancellationToken = default)
     {
         if (txnIdPT > 0)
@@ -48,6 +49,15 @@ public abstract class CommandsController : ControllerBase
 
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required to start a transaction");
+
+        // Read-only queries use a zero-timestamp synthetic transaction: no LocateAndStartTransaction /
+        // LocateAndCommitTransaction round-trips to Kahuna. Kahuna treats HLCTimestamp.Zero as
+        // "read latest committed value" per key (non-transactional snapshot, read-committed per key).
+        if (readOnly)
+        {
+            KvTransaction roTx = await transactions.BeginReadOnlyAsync(databaseName, cancellationToken).ConfigureAwait(false);
+            return (false, roTx); // false → no commit call needed
+        }
 
         KvTransaction tx = await transactions.StartAsync(databaseName, cancellationToken).ConfigureAwait(false);
         return (true, tx);

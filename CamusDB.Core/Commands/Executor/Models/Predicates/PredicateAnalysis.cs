@@ -15,7 +15,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.Predicates;
 /// </summary>
 public sealed class PredicateAnalysis
 {
-    public static PredicateAnalysis Empty { get; } = new([], [], []);
+    public static PredicateAnalysis Empty { get; } = new([], [], [], []);
 
     /// <summary>Column-vs-constant comparisons usable for index selection.</summary>
     public IReadOnlyList<AnalyzedComparison> IndexableComparisons { get; }
@@ -25,13 +25,23 @@ public sealed class PredicateAnalysis
 
     public IReadOnlyList<NodeAst> ResidualConjuncts { get; }
 
+    /// <summary>
+    /// IN-list predicates of the form <c>column IN (v1, v2, …)</c> where every list item is a
+    /// constant or resolved parameter. These are candidates for index-driven multi-seek (R15).
+    /// When no usable index is found, <see cref="Controllers.Queries.PredicateAnalyzer.BuildExecutionFilter"/>
+    /// folds them back into the per-row filter as residual conjuncts.
+    /// </summary>
+    public IReadOnlyList<AnalyzedInList> InListComparisons { get; }
+
     public PredicateAnalysis(
         IReadOnlyList<AnalyzedComparison> indexableComparisons,
         IReadOnlyList<AnalyzedColumnComparison> columnComparisons,
-        IReadOnlyList<NodeAst> residualConjuncts)
+        IReadOnlyList<NodeAst> residualConjuncts,
+        IReadOnlyList<AnalyzedInList>? inListComparisons = null)
     {
         IndexableComparisons = indexableComparisons;
         ColumnComparisons = columnComparisons;
         ResidualConjuncts = residualConjuncts;
+        InListComparisons = inListComparisons ?? [];
     }
 }

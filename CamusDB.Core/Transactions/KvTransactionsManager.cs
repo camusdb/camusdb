@@ -118,6 +118,14 @@ public sealed class KvTransactionsManager
     }
 
     /// <summary>
+    /// Returns a synthetic read-only transaction whose <see cref="KvTransaction.TransactionId"/>
+    /// is <see cref="HLCTimestamp.Zero"/>. Kahuna treats the zero timestamp as a signal to perform
+    /// non-transactional reads (latest committed value, read-committed per key). No Kahuna
+    /// <c>StartTransaction</c> or <c>CommitTransaction</c> round-trips are needed.
+    /// </summary>
+    public KvTransaction CreateReadOnlyTransaction() => KvTransaction.CreateReadOnly();
+
+    /// <summary>
     /// Commits the transaction via Kahuna 2PC.
     /// Throws <see cref="CamusDBException"/> if the transaction was already completed
     /// or if Kahuna aborts the commit.
@@ -125,6 +133,9 @@ public sealed class KvTransactionsManager
     public async Task CommitAsync(KvTransaction tx, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(tx);
+
+        if (tx.IsReadOnly)
+            return; // read-only transactions have no Kahuna state to commit
 
         if (tx.Status != KvTransactionStatus.Active)
             throw new CamusDBException(
@@ -171,6 +182,9 @@ public sealed class KvTransactionsManager
     public async Task RollbackAsync(KvTransaction tx, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(tx);
+
+        if (tx.IsReadOnly)
+            return; // read-only transactions have no Kahuna state to roll back
 
         if (tx.Status != KvTransactionStatus.Active)
             throw new CamusDBException(

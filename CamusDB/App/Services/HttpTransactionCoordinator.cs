@@ -43,6 +43,22 @@ public sealed class HttpTransactionCoordinator
         return tx;
     }
 
+    /// <summary>
+    /// Returns a read-only snapshot transaction that uses <c>HLCTimestamp.Zero</c> for all KV reads.
+    /// Kahuna treats the zero timestamp as "latest committed value" per key — no
+    /// <c>StartTransaction</c> / <c>CommitTransaction</c> round-trips, so commit and rollback are
+    /// no-ops. Use for SELECT queries that are not part of an explicit user transaction.
+    /// </summary>
+    public async Task<KvTransaction> BeginReadOnlyAsync(string databaseName, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(databaseName))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required");
+
+        DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
+        return database.Transactions.CreateReadOnlyTransaction();
+        // Not registered in active — read-only transactions need no tracking or cleanup.
+    }
+
     public KvTransaction GetState(long txnIdPT, uint txnIdCounter)
     {
         if (!active.TryGetValue((txnIdPT, txnIdCounter), out ActiveTransaction? entry))

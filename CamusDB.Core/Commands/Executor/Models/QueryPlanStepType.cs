@@ -20,5 +20,6 @@ public enum QueryPlanStepType
     Limit,
     QueryFromIndex,
     RangeScanFromIndex,
-    SemiJoinProbe
+    SemiJoinProbe,
+    InListScanFromIndex
 }

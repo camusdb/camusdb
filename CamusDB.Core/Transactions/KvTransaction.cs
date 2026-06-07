@@ -53,11 +53,27 @@ public sealed class KvTransaction
     private HashSet<(string key, KeyValueDurability durability)>? modifiedKeys;
     private Dictionary<string, SchemaVersionPin>? schemaPins;
 
-    public KvTransaction(HLCTimestamp transactionId, string uniqueId)
+    /// <summary>
+    /// When true this is a synthetic read-only transaction backed by <see cref="HLCTimestamp.Zero"/>.
+    /// Kahuna uses <c>HLCTimestamp.Zero</c> as the non-transactional snapshot signal (read-committed
+    /// semantics per key, no MVCC context). No <c>StartTransaction</c> / <c>CommitTransaction</c>
+    /// round-trips are issued; commit and rollback are no-ops.
+    /// </summary>
+    public bool IsReadOnly { get; }
+
+    public KvTransaction(HLCTimestamp transactionId, string uniqueId, bool isReadOnly = false)
     {
         TransactionId = transactionId;
         UniqueId = uniqueId;
+        IsReadOnly = isReadOnly;
     }
+
+    /// <summary>
+    /// Creates a read-only snapshot transaction. Uses <see cref="HLCTimestamp.Zero"/> so Kahuna
+    /// performs non-transactional reads of the latest committed value — no Kahuna round-trips.
+    /// </summary>
+    public static KvTransaction CreateReadOnly() =>
+        new(HLCTimestamp.Zero, string.Empty, isReadOnly: true);
 
     /// <summary>
     /// Records that an exclusive lock was acquired on <paramref name="key"/>.

@@ -53,7 +53,8 @@ public sealed class ExecuteSQLController : CommandsController
                 (newTransaction, txnState) = await BeginOrResumeAsync(
                     request.DatabaseName,
                     request.TxnIdPT,
-                    request.TxnIdCounter
+                    request.TxnIdCounter,
+                    readOnly: true   // SELECT / SHOW always read-only; uses HLCTimestamp.Zero
                 ).ConfigureAwait(false);
 
                 ExecuteSQLTicket ticket = new(

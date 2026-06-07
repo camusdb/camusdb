@@ -89,6 +89,7 @@ public static class PlanRenderer
             TableScanNode n => RenderTableScan(n, plan),
             IndexLookupNode n => RenderIndexLookup(n),
             IndexRangeScanNode n => RenderIndexRangeScan(n),
+            IndexInListScanNode n => RenderIndexInListScan(n),
             FilterNode n => RenderFilter(n),
             HavingFilterNode n => RenderHavingFilter(n),
             AggregateNode n => RenderAggregate(n),
@@ -158,6 +159,9 @@ public static class PlanRenderer
         string key = RenderCompositeKey(node.LookupKey);
         return $"index-lookup(index={node.Index.Name}, key={key})";
     }
+
+    private static string RenderIndexInListScan(IndexInListScanNode node) =>
+        $"index-in-list(index={node.Index.Name}, values={node.Values.Count})";
 
     private static string RenderIndexRangeScan(IndexRangeScanNode node)
     {

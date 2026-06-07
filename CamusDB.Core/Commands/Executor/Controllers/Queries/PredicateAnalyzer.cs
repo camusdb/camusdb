@@ -29,6 +29,7 @@ public static class PredicateAnalyzer
 
         List<AnalyzedComparison> indexable = new();
         List<AnalyzedColumnComparison> columnComparisons = new();
+        List<AnalyzedInList> inListComparisons = new();
         List<NodeAst> residual = new();
 
         foreach (NodeAst conjunct in conjuncts)
@@ -36,6 +37,12 @@ public static class PredicateAnalyzer
             if (TryAnalyzeBetween(conjunct, parameters, out List<AnalyzedComparison>? betweenComparisons))
             {
                 indexable.AddRange(betweenComparisons!);
+                continue;
+            }
+
+            if (TryAnalyzeInMembership(conjunct, parameters, out AnalyzedInList? inList))
+            {
+                inListComparisons.Add(inList!);
                 continue;
             }
 
@@ -47,7 +54,7 @@ public static class PredicateAnalyzer
                 residual.Add(conjunct);
         }
 
-        return new PredicateAnalysis(indexable, columnComparisons, residual);
+        return new PredicateAnalysis(indexable, columnComparisons, residual, inListComparisons);
     }
 
     public static PredicateAnalysis AnalyzeFilters(List<QueryFilter>? filters)
@@ -78,12 +85,14 @@ public static class PredicateAnalyzer
     {
         if (right.IndexableComparisons.Count == 0
             && right.ColumnComparisons.Count == 0
-            && right.ResidualConjuncts.Count == 0)
+            && right.ResidualConjuncts.Count == 0
+            && right.InListComparisons.Count == 0)
             return left;
 
         if (left.IndexableComparisons.Count == 0
             && left.ColumnComparisons.Count == 0
-            && left.ResidualConjuncts.Count == 0)
+            && left.ResidualConjuncts.Count == 0
+            && left.InListComparisons.Count == 0)
             return right;
 
         List<AnalyzedComparison> indexable = new(left.IndexableComparisons.Count + right.IndexableComparisons.Count);
@@ -98,13 +107,18 @@ public static class PredicateAnalyzer
         residual.AddRange(left.ResidualConjuncts);
         residual.AddRange(right.ResidualConjuncts);
 
-        return new PredicateAnalysis(indexable, columnComparisons, residual);
+        List<AnalyzedInList> inList = new(left.InListComparisons.Count + right.InListComparisons.Count);
+        inList.AddRange(left.InListComparisons);
+        inList.AddRange(right.InListComparisons);
+
+        return new PredicateAnalysis(indexable, columnComparisons, residual, inList);
     }
 
     public static NodeAst? BuildExecutionFilter(
         PredicateAnalysis analysis,
         QueryPlanStep? scanStep,
-        TableDescriptor table)
+        TableDescriptor table,
+        NodeAst? absorbedInListConjunct = null)
     {
         HashSet<NodeAst> conjuncts = new(ReferenceEqualityComparer.Instance);
 
@@ -118,6 +132,13 @@ public static class PredicateAnalyzer
         {
             if (scanStep is null || !IndexScanBoundAnalysis.IsComparisonAbsorbedByScan(comparison, scanStep, table))
                 conjuncts.Add(comparison.Conjunct);
+        }
+
+        // IN-list comparisons: include as residual filter unless absorbed by an IndexInListScanNode.
+        foreach (AnalyzedInList inList in analysis.InListComparisons)
+        {
+            if (!ReferenceEquals(inList.Conjunct, absorbedInListConjunct))
+                conjuncts.Add(inList.Conjunct);
         }
 
         return CombineConjuncts(conjuncts);
@@ -166,6 +187,73 @@ public static class PredicateAnalyzer
         }
 
         conjuncts.Add(node);
+    }
+
+    /// <summary>
+    /// Recognizes <c>column IN (v1, v2, …)</c> where the LHS is a bare column identifier and
+    /// every RHS item is a constant or resolved parameter. NULL items are silently dropped
+    /// (a NULL list value matches nothing in SQL). Returns false for expressions, column
+    /// references in the list, or subqueries — those stay residual.
+    /// </summary>
+    private static bool TryAnalyzeInMembership(
+        NodeAst conjunct,
+        Dictionary<string, ColumnValue>? parameters,
+        out AnalyzedInList? result)
+    {
+        result = null;
+
+        if (conjunct.nodeType != NodeType.ExprInMembership)
+            return false;
+
+        if (conjunct.leftAst?.nodeType != NodeType.Identifier || conjunct.leftAst.yytext is null)
+            return false;
+
+        if (conjunct.rightAst is null)
+            return false;
+
+        List<ColumnValue> values = new();
+        if (!TryExtractInListValues(conjunct.rightAst, parameters, values))
+            return false;
+
+        // An all-NULL list still has an empty non-null values list — valid but zero seeks.
+        string columnName = conjunct.leftAst.yytext;
+        result = new AnalyzedInList(columnName, values, conjunct);
+        return true;
+    }
+
+    private static bool TryExtractInListValues(
+        NodeAst node,
+        Dictionary<string, ColumnValue>? parameters,
+        List<ColumnValue> values)
+    {
+        if (node.nodeType == NodeType.ExprList)
+        {
+            if (node.leftAst is not null && !TryExtractInListValues(node.leftAst, parameters, values))
+                return false;
+            if (node.rightAst is not null && !TryExtractInListValues(node.rightAst, parameters, values))
+                return false;
+            return true;
+        }
+
+        // Reject bare column references in the list.
+        if (node.nodeType == NodeType.Identifier)
+            return false;
+
+        ColumnValue? value;
+        try
+        {
+            value = SqlExecutor.EvalExpr(node, new(), parameters);
+        }
+        catch (CamusDBException)
+        {
+            return false;
+        }
+
+        // NULL list values match nothing — skip them.
+        if (value.Type != ColumnType.Null)
+            values.Add(value);
+
+        return true;
     }
 
     private static bool TryAnalyzeBetween(

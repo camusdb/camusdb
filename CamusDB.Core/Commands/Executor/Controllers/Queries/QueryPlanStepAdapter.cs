@@ -8,6 +8,7 @@
 
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
+using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -53,6 +54,11 @@ internal static class QueryPlanStepAdapter
                     rangeScan.FromInclusive,
                     rangeScan.ToBound,
                     rangeScan.ToInclusive));
+                stepNodes.Add(node);
+                return;
+
+            case IndexInListScanNode:
+                steps.Add(new QueryPlanStep(QueryPlanStepType.InListScanFromIndex));
                 stepNodes.Add(node);
                 return;
 

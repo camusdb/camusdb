@@ -217,6 +217,19 @@ internal static class CostEstimator
                 });
             }
 
+            case IndexInListScanNode inListNode:
+            {
+                long n = inListNode.Values.Count;
+                bool isUnique = inListNode.Index.Type == CamusDB.Core.Catalogs.Models.IndexType.Unique;
+                return (n, new PlanCost
+                {
+                    EstimatedRows        = n,
+                    KvPointLookups       = isUnique ? n : 0,
+                    KvRangeScanEntries   = isUnique ? 0 : n,
+                    RowFetchesAfterIndex = n,
+                });
+            }
+
             case IndexRangeScanNode rangeNode:
             {
                 long rows = EstimateRangeScanRows(rangeNode, trc, stats, database, primaryTable);

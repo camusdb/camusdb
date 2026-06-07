@@ -39,8 +39,8 @@ public sealed class QueryPlanner
             : PredicateAnalyzer.AnalyzeTicket(ticket);
         plan.PredicateAnalysis = analysis;
 
-        (PhysicalPlanNode scanNode, QueryPlanStep? scanStep) = BuildScanNode(database, table, ticket, analysis);
-        plan.ExecutionFilter = PredicateAnalyzer.BuildExecutionFilter(analysis, scanStep, table);
+        (PhysicalPlanNode scanNode, QueryPlanStep? scanStep, NodeAst? absorbedInListConjunct) = BuildScanNode(database, table, ticket, analysis);
+        plan.ExecutionFilter = PredicateAnalyzer.BuildExecutionFilter(analysis, scanStep, table, absorbedInListConjunct);
 
         // Populate OutputOrdering on the scan node when the chosen index scan guarantees the
         // requested ORDER BY ordering (QP6.2 / R4). The planner then uses this property to
@@ -284,7 +284,7 @@ public sealed class QueryPlanner
         return scanLimit;
     }
 
-    private (PhysicalPlanNode ScanNode, QueryPlanStep? ScanStep) BuildScanNode(
+    private (PhysicalPlanNode ScanNode, QueryPlanStep? ScanStep, NodeAst? AbsorbedInListConjunct) BuildScanNode(
         DatabaseDescriptor database,
         TableDescriptor table,
         QueryTicket ticket,
@@ -312,8 +312,47 @@ public sealed class QueryPlanner
             }
         }
 
+        // R15b finding #1: if a predicate-driven range scan was selected, check whether a unique
+        // single-column IN-list on another column would be cheaper. Unique point-lookups have a
+        // deterministic cost of 2·N (N index reads + N row fetches), making them a safe bet against
+        // range scans of unknown cardinality. Guard: never switch when the range scan was chosen
+        // specifically to satisfy ORDER BY (that would lose sort-elision).
+        if (scanStep is { Type: QueryPlanStepType.RangeScanFromIndex } rangeStep
+            && (rangeStep.FromBound is not null || rangeStep.ToBound is not null)
+            && analysis.InListComparisons is { Count: > 0 })
+        {
+            bool rangeSatisfiesOrder = ticket.OrderBy is { Count: > 0 }
+                && IndexScanSelector.ScanSatisfiesOrderBy(table, rangeStep, ticket.OrderBy);
+            if (!rangeSatisfiesOrder)
+            {
+                IndexInListScanNode? competitor = TryBuildCompetingInListScanNode(
+                    database, table, analysis.InListComparisons, rangeStep);
+                if (competitor is not null)
+                {
+                    NodeAst? absorbed = analysis.InListComparisons
+                        .FirstOrDefault(il => string.Equals(il.ColumnName, competitor.ColumnName, StringComparison.Ordinal))
+                        ?.Conjunct;
+                    return (competitor, null, absorbed);
+                }
+            }
+        }
+
         if (scanStep is not null)
-            return (ToScanNode(scanStep.Value), scanStep);
+            return (ToScanNode(scanStep.Value), scanStep, null);
+
+        // R15: when no regular index scan was chosen, try an index-driven IN-list scan.
+        // Only attempted when there are IN-list comparisons in the predicate analysis.
+        if (analysis.InListComparisons is { Count: > 0 })
+        {
+            IndexInListScanNode? inListNode = TryBuildInListScanNode(database, table, analysis.InListComparisons);
+            if (inListNode is not null)
+            {
+                NodeAst? absorbed = analysis.InListComparisons
+                    .FirstOrDefault(il => string.Equals(il.ColumnName, inListNode.ColumnName, StringComparison.Ordinal))
+                    ?.Conjunct;
+                return (inListNode, null, absorbed);
+            }
+        }
 
         if (!string.IsNullOrEmpty(ticket.IndexName))
         {
@@ -332,11 +371,155 @@ public sealed class QueryPlanner
             }
 
             QueryPlanStep forcedIndexStep = new(QueryPlanStepType.FullScanFromIndex, index);
-            return (new TableScanNode(TableScanSource.ForcedIndex, index), forcedIndexStep);
+            return (new TableScanNode(TableScanSource.ForcedIndex, index), forcedIndexStep, null);
         }
 
         QueryPlanStep tableScanStep = new(QueryPlanStepType.FullScanFromTableIndex);
-        return (new TableScanNode(TableScanSource.PrimaryRows), tableScanStep);
+        return (new TableScanNode(TableScanSource.PrimaryRows), tableScanStep, null);
+    }
+
+    /// <summary>
+    /// Attempts to build an <see cref="IndexInListScanNode"/> for the first IN-list comparison
+    /// whose column has a usable index and whose list size passes the cost gate.
+    ///
+    /// Cost gate (R15):
+    ///   • With stats: prefer seeks when <c>2·N &lt; tableRowCount</c>
+    ///     (each seek = 1 index read + 1 row fetch).
+    ///   • Without stats: allow up to <c>MaxInListSizeWithoutStats</c> values (1000).
+    ///
+    /// Unique indexes support all column types via <c>LookupUnique</c>.
+    /// Non-unique indexes use an equality-as-range scan: types with a computable successor
+    /// (Integer64, Float64, Bool) use <c>[v, successor(v))</c>; String and Id use an
+    /// exact-match scan <c>[v, v]</c> inclusive — <see cref="KvTableStore.ScanIndex"/> appends
+    /// a high sentinel for non-unique, so all <c>encode(v)+rowIdHex</c> entries are captured
+    /// and the decoded-key bounds filter keeps only rows where key == v (R15b).
+    /// </summary>
+    private IndexInListScanNode? TryBuildInListScanNode(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        IReadOnlyList<AnalyzedInList> inListComparisons)
+    {
+        const int MaxInListSizeWithoutStats = 1000;
+
+        foreach (AnalyzedInList inList in inListComparisons)
+        {
+            if (inList.Values.Count == 0)
+                continue;
+
+            TableIndexSchema? bestIndex = null;
+            bool bestIsUnique = false;
+
+            foreach (TableIndexSchema index in table.Indexes.Values)
+            {
+                if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+                    continue;
+
+                if (index.Columns.Length == 0
+                    || !string.Equals(index.Columns[0], inList.ColumnName, StringComparison.Ordinal))
+                    continue;
+
+                bool isUnique = index.Type == IndexType.Unique;
+
+                // Unique index: requires all key columns for LookupUnique — only single-column unique
+                // indexes are eligible (a composite unique index needs a full composite key to resolve
+                // to a single row, and a partial key would silently find nothing).
+                if (isUnique && index.Columns.Length != 1)
+                    continue;
+
+                // Prefer unique single-column over non-unique; among equals pick first.
+                if (bestIndex is null || (isUnique && !bestIsUnique))
+                {
+                    bestIndex = index;
+                    bestIsUnique = isUnique;
+                }
+            }
+
+            if (bestIndex is null)
+                continue;
+
+            int n = inList.Values.Count;
+
+            // Cost gate.
+            if (_stats is not null)
+            {
+                long? tableRowCount = _stats.GetRowCountEstimate(database, table);
+                if (tableRowCount is { } trc && trc > 0 && 2L * n >= trc)
+                    continue; // full scan is cheaper
+            }
+            else if (n > MaxInListSizeWithoutStats)
+            {
+                continue;
+            }
+
+            return new IndexInListScanNode(bestIndex, inList.ColumnName, inList.Values);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Attempts to find a unique single-column IN-list that is cheaper than an already-selected
+    /// range scan. Only unique single-column indexes compete here — their cost is exactly 2·N
+    /// (N point lookups + N row fetches), bounded and predictable regardless of data distribution.
+    ///
+    /// Cost comparison:
+    ///   • With stats: 2·N vs 2·estimated_range_rows.
+    ///   • Without stats: compete only for N ≤ <c>MaxCompetingInListSizeWithoutStats</c> (100),
+    ///     assuming N bounded point-lookups beat an unconstrained range scan.
+    /// </summary>
+    private IndexInListScanNode? TryBuildCompetingInListScanNode(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        IReadOnlyList<AnalyzedInList> inListComparisons,
+        QueryPlanStep rangeScanStep)
+    {
+        const int MaxCompetingInListSizeWithoutStats = 100;
+
+        foreach (AnalyzedInList inList in inListComparisons)
+        {
+            if (inList.Values.Count == 0)
+                continue;
+
+            // Only compete for unique single-column indexes: cost is exactly 2·N.
+            TableIndexSchema? uniqueIndex = null;
+            foreach (TableIndexSchema index in table.Indexes.Values)
+            {
+                if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+                    continue;
+                if (index.Type != IndexType.Unique || index.Columns.Length != 1)
+                    continue;
+                if (!string.Equals(index.Columns[0], inList.ColumnName, StringComparison.Ordinal))
+                    continue;
+                uniqueIndex = index;
+                break;
+            }
+
+            if (uniqueIndex is null)
+                continue;
+
+            int n = inList.Values.Count;
+
+            if (_stats is not null)
+            {
+                long? tableRowCount = _stats.GetRowCountEstimate(database, table);
+                if (tableRowCount is { } trc && trc > 0)
+                {
+                    var tempRangeNode = (IndexRangeScanNode)ToScanNode(rangeScanStep);
+                    long rangeRows = CostEstimator.EstimateRangeScanRows(tempRangeNode, trc, _stats, database, table);
+                    if (2L * n >= 2L * rangeRows)
+                        continue; // range scan is cheaper or equal
+                }
+                // Stats present but no row-count estimate — fall through and compete conservatively.
+            }
+            else if (n > MaxCompetingInListSizeWithoutStats)
+            {
+                continue; // without stats, only compete for small bounded lists
+            }
+
+            return new IndexInListScanNode(uniqueIndex, inList.ColumnName, inList.Values);
+        }
+
+        return null;
     }
 
     private static PhysicalPlanNode ToScanNode(QueryPlanStep step)
