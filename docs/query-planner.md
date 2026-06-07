@@ -304,7 +304,8 @@ All extend `PhysicalPlanNode` (`Models/Plans/PhysicalPlanNode.cs`): a single `In
 | `HavingFilterNode` | `HavingFilter` | Post-aggregate row filter |
 | `SortNode` | `SortBy` | In-memory N-key sort |
 | `ProjectNode` | `ReduceToProjections` | Column projection / aliasing |
-| `DistinctNode` | `Distinct` | Duplicate elimination over projection tuples |
+| `DistinctNode` | `Distinct` | Duplicate elimination over projection tuples (hash, or `IsStreaming` adjacent-row dedup) |
+| `SemiJoinNode` | `SemiJoinProbe` | Index-probing semi / anti / null-aware-anti join from an `IN`/`NOT IN` rewrite |
 | `LimitNode` | `Limit` | LIMIT / OFFSET |
 | `NestedLoopJoinNode` | _(join path only)_ | Nested-loop inner join |
 | `IndexNestedLoopJoinNode` | _(join path only)_ | Index-probed inner join |
@@ -621,6 +622,8 @@ execution.
 | Predicate classification | `Commands/Executor/Controllers/Queries/PredicateAnalyzer.cs` |
 | Index scan selection / bound absorption | `IndexScanSelector.cs`, `IndexScanBoundAnalysis.cs` |
 | Join predicate pushdown / equi-join analysis | `JoinPredicatePushdown.cs`, `JoinEquiJoinAnalyzer.cs` |
+| Semi-/anti-join rewrite (`IN`/`NOT IN`) | `SemiJoinAnalyzer.cs`, `SemiJoinExecutor.cs`, `SemiJoinSpec.cs`, `SemiJoinMode.cs`, `Models/Plans/SemiJoinNode.cs` |
+| Query-shape id / plan-cache hooks | `QueryShapeComputer.cs`, `QueryPlan.QueryShapeId`/`SchemaDeps` |
 | Plan tree → linear steps | `Commands/Executor/Controllers/Queries/QueryPlanStepAdapter.cs` |
 | Projection pushdown | `ProjectionPushdownPlanner.cs`, `RequiredColumnAnalyzer.cs` |
 | Plan rendering / EXPLAIN | `PlanRenderer.cs`, `ExplainExecutor.cs` |
@@ -630,7 +633,7 @@ execution.
 | Scan / filter / sort / aggregate / project / distinct / having / limit | `QueryScanner.cs`, `QueryFilterer.cs`, `QuerySorter.cs`, `QueryAggregator.cs`, `QueryProjector.cs`, `QueryDistincter.cs`, `QueryHavingEvaluator.cs`, `QueryLimiter.cs` |
 | Row merge for joins | `Commands/Executor/Controllers/Queries/QueryRowMerger.cs` |
 | Expression evaluator | `Commands/Executor/Controllers/SqlExecutor.cs` |
-| Table statistics (row counts) | `Statistics/StatisticsManager.cs`, `Statistics/Models/TableStatistics.cs`; flush cadence `CamusDBConfig.StatsFlushIntervalMs` / `stats_flush_interval_ms` |
+| Table statistics (row counts, index counts, column min/max) | `Statistics/StatisticsManager.cs`, `Statistics/Models/TableStatistics.cs`, `ColumnMinMax.cs`, `ScalarBound.cs`; flush cadence `CamusDBConfig.StatsFlushIntervalMs` / `stats_flush_interval_ms` |
 | KV table access | `Storage/Kv/KvTableStore.cs` |
 | Row encoding / decoding | `CommandsExecutor/Models/RowEncoder.cs` |
 | Query plan model | `Commands/Executor/Models/QueryPlan.cs`, `QueryPlanStep.cs`, `QueryPlanStepType.cs` |

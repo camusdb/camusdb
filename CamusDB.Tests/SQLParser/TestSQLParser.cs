@@ -454,6 +454,106 @@ public class TestSQLParser
         Assert.AreEqual("some_table", SelectFromTableName(ast));
     }
 
+    // ── Reserved keywords as backtick-quoted identifiers (gap 3) ──────────────
+
+    [Test]
+    public void TestReservedWordAsColumnName_Select()
+    {
+        // `key`, `select`, `from`, `index` are all reserved tokens; backtick-quoting
+        // must allow them as column references in SELECT.
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `key`, `select`, `from`, `index` FROM some_table");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.IdentifierList, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", SelectFromTableName(ast));
+    }
+
+    [Test]
+    public void TestReservedWordAsColumnName_CreateTable()
+    {
+        // Reserved words used as column names inside CREATE TABLE must parse successfully.
+        NodeAst ast = SQLParserProcessor.Parse(
+            "CREATE TABLE t (`key` STRING NOT NULL, `select` INT64, `index` STRING)");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        Assert.AreEqual("t", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestReservedWordAsColumnName_CreateTableWithConstraints()
+    {
+        // Full round-trip form: column named `key` with PRIMARY KEY and KEY constraints.
+        NodeAst ast = SQLParserProcessor.Parse(
+            "CREATE TABLE t (`id` OID, `key` STRING NOT NULL, PRIMARY KEY (`id`), KEY `key_idx` (`key`))");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+    }
+
+    [Test]
+    public void TestReservedWordAsColumnName_Where()
+    {
+        // Reserved-word column referenced in WHERE must parse correctly.
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SELECT `key` FROM some_table WHERE `key` = 'value'");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.IsNotNull(ast.extendedOne, "WHERE clause must be present");
+    }
+
+    [Test]
+    public void TestReservedWordAsColumnName_Insert()
+    {
+        // INSERT with a reserved-word column name in the field list.
+        NodeAst ast = SQLParserProcessor.Parse(
+            "INSERT INTO t (`key`, `select`) VALUES ('k1', 1)");
+
+        Assert.AreEqual(NodeType.Insert, ast.nodeType);
+    }
+
+    [Test]
+    public void TestReservedWordAsColumnName_NormalizesToLower()
+    {
+        // `KEY` (uppercase) is lowercased by escaped_identifier just like any other identifier.
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `KEY` FROM t");
+
+        Assert.AreEqual("key", ast.leftAst!.yytext,
+            "Backtick-quoted identifiers must be normalised to lower-case");
+    }
+
+    // ── SHOW CREATE TABLE round-trip: KEY / UNIQUE KEY inside CREATE TABLE ────
+
+    [Test]
+    public void TestCreateTable_InlineKeyConstraint()
+    {
+        // Grammar must accept KEY name (...) inline — this is what SHOW CREATE TABLE emits.
+        NodeAst ast = SQLParserProcessor.Parse(
+            "CREATE TABLE `robots` (`id` OID NOT NULL, `name` STRING, PRIMARY KEY (`id`), KEY `name_idx` (`name`))");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+    }
+
+    [Test]
+    public void TestCreateTable_InlineUniqueKeyConstraint()
+    {
+        // Grammar must accept UNIQUE KEY name (...) inline.
+        NodeAst ast = SQLParserProcessor.Parse(
+            "CREATE TABLE `robots` (`id` OID NOT NULL, `code` STRING NOT NULL, PRIMARY KEY (`id`), UNIQUE KEY `code_uk` (`code`))");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+    }
+
+    [Test]
+    public void TestCreateTable_InlineMixedConstraints()
+    {
+        // Multiple constraint types together (what SHOW CREATE TABLE produces for a fully
+        // indexed table).
+        NodeAst ast = SQLParserProcessor.Parse(
+            "CREATE TABLE `t` (`id` OID NOT NULL, `code` STRING NOT NULL, `name` STRING, " +
+            "PRIMARY KEY (`id`), UNIQUE KEY `code_uk` (`code`), KEY `name_idx` (`name`))");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+    }
+
     [Test]
     public void TestParseSimpleAggregate()
     {

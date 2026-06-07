@@ -76,6 +76,8 @@ public enum NodeType
     CreateTableFieldConstraintList,
     CreateTableConstraintList,
     CreateTableConstraintPrimaryKey,
+    CreateTableConstraintMultiIndex,
+    CreateTableConstraintUniqueIndex,
     ConstraintNull,
     ConstraintNotNull,
     ConstraintPrimaryKey,
