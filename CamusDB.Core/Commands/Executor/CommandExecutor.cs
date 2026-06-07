@@ -86,6 +86,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly ISchemaDdlForwarder? schemaDdlForwarder;
 
+    private readonly SQLParser.SqlParserCache sqlParserCache;
+
     // Number of rows indexed per Kahuna transaction during backfill.  Committing in bounded
     // batches keeps transaction size manageable and allows a leader-change resume to skip
     // already-indexed rows via the persisted StartOffset checkpoint.
@@ -138,6 +140,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder);
         semiJoinAnalyzer = new SemiJoinAnalyzer(tableOpener);
         explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor, statisticsManager, semiJoinAnalyzer);
+
+        sqlParserCache = new SQLParser.SqlParserCache(
+            logger,
+            CamusDBConfig.SqlParserCacheTtlSeconds,
+            CamusDBConfig.SqlParserCacheMaxEntries,
+            CamusDBConfig.SqlParserCacheSweepSeconds);
     }
 
     #region database
@@ -897,7 +905,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
+        NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
@@ -1115,7 +1123,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
+        NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
@@ -1166,7 +1174,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
+        NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
 
@@ -1293,5 +1301,6 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await databaseCloser.DisposeAsync();
+        await sqlParserCache.DisposeAsync().ConfigureAwait(false);
     }
 }

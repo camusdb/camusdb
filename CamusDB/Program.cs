@@ -42,6 +42,9 @@ if (opts.InitialCluster.Any()) config.Peers = [.. opts.InitialCluster];
 
 // Apply process-wide tunables (all modes) before the engine starts.
 CamusDBConfig.StatsFlushIntervalMs = config.StatsFlushIntervalMs;
+CamusDBConfig.SqlParserCacheTtlSeconds = config.SqlParserCacheTtlSeconds;
+CamusDBConfig.SqlParserCacheMaxEntries = config.SqlParserCacheMaxEntries;
+CamusDBConfig.SqlParserCacheSweepSeconds = config.SqlParserCacheSweepSeconds;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 

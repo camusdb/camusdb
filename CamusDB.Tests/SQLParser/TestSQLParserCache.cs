@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Threading.Tasks;
 using NUnit.Framework;
 using CamusDB.Core;
 using CamusDB.Core.SQLParser;
@@ -14,150 +15,136 @@ namespace CamusDB.Tests.SQLParser;
 
 /// <summary>
 /// PC1.1 acceptance tests for the SQL parser AST cache.
+/// Each test owns its own <see cref="SqlParserCache"/> instance, so tests are fully
+/// independent — no shared state, no [NonParallelizable] required.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public class TestSQLParserCache
 {
-    private int _savedTtl;
-
-    [SetUp]
-    public void SetUp()
-    {
-        _savedTtl = CamusDBConfig.SqlParserCacheTtlSeconds;
-        // Enable caching with a long TTL for all tests unless the test overrides it.
-        CamusDBConfig.SqlParserCacheTtlSeconds = 300;
-        SqlParserCache.Clear();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        CamusDBConfig.SqlParserCacheTtlSeconds = _savedTtl;
-        SqlParserCache.Clear();
-    }
+    private static SqlParserCache EnabledCache()  => new(null, ttlSeconds: 300, maxEntries: 2048, sweepSeconds: 60);
+    private static SqlParserCache DisabledCache() => new(null, ttlSeconds: 0,   maxEntries: 2048, sweepSeconds: 60);
 
     // ── Cache hit: same reference ──────────────────────────────────────────────
 
     [Test]
-    public void ParseSameSql_SecondCallReturnsCachedReference()
+    public async Task ParseSameSql_SecondCallReturnsCachedReference()
     {
+        await using SqlParserCache cache = EnabledCache();
         const string sql = "SELECT id, name FROM users WHERE id = 1";
 
-        NodeAst first = SQLParserProcessor.Parse(sql);
-        NodeAst second = SQLParserProcessor.Parse(sql);
+        NodeAst first  = SQLParserProcessor.Parse(sql, cache);
+        NodeAst second = SQLParserProcessor.Parse(sql, cache);
 
         Assert.That(second, Is.SameAs(first),
             "Second parse of the same SQL must return the cached NodeAst reference");
     }
 
     [Test]
-    public void ParseDifferentSql_ReturnsDifferentReferences()
+    public async Task ParseDifferentSql_ReturnsDifferentReferences()
     {
-        NodeAst a = SQLParserProcessor.Parse("SELECT a FROM t");
-        NodeAst b = SQLParserProcessor.Parse("SELECT b FROM t");
+        await using SqlParserCache cache = EnabledCache();
+
+        NodeAst a = SQLParserProcessor.Parse("SELECT a FROM t", cache);
+        NodeAst b = SQLParserProcessor.Parse("SELECT b FROM t", cache);
 
         Assert.That(b, Is.Not.SameAs(a),
             "Different SQL strings must produce distinct NodeAst instances");
     }
 
     [Test]
-    public void CacheCount_IncreasesOnFirstParse_StaysStableOnHit()
+    public async Task CacheCount_IncreasesOnFirstParse_StaysStableOnHit()
     {
-        Assert.That(SqlParserCache.Count, Is.EqualTo(0));
+        await using SqlParserCache cache = EnabledCache();
+        Assert.That(cache.Count, Is.EqualTo(0));
 
-        SQLParserProcessor.Parse("SELECT id FROM users");
-        Assert.That(SqlParserCache.Count, Is.EqualTo(1));
+        SQLParserProcessor.Parse("SELECT id FROM users", cache);
+        Assert.That(cache.Count, Is.EqualTo(1));
 
         // Second call is a cache hit — no new entry.
-        SQLParserProcessor.Parse("SELECT id FROM users");
-        Assert.That(SqlParserCache.Count, Is.EqualTo(1));
+        SQLParserProcessor.Parse("SELECT id FROM users", cache);
+        Assert.That(cache.Count, Is.EqualTo(1));
     }
 
     [Test]
-    public void ParseTwoDistinctSql_CacheCountIsTwo()
+    public async Task ParseTwoDistinctSql_CacheCountIsTwo()
     {
-        SQLParserProcessor.Parse("SELECT a FROM t1");
-        SQLParserProcessor.Parse("SELECT b FROM t2");
+        await using SqlParserCache cache = EnabledCache();
 
-        Assert.That(SqlParserCache.Count, Is.EqualTo(2));
+        SQLParserProcessor.Parse("SELECT a FROM t1", cache);
+        SQLParserProcessor.Parse("SELECT b FROM t2", cache);
+
+        Assert.That(cache.Count, Is.EqualTo(2));
     }
 
     // ── Syntax error: not cached ───────────────────────────────────────────────
 
     [Test]
-    public void ParseSyntaxError_IsNotCached_AndRethrowsOnEveryCall()
+    public async Task ParseSyntaxError_IsNotCached_AndRethrowsOnEveryCall()
     {
+        await using SqlParserCache cache = EnabledCache();
         const string bad = "SELECT FROM WHERE";
 
-        Assert.That(SqlParserCache.Count, Is.EqualTo(0));
+        Assert.That(cache.Count, Is.EqualTo(0));
 
-        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse(bad));
-        Assert.That(SqlParserCache.Count, Is.EqualTo(0), "Syntax errors must not be cached");
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse(bad, cache));
+        Assert.That(cache.Count, Is.EqualTo(0), "Syntax errors must not be cached");
 
         // Second call must also throw — not silently succeed or return null.
-        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse(bad));
-        Assert.That(SqlParserCache.Count, Is.EqualTo(0));
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse(bad, cache));
+        Assert.That(cache.Count, Is.EqualTo(0));
     }
 
     [Test]
-    public void ParseSyntaxError_DoesNotPolluteCacheForOtherSql()
+    public async Task ParseSyntaxError_DoesNotPolluteCacheForOtherSql()
     {
-        const string bad = "SELECT FROM WHERE";
+        await using SqlParserCache cache = EnabledCache();
+        const string bad  = "SELECT FROM WHERE";
         const string good = "SELECT id FROM users";
 
-        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse(bad));
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse(bad, cache));
 
-        NodeAst first = SQLParserProcessor.Parse(good);
-        NodeAst second = SQLParserProcessor.Parse(good);
+        NodeAst first  = SQLParserProcessor.Parse(good, cache);
+        NodeAst second = SQLParserProcessor.Parse(good, cache);
 
         Assert.That(second, Is.SameAs(first));
-        Assert.That(SqlParserCache.Count, Is.EqualTo(1));
+        Assert.That(cache.Count, Is.EqualTo(1));
     }
 
     // ── Disabled cache ─────────────────────────────────────────────────────────
 
     [Test]
-    public void CacheDisabled_NothingIsCached_ParseAlwaysReturnsNewInstance()
+    public async Task CacheDisabled_NothingIsCached_ParseAlwaysReturnsNewInstance()
     {
-        CamusDBConfig.SqlParserCacheTtlSeconds = 0;
-
+        await using SqlParserCache cache = DisabledCache();
         const string sql = "SELECT id FROM users";
 
-        NodeAst first = SQLParserProcessor.Parse(sql);
-        NodeAst second = SQLParserProcessor.Parse(sql);
+        NodeAst first  = SQLParserProcessor.Parse(sql, cache);
+        NodeAst second = SQLParserProcessor.Parse(sql, cache);
 
         Assert.That(second, Is.Not.SameAs(first),
             "With cache disabled each parse must return a fresh instance");
-        Assert.That(SqlParserCache.Count, Is.EqualTo(0));
+        Assert.That(cache.Count, Is.EqualTo(0));
     }
 
     [Test]
-    public void CacheDisabledWithNegativeTtl_BehavesLikeZeroTtl()
+    public async Task CacheDisabled_IsEnabledIsFalse()
     {
-        CamusDBConfig.SqlParserCacheTtlSeconds = -1;
+        await using SqlParserCache cache = DisabledCache();
 
-        const string sql = "SELECT id FROM orders";
-
-        NodeAst first = SQLParserProcessor.Parse(sql);
-        NodeAst second = SQLParserProcessor.Parse(sql);
-
-        Assert.That(second, Is.Not.SameAs(first));
-        Assert.That(SqlParserCache.Count, Is.EqualTo(0));
+        Assert.That(cache.IsEnabled, Is.False);
+        Assert.That(cache.Count, Is.EqualTo(0));
     }
 
     // ── Parameterized queries share a cached AST ───────────────────────────────
 
     [Test]
-    public void ParameterizedQuery_SameTextDifferentValues_SharesCachedAst()
+    public async Task ParameterizedQuery_SameTextDifferentValues_SharesCachedAst()
     {
-        // Two executions of the same parameterized statement (the parameter value is supplied
-        // outside the SQL text, at eval time). The SQL text is identical, so both hits use the
-        // same cached NodeAst — the core correctness property of the cache.
+        await using SqlParserCache cache = EnabledCache();
         const string sql = "SELECT id FROM users WHERE id = @id";
 
-        NodeAst first = SQLParserProcessor.Parse(sql);
-        NodeAst second = SQLParserProcessor.Parse(sql);
+        NodeAst first  = SQLParserProcessor.Parse(sql, cache);
+        NodeAst second = SQLParserProcessor.Parse(sql, cache);
 
         Assert.That(second, Is.SameAs(first),
             "Parameterized SQL must share a single cached AST across executions");

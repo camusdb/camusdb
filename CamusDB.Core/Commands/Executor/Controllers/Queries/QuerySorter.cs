@@ -42,14 +42,20 @@ internal sealed class QuerySorter
 
     private static ColumnValue GetSortValue(QueryResultRow row, string columnName)
     {
-        if (!row.Row.TryGetValue(columnName, out ColumnValue? value))
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Sort column '{columnName}' is missing from result row");
-        }
+        // Joins key rows by the qualified name ("u.position") — try that first.
+        if (row.Row.TryGetValue(columnName, out ColumnValue? value))
+            return value;
 
-        return value;
+        // Single-table scan rows are keyed by the bare column name, so an alias-qualified
+        // ORDER BY column ("u.position") must fall back to its bare form ("position").
+        int dot = columnName.LastIndexOf('.');
+        if (dot >= 0 && dot < columnName.Length - 1
+            && row.Row.TryGetValue(columnName[(dot + 1)..], out value))
+            return value;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Sort column '{columnName}' is missing from result row");
     }
 
     private sealed class QueryResultRowOrderComparer : IComparer<QueryResultRow>

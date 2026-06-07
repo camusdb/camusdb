@@ -49,6 +49,30 @@ public class TestQuerySorter
     }
 
     [Test]
+    public async Task SortResultset_AliasQualifiedOrderColumn_resolvesToBareRowKey()
+    {
+        // Single-table aliased query: `ORDER BY u.position`, but scan rows are keyed by the
+        // bare column name "position". The sorter must fall back from the qualified name to the
+        // bare key. This only manifests with non-empty result sets (0-row sorts never look up).
+        QueryTicket ticket = MakeTicket(new QueryOrderBy("u.position", OrderType.Ascending));
+
+        List<QueryResultRow> rows =
+        [
+            Row(("position", 3L)),
+            Row(("position", 1L)),
+            Row(("position", 2L)),
+        ];
+
+        QuerySorter sorter = new();
+        List<QueryResultRow> sorted = await sorter.SortResultset(ticket, ToAsync(rows)).ToListAsync();
+
+        Assert.AreEqual(3, sorted.Count);
+        Assert.AreEqual(1L, sorted[0].Row["position"].LongValue);
+        Assert.AreEqual(2L, sorted[1].Row["position"].LongValue);
+        Assert.AreEqual(3L, sorted[2].Row["position"].LongValue);
+    }
+
+    [Test]
     public void SortResultset_MissingSortColumn_throws()
     {
         QueryTicket ticket = MakeTicket(new QueryOrderBy("missing", OrderType.Ascending));

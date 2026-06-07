@@ -32,20 +32,36 @@ public static class SQLParserProcessor
     /// When TTL is zero or negative the cache is bypassed and behaviour is identical to pre-PC1.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Parses <paramref name="sql"/> without any caching. Each call produces a fresh
+    /// <see cref="NodeAst"/>. Used directly by tests and internal utilities that do not
+    /// go through <see cref="CommandsExecutor.CommandExecutor"/>.
+    /// </summary>
     public static NodeAst Parse(string sql)
     {
-        long ttlMs = (long)CamusDBConfig.SqlParserCacheTtlSeconds * 1000;
+        sqlParser sqlParser = new();
+        NodeAst ast = sqlParser.Parse(sql);
+        IdentifierNormalizer.Normalize(ast);
+        return ast;
+    }
 
-        if (ttlMs > 0 && SqlParserCache.TryGet(sql, ttlMs, out NodeAst? cached))
+    /// <summary>
+    /// Parses <paramref name="sql"/> through the supplied <paramref name="cache"/>.
+    /// Returns the cached <see cref="NodeAst"/> on a hit (same reference, TTL slid);
+    /// parses, normalises, stores, and returns a fresh instance on a miss.
+    /// When the cache is disabled (<see cref="SqlParserCache.IsEnabled"/> is
+    /// <see langword="false"/>) behaves identically to <see cref="Parse(string)"/>.
+    /// </summary>
+    public static NodeAst Parse(string sql, SqlParserCache cache)
+    {
+        if (cache.TryGet(sql, out NodeAst? cached))
             return cached!;
 
         sqlParser sqlParser = new();
         NodeAst ast = sqlParser.Parse(sql);
         IdentifierNormalizer.Normalize(ast);
 
-        if (ttlMs > 0)
-            SqlParserCache.Store(sql, ast, ttlMs);
-
+        cache.Store(sql, ast);
         return ast;
     }
 }

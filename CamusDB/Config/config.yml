@@ -40,3 +40,19 @@ data_dir: /tmp/camusdb/
 #   -1 = never auto-flush; persist only on explicit flush / database close
 #   >0 = cap flush frequency to roughly once per interval per table (default 5000)
 # stats_flush_interval_ms: 5000
+
+# SQL parser AST cache (PC1–PC3). Identical SQL texts skip lexing+parsing on the
+# second and later executions; the cached NodeAst is immutable and shared safely
+# across concurrent requests. Parameters are not part of the AST, so a parameterized
+# query with different values reuses the same cached tree.
+#
+# sql_parser_cache_ttl_seconds: sliding TTL in seconds; each cache hit extends the
+#   deadline. 0 disables the cache entirely (pre-cache behaviour). Default: 300.
+# sql_parser_cache_max_entries: cap on the number of distinct SQL texts held at once.
+#   When full, new statements are skipped until the sweep reclaims expired entries.
+#   0 = unbounded (no cap). Default: 10000.
+# sql_parser_cache_sweep_seconds: how often the background sweep task removes expired
+#   entries. Must be > 0. Default: 60.
+# sql_parser_cache_ttl_seconds: 300
+# sql_parser_cache_max_entries: 2048
+# sql_parser_cache_sweep_seconds: 60

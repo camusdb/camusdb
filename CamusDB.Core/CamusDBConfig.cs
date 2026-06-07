@@ -51,6 +51,27 @@ public static class CamusDBConfig
     public static int SqlParserCacheTtlSeconds = 300;
 
     /// <summary>
+    /// Maximum number of entries the SQL parser AST cache may hold at any moment (PC2).
+    /// When the cache is at capacity new statements are silently dropped until the background
+    /// sweep reclaims expired entries. This is a safety bound against floods of unique ad-hoc
+    /// SQL, not a precise LRU.
+    /// <para>
+    ///   <c>0</c> — no cap (unbounded, same risk as Kahuna's pure-TTL cache).
+    /// </para>
+    /// Default: <c>10_000</c>.
+    /// Wired to <c>config.yml</c> in PC3.
+    /// </summary>
+    public static int SqlParserCacheMaxEntries = 2048;
+
+    /// <summary>
+    /// How often, in seconds, the background sweep task removes expired SQL parser cache entries (PC2).
+    /// Must be &gt; 0.
+    /// Default: <c>60</c> seconds.
+    /// Wired to <c>config.yml</c> in PC3.
+    /// </summary>
+    public static int SqlParserCacheSweepSeconds = 60;
+
+    /// <summary>
     /// The internal name used to identify primary key indices.
     /// This name should only be changed in a new installation. Changing it after
     /// having databases with tables and data can cause unexpected problems.

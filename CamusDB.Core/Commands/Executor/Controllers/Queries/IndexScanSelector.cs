@@ -336,13 +336,21 @@ internal static class IndexScanSelector
 
         for (int i = 0; i < max; i++)
         {
-            if (!string.Equals(index.Columns[i], orderBy[i].ColumnName, StringComparison.Ordinal))
+            // Index columns are bare; an ORDER BY column may be alias-qualified ("u.position").
+            // Compare against the bare column name so aliased single-table ORDER BY can elide.
+            if (!string.Equals(index.Columns[i], BareColumnName(orderBy[i].ColumnName), StringComparison.Ordinal))
                 break;
 
             matched++;
         }
 
         return matched;
+    }
+
+    private static string BareColumnName(string columnName)
+    {
+        int dot = columnName.LastIndexOf('.');
+        return dot >= 0 && dot < columnName.Length - 1 ? columnName[(dot + 1)..] : columnName;
     }
 
     private static bool TryGetEquality(

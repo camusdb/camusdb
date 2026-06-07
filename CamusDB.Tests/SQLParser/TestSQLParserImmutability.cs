@@ -7,7 +7,6 @@
  */
 
 using NUnit.Framework;
-using CamusDB.Core;
 using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Tests.SQLParser;
@@ -20,27 +19,8 @@ namespace CamusDB.Tests.SQLParser;
 /// the parameter name, not the value, so the same SQL text with different parameter values
 /// produces structurally identical trees.
 /// </summary>
-[NonParallelizable]
 public class TestSQLParserImmutability
 {
-    private int _savedTtl;
-
-    [SetUp]
-    public void SetUp()
-    {
-        _savedTtl = CamusDBConfig.SqlParserCacheTtlSeconds;
-        // Disable the cache so these pre-cache invariant tests see raw parser behaviour.
-        CamusDBConfig.SqlParserCacheTtlSeconds = 0;
-        SqlParserCache.Clear();
-    }
-
-    [TearDown]
-    public void TearDown()
-    {
-        CamusDBConfig.SqlParserCacheTtlSeconds = _savedTtl;
-        SqlParserCache.Clear();
-    }
-
     // Recursive structural equality: same node types and yytext at every position.
     private static bool StructurallyEqual(NodeAst? a, NodeAst? b)
     {
@@ -83,10 +63,10 @@ public class TestSQLParserImmutability
         NodeAst first = SQLParserProcessor.Parse(sql);
         NodeAst second = SQLParserProcessor.Parse(sql);
 
-        // Must be different object references (cache disabled in SetUp).
-        Assert.That(first, Is.Not.SameAs(second), "With cache disabled each parse returns a fresh instance");
+        // No-cache overload always returns a fresh instance.
+        Assert.That(first, Is.Not.SameAs(second), "Parse without a cache always returns a fresh instance");
 
-        // Must be structurally identical: same shape, same node types, same text at each node.
+        // But the shape must be identical.
         Assert.That(StructurallyEqual(first, second), Is.True,
             "Parsing the same SQL twice must yield structurally equal trees");
     }
@@ -140,10 +120,8 @@ public class TestSQLParserImmutability
     public void IdentifierNormalization_AlreadyAppliedBeforeReturn()
     {
         // IdentifierNormalizer runs inside Parse, so the returned tree has lower-cased identifiers.
-        // Verifies that the normalization step is complete before the tree would enter the cache.
         NodeAst ast = SQLParserProcessor.Parse("SELECT MyCol FROM MyTable");
 
-        // Walk to the first identifier
         static NodeAst? FindIdentifier(NodeAst? n)
         {
             if (n is null) return null;

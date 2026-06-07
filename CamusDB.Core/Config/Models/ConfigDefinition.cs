@@ -60,6 +60,31 @@ public class ConfigDefinition
     /// </summary>
     public int StatsFlushIntervalMs { get; set; } = 5000;
 
+    /// <summary>
+    /// Sliding TTL for the SQL parser AST cache, in seconds (PC1/PC3).
+    /// Each cache hit extends the deadline by this interval.
+    /// <c>0</c> disables the cache entirely (every parse re-lexes from scratch).
+    /// Must be <c>&gt;= 0</c>.
+    /// Maps to <c>CamusDBConfig.SqlParserCacheTtlSeconds</c>.
+    /// </summary>
+    public int SqlParserCacheTtlSeconds { get; set; } = 300;
+
+    /// <summary>
+    /// Maximum number of distinct SQL texts the parser AST cache may hold (PC2/PC3).
+    /// When the cap is reached, new statements are silently skipped until the background
+    /// sweep reclaims expired entries. <c>0</c> = unbounded (no cap).
+    /// Must be <c>&gt;= 0</c>.
+    /// Maps to <c>CamusDBConfig.SqlParserCacheMaxEntries</c>.
+    /// </summary>
+    public int SqlParserCacheMaxEntries { get; set; } = 2048;
+
+    /// <summary>
+    /// How often, in seconds, the background sweep task removes expired SQL parser cache
+    /// entries (PC2/PC3). Must be <c>&gt; 0</c>.
+    /// Maps to <c>CamusDBConfig.SqlParserCacheSweepSeconds</c>.
+    /// </summary>
+    public int SqlParserCacheSweepSeconds { get; set; } = 60;
+
     public bool IsClusterMode => Mode == "cluster" || Peers.Count > 0;
 
     /// <summary>
@@ -93,6 +118,18 @@ public class ConfigDefinition
             throw Invalid(
                 "'stats_flush_interval_ms' must be >= 0 (interval), 0 (immediate), or -1 " +
                 $"(disabled), got {StatsFlushIntervalMs}");
+
+        if (SqlParserCacheTtlSeconds < 0)
+            throw Invalid(
+                $"'sql_parser_cache_ttl_seconds' must be >= 0 (0 = disabled), got {SqlParserCacheTtlSeconds}");
+
+        if (SqlParserCacheMaxEntries < 0)
+            throw Invalid(
+                $"'sql_parser_cache_max_entries' must be >= 0 (0 = unbounded), got {SqlParserCacheMaxEntries}");
+
+        if (SqlParserCacheSweepSeconds <= 0)
+            throw Invalid(
+                $"'sql_parser_cache_sweep_seconds' must be > 0, got {SqlParserCacheSweepSeconds}");
 
         // Forwarding endpoints: http_peers, when supplied, must be parallel to peers so
         // the raft-endpoint → HTTP base-URI map in Program.cs is unambiguous. An entry
