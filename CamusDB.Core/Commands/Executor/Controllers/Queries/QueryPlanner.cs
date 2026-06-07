@@ -59,6 +59,39 @@ public sealed class QueryPlanner
         bool scanSatisfiesOrderBy = scanNode.OutputOrdering is not null;
         plan.ScanRowLimit = TryComputeScanRowLimit(ticket, plan.ExecutionFilter, scanSatisfiesOrderBy);
 
+        // R12: streaming distinct detection.
+        // When SELECT DISTINCT projects only simple column identifiers that are covered by
+        // an index prefix, use a streaming (adjacent-key) dedup instead of a hash set,
+        // reducing memory from O(distinct-count) to O(1).
+        // Override the scan with a full ordered index scan when no predicate-driven scan was
+        // chosen (scanStep == null). Only override when scanStep is null so predicate-driven
+        // scans are not disrupted; correctness of ExecutionFilter is unaffected since a
+        // FullScanFromIndex step consumes no predicates, same as a null/table-scan step.
+        bool isStreamingDistinct = false;
+        IReadOnlyList<QueryOrderBy>? streamingDistinctOrdering = null;
+        if (ticket.IsDistinct && ticket.GroupBy is not { Count: > 0 })
+        {
+            List<string>? distinctCols = TryExtractDistinctColumns(ticket.Projection);
+            if (distinctCols is { Count: > 0 } && AllDistinctColumnsAreNotNull(table, distinctCols))
+            {
+                if (scanStep is not null && IndexScanSelector.ScanStepCoversDistinctColumns(scanStep.Value, distinctCols))
+                {
+                    isStreamingDistinct = true;
+                    streamingDistinctOrdering = BuildDistinctOrdering(scanStep.Value.Index!, distinctCols);
+                }
+                else if (scanStep is null || scanStep.Value.Type == QueryPlanStepType.FullScanFromTableIndex)
+                {
+                    TableIndexSchema? distinctIndex = IndexScanSelector.TryFindStreamingDistinctIndex(table, distinctCols);
+                    if (distinctIndex is not null)
+                    {
+                        scanNode = new TableScanNode(TableScanSource.ForcedIndex, distinctIndex);
+                        isStreamingDistinct = true;
+                        streamingDistinctOrdering = BuildDistinctOrdering(distinctIndex, distinctCols);
+                    }
+                }
+            }
+        }
+
         PhysicalPlanNode root = scanNode;
 
         if (plan.ExecutionFilter is not null)
@@ -122,10 +155,22 @@ public sealed class QueryPlanner
                         root = new ProjectNode(root);
                 }
 
-                root = new DistinctNode(root);
+                // R12: streaming distinct — O(1) memory dedup when the scan guarantees ordered output.
+                DistinctNode distinctNode = new(root) { IsStreaming = isStreamingDistinct };
+                if (isStreamingDistinct && streamingDistinctOrdering is not null)
+                    distinctNode.OutputOrdering = streamingDistinctOrdering;
+                root = distinctNode;
 
                 if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
-                    root = new SortNode(root) { OrderBy = ticket.OrderBy, OutputOrdering = ticket.OrderBy };
+                {
+                    // Elide SortNode when the streaming-distinct ordering already satisfies ORDER BY.
+                    bool orderElided = isStreamingDistinct
+                        && streamingDistinctOrdering is not null
+                        && StreamingOrderSatisfiesOrderBy(streamingDistinctOrdering, ticket.OrderBy);
+
+                    if (!orderElided)
+                        root = new SortNode(root) { OrderBy = ticket.OrderBy, OutputOrdering = ticket.OrderBy };
+                }
 
                 if (ticket.Limit is not null || ticket.Offset is not null)
                     root = new LimitNode(root)
@@ -339,6 +384,83 @@ public sealed class QueryPlanner
                 (result ??= new()).Add(proj);
         }
         return result;
+    }
+
+    /// <summary>
+    /// Extracts a flat list of bare column names from the projection list for R12 streaming-distinct
+    /// eligibility. Returns null if any projection item is a non-identifier expression (aggregate,
+    /// arithmetic, alias over expression, wildcard) — those block streaming.
+    /// </summary>
+    // Indexes don't hold NULL-keyed rows (BackfillIndex throws on NULL), so a full index
+    // scan silently omits the NULL group. Gate streaming to NOT NULL columns only.
+    private static bool AllDistinctColumnsAreNotNull(TableDescriptor table, IReadOnlyList<string> distinctCols)
+    {
+        if (table.Schema.Columns is null)
+            return false;
+
+        foreach (string col in distinctCols)
+        {
+            TableColumnSchema? schema = table.Schema.Columns.Find(c => c.Name == col);
+            if (schema is null || !schema.NotNull)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static List<string>? TryExtractDistinctColumns(List<NodeAst>? projection)
+    {
+        if (projection is null || projection.Count == 0)
+            return null;
+
+        List<string> cols = new(projection.Count);
+        foreach (NodeAst proj in projection)
+        {
+            // Unwrap a simple alias (col AS alias) to get the underlying identifier.
+            NodeAst expr = proj.nodeType == NodeType.ExprAlias ? proj.leftAst! : proj;
+
+            if (expr.nodeType != NodeType.Identifier || expr.yytext is null)
+                return null; // expression — streaming not possible
+
+            cols.Add(expr.yytext);
+        }
+
+        return cols;
+    }
+
+    /// <summary>
+    /// Builds an ascending OutputOrdering from the first <c>distinctCols.Count</c> columns
+    /// of <paramref name="index"/>. This is the order a streaming-distinct scan guarantees.
+    /// </summary>
+    private static List<QueryOrderBy> BuildDistinctOrdering(TableIndexSchema index, IReadOnlyList<string> distinctCols)
+    {
+        List<QueryOrderBy> ordering = new(distinctCols.Count);
+        for (int i = 0; i < distinctCols.Count; i++)
+            ordering.Add(new QueryOrderBy(index.Columns[i], OrderType.Ascending));
+        return ordering;
+    }
+
+    /// <summary>
+    /// Returns true when the streaming-distinct ordering (ascending by the index prefix) is a
+    /// prefix of the requested ORDER BY, allowing the SortNode to be elided (R12 sort elision).
+    /// </summary>
+    private static bool StreamingOrderSatisfiesOrderBy(
+        IReadOnlyList<QueryOrderBy> streamingOrdering,
+        IReadOnlyList<QueryOrderBy> orderBy)
+    {
+        if (orderBy.Count > streamingOrdering.Count)
+            return false;
+
+        for (int i = 0; i < orderBy.Count; i++)
+        {
+            if (orderBy[i].Type != OrderType.Ascending)
+                return false; // streaming only guarantees ascending
+
+            if (!string.Equals(orderBy[i].ColumnName, streamingOrdering[i].ColumnName, StringComparison.Ordinal))
+                return false;
+        }
+
+        return true;
     }
 
     private static long? EvalLong(NodeAst? expr, QueryTicket ticket)

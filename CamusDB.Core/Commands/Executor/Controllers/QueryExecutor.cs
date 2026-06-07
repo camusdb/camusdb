@@ -124,7 +124,13 @@ internal sealed class QueryExecutor
                     if (plan.DataCursor is null)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
-                    plan.DataCursor = queryDistincter.DistinctResultset(plan.Ticket, plan.DataCursor);
+                    // R12: route to streaming (adjacent-key) or hash dedup based on plan node flag.
+                    {
+                        DistinctNode distinctNode = (DistinctNode)plan.StepNodes[i];
+                        plan.DataCursor = distinctNode.IsStreaming
+                            ? queryDistincter.StreamingDistinctRows(plan.DataCursor)
+                            : queryDistincter.DistinctResultset(plan.Ticket, plan.DataCursor);
+                    }
                     break;
 
                 case QueryPlanStepType.Aggregate:

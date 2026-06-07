@@ -373,8 +373,8 @@ public sealed class TestStatisticsR9b : BaseTest
             "EXPLAIN SELECT * FROM robots WHERE year >= 2023 AND year < 2025");
 
         bool hasIndexScan = rows.Any(r =>
-            r.Row.TryGetValue("node", out ColumnValue n)
-            && n.StrValue is not null
+            r.Row.TryGetValue("node", out ColumnValue? n)
+            && n!.StrValue is not null
             && n.StrValue.Contains("index"));
 
         Assert.IsTrue(hasIndexScan,
@@ -398,8 +398,8 @@ public sealed class TestStatisticsR9b : BaseTest
             "EXPLAIN SELECT * FROM robots WHERE year > 2000");
 
         bool hasTableScan = rows.Any(r =>
-            r.Row.TryGetValue("node", out ColumnValue n)
-            && n.StrValue is not null
+            r.Row.TryGetValue("node", out ColumnValue? n)
+            && n!.StrValue is not null
             && n.StrValue.Contains("table-scan"));
 
         Assert.IsTrue(hasTableScan,
@@ -407,7 +407,7 @@ public sealed class TestStatisticsR9b : BaseTest
     }
 
     [Test]
-    public async Task R9b_ScalarBoundCompareTo_OrdersCorrectly()
+    public Task R9b_ScalarBoundCompareTo_OrdersCorrectly()
     {
         // Unit-level check of ScalarBound.CompareTo for integer and float types.
         var a = new ScalarBound { Type = ColumnType.Integer64, LongValue = 10 };
@@ -421,6 +421,8 @@ public sealed class TestStatisticsR9b : BaseTest
         var fa = new ScalarBound { Type = ColumnType.Float64, FloatValue = 1.5 };
         var fb = new ScalarBound { Type = ColumnType.Float64, FloatValue = 3.0 };
         Assert.IsTrue(fa.CompareTo(fb) < 0, "1.5 < 3.0");
+
+        return Task.CompletedTask;
     }
 
     // ─────────────────────────────────────────────────────────────────────────

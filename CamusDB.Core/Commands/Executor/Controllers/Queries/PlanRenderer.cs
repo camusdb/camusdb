@@ -95,7 +95,7 @@ public static class PlanRenderer
             SortNode n => RenderSort(n),
             LimitNode n => RenderLimit(n),
             ProjectNode => "project",
-            DistinctNode => "distinct",
+            DistinctNode n => n.IsStreaming ? "distinct(streaming: true)" : "distinct(hash)",
             NestedLoopJoinNode n => RenderNestedLoopJoin(n),
             IndexNestedLoopJoinNode n => RenderIndexNestedLoopJoin(n),
             DerivedTableScanNode n => RenderDerivedTableScan(n),

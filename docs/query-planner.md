@@ -81,8 +81,8 @@ There are two ways to choose a plan:
   selectivity) and pick the cheapest. More powerful, but needs statistics and a cost model.
 
 **CamusDB is primarily heuristic-based, with a small cost model bolted on.** This is intentional: the
-project follows the "heuristics before CBO" path. A first cost model (R9) now exists — `CostEstimator`
-annotates every plan node with an estimated row count and a `PlanCost`, fed by R8 row-count statistics —
+project follows the "heuristics before CBO" path. A first cost model now exists — `CostEstimator`
+annotates every plan node with an estimated row count and a `PlanCost`, fed by row-count statistics —
 but it currently drives exactly **one** decision: whether a predicate-driven index range scan should be
 replaced by a full table scan. Everything else (which index, join algorithm, operator order) is still
 decided by deterministic rules. So the accurate mental model is: *rules choose the plan; the cost model
@@ -109,7 +109,7 @@ Two subtleties worth internalizing early:
    `SqlExecutor.EvalExpr`. The models wrap *structure* (which table, which projection) in typed objects
    but keep *expressions* as AST. So you will see `NodeAst` flowing all the way into the executor.
 2. **A `QueryPlan` holds the plan twice.** `Root` is the real tree (used by the renderer, EXPLAIN, the
-   join executor, and all the R4 metadata). `Steps` is a flattened, leaf-first linear list produced by
+   join executor, and all the distributed-ready metadata). `Steps` is a flattened, leaf-first linear list produced by
    `QueryPlanStepAdapter`, consumed by the *single-table* executor, which predates the tree. They share
    the same node instances (the linear list points at the same `PhysicalPlanNode` objects), so per-node
    data like runtime stats is visible through both. When you add a node type, you touch both the tree
@@ -263,7 +263,7 @@ and join.
 3. `PredicateAnalyzer.BuildExecutionFilter` assembles the residual runtime filter (predicates the scan
    did not absorb) into one `NodeAst` AND-tree stored as `QueryPlan.ExecutionFilter`.
 4. If the chosen index scan already satisfies `ORDER BY`, the scan node's `OutputOrdering` is set
-   (R4) and the `SortNode` is **elided** — this is the single source of truth for sort elision.
+   and the `SortNode` is **elided** — this is the single source of truth for sort elision.
 5. `TryComputeScanRowLimit` pushes `LIMIT` (+ `OFFSET`) into the scan when safe (no filter, no
    aggregation, no GROUP BY/HAVING, no DISTINCT, and ORDER BY satisfied by the scan).
 
@@ -291,7 +291,7 @@ inline `ExecutionFilter` applied during the scan, avoiding a separate streaming 
 ### Physical plan nodes
 
 All extend `PhysicalPlanNode` (`Models/Plans/PhysicalPlanNode.cs`): a single `Input` child, plus
-`RequiredColumns` (projection pushdown) and the R4 distributed-ready properties (Part IV).
+`RequiredColumns` (projection pushdown) and the distributed-ready properties (Part IV).
 
 | Node | Step type | Meaning |
 |------|-----------|---------|
@@ -355,7 +355,7 @@ the ascending index encoding and forces a real `SortNode`.
 
 **File:** `Controllers/Queries/JoinQueryPlanner.cs`. Runs when `IsMultiSource`:
 
-1. **Join-order heuristics (R7)** — `JoinOrderOptimizer.Reorder` may reorder sources first (§Part V).
+1. **Join-order heuristics** — `JoinOrderOptimizer.Reorder` may reorder sources first (§Part V).
 2. **Predicate pushdown** — `JoinPredicatePushdown.Analyze` splits WHERE into per-source scan filters
    (`ScanFiltersByAlias`) and a cross-source `PostJoinFilter`.
 3. **Tree construction** — `BuildJoinTree` recurses the (possibly reordered) `QuerySource`:
@@ -419,7 +419,7 @@ for the join path so both executors agree:
 Being able to *see* a plan is essential for debugging the planner. CamusDB has an internal renderer and a
 user-facing `EXPLAIN`. (User-facing reference: [`docs/explain.md`](./explain.md).)
 
-## PlanRenderer (R1)
+## PlanRenderer
 
 **File:** `Controllers/Queries/PlanRenderer.cs`. Walks a `PhysicalPlanNode` tree and produces a
 deterministic, indented, multi-line string with one **canonical node name** per node — these names are
@@ -433,16 +433,16 @@ limit, project, distinct, nested-loop-join, index-nested-loop-join, derived-tabl
 `PlanRenderer.Render(plan, includeRequiredColumns, includeDistributedProperties)` produces the string
 form; `PlanRenderer.WalkNodes(root, plan)` yields `(name, detail)` pairs in depth-first, parent-before-
 child order. Both share one `GetRenderLine` so the string form and the EXPLAIN rows never diverge. The
-verbose `includeDistributedProperties` flag appends R4 metadata (`order=[…]`, `decomposable=…`).
+verbose `includeDistributedProperties` flag appends distributed-ready metadata (`order=[…]`, `decomposable=…`).
 
-## EXPLAIN (R2 parse, R3 execute)
+## EXPLAIN
 
 **Files:** grammar `explain_stmt`, `Controllers/Queries/ExplainExecutor.cs`, wired in
 `CommandExecutor.ExecuteSQLQuery`.
 
 `EXPLAIN [(LOGICAL|PHYSICAL)] SELECT …` runs **parse → bind → plan but not execution**, then returns one
 result row per plan node with columns: `stage`, `node`, `detail`, `estimated_rows`
-(`PhysicalPlanNode.EstimatedCardinality` from the R9 cost model), and `estimated_cost`
+(`PhysicalPlanNode.EstimatedCardinality` from the cost model), and `estimated_cost`
 (`PhysicalPlanNode.Cost.Total`). These are now populated for single-table plans; for join plans they are
 rough placeholders (see the cost-model caveats in Part V). `(LOGICAL)` and `(PHYSICAL)` currently render the same physical tree
 (there is no separate logical-plan representation yet); they differ only in the `stage` label.
@@ -452,7 +452,7 @@ treated as a plain explain.
 *Caveat:* because stage 2b/3b execute uncorrelated subqueries during planning, `EXPLAIN` of a query that
 contains a subquery does read storage for the inner query. The outer query is never executed.
 
-## EXPLAIN ANALYZE (R5)
+## EXPLAIN ANALYZE
 
 `EXPLAIN (ANALYZE) SELECT …` actually executes the query, drains the cursor, and adds **actual** runtime
 counters per node. Counters live in `PlanNodeStats` (`Models/Plans/PlanNodeStats.cs`):
@@ -471,7 +471,7 @@ Design points worth knowing:
 
 ---
 
-# Part IV — Distributed-ready plan properties (R4)
+# Part IV — Distributed-ready plan properties
 
 Even though execution is single-process today, plan nodes carry optional metadata so a future
 distributed executor (CockroachDB-style "do local work near data, merge at a coordinator") is not
@@ -480,8 +480,8 @@ blocked. On `PhysicalPlanNode`:
 | Property | Meaning | Status today |
 |----------|---------|--------------|
 | `OutputOrdering` | The ordering this node guarantees on its output | Set on index scans that satisfy ORDER BY and on `SortNode`; drives sort elision |
-| `EstimatedCardinality` | Estimated output rows | Populated by the R9 `CostEstimator` (single-table accurate; join estimates are placeholders) |
-| `Cost` (`PlanCost?`) | Weighted cost estimate for the node | Populated by the R9 `CostEstimator`; `null` if the plan was not costed |
+| `EstimatedCardinality` | Estimated output rows | Populated by the `CostEstimator` (single-table accurate; join estimates are placeholders) |
+| `Cost` (`PlanCost?`) | Weighted cost estimate for the node | Populated by the `CostEstimator`; `null` if the plan was not costed |
 | `PartitionLocality` | Partition affinity hint | `null` (single-partition placeholder) |
 | `CanDecomposeToLocalPlusMerge` | Whether the operator splits into per-partition local work + a merge | `true` for scan/filter/project; `AggregateNode` only for `COUNT`/`SUM`/`MIN`/`MAX` (not `AVG`); `false` for sort/limit/distinct/join |
 
@@ -495,21 +495,23 @@ They are descriptive metadata — no execution behavior depends on them yet exce
 
 | Pass | Where | What it does |
 |------|-------|--------------|
-| **Sort elision (QP6.2)** | `IndexScanSelector` + `QueryPlanner` | If an index scan emits rows already in ORDER BY order, set `OutputOrdering` and skip `SortNode`. |
-| **Projection pushdown (QP6.1)** | `ProjectionPushdownPlanner` + `RequiredColumnAnalyzer` | Compute the set of columns any operator needs and store it on scan nodes as `RequiredColumns`; `RowEncoder.DecodeAsync` then skips unreferenced columns. `null` = all columns (`SELECT *`). |
-| **Limit pushdown (QP6.3)** | `QueryPlanner.TryComputeScanRowLimit` | Push `LIMIT`+`OFFSET` into the scan (`ScanRowLimit`) when no filter/aggregation/GROUP BY/HAVING/DISTINCT and ORDER BY is scan-satisfied. Scans stop reading early. |
+| **Sort elision** | `IndexScanSelector` + `QueryPlanner` | If an index scan emits rows already in ORDER BY order, set `OutputOrdering` and skip `SortNode`. |
+| **Projection pushdown** | `ProjectionPushdownPlanner` + `RequiredColumnAnalyzer` | Compute the set of columns any operator needs and store it on scan nodes as `RequiredColumns`; `RowEncoder.DecodeAsync` then skips unreferenced columns. `null` = all columns (`SELECT *`). |
+| **Limit pushdown** | `QueryPlanner.TryComputeScanRowLimit` | Push `LIMIT`+`OFFSET` into the scan (`ScanRowLimit`) when no filter/aggregation/GROUP BY/HAVING/DISTINCT and ORDER BY is scan-satisfied. Scans stop reading early. |
 | **Filter absorption** | `IndexScanBoundAnalysis` | Drop residual comparisons already implied by the scan's key bounds (e.g. `col >= 3` when the scan seeks from `5`). |
-| **Join predicate pushdown (QP4.4)** | `JoinPredicatePushdown` | Single-source WHERE predicates run during that table's scan; cross-source predicates become the post-join filter. |
-| **Join-order heuristics (R7)** | `JoinOrderOptimizer` | Reorder inner-join sources before tree construction. |
-| **Cost-based scan choice (R9)** | `CostEstimator` | Annotate every node with `EstimatedCardinality` + `PlanCost`; replace a predicate-driven index range scan with a full table scan when it would touch too much of the table. |
+| **Join predicate pushdown** | `JoinPredicatePushdown` | Single-source WHERE predicates run during that table's scan; cross-source predicates become the post-join filter. |
+| **Join-order heuristics** | `JoinOrderOptimizer` | Reorder inner-join sources before tree construction. |
+| **Cost-based scan choice** | `CostEstimator` | Annotate every node with `EstimatedCardinality` + `PlanCost`; replace a predicate-driven index range scan with a full table scan when it would touch too much of the table. Range selectivity uses real per-column min/max when available, else fixed defaults. |
+| **Semi-/anti-join rewrite** | `SemiJoinAnalyzer` + `SemiJoinExecutor` | Rewrite eligible uncorrelated `IN`/`NOT IN` into an index-probing semi/anti/null-aware-anti join (instead of materializing), but only when the inner column is indexed; otherwise fall back to materialization. |
+| **DISTINCT streaming** | `QueryDistincter` + `IndexScanSelector` | When the `DISTINCT` columns form an index set-prefix and are all NOT NULL, scan in index order and dedup by comparing adjacent rows (O(1) memory) instead of a hash set. |
 
-## Cost model (R9) in detail
+## Cost model in detail
 
 **Files:** `Models/Plans/PlanCost.cs`, `Controllers/Queries/CostEstimator.cs`. This is CamusDB's first
 (deliberately small) cost model. It does two things:
 
 1. **Annotates the plan.** `CostEstimator.AnnotatePlan(root, db, table, stats)` walks the tree bottom-up
-   and assigns each node an `EstimatedCardinality` and a `PlanCost`. Row counts come from R8
+   and assigns each node an `EstimatedCardinality` and a `PlanCost`. Row counts come from the table statistics
    (`StatisticsManager.GetRowCountEstimate`); when stats are absent it degrades to a fixed
    `DefaultTableRowCount` (10 000) and fixed selectivity constants (range with both bounds → 10 %, one
    bound → 40 %, filter → 10 %, group-by → 20 %, distinct → 70 %). `PlanCost.Total` is a weighted sum of
@@ -524,21 +526,20 @@ They are descriptive metadata — no execution behavior depends on them yet exce
 
 **Important limitations to know before relying on it:**
 
-- **One-bound range scans flip to full scan on large tables, regardless of true selectivity.** Because the
-  one-bound selectivity assumption (40 %) equals the breakeven fraction (40 %), any single-bound range
-  predicate (`WHERE year > 2020`) on a table with stats is estimated to touch 40 % and is converted to a
-  full scan. For a genuinely selective bound (e.g. `id > <near-max>` returning a handful of rows) this is
-  pessimistic — the index is abandoned. This is intentional and tested for now, but it is exactly what
-  R9b's real per-column min/max selectivity will fix.
+- **One-bound range selectivity now uses real min/max when available.** `EstimateRangeScanRows`
+  reads the column's persisted min/max (`StatisticsManager.GetColumnMinMax`) to compute actual range
+  selectivity, so a genuinely selective bound (`id > <near-max>`) keeps its index while a non-selective one
+  (`year > <near-min>`) flips to full scan. The fixed-40 % assumption is now only the **fallback** when
+  min/max is unavailable (no stats yet, or non-numeric columns — strings/ids fall back to fixed).
 - **Join costs are placeholders.** `JoinQueryPlanner` calls `AnnotatePlan` with `table: null`, so every
   source in a join is costed with the default 10 000 row count — `EstimatedCardinality`/`estimated_cost`
-  for join plans are not meaningful yet. Join-order (R7) and algorithm choice do not consume the cost
+  for join plans are not meaningful yet. Join-order and algorithm choice do not consume the cost
   model; they remain heuristic.
 - **The cost model is advisory and single-decision.** It computes costs for all nodes but only the
   range-scan-vs-full-scan choice consumes them. Unique-lookup-vs-scan and nested-loop-vs-index-nested-loop
   remain rule-based.
 
-## Join-order heuristics (R7) in detail
+## Join-order heuristics in detail
 
 **File:** `Controllers/Queries/JoinOrderOptimizer.cs`. A deterministic, rule-based reorder applied to
 **inner joins only** (it bails to the declared order if any `JoinSource.Kind != Inner`, since outer joins
@@ -556,7 +557,7 @@ A stable secondary sort on declared position keeps results deterministic. Two sa
 no connecting predicate after reordering falls back to the declared order), and reordering is semantics-
 preserving because all `ON` predicates are kept and re-applied where their referenced aliases are in
 scope. Scoring is by *scan selectivity*, not by which side holds the indexed join key — INL-join
-placement is left to `JoinEquiJoinAnalyzer` and the declared order; a future cost model (R9) can unify
+placement is left to `JoinEquiJoinAnalyzer` and the declared order; a future cost model can unify
 the two.
 
 ---
@@ -567,30 +568,31 @@ the two.
 
 Parse, bind, plan, and execute for: single-table SELECT with index selection (unique/composite/range),
 `WHERE` with predicate analysis and filter absorption, `GROUP BY` + `HAVING`, global and grouped
-aggregates (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `SELECT DISTINCT`, `ORDER BY` (with index-based sort
-elision), `LIMIT`/`OFFSET` (with pushdown), `[INNER]`/comma joins (nested-loop and index-nested-loop),
-derived tables, scalar/`IN`/`NOT IN`/`EXISTS` subqueries, projection pushdown, join-order heuristics,
-advisory row-count statistics (persisted, configurable flush cadence), a small cost model that vetoes
-low-selectivity index range scans, and full plan inspection via `EXPLAIN` / `EXPLAIN ANALYZE`.
+aggregates (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `SELECT DISTINCT` (hash or index-ordered streaming),
+`ORDER BY` (with index-based sort elision), `LIMIT`/`OFFSET` (with pushdown), `[INNER]`/comma joins
+(nested-loop and index-nested-loop), derived tables, scalar/`IN`/`NOT IN`/`EXISTS` subqueries with
+semi/anti-join rewrite for indexed `IN`/`NOT IN`, projection pushdown, join-order heuristics, advisory
+statistics (row counts, per-index counts, per-column min/max — persisted, configurable flush cadence), a
+small min/max-driven cost model that vetoes low-selectivity index range scans, an error/semantics matrix,
+and full plan inspection via `EXPLAIN` / `EXPLAIN ANALYZE`.
 
 ## Gaps and where to contribute
 
-These are the meaningful missing pieces. The detailed task breakdown lives in
-`QUERY_PLANNER_REMAINING.md` (task IDs in brackets).
+These are the meaningful missing pieces and where new work fits.
 
 | Area | State | Notes |
 |------|-------|-------|
-| **Table statistics — row counts** [R8] | **Done** | `StatisticsManager` tracks/persists `RowCount` per table (Kahuna meta KV `{db}:stats:{tableId}`), with a configurable flush cadence (`stats_flush_interval_ms`) and a close-hook flush. |
-| **Index counts & column min/max** [R9b] | **Missing** | `TableStatistics.IndexEntryCounts` declared but never populated; no min/max. Needed for real selectivity — would fix R9's coarse fixed-percentage range estimates. Sequenced right before being consumed. |
-| **Cost model** [R9] | **Done (small)** | `PlanCost` + `CostEstimator` populate `EstimatedCardinality`/`Cost` and veto low-selectivity index range scans. Limits: one-bound ranges always flip to full scan (fixed 40 % assumption), join costs are placeholders, only one decision is cost-driven. |
-| **Plan-cache hooks** [R10] | **Partial** | Plans record `TableSchemaVersion`; no stable query-shape identifier yet. No plan reuse. |
-| **Semi-/anti-join rewrite** [R11] | **Missing** | `IN`/`NOT IN` are always materialized (correct but not optimized into semi/anti joins). NULL-aware `NOT IN` must be preserved. |
-| **DISTINCT streaming** [R12] | **Missing** | `QueryDistincter` is hash-only; no index-ordered streaming dedup. |
+| **Table statistics — row counts** | **Done** | `StatisticsManager` tracks/persists `RowCount` per table (Kahuna meta KV `{db}:stats:{tableId}`), with a configurable flush cadence (`stats_flush_interval_ms`) and a close-hook flush. |
+| **Index counts & column min/max** | **Done** | `StatisticsManager` tracks/persists per-index entry counts and per-column min/max (`ColumnMinMax`/`ScalarBound`), respecting index element-state. Consumed by the cost model for real range selectivity. |
+| **Cost model** | **Done (small)** | `PlanCost` + `CostEstimator` populate `EstimatedCardinality`/`Cost` and veto low-selectivity index range scans. Range selectivity is min/max-driven; join costs are still rough; only the range-vs-fullscan decision is cost-driven. |
+| **Plan-cache hooks** | **Partial** | Plans record `TableSchemaVersion`; no stable query-shape identifier yet. No plan reuse. |
+| **Semi-/anti-join rewrite** | **Done** | Eligible uncorrelated `IN`/`NOT IN` over an **indexed** inner column rewrite to semi / anti / null-aware-anti join (`SemiJoinAnalyzer`/`SemiJoinExecutor`); non-indexed falls back to materialization. Three-valued `NOT IN` semantics preserved. |
+| **DISTINCT streaming** | **Done** | `SELECT DISTINCT` over a NOT-NULL index set-prefix streams (adjacent-row dedup, O(1) memory); otherwise hash dedup. |
 | **EXPLAIN ANALYZE for joins** | **Missing** | Throws today; needs the join executor instrumented with `PlanNodeStats`. |
 | **Logical EXPLAIN** | **Cosmetic** | `(LOGICAL)` renders the physical tree relabeled; there is no distinct logical-plan rendering. |
 | **Per-node timing** | **Root-only** | `actual_time_ms` is only measured for the whole plan, not per operator. |
-| **Error/semantics matrix** [R13] | **Thin** | Few negative tests for ambiguous columns, bad HAVING refs, multi-column subqueries, etc. |
-| **Query microbenchmarks** [R14] | **Missing** | No benchmarks for grouped aggregation, join algorithms, or subquery materialization. |
+| **Error/semantics matrix** | **Done** | `TestErrorMatrix.cs` — 14 negative cases (ambiguous column, bad HAVING refs, multi-column/multi-row subqueries, `COUNT(DISTINCT)`, etc.) asserting precise codes + messages. |
+| **Query microbenchmarks** | **Missing** | No benchmarks for grouped aggregation, join algorithms, or subquery materialization. The one remaining roadmap item. |
 
 Explicitly deferred (by design): OUTER joins, window functions, CTEs, quantified predicates beyond
 `IN`/`NOT IN` (`ANY`/`ALL`/`SOME`), `COUNT(DISTINCT …)`, full cost-based join reordering, and distributed
@@ -646,7 +648,7 @@ execution.
 3. **`QueryTicketAdapter`** — carry the new field through if the single-table path needs it.
 4. **Binder** — add scope/ambiguity/type validation in `QueryBinder`.
 5. **Planner** — add a `PhysicalPlanNode` if needed; insert it at the correct point in `QueryPlanner` and
-   `JoinQueryPlanner`. Set R4 properties (`CanDecomposeToLocalPlusMerge`, `OutputOrdering`) where they
+   `JoinQueryPlanner`. Set the distributed-ready properties (`CanDecomposeToLocalPlusMerge`, `OutputOrdering`) where they
    apply.
 6. **`QueryPlanStepAdapter`** — add the node's `Flatten` case (emit a step, or skip like Filter/joins).
 7. **Executor** — handle the new step in `QueryExecutor` **and** the corresponding stage in
@@ -656,7 +658,7 @@ execution.
 9. **Renderer** — add a canonical node name + detail in `PlanRenderer` so `EXPLAIN` shows it; if it has
    runtime cost, wire `PlanNodeStats` for EXPLAIN ANALYZE.
 10. **Tests** — parser tests, planner tests asserting plan shape (via `PlanRenderer`), and execution
-    tests with exact expected rows. Validate per `QUERY_PLANNER_PLAN.md` → Validation Policy.
+    tests with exact expected rows. Run the parser, planner, and `TestExecuteSqlSelect` suites.
 
 ---
 
@@ -673,12 +675,11 @@ execution.
 - **Nested-loop join / index-nested-loop join** — for each left row, scan the right source / probe the
   right index.
 - **Heuristic vs cost-based** — rule-driven plan choice vs statistics-driven cost comparison. CamusDB is
-  mostly heuristic, with a small cost model (R9) that vetoes one index-vs-scan choice.
+  mostly heuristic, with a small cost model that vetoes one index-vs-scan choice.
 - **`PlanCost` / cost model** — per-node estimated cardinality + weighted I/O cost (`CostEstimator`), fed
-  by R8 row-count stats; surfaced in `EXPLAIN` and used to prefer a full scan over a low-selectivity index
+  by row-count stats; surfaced in `EXPLAIN` and used to prefer a full scan over a low-selectivity index
   range scan.
 - **Streaming (`IAsyncEnumerable`)** — pulling rows one at a time without materializing the whole result.
 - **SQL-over-KV** — the architectural boundary where relational operations become Kahuna key/value reads.
 
-For the remaining-work task breakdown, see `QUERY_PLANNER_REMAINING.md`. For `EXPLAIN` output as a user
-feature, see [`docs/explain.md`](./explain.md).
+For `EXPLAIN` output as a user feature, see [`docs/explain.md`](./explain.md).

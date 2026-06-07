@@ -700,8 +700,10 @@ public class TestQueryPlanner
     }
 
     [Test]
-    public void PlanDistinctWithOrderByAlwaysIncludesSortAfterDistinct()
+    public void PlanDistinctWithOrderByOverIndexedColumn_ElidesSortNode()
     {
+        // R12: streaming distinct on the PK index covers `id`; ORDER BY id ASC matches the
+        // streaming ordering → SortNode is elided. No SortBy in the plan.
         QueryTicket ticket = CreateQueryTicketFromSelectSql(
             "SELECT DISTINCT id FROM robots WHERE id = @id ORDER BY id",
             new() { { "@id", new ColumnValue(ColumnType.Id, QueryPlannerTestContext.SampleRowId) } });
@@ -713,8 +715,34 @@ public class TestQueryPlanner
                 QueryPlanStepType.QueryFromIndex,
                 QueryPlanStepType.ReduceToProjections,
                 QueryPlanStepType.Distinct,
-                QueryPlanStepType.SortBy,
             },
             StepTypes(plan));
+
+        // The DistinctNode must be streaming.
+        DistinctNode distinctNode = plan.StepNodes.OfType<DistinctNode>().Single();
+        Assert.IsTrue(distinctNode.IsStreaming, "distinct over indexed id column must be streaming");
+    }
+
+    [Test]
+    public void PlanDistinctWithOrderByOverNonStreamableColumn_IncludesSortAfterDistinct()
+    {
+        // `enabled` has no single-column index → hash distinct → SortNode is still needed.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT DISTINCT enabled FROM robots ORDER BY enabled LIMIT 2");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                QueryPlanStepType.FullScanFromTableIndex,
+                QueryPlanStepType.ReduceToProjections,
+                QueryPlanStepType.Distinct,
+                QueryPlanStepType.SortBy,
+                QueryPlanStepType.Limit,
+            },
+            StepTypes(plan));
+
+        DistinctNode distinctNode = plan.StepNodes.OfType<DistinctNode>().Single();
+        Assert.IsFalse(distinctNode.IsStreaming, "distinct over non-indexed enabled must be hash");
     }
 }

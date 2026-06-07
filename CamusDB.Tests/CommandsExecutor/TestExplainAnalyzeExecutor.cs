@@ -109,7 +109,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
     // R10: the last row of EXPLAIN ANALYZE output is now a "plan-info" metadata row.
     // Use this helper to get the last *physical node* row (scan, filter, etc.) for stats checks.
     private static QueryResultRow LastDataRow(List<QueryResultRow> rows) =>
-        rows.Last(r => r.Row.TryGetValue("node", out ColumnValue n) && n.StrValue != "plan-info");
+        rows.Last(r => r.Row.TryGetValue("node", out ColumnValue? n) && n!.StrValue != "plan-info");
 
     // ── Column schema tests ───────────────────────────────────────────────────
 

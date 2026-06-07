@@ -139,10 +139,10 @@ public sealed class TestCostEstimator : BaseTest
 
         // At least one node must carry a non-null estimated_rows.
         bool anyNonNullRows = rows.Any(r =>
-            r.Row.TryGetValue("estimated_rows", out ColumnValue er) && er.Type != ColumnType.Null);
+            r.Row.TryGetValue("estimated_rows", out ColumnValue? er) && er!.Type != ColumnType.Null);
 
         bool anyNonNullCost = rows.Any(r =>
-            r.Row.TryGetValue("estimated_cost", out ColumnValue ec) && ec.Type != ColumnType.Null);
+            r.Row.TryGetValue("estimated_cost", out ColumnValue? ec) && ec!.Type != ColumnType.Null);
 
         Assert.IsTrue(anyNonNullRows, "At least one EXPLAIN row must have non-null estimated_rows");
         Assert.IsTrue(anyNonNullCost, "At least one EXPLAIN row must have non-null estimated_cost");
@@ -161,12 +161,12 @@ public sealed class TestCostEstimator : BaseTest
         List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname, "EXPLAIN SELECT * FROM robots");
 
         QueryResultRow? scanRow = rows.FirstOrDefault(r =>
-            r.Row.TryGetValue("node", out ColumnValue n) && n.StrValue == "table-scan");
+            r.Row.TryGetValue("node", out ColumnValue? n) && n!.StrValue == "table-scan");
 
         Assert.IsNotNull(scanRow, "EXPLAIN must include a table-scan node");
 
-        Assert.IsTrue(scanRow.Value.Row.TryGetValue("estimated_rows", out ColumnValue estRows));
-        Assert.AreEqual(ColumnType.Integer64, estRows.Type, "estimated_rows must be Integer64");
+        Assert.IsTrue(scanRow.Value.Row.TryGetValue("estimated_rows", out ColumnValue? estRows));
+        Assert.AreEqual(ColumnType.Integer64, estRows!.Type, "estimated_rows must be Integer64");
         Assert.AreEqual(500L, estRows.LongValue,
             "table-scan EstimatedCardinality should match the seeded row count");
     }
@@ -248,7 +248,7 @@ public sealed class TestCostEstimator : BaseTest
             $"EXPLAIN SELECT * FROM robots WHERE id = '{anId}'");
 
         bool hasIndexLookup = rows.Any(r =>
-            r.Row.TryGetValue("node", out ColumnValue n) && n.StrValue == "index-lookup");
+            r.Row.TryGetValue("node", out ColumnValue? n) && n!.StrValue == "index-lookup");
 
         Assert.IsTrue(hasIndexLookup,
             "Unique-index equality lookup must produce an index-lookup node even with large stats");
@@ -278,7 +278,7 @@ public sealed class TestCostEstimator : BaseTest
             "EXPLAIN SELECT * FROM robots WHERE year >= 2020 AND year < 2021");
 
         bool hasIndexScan = rows.Any(r =>
-            r.Row.TryGetValue("node", out ColumnValue n) && n.StrValue == "index-range-scan");
+            r.Row.TryGetValue("node", out ColumnValue? n) && n!.StrValue == "index-range-scan");
 
         Assert.IsTrue(hasIndexScan,
             "Tight both-bounds range (10 % selectivity, 100k table) must stay on the secondary index");
@@ -316,10 +316,10 @@ public sealed class TestCostEstimator : BaseTest
             "EXPLAIN SELECT * FROM robots WHERE year > 2000");
 
         bool hasIndexRangeScan = rows.Any(r =>
-            r.Row.TryGetValue("node", out ColumnValue n) && n.StrValue == "index-range-scan");
+            r.Row.TryGetValue("node", out ColumnValue? n) && n!.StrValue == "index-range-scan");
 
         bool hasTableScan = rows.Any(r =>
-            r.Row.TryGetValue("node", out ColumnValue n) && n.StrValue == "table-scan");
+            r.Row.TryGetValue("node", out ColumnValue? n) && n!.StrValue == "table-scan");
 
         Assert.IsTrue(hasIndexRangeScan,
             "Half-open range (40 % < 50 % breakeven) must keep the index-range-scan");

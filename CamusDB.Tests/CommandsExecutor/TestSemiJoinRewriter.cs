@@ -137,8 +137,8 @@ public sealed class TestSemiJoinRewriter : BaseTest
         // Each EXPLAIN row has "node" and "detail" columns; concatenate both for plan shape checking.
         return string.Join("\n", rows.Select(r =>
         {
-            string node = r.Row.TryGetValue("node", out ColumnValue nv) ? (nv.StrValue ?? "") : "";
-            string detail = r.Row.TryGetValue("detail", out ColumnValue dv) ? (dv.StrValue ?? "") : "";
+            string node = r.Row.TryGetValue("node", out ColumnValue? nv) ? (nv?.StrValue ?? "") : "";
+            string detail = r.Row.TryGetValue("detail", out ColumnValue? dv) ? (dv?.StrValue ?? "") : "";
             return $"{node}({detail})";
         }));
     }
@@ -342,18 +342,21 @@ public sealed class TestSemiJoinRewriter : BaseTest
     }
 
     [Test]
-    public async Task R11_NullAwareAntiJoinNullInFilteredOutRowDoesNotPoison()
+    public async Task R11_NullInFilteredOutInnerRowDoesNotPoisonNotIn()
     {
-        // Bug #6: InnerScanForNullsAsync must apply node.InnerFilter before checking for NULLs.
-        // A NULL that lives in a row excluded by the inner WHERE is NOT part of the subquery
-        // result set and must not poison the anti-join.
+        // Bug #6: the null-scan pre-pass must apply node.InnerFilter so that a NULL sitting in
+        // a row excluded by the inner WHERE clause does not poison the NOT IN result.
         //
-        // Setup: blocklist has two rows —
-        //   (id=X, name=NULL,    active=false)  ← excluded by inner filter; its NULL must NOT count
-        //   (id=Y, name="Alpha", active=true)   ← included; no NULL → anti-join proceeds normally
+        // CamusDB's IndexMulti rejects NULL inserts, so the NullAwareAnti semi-join path
+        // (indexed nullable column) is currently unreachable via normal DML.  This test drives
+        // the same SQL semantics through SubqueryRewriter materialisation, which supports the
+        // full nullable+filter combination and must produce the correct result.
         //
-        // Query: robots WHERE name NOT IN (SELECT name FROM blocklist WHERE active = true)
-        // Expected: Beta and Gamma pass (not blocked); Alpha is blocked.
+        // Setup: active_blocklist has two rows —
+        //   (id=X, name=NULL,    active=false)  ← excluded by inner WHERE; its NULL must NOT count
+        //   (id=Y, name="Alpha", active=true)   ← included; no NULL → only Alpha is blocked
+        //
+        // Expected: Beta and Gamma pass; Alpha is blocked.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();
 
         KvTransaction setup = await database.Transactions.BeginAsync();
@@ -363,17 +366,16 @@ public sealed class TestSemiJoinRewriter : BaseTest
             columns: new ColumnInfo[]
             {
                 new("id",     ColumnType.Id),
-                new("name",   ColumnType.String),            // nullable
+                new("name",   ColumnType.String),             // nullable — no index (IndexMulti rejects NULLs)
                 new("active", ColumnType.Bool, notNull: true),
             },
             constraints: new ConstraintInfo[]
             {
-                new(ConstraintType.PrimaryKey, "~pk",             new ColumnIndexInfo[] { new("id",   OrderType.Ascending) }),
-                new(ConstraintType.IndexMulti,  "abl_name_idx",  new ColumnIndexInfo[] { new("name", OrderType.Ascending) }),
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
             },
             ifNotExists: false));
 
-        // Row with NULL name but active=false — must be ignored by the null-scan.
+        // Row with NULL name, active=false — must be invisible to the inner subquery.
         await executor.Insert(new InsertTicket(txnState: setup, databaseName: dbname, tableName: "active_blocklist",
             values: new()
             {
@@ -385,9 +387,8 @@ public sealed class TestSemiJoinRewriter : BaseTest
         List<QueryResultRow> rows = await RunQueryAsync(database, executor, dbname,
             "SELECT name FROM robots WHERE name NOT IN (SELECT name FROM active_blocklist WHERE active = true)");
 
-        // Alpha is blocked (active=true in blocklist); Beta and Gamma are not.
         Assert.AreEqual(2, rows.Count,
-            "NULL in a filter-excluded inner row must not poison the NullAwareAnti-join");
+            "NULL in a filter-excluded inner row must not poison the NOT IN result");
         IEnumerable<string?> names = rows.Select(r => r.Row["name"].StrValue).OrderBy(n => n);
         CollectionAssert.AreEqual(new[] { "Beta", "Gamma" }, names);
     }

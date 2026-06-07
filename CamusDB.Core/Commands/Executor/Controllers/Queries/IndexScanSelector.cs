@@ -239,6 +239,63 @@ internal static class IndexScanSelector
             toInclusive: true);
     }
 
+    /// <summary>
+    /// Finds a readable index whose first <c>distinctColumns.Count</c> columns are exactly the set of
+    /// DISTINCT key columns. Such an index guarantees that equal rows are adjacent in the scan,
+    /// enabling streaming deduplication without a hash set (R12).
+    /// Returns the first matching index, or null if none qualifies.
+    /// </summary>
+    internal static TableIndexSchema? TryFindStreamingDistinctIndex(
+        TableDescriptor table,
+        IReadOnlyList<string> distinctColumns)
+    {
+        if (distinctColumns.Count == 0)
+            return null;
+
+        HashSet<string> distinctSet = new(distinctColumns, StringComparer.Ordinal);
+
+        foreach (TableIndexSchema index in table.Indexes.Values)
+        {
+            if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+                continue;
+
+            if (index.Columns.Length < distinctColumns.Count)
+                continue;
+
+            // The first distinctColumns.Count index columns must form exactly the distinct key set.
+            HashSet<string> prefix = new(StringComparer.Ordinal);
+            for (int i = 0; i < distinctColumns.Count; i++)
+                prefix.Add(index.Columns[i]);
+
+            if (prefix.SetEquals(distinctSet))
+                return index;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Returns true when the scan step uses an index whose first N columns cover exactly the
+    /// DISTINCT key set, guaranteeing that equal rows are adjacent in the scan (R12).
+    /// </summary>
+    internal static bool ScanStepCoversDistinctColumns(
+        QueryPlanStep scanStep,
+        IReadOnlyList<string> distinctColumns)
+    {
+        if (scanStep.Index is null || distinctColumns.Count == 0)
+            return false;
+
+        if (scanStep.Index.Columns.Length < distinctColumns.Count)
+            return false;
+
+        HashSet<string> distinctSet = new(distinctColumns, StringComparer.Ordinal);
+        HashSet<string> prefix = new(StringComparer.Ordinal);
+        for (int i = 0; i < distinctColumns.Count; i++)
+            prefix.Add(scanStep.Index.Columns[i]);
+
+        return prefix.SetEquals(distinctSet);
+    }
+
     internal static bool ScanSatisfiesOrderBy(
         TableDescriptor table,
         QueryPlanStep scanStep,

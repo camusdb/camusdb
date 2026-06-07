@@ -305,10 +305,12 @@ public class TestPlanDistributedProperties
     [Test]
     public void Distinct_WithIndexOrderBy_SortNodeIsStillEmitted()
     {
-        QueryPlan plan = Plan("SELECT DISTINCT year FROM robots ORDER BY year");
+        // R12 elides the SortNode when streaming-distinct ordering satisfies ORDER BY.
+        // Use DESC to guarantee a SortNode is still required (ASC streaming can't satisfy DESC).
+        QueryPlan plan = Plan("SELECT DISTINCT year FROM robots ORDER BY year DESC");
         SortNode sort = AllNodes(plan).OfType<SortNode>().First();
         Assert.IsNotNull(sort.OutputOrdering,
-            "DISTINCT query: SortNode must carry OutputOrdering");
+            "DISTINCT query with DESC: SortNode must carry OutputOrdering");
     }
 
     [Test]
