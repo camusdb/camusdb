@@ -64,6 +64,15 @@ public sealed class QueryTicket
     /// <summary>Semi/anti-join specs extracted by R11 SemiJoinAnalyzer. Null when there are none.</summary>
     internal IReadOnlyList<SemiJoinSpec>? SemiJoinSpecs { get; }
 
+    /// <summary>
+    /// When set by the UPDATE/DELETE locate phase (R16), overrides the projection-derived
+    /// column set for scan-time partial decoding. Contains exactly the columns needed to
+    /// evaluate the WHERE and SET expressions — candidates that fail the filter are decoded
+    /// no further. The write phase still does a full <c>DecodeWritableAsync</c>.
+    /// Null means use the normal <see cref="RequiredColumnAnalyzer"/> derivation.
+    /// </summary>
+    internal IReadOnlySet<string>? LocateColumns { get; }
+
     public QueryTicket(
         KvTransaction txnState,
         string databaseName,
@@ -83,7 +92,8 @@ public sealed class QueryTicket
         ExistsSubqueryRegistry? existsSubqueries = null,
         bool isDistinct = false,
         SelectQuery? selectQuery = null,
-        IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null)
+        IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null,
+        IReadOnlySet<string>? locateColumns = null)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -104,5 +114,6 @@ public sealed class QueryTicket
         ExistsSubqueries = existsSubqueries;
         SelectQuery = selectQuery;
         SemiJoinSpecs = semiJoinSpecs;
+        LocateColumns = locateColumns;
     }
 }

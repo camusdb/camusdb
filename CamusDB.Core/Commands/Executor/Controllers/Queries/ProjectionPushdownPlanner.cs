@@ -27,7 +27,10 @@ internal static class ProjectionPushdownPlanner
 
     private static void ApplySingleTablePlan(QueryPlan plan)
     {
-        plan.ScanRequiredColumns = RequiredColumnAnalyzer.ComputeSingleTable(plan.Ticket);
+        // R16: locate-phase tickets supply an explicit column set (WHERE + SET expressions only).
+        // All other tickets derive the set from projections + WHERE via RequiredColumnAnalyzer.
+        plan.ScanRequiredColumns = plan.Ticket.LocateColumns
+            ?? RequiredColumnAnalyzer.ComputeSingleTable(plan.Ticket);
         AnnotateScanNodes(plan.Root, plan.ScanRequiredColumns);
     }
 

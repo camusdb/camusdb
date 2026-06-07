@@ -306,6 +306,7 @@ All extend `PhysicalPlanNode` (`Models/Plans/PhysicalPlanNode.cs`): a single `In
 | `ProjectNode` | `ReduceToProjections` | Column projection / aliasing |
 | `DistinctNode` | `Distinct` | Duplicate elimination over projection tuples (hash, or `IsStreaming` adjacent-row dedup) |
 | `SemiJoinNode` | `SemiJoinProbe` | Index-probing semi / anti / null-aware-anti join from an `IN`/`NOT IN` rewrite |
+| `IndexInListScanNode` | `InListScanFromIndex` | One index seek per value for `x IN (v1, v2, …)`, unioned and row-id-deduped |
 | `LimitNode` | `Limit` | LIMIT / OFFSET |
 | `NestedLoopJoinNode` | _(join path only)_ | Nested-loop inner join |
 | `IndexNestedLoopJoinNode` | _(join path only)_ | Index-probed inner join |
@@ -377,8 +378,11 @@ the ascending index encoding and forces a real `SortNode`.
   `QueryScanner` / `QueryUsingIndex` / `QueryUsingRangeIndex`: read from `KvTableStore`, decode each row
   with `RowEncoder.DecodeAsync(schema, txId, rowId, data, requiredColumns)`, apply the inline filter,
   honor `ScanRowLimit`.
+- **`InListScanFromIndex`** → `QueryUsingInListIndex` — one index seek per `IN`-list value (point lookup or
+  equality range), unioned with row-id dedup, residual predicate re-applied per emitted row.
 - **`SortBy`** → `QuerySorter` — materializes, sorts by an N-key comparator over the actual ORDER BY
-  columns, streams.
+  columns, streams. Resolves an alias-qualified order column (`u.position`) against the bare row key when
+  the row isn't keyed by the qualified name (single-table scans).
 - **`Aggregate`** → `QueryAggregator` — groups by the GROUP BY key (or one global group), accumulates
   `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, emits one row per group.
 - **`HavingFilter`** → `QueryFilterer.FilterHavingResultset` — evaluates HAVING against aggregated rows
@@ -505,6 +509,8 @@ They are descriptive metadata — no execution behavior depends on them yet exce
 | **Cost-based scan choice** | `CostEstimator` | Annotate every node with `EstimatedCardinality` + `PlanCost`; replace a predicate-driven index range scan with a full table scan when it would touch too much of the table. Range selectivity uses real per-column min/max when available, else fixed defaults. |
 | **Semi-/anti-join rewrite** | `SemiJoinAnalyzer` + `SemiJoinExecutor` | Rewrite eligible uncorrelated `IN`/`NOT IN` into an index-probing semi/anti/null-aware-anti join (instead of materializing), but only when the inner column is indexed; otherwise fall back to materialization. |
 | **DISTINCT streaming** | `QueryDistincter` + `IndexScanSelector` | When the `DISTINCT` columns form an index set-prefix and are all NOT NULL, scan in index order and dedup by comparing adjacent rows (O(1) memory) instead of a hash set. |
+| **Value-list `IN` → index seeks** | `PredicateAnalyzer` + `QueryPlanner` + `IndexInListScanNode` | Turn `x IN (v1, v2, …)` on an indexed column into one index seek per value (point lookup for a unique index, equality range for a non-unique one), unioned and row-id-deduped, instead of a full scan + residual membership filter. Cost-gated, and cost-compared against a competing range scan so a selective unique `IN` wins. Falls back to a residual filter when the column is unindexed or the list is too large. |
+| **UPDATE/DELETE locate partial decode** | `RowUpdater` / `RowDeleter` + `RequiredColumnAnalyzer.ComputeForLocate` | The row-locating scan for `UPDATE`/`DELETE` decodes only the columns the `WHERE` (and SET expressions) reference, not the whole row. The write phase still does one full decode per matched row to re-encode it and maintain indexes. |
 
 ## Cost model in detail
 
@@ -572,10 +578,12 @@ Parse, bind, plan, and execute for: single-table SELECT with index selection (un
 aggregates (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `SELECT DISTINCT` (hash or index-ordered streaming),
 `ORDER BY` (with index-based sort elision), `LIMIT`/`OFFSET` (with pushdown), `[INNER]`/comma joins
 (nested-loop and index-nested-loop), derived tables, scalar/`IN`/`NOT IN`/`EXISTS` subqueries with
-semi/anti-join rewrite for indexed `IN`/`NOT IN`, projection pushdown, join-order heuristics, advisory
+semi/anti-join rewrite for indexed `IN`/`NOT IN`, index-driven value-list `IN` (`x IN (v1, v2, …)`),
+projection pushdown (including partial-decode locate for `UPDATE`/`DELETE`), join-order heuristics, advisory
 statistics (row counts, per-index counts, per-column min/max — persisted, configurable flush cadence), a
-small min/max-driven cost model that vetoes low-selectivity index range scans, an error/semantics matrix,
-and full plan inspection via `EXPLAIN` / `EXPLAIN ANALYZE`.
+small min/max-driven cost model that vetoes low-selectivity index range scans (and cost-compares a unique
+value-list `IN` against a competing range scan), an error/semantics matrix, and full plan inspection via
+`EXPLAIN` / `EXPLAIN ANALYZE`.
 
 ## Gaps and where to contribute
 
@@ -623,6 +631,8 @@ execution.
 | Index scan selection / bound absorption | `IndexScanSelector.cs`, `IndexScanBoundAnalysis.cs` |
 | Join predicate pushdown / equi-join analysis | `JoinPredicatePushdown.cs`, `JoinEquiJoinAnalyzer.cs` |
 | Semi-/anti-join rewrite (`IN`/`NOT IN`) | `SemiJoinAnalyzer.cs`, `SemiJoinExecutor.cs`, `SemiJoinSpec.cs`, `SemiJoinMode.cs`, `Models/Plans/SemiJoinNode.cs` |
+| Value-list `IN` → index seeks | `Models/Predicates/AnalyzedInList.cs`, `Models/Plans/IndexInListScanNode.cs`, `PredicateAnalyzer.cs`, `QueryPlanner.cs` (`TryBuildInListScanNode` / `TryBuildCompetingInListScanNode`), `QueryExecutor.QueryUsingInListIndex` |
+| UPDATE/DELETE locate partial decode | `Controllers/RowUpdater.cs`, `Controllers/RowDeleter.cs`, `RequiredColumnAnalyzer.ComputeForLocate`, `QueryTicket.LocateColumns` |
 | Query-shape id / plan-cache hooks | `QueryShapeComputer.cs`, `QueryPlan.QueryShapeId`/`SchemaDeps` |
 | Plan tree → linear steps | `Commands/Executor/Controllers/Queries/QueryPlanStepAdapter.cs` |
 | Projection pushdown | `ProjectionPushdownPlanner.cs`, `RequiredColumnAnalyzer.cs` |

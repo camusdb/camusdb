@@ -16,6 +16,7 @@ using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.Diagnostics;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 
@@ -71,6 +72,12 @@ internal sealed class RowDeleter
     {
         DeleteTicket ticket = state.Ticket;
 
+        // R16: decode only the columns the WHERE/filter needs during the locate scan.
+        // The write phase calls LoadWritableRow which does a full decode per matched row.
+        // Returns null when the WHERE contains subquery nodes — fall back to full decode.
+        IReadOnlySet<string>? locateColumns = RequiredColumnAnalyzer.ComputeForLocate(
+            ticket.Where, ticket.Filters, exprValues: null);
+
         QueryTicket queryTicket = new(
             txnState: ticket.TxnState,
             databaseName: ticket.DatabaseName,
@@ -82,7 +89,8 @@ internal sealed class RowDeleter
             orderBy: null,
             limit: ticket.Limit,
             offset: null,
-            parameters: ticket.Parameters
+            parameters: ticket.Parameters,
+            locateColumns: locateColumns
         );
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);

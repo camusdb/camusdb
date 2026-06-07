@@ -17,6 +17,7 @@ using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.Diagnostics;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 
@@ -176,6 +177,14 @@ public sealed class RowUpdater
     {
         UpdateTicket ticket = state.Ticket;
 
+        // R16: restrict scan-time decode to columns needed by the WHERE filter and any
+        // expression-based SET values (e.g. SET col = old_col + 1). Rejected candidates
+        // are only partially decoded. The write phase re-reads and fully decodes each
+        // matched row via LoadWritableRow before applying the change.
+        // Returns null when the WHERE contains subquery nodes — fall back to full decode.
+        IReadOnlySet<string>? locateColumns = RequiredColumnAnalyzer.ComputeForLocate(
+            ticket.Where, ticket.Filters, ticket.ExprValues);
+
         QueryTicket queryTicket = new(
             txnState: ticket.TxnState,
             databaseName: ticket.DatabaseName,
@@ -187,7 +196,8 @@ public sealed class RowUpdater
             orderBy: null,
             limit: ticket.Limit,
             offset: null,
-            parameters: ticket.Parameters
+            parameters: ticket.Parameters,
+            locateColumns: locateColumns
         );
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);

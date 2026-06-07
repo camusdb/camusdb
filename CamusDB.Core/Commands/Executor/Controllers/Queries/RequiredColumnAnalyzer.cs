@@ -46,6 +46,77 @@ internal static class RequiredColumnAnalyzer
         return required;
     }
 
+    /// <summary>
+    /// Computes the minimal column set needed by the UPDATE/DELETE locate scan (R16):
+    /// columns referenced in <paramref name="where"/>, <paramref name="filters"/>, and
+    /// the RHS of any expression-based SET clauses (<paramref name="exprValues"/>).
+    ///
+    /// Returns <c>null</c> when a fallback to full decode is required — specifically
+    /// when the WHERE contains a subquery node (<c>ExprExistsSubquery</c>,
+    /// <c>ExprExistsCorrelated</c>, <c>ExprInSubquery</c>, <c>ExprNotInSubquery</c>).
+    /// <c>CollectColumnReferences</c> does not descend into subquery bodies, so outer
+    /// correlation column references would be silently omitted; falling back to full
+    /// decode is the safest conservative choice.
+    ///
+    /// Returns an empty (non-null) set when there are no filter or expression columns —
+    /// the scan only needs the row id, which is always decoded from the BTree key.
+    /// </summary>
+    public static IReadOnlySet<string>? ComputeForLocate(
+        NodeAst? where,
+        List<QueryFilter>? filters,
+        Dictionary<string, NodeAst>? exprValues)
+    {
+        // Fall back to full decode when the WHERE contains subquery nodes. The
+        // CollectColumnReferences walker does not descend into subquery bodies, so outer
+        // correlation columns (e.g. outer.id in EXISTS(SELECT 1 WHERE inner.id = outer.id))
+        // would be silently omitted from the locate-column set, causing the correlated
+        // filter to fail on matching rows.
+        if (where is not null && ContainsSubqueryNode(where))
+            return null;
+
+        HashSet<string> required = new(StringComparer.Ordinal);
+
+        if (where is not null)
+        {
+            HashSet<string> refs = new(StringComparer.Ordinal);
+            QueryExpressionWalker.CollectColumnReferences(where, refs);
+            foreach (string col in refs)
+                required.Add(col);
+        }
+
+        if (filters is not null)
+        {
+            foreach (QueryFilter f in filters)
+                required.Add(f.ColumnName);
+        }
+
+        if (exprValues is not null)
+        {
+            foreach (KeyValuePair<string, NodeAst> kv in exprValues)
+            {
+                HashSet<string> refs = new(StringComparer.Ordinal);
+                QueryExpressionWalker.CollectColumnReferences(kv.Value, refs);
+                foreach (string col in refs)
+                    required.Add(col);
+            }
+        }
+
+        return required;
+    }
+
+    /// <summary>Returns true if <paramref name="expr"/> or any descendant is a subquery node.</summary>
+    private static bool ContainsSubqueryNode(NodeAst expr)
+    {
+        return expr.nodeType is NodeType.ExprExistsSubquery
+            or NodeType.ExprExistsCorrelated
+            or NodeType.ExprInSubquery
+            or NodeType.ExprNotInSubquery
+            || (expr.leftAst is not null && ContainsSubqueryNode(expr.leftAst))
+            || (expr.rightAst is not null && ContainsSubqueryNode(expr.rightAst))
+            || (expr.extendedOne is not null && ContainsSubqueryNode(expr.extendedOne))
+            || (expr.extendedTwo is not null && ContainsSubqueryNode(expr.extendedTwo));
+    }
+
     public static Dictionary<string, IReadOnlySet<string>> ComputeJoinPlan(
         BoundSelectQuery bound,
         QueryTicket ticket,

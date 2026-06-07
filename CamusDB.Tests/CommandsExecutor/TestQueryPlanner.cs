@@ -745,4 +745,123 @@ public class TestQueryPlanner
         DistinctNode distinctNode = plan.StepNodes.OfType<DistinctNode>().Single();
         Assert.IsFalse(distinctNode.IsStreaming, "distinct over non-indexed enabled must be hash");
     }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // R16 — locate-column plumbing tests
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A QueryTicket carrying an explicit LocateColumns set must produce a plan whose
+    /// ScanRequiredColumns equals that set — bypassing RequiredColumnAnalyzer.ComputeSingleTable.
+    /// This locks the optimisation plumbing: a future change that stops threading
+    /// LocateColumns would break this test even before the correctness tests fire.
+    /// </summary>
+    [Test]
+    public void LocateColumnsOverridesScanRequiredColumns()
+    {
+        IReadOnlySet<string> locate = new HashSet<string>(StringComparer.Ordinal) { "year" };
+
+        QueryTicket ticket = new(
+            txnState: context!.Txn,
+            databaseName: QueryPlannerTestContext.DatabaseName,
+            tableName: context.Table.Schema.Name!,
+            index: null,
+            projection: null,          // projection:null would normally → ScanRequiredColumns null
+            filters: null,
+            where: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null,
+            locateColumns: locate);
+
+        QueryPlan plan = queryPlanner.GetPlan(context.Database, context.Table, ticket);
+
+        Assert.IsNotNull(plan.ScanRequiredColumns,
+            "LocateColumns should override the null-projection default (full decode)");
+        CollectionAssert.AreEquivalent(new[] { "year" }, plan.ScanRequiredColumns);
+        CollectionAssert.AreEquivalent(new[] { "year" }, ScanRoot(plan).RequiredColumns);
+    }
+
+    // Helper: build a bare Identifier node.
+    private static NodeAst Id(string name) =>
+        new(NodeType.Identifier, null, null, null, null, null, null, null, name);
+
+    // Helper: build an Integer literal node.
+    private static NodeAst IntLit(string v) =>
+        new(NodeType.Integer, null, null, null, null, null, null, null, v);
+
+    // Helper: build a binary expression node (e.g. ExprEquals, ExprAdd).
+    private static NodeAst Binary(NodeType op, NodeAst left, NodeAst right) =>
+        new(op, left, right, null, null, null, null, null, null);
+
+    /// <summary>
+    /// ComputeForLocate with a simple equality WHERE returns the referenced column only.
+    /// </summary>
+    [Test]
+    public void ComputeForLocate_SimpleWhere_ReturnsWhereColumns()
+    {
+        // WHERE year = 2000
+        NodeAst where = Binary(NodeType.ExprEquals, Id("year"), IntLit("2000"));
+        IReadOnlySet<string>? cols = RequiredColumnAnalyzer.ComputeForLocate(where, filters: null, exprValues: null);
+
+        Assert.IsNotNull(cols);
+        CollectionAssert.AreEquivalent(new[] { "year" }, cols);
+    }
+
+    /// <summary>
+    /// ComputeForLocate with an ExprValues expression includes the RHS column references.
+    /// For SET score = score + year, both "score" and "year" must be fetched in the locate phase.
+    /// </summary>
+    [Test]
+    public void ComputeForLocate_ExprValues_IncludesRhsColumns()
+    {
+        // WHERE enabled = 1 (literal)
+        NodeAst where     = Binary(NodeType.ExprEquals, Id("enabled"), IntLit("1"));
+        // SET score = score + year  (RHS references score and year)
+        NodeAst scoreExpr = Binary(NodeType.ExprAdd, Id("score"), Id("year"));
+        Dictionary<string, NodeAst> exprValues = new(StringComparer.Ordinal) { { "score", scoreExpr } };
+
+        IReadOnlySet<string>? cols = RequiredColumnAnalyzer.ComputeForLocate(where, filters: null, exprValues);
+
+        Assert.IsNotNull(cols);
+        // "enabled" from WHERE, "score" and "year" from the SET expression RHS.
+        CollectionAssert.IsSubsetOf(new[] { "enabled", "score", "year" }, cols);
+    }
+
+    /// <summary>
+    /// ComputeForLocate with no WHERE and no filters returns an empty (non-null) set.
+    /// The scan needs only the row id — ScanRequiredColumns == {} means decode 0 columns.
+    /// </summary>
+    [Test]
+    public void ComputeForLocate_NoWhereNoFilters_ReturnsEmptySet()
+    {
+        IReadOnlySet<string>? cols = RequiredColumnAnalyzer.ComputeForLocate(
+            where: null, filters: null, exprValues: null);
+
+        Assert.IsNotNull(cols);
+        Assert.AreEqual(0, cols!.Count);
+    }
+
+    /// <summary>
+    /// ComputeForLocate returns null (full-decode fallback) when the WHERE contains
+    /// a subquery node, because CollectColumnReferences does not descend into subquery
+    /// bodies and outer correlation columns would be silently omitted.
+    /// </summary>
+    [Test]
+    public void ComputeForLocate_SubqueryInWhere_ReturnsNullFallback()
+    {
+        // Build a minimal ExprExistsSubquery node inline — the parser would produce
+        // one for "WHERE EXISTS (SELECT 1 FROM …)" but we exercise the guard directly.
+        NodeAst existsNode = new NodeAst(
+            NodeType.ExprExistsSubquery,
+            leftAst: new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, "id"),
+            rightAst: null, extendedOne: null, extendedTwo: null,
+            extendedThree: null, extendedFour: null, extendedFive: null, yytext: null);
+
+        IReadOnlySet<string>? cols = RequiredColumnAnalyzer.ComputeForLocate(
+            where: existsNode, filters: null, exprValues: null);
+
+        Assert.IsNull(cols, "EXISTS subquery WHERE should trigger full-decode fallback");
+    }
 }
