@@ -38,7 +38,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///      from the pre-R9 behaviour — cost model is additive, not disruptive.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestCostEstimator : BaseTest
 {
     // ─────────────────────────────────────────────────────────────────────────

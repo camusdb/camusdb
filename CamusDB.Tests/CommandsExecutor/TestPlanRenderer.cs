@@ -35,7 +35,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// bound end-to-end flow. Do not treat these as end-to-end coverage of column resolution or schema
 /// validation; see TestExecuteSqlSelect for that.
 /// </summary>
-[NonParallelizable]
 public sealed class TestPlanRenderer
 {
     private static QueryPlannerTestContext? context;

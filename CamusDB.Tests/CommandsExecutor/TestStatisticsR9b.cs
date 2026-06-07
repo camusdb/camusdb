@@ -40,7 +40,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   7. Existing R8 row-count behavior remains green.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestStatisticsR9b : BaseTest
 {
     // ─────────────────────────────────────────────────────────────────────────

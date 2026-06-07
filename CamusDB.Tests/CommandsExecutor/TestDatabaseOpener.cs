@@ -20,7 +20,6 @@ using Kahuna;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-[NonParallelizable]
 public sealed class TestDatabaseOpener : BaseTest
 {    
     [Test]

@@ -35,7 +35,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// "fixed here"      = the throw site was absent or wrong; this task corrected it.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestErrorMatrix : BaseTest
 {
     // ─────────────────────────────────────────────────────────────────────────

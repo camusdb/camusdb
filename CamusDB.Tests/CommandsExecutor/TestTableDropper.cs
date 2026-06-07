@@ -16,7 +16,6 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-[NonParallelizable]
 internal sealed class TestTableDropper : SharedNodeBaseTest
 {    
     private async Task<(string, DatabaseDescriptor, CommandExecutor, CatalogsManager)> SetupDatabase()

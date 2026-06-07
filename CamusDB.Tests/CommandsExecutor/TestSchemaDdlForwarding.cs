@@ -40,7 +40,6 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 namespace CamusDB.Tests.CommandsExecutor;
 
 [TestFixture]
-[NonParallelizable]
 public sealed class TestSchemaDdlForwarding
 {
     private static readonly ILoggerFactory LoggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(builder =>

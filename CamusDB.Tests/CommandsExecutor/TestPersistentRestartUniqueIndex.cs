@@ -33,7 +33,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// time, very plausibly across restarts). Single-node, SQLite-backed, 8 partitions, on a fixed
 /// storage path that survives the simulated restart (dispose + recreate the node).
 /// </summary>
-[NonParallelizable]
 internal sealed class TestPersistentRestartUniqueIndex : BaseTest
 {
     private const string Id = "1e8921c8-58ed-483e-b4f2-c0f43cbc6c22";

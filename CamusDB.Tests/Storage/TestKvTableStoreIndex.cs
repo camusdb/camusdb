@@ -32,7 +32,6 @@ namespace CamusDB.Tests.Storage;
 ///   LookupUnique, ScanIndex, PutIndexEntry, DeleteIndexEntry.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestKvTableStoreIndex
 {
     // ---- transaction helpers ----------------------------------------------

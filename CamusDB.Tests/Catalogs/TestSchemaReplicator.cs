@@ -29,7 +29,6 @@ using NUnit.Framework;
 namespace CamusDB.Tests.Catalogs;
 
 [TestFixture]
-[NonParallelizable]
 public sealed class TestSchemaReplicator
 {
     private static readonly ILoggerFactory LoggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(b =>

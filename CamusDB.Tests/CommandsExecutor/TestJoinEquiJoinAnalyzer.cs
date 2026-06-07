@@ -19,7 +19,6 @@ using NUnit.Framework;
 namespace CamusDB.Tests.CommandsExecutor;
 
 [TestFixture]
-[NonParallelizable]
 public sealed class TestJoinEquiJoinAnalyzer
 {
     [Test]

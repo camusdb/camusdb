@@ -15,7 +15,6 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-[NonParallelizable]
 internal class TestDatabaseCreator : BaseTest
 {
     [Test]

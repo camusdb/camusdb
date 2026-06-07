@@ -30,7 +30,6 @@ using NUnit.Framework;
 namespace CamusDB.Tests.CommandsExecutor;
 
 [TestFixture]
-[NonParallelizable]
 public sealed class TestJoinQueryPlanner
 {
     private static readonly ILogger<ICamusDB> logger = new LoggerFactory().CreateLogger<ICamusDB>();

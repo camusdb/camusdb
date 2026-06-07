@@ -36,7 +36,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   6. Schema version appears correctly in the schema-deps list.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestPlanCacheHooks : BaseTest
 {
     // ─────────────────────────────────────────────────────────────────────────

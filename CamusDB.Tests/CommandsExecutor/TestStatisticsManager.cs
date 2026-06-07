@@ -27,7 +27,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// R8 — Lightweight Table Statistics tests.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestStatisticsManager : BaseTest
 {
     // ─────────────────────────────────────────────────────────────────────────

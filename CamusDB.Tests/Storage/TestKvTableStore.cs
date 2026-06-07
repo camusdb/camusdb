@@ -35,7 +35,6 @@ namespace CamusDB.Tests.Storage;
 /// public surface of KvTableStore against it.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestKvTableStore
 {
     // ---- schema helpers ---------------------------------------------------

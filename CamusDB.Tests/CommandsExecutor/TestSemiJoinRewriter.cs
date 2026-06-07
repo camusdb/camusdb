@@ -34,7 +34,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   D. Non-eligible paths — star projection, multi-column, correlated: fall through to materialisation.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestSemiJoinRewriter : BaseTest
 {
     // ─────────────────────────────────────────────────────────────────────────
@@ -342,6 +341,57 @@ public sealed class TestSemiJoinRewriter : BaseTest
         Assert.AreEqual("Gamma", rows[0].Row["name"].StrValue);
     }
 
+    [Test]
+    public async Task R11_NullAwareAntiJoinNullInFilteredOutRowDoesNotPoison()
+    {
+        // Bug #6: InnerScanForNullsAsync must apply node.InnerFilter before checking for NULLs.
+        // A NULL that lives in a row excluded by the inner WHERE is NOT part of the subquery
+        // result set and must not poison the anti-join.
+        //
+        // Setup: blocklist has two rows —
+        //   (id=X, name=NULL,    active=false)  ← excluded by inner filter; its NULL must NOT count
+        //   (id=Y, name="Alpha", active=true)   ← included; no NULL → anti-join proceeds normally
+        //
+        // Query: robots WHERE name NOT IN (SELECT name FROM blocklist WHERE active = true)
+        // Expected: Beta and Gamma pass (not blocked); Alpha is blocked.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();
+
+        KvTransaction setup = await database.Transactions.BeginAsync();
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "active_blocklist",
+            columns: new ColumnInfo[]
+            {
+                new("id",     ColumnType.Id),
+                new("name",   ColumnType.String),            // nullable
+                new("active", ColumnType.Bool, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk",             new ColumnIndexInfo[] { new("id",   OrderType.Ascending) }),
+                new(ConstraintType.IndexMulti,  "abl_name_idx",  new ColumnIndexInfo[] { new("name", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        // Row with NULL name but active=false — must be ignored by the null-scan.
+        await executor.Insert(new InsertTicket(txnState: setup, databaseName: dbname, tableName: "active_blocklist",
+            values: new()
+            {
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "active", new(ColumnType.Bool, false) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "name", new(ColumnType.String, "Alpha") }, { "active", new(ColumnType.Bool, true) } },
+            }));
+        await database.Transactions.CommitAsync(setup);
+
+        List<QueryResultRow> rows = await RunQueryAsync(database, executor, dbname,
+            "SELECT name FROM robots WHERE name NOT IN (SELECT name FROM active_blocklist WHERE active = true)");
+
+        // Alpha is blocked (active=true in blocklist); Beta and Gamma are not.
+        Assert.AreEqual(2, rows.Count,
+            "NULL in a filter-excluded inner row must not poison the NullAwareAnti-join");
+        IEnumerable<string?> names = rows.Select(r => r.Row["name"].StrValue).OrderBy(n => n);
+        CollectionAssert.AreEqual(new[] { "Beta", "Gamma" }, names);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // D. Non-eligible paths fall through to materialisation (no crash)
     // ─────────────────────────────────────────────────────────────────────────
@@ -375,6 +425,130 @@ public sealed class TestSemiJoinRewriter : BaseTest
             "SELECT name FROM robots WHERE name IN (SELECT name FROM approved WHERE name = 'Alpha')");
 
         Assert.AreEqual(1, rows.Count, "IN with inner WHERE must apply both inner filter and probe");
+        Assert.AreEqual("Alpha", rows[0].Row["name"].StrValue);
+    }
+
+    [Test]
+    public async Task R11_NullOuterNotInEmptyAntiInnerEmitsRow()
+    {
+        // SQL: NULL NOT IN () → TRUE. The outer table has a row whose "year" is NULL.
+        // The anti-join inner (empty_anti) has no rows, so every outer row — including the
+        // one with NULL year — must be returned.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "null_year_robots",
+            columns: new ColumnInfo[]
+            {
+                new("id",   ColumnType.Id),
+                new("year", ColumnType.Integer64),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "empty_years",
+            columns: new ColumnInfo[]
+            {
+                new("id",   ColumnType.Id),
+                new("year", ColumnType.Integer64, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk",        new ColumnIndexInfo[] { new("id",   OrderType.Ascending) }),
+                new(ConstraintType.IndexMulti,  "year_idx",  new ColumnIndexInfo[] { new("year", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        // Insert one row with a NULL year — this is the outer row with NULL outer value.
+        await executor.Insert(new InsertTicket(txnState: txn, databaseName: dbname, tableName: "null_year_robots",
+            values: new() { new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) } } }));
+
+        await database.Transactions.CommitAsync(txn);
+
+        List<QueryResultRow> rows = await RunQueryAsync(database, executor, dbname,
+            "SELECT id FROM null_year_robots WHERE year NOT IN (SELECT year FROM empty_years)");
+
+        Assert.AreEqual(1, rows.Count,
+            "NULL NOT IN (empty) must be TRUE — the row with a NULL outer column must be emitted");
+    }
+
+    [Test]
+    public async Task R11_NullOuterNotInNonEmptyAntiInnerDropsRow()
+    {
+        // SQL: NULL NOT IN (non-empty) → UNKNOWN → FALSE; the row must NOT be emitted.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "null_year_robots2",
+            columns: new ColumnInfo[]
+            {
+                new("id",   ColumnType.Id),
+                new("year", ColumnType.Integer64),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "some_years",
+            columns: new ColumnInfo[]
+            {
+                new("id",   ColumnType.Id),
+                new("year", ColumnType.Integer64, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk",        new ColumnIndexInfo[] { new("id",   OrderType.Ascending) }),
+                new(ConstraintType.IndexMulti,  "year_idx2", new ColumnIndexInfo[] { new("year", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        await executor.Insert(new InsertTicket(txnState: txn, databaseName: dbname, tableName: "null_year_robots2",
+            values: new() { new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) } } }));
+
+        await executor.Insert(new InsertTicket(txnState: txn, databaseName: dbname, tableName: "some_years",
+            values: new() { new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "year", new(ColumnType.Integer64, 2024L) } } }));
+
+        await database.Transactions.CommitAsync(txn);
+
+        List<QueryResultRow> rows = await RunQueryAsync(database, executor, dbname,
+            "SELECT id FROM null_year_robots2 WHERE year NOT IN (SELECT year FROM some_years)");
+
+        Assert.AreEqual(0, rows.Count,
+            "NULL NOT IN (non-empty) must be UNKNOWN → FALSE — the row with NULL outer column must be dropped");
+    }
+
+    [Test]
+    public async Task R11_InSubqueryWithParameterizedInnerFilterExecutesCorrectly()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();
+
+        // Inner filter references a query parameter — verifies that ProbeViaIndexAsync threads
+        // outerTicket.Parameters through to EvalFilter (bug: previously called with null).
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(
+            txnState: txn,
+            database: dbname,
+            sql: "SELECT name FROM robots WHERE name IN (SELECT name FROM approved WHERE name = @p)",
+            parameters: new() { { "@p", new ColumnValue(ColumnType.String, "Alpha") } });
+
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        await database.Transactions.CommitAsync(txn);
+
+        Assert.AreEqual(1, rows.Count, "Parameterized inner filter must be evaluated with the supplied parameters");
         Assert.AreEqual("Alpha", rows[0].Row["name"].StrValue);
     }
 }

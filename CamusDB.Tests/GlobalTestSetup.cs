@@ -9,6 +9,8 @@ using System;
 using System.Threading;
 using NUnit.Framework;
 
+[assembly: Parallelizable(ParallelScope.Fixtures)]
+
 namespace CamusDB.Tests;
 
 /// <summary>

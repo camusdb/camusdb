@@ -26,7 +26,6 @@ using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-[NonParallelizable]
 internal sealed class TestRowInsertorCloseDb : BaseTest
 {
     private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()

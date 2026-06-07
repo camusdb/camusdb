@@ -14,7 +14,6 @@ using CamusDB.Tests.Flux.Fixtures;
 
 namespace CamusDB.Tests.Flux;
 
-[NonParallelizable]
 internal sealed class TestFlux
 {
     private FluxAction CallStep(TestFluxState state)

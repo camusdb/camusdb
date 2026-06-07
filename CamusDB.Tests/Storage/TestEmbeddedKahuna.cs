@@ -40,7 +40,6 @@ namespace CamusDB.Tests.Storage;
 ///   4. Disposes cleanly via IAsyncDisposable.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestEmbeddedKahuna
 {
     // Dynamic port base — incremented atomically per test so that nodes from a prior test

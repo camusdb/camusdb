@@ -33,7 +33,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// so row + indexes share a partition and the bug is masked. This fixture spins up its own node with
 /// many partitions to exercise cross-partition unique-index lookups and 2PC.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestMultiPartitionUniqueIndex : BaseTest
 {
     private const string Id = "1e8921c8-58ed-483e-b4f2-c0f43cbc6c22";

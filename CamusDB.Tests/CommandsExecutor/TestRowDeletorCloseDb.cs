@@ -25,7 +25,6 @@ using CamusDB.Core.CommandsExecutor.Models.Results;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-[NonParallelizable]
 public class TestRowDeletorCloseDb : BaseTest
 {
     private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()

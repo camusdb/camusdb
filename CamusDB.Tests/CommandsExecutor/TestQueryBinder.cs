@@ -28,7 +28,6 @@ using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-[NonParallelizable]
 public class TestQueryBinder : BaseTest
 {
     [Test]

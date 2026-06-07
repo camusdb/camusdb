@@ -27,7 +27,6 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 namespace CamusDB.Tests.CommandsExecutor;
 
 [TestFixture]
-[NonParallelizable]
 public sealed class TestHttpSchemaDdlForwarder
 {
     private static readonly ILogger<ICamusDB> Logger = NullLogger<ICamusDB>.Instance;

@@ -925,8 +925,7 @@ on an older layout decode with their own version and read `age` with current vis
   the data side free.
 - ~~**Ack transport / per-instance tracker.**~~ **Implemented (E3).** `SchemaAckTracker` is now
   a per-`EmbeddedKahuna` instance. `RecordAndPublishSchemaApplied` sends follower acks to the
-  leader via `ISchemaAckSender` (HTTP in production, in-process relay in tests). See §6.2 and
-  `docs/distributed-schema-ack-transport-spec.md`.
+  leader via `ISchemaAckSender` (HTTP in production, in-process relay in tests). See §6.2.
 - **Auto-recovery without restart.** Restart-replay durability is now implemented: on open,
   the restore path reads the persisted checkpoint version as a *floor*, replays committed schema
   entries to head, re-persists the checkpoint, and clears the degraded flag (`SchemaReplicator.

@@ -20,7 +20,6 @@ using NUnit.Framework;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-[NonParallelizable]
 public class TestQuerySorter
 {
     [Test]
