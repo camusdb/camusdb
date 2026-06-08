@@ -629,7 +629,14 @@ public sealed class StatisticsManager
     private async Task<TableStatistics?> LoadFromKahunaByIdAsync(DatabaseDescriptor database, string tableId)
     {
         string kahunaKey = KahunaKey(database.Name, tableId);
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+
+        // Statistics are advisory metadata read for planning/cost estimation; a stale or
+        // missing value is harmless. Use a synthetic read-only transaction (HLCTimestamp.Zero)
+        // so Kahuna performs a non-transactional read-committed point read — no
+        // START-TRANSACTION / ROLLBACK round-trips and no MVCC context, matching how the
+        // table scan itself reads rows. Previously this opened a full interactive transaction
+        // per stats load and immediately rolled it back.
+        KvTransaction tx = database.Transactions.CreateReadOnlyTransaction();
 
         try
         {
