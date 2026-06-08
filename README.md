@@ -16,7 +16,8 @@ Features
 - **Aggregation** — COUNT, SUM, AVG, MIN, MAX with GROUP BY and HAVING filters.
 - **Filtering and ordering** — WHERE clauses with =, !=, <, >, <=, >=, AND, OR, LIKE, ILIKE, BETWEEN, IS NULL, IN, NOT IN, scalar subqueries, and EXISTS subqueries; ORDER BY (ASC/DESC), projection aliases, ordinal references, LIMIT, and OFFSET.
 - **Scalar functions** — string, math, date/time, cast, object id, and JSON helpers including `json_valid`, `json_type`, `json_extract`, `json_value`, `json_array_length`, and `json_contains`.
-- **Query planning** — rule-based physical planning for table scans, index scans, joins, aggregation, distinct, sorting, and limits, including predicate pushdown and index nested-loop joins for eligible equi-joins.
+- **Query planning** — physical plan trees for table scans, index scans, joins, aggregation, distinct, sorting, and limits, with predicate/projection/limit pushdown, index-based sort elision, join-order heuristics, index nested-loop joins for eligible equi-joins, semi/anti-join rewrite of indexed `IN`/`NOT IN` subqueries, index-driven value-list `IN`, and streaming `DISTINCT`. A small statistics-backed cost model (row counts, per-index counts, per-column min/max) chooses between index and full scans.
+- **Query introspection** — `EXPLAIN`, `EXPLAIN (LOGICAL)`, `EXPLAIN (PHYSICAL)`, and `EXPLAIN (ANALYZE)` return the plan as result rows (node names, details, estimated rows/cost, and — for `ANALYZE` — actual row counts and KV access counters).
 - **Indexes** — PRIMARY KEY, inline UNIQUE column constraints, UNIQUE indexes, multi-column indexes, CREATE INDEX IF NOT EXISTS, CREATE UNIQUE INDEX IF NOT EXISTS, and ALTER TABLE ADD/DROP INDEX.
 - **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, ALTER TABLE ADD/DROP COLUMN.
 - **ACID transactions** — pessimistic locking with read-committed isolation; cross-partition writes use two-phase commit (2PC).
@@ -70,6 +71,10 @@ WHERE id NOT IN (SELECT robots_id FROM user_robots);
 SELECT json_value(payload, "$.name")
 FROM robots
 WHERE json_valid(payload) = true;
+
+EXPLAIN SELECT * FROM app_users WHERE email = 'a@example.com';
+
+EXPLAIN (ANALYZE) SELECT role, COUNT(*) FROM app_users GROUP BY role;
 ```
 
 `SELECT DISTINCT` is row-level distinct. Aggregate-level distinct such as `COUNT(DISTINCT code)` is not supported yet.
@@ -113,7 +118,7 @@ The engine is structured as a pipeline of composable operators:
 - **SQL Parser** — LALR(1) parser (GPLEX/GPPG) that produces an AST. Identifiers are normalized to lowercase at parse time.
 - **Query planner** — builds a physical plan tree from the bound SELECT model, choosing table scans, index scans, index lookup scans, nested-loop joins, index nested-loop joins, aggregate nodes, distinct nodes, sort nodes, and limit nodes based on query shape and available indexes.
 - **Query binder** — resolves table aliases, derived table output columns, projection aliases, ordinal GROUP BY/ORDER BY references, aggregate scope, HAVING scope, and subquery scope before execution.
-- **Query operators** — `QueryScanner`, `QueryFilterer`, `QuerySorter`, `QueryLimiter`, `QueryProjector`, `QueryAggregator`, `QueryDistincter`, and `QueryJoinExecutor` execute the plan while keeping filtering, sorting, aggregation, projection, and limiting storage-agnostic.
+- **Query operators** — `QueryScanner`, `QueryFilterer`, `QuerySorter`, `QueryLimiter`, `QueryProjector`, `QueryAggregator`, `QueryDistincter`, `SemiJoinExecutor`, and `QueryJoinExecutor` execute the plan while keeping filtering, sorting, aggregation, projection, and limiting storage-agnostic.
 - **Storage layer** — row data and index entries are stored in an embedded Kahuna KV node. `KvTableStore` maps table rows and index entries onto Kahuna keys using a prefix layout that keeps all rows of a table on the same Raft partition.
 - **Transaction layer** — `KvTransactionsManager` coordinates BEGIN/COMMIT/ROLLBACK via Kahuna's transaction API; cross-partition writes go through Kahuna's 2PC protocol.
 - **Catalog** — table and index descriptors are kept in memory and persisted through the KV layer.
@@ -122,7 +127,7 @@ The engine is structured as a pipeline of composable operators:
 Query Planner
 -------------
 
-See [docs/query-planner.md](docs/query-planner.md) for a full developer reference: pipeline stages, physical plan nodes, predicate analysis, index scan selection, join execution, optimization passes, file map, and a checklist for adding new SQL features.
+See [docs/query-planner.md](docs/query-planner.md) for a full developer reference: pipeline stages, physical plan nodes, predicate analysis, index scan selection, join execution, the cost model and statistics, optimization passes, file map, and a checklist for adding new SQL features. For the user-facing `EXPLAIN` output format (node names, columns, and worked examples) see [docs/explain.md](docs/explain.md).
 
 Distributed Schema
 ------------------

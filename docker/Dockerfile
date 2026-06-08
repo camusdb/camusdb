@@ -17,6 +17,12 @@ COPY --from=build-env /app .
 COPY docker/config.cluster.yml /app/Config/config.yml
 COPY docker/certs/development-certificate.pfx /app/certificate.pfx
 
+# Trust the self-signed dev cert so inter-node Raft gRPC (which defaults to TLS and has no
+# insecure-validation bypass) accepts peer certificates. The cert's SANs cover the node IPs
+# (see docker/certs/san.cnf); installing it as a CA anchor satisfies chain validation.
+COPY docker/certs/development-certificate.crt /usr/local/share/ca-certificates/camus-dev.crt
+RUN update-ca-certificates
+
 ARG CAMUS_RAFT_NODENAME
 ARG CAMUS_RAFT_NODEID
 ARG CAMUS_RAFT_HOST

@@ -1,0 +1,45 @@
+# OpenSSL config for the CamusDB local-development cluster certificate.
+#
+# Self-signed dev cert used by every node for the Raft gRPC port (--raft-certificate)
+# and the HTTPS API port (--https-certificate). NOT for production.
+#
+# The Subject Alternative Names below MUST cover every endpoint a node dials. In the
+# latest Kahuna/Kommander the Raft transport defaults to TLS (https) and CamusDB exposes
+# no insecure-validation bypass, so the presented cert is validated against the dialed
+# host. docker/local.yml nodes dial each other by container IP (172.31.0.2/.3/.4), so
+# those IPs must appear here or the inter-node TLS handshake fails and the cluster never
+# forms. If you change the node IPs, hostnames, or subnet in docker/local.yml, update the
+# alt_names block below and regenerate (see generate.sh).
+
+[req]
+default_bits       = 2048
+prompt             = no
+default_md         = sha256
+distinguished_name = dn
+req_extensions     = req_ext
+x509_extensions    = req_ext
+
+[dn]
+C  = CO
+ST = BOG
+L  = BOG
+O  = CamusDB Development
+CN = camus-cluster
+
+[req_ext]
+subjectAltName   = @alt_names
+# Nodes act as both gRPC server and client, so both EKUs are needed.
+extendedKeyUsage = serverAuth, clientAuth
+# Self-signed cert doubles as its own trust anchor when added to the container CA store.
+basicConstraints = critical, CA:TRUE
+
+[alt_names]
+DNS.1 = localhost
+DNS.2 = camus1
+DNS.3 = camus2
+DNS.4 = camus3
+IP.1  = 127.0.0.1
+IP.2  = ::1
+IP.3  = 172.31.0.2
+IP.4  = 172.31.0.3
+IP.5  = 172.31.0.4
