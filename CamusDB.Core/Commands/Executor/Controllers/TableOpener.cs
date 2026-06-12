@@ -84,6 +84,17 @@ internal sealed class TableOpener
         // commits (a no-op on other nodes — the descriptor arrives by replication). Idempotent.
         // Never register {db}/meta (Kahuna rejects it — the schema log must stay hash-routed for
         // total ordering). Index spaces are registered below (C3), after column types are resolved.
+        //
+        // DROP TABLE safety (C5): dropping a table evicts its AsyncLazy<TableDescriptor> entry from
+        // database.TableDescriptors by name — locally via TableDropper, and on the replicated apply
+        // path via SchemaReplicator.InvalidateAppliedTableDescriptor (which also evicts on
+        // AddIndex/DropIndex/SetElementState(Index), so index DDL rebuilds rangedIndexIds too). A
+        // recreated table with the same name gets a NEW ObjectId, so RegisterKeyRangeAsync is called with a
+        // brand-new key space ({newId}:r) — completely disjoint from the old one ({oldId}:r). Kahuna
+        // has no deregistration API, so the old key-range descriptor stays in node memory until
+        // process restart, but it is never written to and poses no correctness risk (bounded leak).
+        // Lazy-on-open registration is the correct contract: K1 forwarding means the very first
+        // writer pays at most one extra round-trip to establish the range descriptor.
         if (CamusDBConfig.KeyRangeShardingEnabled)
             await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.RowKeySpace);
 

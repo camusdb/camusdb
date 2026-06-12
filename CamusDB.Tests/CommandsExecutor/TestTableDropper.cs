@@ -2,6 +2,7 @@
 using NUnit.Framework;
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
@@ -10,9 +11,12 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
+
+using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -161,5 +165,123 @@ internal sealed class TestTableDropper : SharedNodeBaseTest
 
         Assert.AreEqual("status", tableSchema.Columns![4].Name);
         Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![4].Type);
+    }
+
+    // C5: Registration lifecycle — DROP TABLE + recreate with same name under key-range sharding.
+    // Verifies that (a) the old table's TableDescriptor is evicted on DROP so the new table's
+    // lazy open doesn't return stale schema or stale row data, (b) the new table's RegisterKeyRangeAsync
+    // call registers a distinct key space (new ObjectId), and (c) INSERT + SELECT on the recreated
+    // table see only the new rows. With InitialPartitions=1 the register call is a harmless no-op
+    // from a routing standpoint, but the full descriptor-lifecycle path still executes.
+    [Test]
+    [NonParallelizable]
+    public async Task TestDropAndRecreateTableUnderKeyRangeSharding_DescriptorIsEvictedAndNewDataVisible()
+    {
+        bool prevFlag = CamusConfig.KeyRangeShardingEnabled;
+        CamusConfig.KeyRangeShardingEnabled = true;
+
+        try
+        {
+            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+            // ── Phase 1: create "vehicles" and insert 5 rows ──────────────────────
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: "vehicles",
+                columns:
+                [
+                    new ColumnInfo("id", ColumnType.Id),
+                    new ColumnInfo("value", ColumnType.Integer64)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+
+            for (int i = 0; i < 5; i++)
+            {
+                KvTransaction tx = await database.Transactions.BeginAsync();
+                await executor.Insert(new InsertTicket(
+                    txnState: tx,
+                    databaseName: dbname,
+                    tableName: "vehicles",
+                    values:
+                    [
+                        new()
+                        {
+                            { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                            { "value", new(ColumnType.Integer64, i) }
+                        }
+                    ]
+                ));
+                await database.Transactions.CommitAsync(tx);
+            }
+
+            // Confirm 5 rows visible before drop.
+            Assert.AreEqual(5, await CountRows(dbname, database, executor, "vehicles"));
+
+            // ── Phase 2: drop and recreate with a different schema ─────────────────
+            await executor.DropTable(new DropTableTicket(databaseName: dbname, tableName: "vehicles", ifExists: false));
+
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: "vehicles",
+                columns:
+                [
+                    new ColumnInfo("id", ColumnType.Id),
+                    new ColumnInfo("model", ColumnType.String, notNull: true)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+
+            for (int i = 0; i < 3; i++)
+            {
+                KvTransaction tx = await database.Transactions.BeginAsync();
+                await executor.Insert(new InsertTicket(
+                    txnState: tx,
+                    databaseName: dbname,
+                    tableName: "vehicles",
+                    values:
+                    [
+                        new()
+                        {
+                            { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                            { "model", new(ColumnType.String, "Model " + i) }
+                        }
+                    ]
+                ));
+                await database.Transactions.CommitAsync(tx);
+            }
+
+            // ── Phase 3: assert only 3 new rows are visible; schema is the new one ─
+            Assert.AreEqual(3, await CountRows(dbname, database, executor, "vehicles"),
+                "recreated table must see only the 3 new rows, not the 5 rows from the dropped table");
+
+            TableSchema schema = new CatalogsManager(logger).GetTableSchema(database, "vehicles");
+            Assert.AreEqual(2, schema.Columns!.Count, "new schema has 2 columns");
+            Assert.AreEqual("model", schema.Columns![1].Name, "second column is 'model', not 'value'");
+        }
+        finally
+        {
+            CamusConfig.KeyRangeShardingEnabled = prevFlag;
+        }
+    }
+
+    private static async Task<int> CountRows(string dbname, DatabaseDescriptor database, CommandExecutor executor, string tableName)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(tx, dbname, $"SELECT id FROM {tableName}", null));
+        int count = (await cursor.ToListAsync()).Count;
+        await database.Transactions.CommitAsync(tx);
+        return count;
     }
 }

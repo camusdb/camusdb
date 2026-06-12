@@ -85,6 +85,14 @@ public static class CamusDBConfig
     /// types (Integer64/Float64/Bool/Id/Null) are also registered and range-locked. String-keyed
     /// indexes stay hash-routed until the persistence comparator is aligned (C3b). Kahuna
     /// auto-split/merge is not wired (logical range routing + per-range locks work without it).
+    ///
+    /// <b>Operational requirement (C6):</b> key-range routing requires <c>InitialPartitions ≥ 2</c>
+    /// in <c>config.yml</c>. With a single partition the Kahuna registry call is a silent no-op
+    /// (stays hash-routed, range locks transparently fall back to the single-partition hash path),
+    /// so enabling this flag on a single-partition node is safe but has no effect. A startup
+    /// warning is emitted when the flag is on and <c>InitialPartitions &lt; 2</c>. Production
+    /// clusters must set <c>initial_partitions: 2</c> (or more) to activate key-range sharding.
+    ///
     /// Default off. Toggle via the <c>CAMUS_KEY_RANGE_SHARDING</c> environment variable.
     /// </summary>
     public static bool KeyRangeShardingEnabled =

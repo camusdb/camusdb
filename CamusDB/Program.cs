@@ -190,6 +190,16 @@ ThreadPool.SetMinThreads(1024, 512);
 
 WebApplication app = builder.Build();
 
+// C6: warn early when key-range sharding is enabled but InitialPartitions < 2.
+// With a single partition Kahuna treats RegisterKeyRangeAsync as a no-op, so the flag is
+// harmless but silent — operators must know they need ≥ 2 partitions to benefit.
+if (CamusDBConfig.KeyRangeShardingEnabled && config.InitialPartitions < 2)
+    app.Logger.LogWarning(
+        "CAMUS_KEY_RANGE_SHARDING is enabled but initial_partitions={InitialPartitions} < 2; " +
+        "key-range routing is a no-op on a single-partition node. " +
+        "Set initial_partitions >= 2 in config.yml to activate key-range sharding.",
+        config.InitialPartitions);
+
 if (config.IsClusterMode)
 {
     app.MapGrpcRaftRoutes();
