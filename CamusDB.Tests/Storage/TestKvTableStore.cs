@@ -344,42 +344,44 @@ public sealed class TestKvTableStore
         await CommitTransaction(node.Kahuna, tx);
     }
 
-    // Exclusive range (prefix) lock: serializable scans. A transaction that acquires the table's
+    // Exclusive range lock (key-range-sharding mode): a transaction that acquires the table's
     // row range lock blocks any other transaction from locking the same range, and the lock is
-    // released when the owning transaction commits (a read-only prefix lock is not finalized by
-    // the 2PC, so KvTransactionsManager releases it explicitly).
+    // released when the owning transaction commits. Range locks are only active when
+    // KeyRangeShardingEnabled=true; in single-partition mode the method is a no-op.
     [Test]
+    [NonParallelizable]
     public async Task AcquireRowRangeLock_IsExclusive_AndReleasedOnCommit()
     {
-        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("trangelock");
-        await using EmbeddedKahuna __ = node;
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("trangelock");
+            await using EmbeddedKahuna __ = node;
 
-        KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna);
 
-        // The lock is tracked in the prefix-lock set (hash mode) or the range-lock set (key-range
-        // mode); count whichever the active routing mode uses.
-        static int HeldLocks(KvTransaction tx) =>
-            CamusDBConfig.KeyRangeShardingEnabled ? tx.GetAcquiredRangeLocks().Count : tx.GetAcquiredPrefixLocks().Count;
+            KvTransaction tx1 = await transactions.BeginAsync();
+            await store.AcquireRowRangeLockAsync(tx1);
+            Assert.AreEqual(1, tx1.GetAcquiredRangeLocks().Count, "tx1 must track its range lock");
 
-        KvTransaction tx1 = await transactions.BeginAsync();
-        await store.AcquireRowRangeLockAsync(tx1);
-        Assert.AreEqual(1, HeldLocks(tx1), "tx1 must track its range lock");
+            // A second transaction cannot acquire the same range while tx1 holds it.
+            KvTransaction tx2 = await transactions.BeginAsync();
+            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+                async () => await store.AcquireRowRangeLockAsync(tx2));
+            Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex!.Code,
+                "a concurrent range lock must be rejected as a conflict");
 
-        // A second transaction cannot acquire the same range while tx1 holds it.
-        KvTransaction tx2 = await transactions.BeginAsync();
-        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
-            async () => await store.AcquireRowRangeLockAsync(tx2));
-        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex!.Code,
-            "a concurrent range lock must be rejected as a conflict");
+            // Committing tx1 releases the range lock.
+            await transactions.CommitAsync(tx1);
 
-        // Committing tx1 releases the range lock.
-        await transactions.CommitAsync(tx1);
+            // tx2 can now acquire it.
+            Assert.DoesNotThrowAsync(async () => await store.AcquireRowRangeLockAsync(tx2),
+                "the range must be lockable again once the holder commits");
+            Assert.AreEqual(1, tx2.GetAcquiredRangeLocks().Count);
 
-        // tx2 can now acquire it.
-        Assert.DoesNotThrowAsync(async () => await store.AcquireRowRangeLockAsync(tx2),
-            "the range must be lockable again once the holder commits");
-        Assert.AreEqual(1, HeldLocks(tx2));
-
-        await transactions.CommitAsync(tx2);
+            await transactions.CommitAsync(tx2);
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
 }

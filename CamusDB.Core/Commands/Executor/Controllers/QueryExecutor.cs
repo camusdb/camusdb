@@ -320,6 +320,13 @@ internal sealed class QueryExecutor
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
+        // R1/C2: phantom-protection lock scoped to the actual scan range instead of the whole
+        // bucket. Two transactions scanning disjoint sub-ranges of the same index don't conflict.
+        await table.Store.AcquireBoundedIndexRangeLockAsync(
+            ticket.TxnState, index.Name,
+            fromBound, fromInclusive, toBound, toInclusive,
+            unique).ConfigureAwait(false);
+
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             txId,
             index.Name,
@@ -375,6 +382,24 @@ internal sealed class QueryExecutor
 
         HashSet<ObjectIdValue> seen = new();
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+
+        // R1/C2: for a non-unique InList scan acquire a BOUNDED range lock covering [min,max] of
+        // the IN values — tighter than the whole bucket, allows concurrent scans on disjoint ranges.
+        // Unique in-list uses point lookups only (LookupUnique) so no range lock is needed.
+        if (!isUnique)
+        {
+            CompositeColumnValue? minVal = null, maxVal = null;
+            foreach (ColumnValue v in inListNode.Values)
+            {
+                CompositeColumnValue cv = new(v);
+                if (minVal is null || cv.CompareTo(minVal) < 0) minVal = cv;
+                if (maxVal is null || cv.CompareTo(maxVal) > 0) maxVal = cv;
+            }
+            await table.Store.AcquireBoundedIndexRangeLockAsync(
+                ticket.TxnState, index.Name,
+                minVal, true, maxVal, true,
+                unique: false).ConfigureAwait(false);
+        }
 
         foreach (ColumnValue value in inListNode.Values)
         {

@@ -508,4 +508,63 @@ public class TestKeyEncoder
             sb.Append(StringTokens[random.Next(StringTokens.Length)]);
         return sb.ToString();
     }
+
+    // ---- IndexKeySentinel invariant ------------------------------------------
+
+    // KvTableStore appends IndexKeySentinel (U+FFFF) after the encoded upper bound for non-unique
+    // index keys so that every possible rowId suffix ({24 lowercase hex chars, U+0030..U+0066}) is
+    // covered by the range lock.  This relies on KeyEncoder never emitting a character >= U+FFFF.
+    //
+    // This test pins that invariant across every type and a wide sample of values, including the
+    // edge cases that already appear in StringTokens (e.g. U+FFFF and U+FFFD as *content*).  If
+    // KeyEncoder is ever changed to emit a code unit >= U+FFFF, this test fails first.
+    [Test]
+    public void AllEncodedCharsBelowIndexKeySentinel()
+    {
+        const char Sentinel = '￿'; // must match KvTableStore.IndexKeySentinel
+
+        // ---- fixed representative values per type ----
+        List<CompositeColumnValue> samples =
+        [
+            Single(new ColumnValue(ColumnType.Integer64, long.MinValue)),
+            Single(new ColumnValue(ColumnType.Integer64, -1L)),
+            Single(new ColumnValue(ColumnType.Integer64, 0L)),
+            Single(new ColumnValue(ColumnType.Integer64, 1L)),
+            Single(new ColumnValue(ColumnType.Integer64, long.MaxValue)),
+            Single(new ColumnValue(ColumnType.Float64, double.NegativeInfinity)),
+            Single(new ColumnValue(ColumnType.Float64, -1.5)),
+            Single(new ColumnValue(ColumnType.Float64, 0.0)),
+            Single(new ColumnValue(ColumnType.Float64, 1.5)),
+            Single(new ColumnValue(ColumnType.Float64, double.PositiveInfinity)),
+            Single(new ColumnValue(ColumnType.Bool, false)),
+            Single(new ColumnValue(ColumnType.Bool, true)),
+            Single(new ColumnValue(ColumnType.String, "")),
+            Single(new ColumnValue(ColumnType.String, "hello")),
+            // High-plane content: KeyEncoder encodes these as 4-hex-per-code-unit → pure ASCII output.
+            Single(new ColumnValue(ColumnType.String, "�")),   // replacement char as value
+            Single(new ColumnValue(ColumnType.String, "￿")),   // the sentinel itself as *value*
+            Single(new ColumnValue(ColumnType.String, "😀")), // supplementary plane emoji
+            Single(new ColumnValue(ColumnType.Null, false)),
+        ];
+
+        // ---- random composites spanning all types ----
+        Random rng = new(20260612);
+        for (int i = 0; i < 500; i++)
+        {
+            int cols = rng.Next(1, 5);
+            ColumnType[] schema = new ColumnType[cols];
+            for (int c = 0; c < cols; c++)
+                schema[c] = OrderableTypes[rng.Next(OrderableTypes.Length)];
+            samples.Add(RandomComposite(rng, schema));
+        }
+
+        foreach (CompositeColumnValue cv in samples)
+        {
+            string encoded = KeyEncoder.Encode(cv);
+            foreach (char ch in encoded)
+                Assert.That((int)ch, Is.LessThan((int)Sentinel),
+                    $"KeyEncoder emitted U+{(int)ch:X4} which is >= IndexKeySentinel U+FFFF " +
+                    $"(encoded output: '{encoded}', input: {cv})");
+        }
+    }
 }

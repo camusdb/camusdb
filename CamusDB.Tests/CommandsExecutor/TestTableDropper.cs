@@ -3,6 +3,7 @@ using NUnit.Framework;
 
 using System;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 
@@ -273,6 +274,84 @@ internal sealed class TestTableDropper : SharedNodeBaseTest
         {
             CamusConfig.KeyRangeShardingEnabled = prevFlag;
         }
+    }
+
+    // C1 regression test: concurrent SELECTs must not conflict in key-range-sharding mode.
+    // Before the fix, QueryController passed readOnly=false (the default) for SELECTs, so
+    // every scan acquired an exclusive whole-bucket range lock. Two concurrent reads on the same
+    // table would then fail fast with TransactionConflict (AlreadyLocked). Fix: pure reads use
+    // read-only transactions (IsReadOnly=true) which skip the range-lock acquisition entirely.
+    [Test]
+    [NonParallelizable]
+    public async Task C1_ConcurrentSelectsWithReadOnlyTransactionsDoNotConflictInKeyRangeMode()
+    {
+        bool prevFlag = CamusConfig.KeyRangeShardingEnabled;
+        CamusConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: "books",
+                columns:
+                [
+                    new ColumnInfo("id",    ColumnType.Id),
+                    new ColumnInfo("title", ColumnType.String, notNull: true),
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false));
+
+            // Seed 5 rows.
+            for (int i = 0; i < 5; i++)
+            {
+                KvTransaction ins = await database.Transactions.BeginAsync();
+                await executor.Insert(new InsertTicket(
+                    txnState: ins,
+                    databaseName: dbname,
+                    tableName: "books",
+                    values: new()
+                    {
+                        new()
+                        {
+                            { "id",    new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                            { "title", new(ColumnType.String, $"Book {i}") },
+                        },
+                    }));
+                await database.Transactions.CommitAsync(ins);
+            }
+
+            // Run 4 concurrent SELECTs using read-only transactions. Each must succeed and
+            // see 5 rows. No TransactionConflict should be thrown.
+            int concurrency = 4;
+            using SemaphoreSlim gate = new(0, concurrency);
+            List<Task<int>> tasks = [];
+
+            for (int i = 0; i < concurrency; i++)
+            {
+                tasks.Add(Task.Run(async () =>
+                {
+                    // Simulate the fixed HTTP layer: read-only transaction for a pure SELECT.
+                    KvTransaction ro = database.Transactions.CreateReadOnlyTransaction();
+                    (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+                        await executor.ExecuteSQLQuery(new(ro, dbname, "SELECT id FROM books", null));
+
+                    gate.Release(); // all tasks lined up; start scanning together
+                    await gate.WaitAsync(concurrency - 1); // wait until everyone released
+
+                    return (await cursor.ToListAsync()).Count;
+                }));
+            }
+
+            int[] results = await Task.WhenAll(tasks);
+            Assert.That(results, Is.All.EqualTo(5),
+                "each concurrent read-only SELECT must return all 5 rows without conflicting");
+        }
+        finally { CamusConfig.KeyRangeShardingEnabled = prevFlag; }
     }
 
     private static async Task<int> CountRows(string dbname, DatabaseDescriptor database, CommandExecutor executor, string tableName)

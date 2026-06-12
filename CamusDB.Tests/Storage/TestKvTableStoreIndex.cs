@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -509,43 +510,43 @@ public sealed class TestKvTableStoreIndex
     // ---- range lock tests (C3) -------------------------------------------
 
     // Mirrors TestKvTableStore.AcquireRowRangeLock_IsExclusive_AndReleasedOnCommit for index spaces.
-    // An index marked as ranged (MarkIndexAsRanged) uses a Kahuna range lock; an unmarked index uses
-    // a prefix lock. Both are exclusive within the session and are released on commit.
+    // Range locks are only active when KeyRangeShardingEnabled=true AND the index is marked as
+    // ranged. In single-partition mode both methods are no-ops.
     [Test]
+    [NonParallelizable]
     public async Task AcquireIndexRangeLock_IsExclusive_AndReleasedOnCommit()
     {
-        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange1");
-        await using EmbeddedKahuna __ = node;
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange1");
+            await using EmbeddedKahuna __ = node;
 
-        // Mark the index as ranged (simulates what TableOpener does after RegisterKeyRangeAsync).
-        // When KeyRangeShardingEnabled is false this call is a no-op in terms of routing, but
-        // AcquireIndexRangeLockAsync checks both the flag and the set, so the lock type adapts.
-        store.MarkIndexAsRanged("idx_age");
+            // Mark the index as ranged (simulates what TableOpener does after RegisterKeyRangeAsync).
+            store.MarkIndexAsRanged("idx_age");
 
-        KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna);
 
-        static int HeldLocks(KvTransaction tx) =>
-            CamusDBConfig.KeyRangeShardingEnabled
-                ? tx.GetAcquiredRangeLocks().Count
-                : tx.GetAcquiredPrefixLocks().Count;
+            KvTransaction tx1 = await transactions.BeginAsync();
+            await store.AcquireIndexRangeLockAsync(tx1, "idx_age");
+            Assert.AreEqual(1, tx1.GetAcquiredRangeLocks().Count, "tx1 must track its index range lock");
 
-        KvTransaction tx1 = await transactions.BeginAsync();
-        await store.AcquireIndexRangeLockAsync(tx1, "idx_age");
-        Assert.AreEqual(1, HeldLocks(tx1), "tx1 must track its index range lock");
+            KvTransaction tx2 = await transactions.BeginAsync();
+            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+                async () => await store.AcquireIndexRangeLockAsync(tx2, "idx_age"));
+            Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex!.Code,
+                "a concurrent index range lock must be rejected as a conflict");
 
-        KvTransaction tx2 = await transactions.BeginAsync();
-        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
-            async () => await store.AcquireIndexRangeLockAsync(tx2, "idx_age"));
-        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex!.Code,
-            "a concurrent index range lock must be rejected as a conflict");
+            await transactions.CommitAsync(tx1);
 
-        await transactions.CommitAsync(tx1);
+            Assert.DoesNotThrowAsync(async () => await store.AcquireIndexRangeLockAsync(tx2, "idx_age"),
+                "the index range must be lockable again once the holder commits");
+            Assert.AreEqual(1, tx2.GetAcquiredRangeLocks().Count);
 
-        Assert.DoesNotThrowAsync(async () => await store.AcquireIndexRangeLockAsync(tx2, "idx_age"),
-            "the index range must be lockable again once the holder commits");
-        Assert.AreEqual(1, HeldLocks(tx2));
-
-        await transactions.CommitAsync(tx2);
+            await transactions.CommitAsync(tx2);
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
 
     // ---- IsIndexRangeable gate tests (C3) ------------------------------------
@@ -632,22 +633,373 @@ public sealed class TestKvTableStoreIndex
         Assert.IsFalse(TableOpener.IsIndexRangeable(entry, types));
     }
 
-    // An index NOT marked as ranged always uses a prefix lock, even when KeyRangeShardingEnabled
-    // is true. This covers the String-keyed-index case (C3b) and the legacy SystemSchema path.
+    // An index NOT marked as ranged (or when key-range sharding is off) acquires NO lock.
+    // In single-partition mode MVCC provides snapshot isolation; phantom protection via
+    // range locks only activates with KeyRangeShardingEnabled + a registered ranged index.
     [Test]
-    public async Task AcquireIndexRangeLock_UnmarkedIndex_UsesPrefixLock()
+    public async Task AcquireIndexRangeLock_UnmarkedIndex_AcquiresNoLock()
     {
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange2");
         await using EmbeddedKahuna __ = node;
 
-        // idx_name is NOT marked as ranged — it should use a prefix lock regardless of the flag.
+        // idx_name is NOT marked as ranged — no lock should be acquired.
         KvTransactionsManager transactions = new(node.Kahuna);
 
         KvTransaction tx1 = await transactions.BeginAsync();
         await store.AcquireIndexRangeLockAsync(tx1, "idx_name");
-        Assert.AreEqual(1, tx1.GetAcquiredPrefixLocks().Count, "unmarked index must use a prefix lock");
-        Assert.AreEqual(0, tx1.GetAcquiredRangeLocks().Count, "no range lock for unmarked index");
+        Assert.AreEqual(0, tx1.GetAcquiredPrefixLocks().Count, "unmarked index must not acquire a prefix lock");
+        Assert.AreEqual(0, tx1.GetAcquiredRangeLocks().Count, "unmarked index must not acquire a range lock");
 
         await transactions.CommitAsync(tx1);
+    }
+
+    // C2 / Finding-1: a bounded range lock [1,50] must BLOCK a concurrent write (PutIndexEntry) whose
+    // index value falls inside the range, and must ALLOW a write whose value falls outside it.
+    // This validates that the encoded bounds in AcquireBoundedIndexRangeLockAsync match actual stored-key
+    // positions — the thing that the lock-vs-lock test (below) cannot catch because two self-consistent
+    // encodings are always disjoint/overlapping by value order regardless of encoding bugs.
+    [Test]
+    [NonParallelizable]
+    public async Task C2_BoundedIndexRangeLock_BlocksWriteInsideRange_AllowsWriteOutside()
+    {
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f1");
+            await using EmbeddedKahuna __ = node;
+
+            store.MarkIndexAsRanged("idx_age");
+            KvTransactionsManager transactions = new(node.Kahuna);
+
+            CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
+            CompositeColumnValue cv25 = new(new ColumnValue(ColumnType.Integer64, 25L));
+            CompositeColumnValue cv50 = new(new ColumnValue(ColumnType.Integer64, 50L));
+            CompositeColumnValue cv75 = new(new ColumnValue(ColumnType.Integer64, 75L));
+
+            // txA holds a bounded range lock [1, 50] on idx_age.
+            KvTransaction txA = await transactions.BeginAsync();
+            await store.AcquireBoundedIndexRangeLockAsync(txA, "idx_age", cv1, true, cv50, true, unique: false);
+            Assert.AreEqual(1, txA.GetAcquiredRangeLocks().Count, "txA must hold the [1,50] range lock");
+
+            // txB tries to write value=25 (inside [1,50]) — must be blocked.
+            // Kahuna returns MustRetry (key falls in the locked range), so RetryOnMustRetry loops
+            // until the CancellationToken fires.  We give it 500 ms; the first retry delay is 1 ms
+            // so cancellation happens well before the 32-retry budget would expire.
+            KvTransaction txB = await transactions.BeginAsync();
+            ObjectIdValue rowId25 = new(25, 0, 0);
+            using CancellationTokenSource ctsInside = new(TimeSpan.FromMilliseconds(500));
+            Assert.CatchAsync<OperationCanceledException>(
+                async () => await store.PutIndexEntry(txB, "idx_age", cv25, rowId25, unique: false, cancellationToken: ctsInside.Token),
+                "write at value=25 must be blocked by the active [1,50] range lock");
+
+            // txC writes value=75 (outside [1,50]) — must succeed without blocking.
+            KvTransaction txC = await transactions.BeginAsync();
+            ObjectIdValue rowId75 = new(75, 0, 0);
+            Assert.DoesNotThrowAsync(
+                async () => await store.PutIndexEntry(txC, "idx_age", cv75, rowId75, unique: false),
+                "write at value=75 must not be blocked — it is outside the locked range");
+            await transactions.CommitAsync(txC);
+
+            // After txA releases the range lock, the previously-blocked range becomes writable.
+            await transactions.CommitAsync(txA);
+
+            KvTransaction txD = await transactions.BeginAsync();
+            ObjectIdValue rowId25b = new(25, 0, 1);
+            Assert.DoesNotThrowAsync(
+                async () => await store.PutIndexEntry(txD, "idx_age", cv25, rowId25b, unique: false),
+                "write at value=25 must succeed once the range lock is released");
+            await transactions.CommitAsync(txD);
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+    }
+
+    // C2: bounded range locks — two transactions scanning DISJOINT index ranges must not conflict;
+    // two transactions scanning OVERLAPPING ranges must conflict.
+    [Test]
+    [NonParallelizable]
+    public async Task C2_BoundedIndexRangeLock_DisjointRangesDoNotConflict_OverlappingRangesConflict()
+    {
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange3");
+            await using EmbeddedKahuna __ = node;
+
+            store.MarkIndexAsRanged("idx_age");
+            KvTransactionsManager transactions = new(node.Kahuna);
+
+            CompositeColumnValue low  = new(new ColumnValue(ColumnType.Integer64, 1L));
+            CompositeColumnValue mid  = new(new ColumnValue(ColumnType.Integer64, 50L));
+            CompositeColumnValue high = new(new ColumnValue(ColumnType.Integer64, 100L));
+
+            // --- Case 1: disjoint ranges [1,50] and [51,100] must not conflict ---
+            CompositeColumnValue boundary = new(new ColumnValue(ColumnType.Integer64, 51L));
+
+            KvTransaction txA = await transactions.BeginAsync();
+            await store.AcquireBoundedIndexRangeLockAsync(txA, "idx_age", low, true, mid, true, unique: false);
+            Assert.AreEqual(1, txA.GetAcquiredRangeLocks().Count, "txA must hold [1,50] range lock");
+
+            KvTransaction txB = await transactions.BeginAsync();
+            Assert.DoesNotThrowAsync(
+                async () => await store.AcquireBoundedIndexRangeLockAsync(txB, "idx_age", boundary, true, high, true, unique: false),
+                "disjoint [51,100] must not conflict with [1,50]");
+            Assert.AreEqual(1, txB.GetAcquiredRangeLocks().Count, "txB must hold [51,100] range lock");
+
+            await transactions.CommitAsync(txA);
+            await transactions.CommitAsync(txB);
+
+            // --- Case 2: overlapping ranges [1,75] and [50,100] must conflict ---
+            CompositeColumnValue r1end  = new(new ColumnValue(ColumnType.Integer64, 75L));
+            CompositeColumnValue r2start = mid; // 50
+
+            KvTransaction txC = await transactions.BeginAsync();
+            await store.AcquireBoundedIndexRangeLockAsync(txC, "idx_age", low, true, r1end, true, unique: false);
+
+            KvTransaction txD = await transactions.BeginAsync();
+            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+                async () => await store.AcquireBoundedIndexRangeLockAsync(txD, "idx_age", r2start, true, high, true, unique: false));
+            Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex!.Code,
+                "overlapping [50,100] must conflict with active [1,75] lock");
+
+            await transactions.CommitAsync(txC);
+
+            // After txC commits, txD can now acquire the same range.
+            Assert.DoesNotThrowAsync(
+                async () => await store.AcquireBoundedIndexRangeLockAsync(txD, "idx_age", r2start, true, high, true, unique: false),
+                "must be lockable again once the holder committed");
+            await transactions.CommitAsync(txD);
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+    }
+
+    // Finding-2a: non-unique sentinel (￿) must cover every rowId suffix for the upper-bound
+    // value.  A write at value=50 (the exact upper bound) with any rowId must be blocked; a write at
+    // value=51 must pass through.  This is the case the lock-vs-lock test cannot catch: a missing or
+    // wrong sentinel would silently let phantom writes at the boundary value through.
+    [Test]
+    [NonParallelizable]
+    public async Task C2_NonUniqueSentinel_CoversAllRowIdSuffixesAtUpperBound()
+    {
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2a");
+            await using EmbeddedKahuna __ = node;
+
+            store.MarkIndexAsRanged("idx_age");
+            KvTransactionsManager transactions = new(node.Kahuna);
+
+            CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
+            CompositeColumnValue cv50 = new(new ColumnValue(ColumnType.Integer64, 50L));
+            CompositeColumnValue cv51 = new(new ColumnValue(ColumnType.Integer64, 51L));
+
+            KvTransaction txA = await transactions.BeginAsync();
+            await store.AcquireBoundedIndexRangeLockAsync(txA, "idx_age", cv1, true, cv50, true, unique: false);
+
+            // Write at value=50 with rowId (0,50,0) — non-unique key is enc(50)+rowId.
+            // The sentinel (￿) appended to the encoded upper bound must cover it.
+            KvTransaction txB = await transactions.BeginAsync();
+            ObjectIdValue rowId50a = new(0, 50, 0);
+            using CancellationTokenSource cts50a = new(TimeSpan.FromMilliseconds(500));
+            Assert.CatchAsync<OperationCanceledException>(
+                async () => await store.PutIndexEntry(txB, "idx_age", cv50, rowId50a, unique: false, cancellationToken: cts50a.Token),
+                "write at value=50 rowId=(0,50,0) must be blocked — sentinel covers all rowId suffixes");
+
+            // Repeat with a different rowId to confirm it is not rowId-specific.
+            KvTransaction txC = await transactions.BeginAsync();
+            ObjectIdValue rowId50b = new(0, 99, 0);
+            using CancellationTokenSource cts50b = new(TimeSpan.FromMilliseconds(500));
+            Assert.CatchAsync<OperationCanceledException>(
+                async () => await store.PutIndexEntry(txC, "idx_age", cv50, rowId50b, unique: false, cancellationToken: cts50b.Token),
+                "write at value=50 rowId=(0,99,0) must also be blocked");
+
+            // Write at value=51 — enc(51) > enc(50)+sentinel → outside range → must succeed.
+            KvTransaction txD = await transactions.BeginAsync();
+            ObjectIdValue rowId51 = new(0, 51, 0);
+            Assert.DoesNotThrowAsync(
+                async () => await store.PutIndexEntry(txD, "idx_age", cv51, rowId51, unique: false),
+                "write at value=51 must not be blocked — enc(51) is past the sentinel");
+            await transactions.CommitAsync(txD);
+
+            await transactions.CommitAsync(txA);
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+    }
+
+    // Finding-2b: String bounds exercise the C3b AppendStringHex encoding path.  A String-indexed
+    // column's lock bounds are encoded via 4-hex-chars-per-code-unit + \x00\x01 terminator.  A bug
+    // in that path (e.g., wrong char width or missing terminator) would silently misplace the lock
+    // boundary while two lock-vs-lock tests with self-consistent encodings would still agree.
+    [Test]
+    [NonParallelizable]
+    public async Task C2_StringBounds_BlocksWriteInsideRange_AllowsWriteOutside()
+    {
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2b");
+            await using EmbeddedKahuna __ = node;
+
+            store.MarkIndexAsRanged("idx_name");
+            KvTransactionsManager transactions = new(node.Kahuna);
+
+            CompositeColumnValue cvApple  = new(new ColumnValue(ColumnType.String, "apple"));
+            CompositeColumnValue cvBanana = new(new ColumnValue(ColumnType.String, "banana"));
+            CompositeColumnValue cvMango  = new(new ColumnValue(ColumnType.String, "mango"));
+            CompositeColumnValue cvZebra  = new(new ColumnValue(ColumnType.String, "zebra"));
+
+            // Lock ["apple", "mango"] inclusive on a non-unique String index.
+            KvTransaction txA = await transactions.BeginAsync();
+            await store.AcquireBoundedIndexRangeLockAsync(txA, "idx_name", cvApple, true, cvMango, true, unique: false);
+
+            // "banana" is inside ["apple","mango"] → must be blocked.
+            KvTransaction txB = await transactions.BeginAsync();
+            ObjectIdValue rowBanana = new(0, 1, 0);
+            using CancellationTokenSource ctsBanana = new(TimeSpan.FromMilliseconds(500));
+            Assert.CatchAsync<OperationCanceledException>(
+                async () => await store.PutIndexEntry(txB, "idx_name", cvBanana, rowBanana, unique: false, cancellationToken: ctsBanana.Token),
+                "write \"banana\" must be blocked — it is inside [\"apple\",\"mango\"]");
+
+            // "mango" with any rowId — sentinel must cover it.
+            KvTransaction txC = await transactions.BeginAsync();
+            ObjectIdValue rowMango = new(0, 2, 0);
+            using CancellationTokenSource ctsMango = new(TimeSpan.FromMilliseconds(500));
+            Assert.CatchAsync<OperationCanceledException>(
+                async () => await store.PutIndexEntry(txC, "idx_name", cvMango, rowMango, unique: false, cancellationToken: ctsMango.Token),
+                "write \"mango\" must be blocked — sentinel covers all rowId suffixes at the upper bound");
+
+            // "zebra" is beyond "mango" → must succeed.
+            KvTransaction txD = await transactions.BeginAsync();
+            ObjectIdValue rowZebra = new(0, 3, 0);
+            Assert.DoesNotThrowAsync(
+                async () => await store.PutIndexEntry(txD, "idx_name", cvZebra, rowZebra, unique: false),
+                "write \"zebra\" must not be blocked — it is past the locked range");
+            await transactions.CommitAsync(txD);
+
+            await transactions.CommitAsync(txA);
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+    }
+
+    // Finding-2c: exclusive bounds on a UNIQUE index (no rowId suffix, so startInclusive/endInclusive
+    // have exact-key semantics).  A write at the exact boundary value must be ALLOWED; a write
+    // strictly inside must be BLOCKED.  Non-unique tests cannot cover this cleanly because any rowId
+    // suffix makes the write key strictly greater than the startKey regardless of startInclusive.
+    [Test]
+    [NonParallelizable]
+    public async Task C2_ExclusiveBounds_UniqueIndex_BoundaryAllowed_InteriorBlocked()
+    {
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2c");
+            await using EmbeddedKahuna __ = node;
+
+            store.MarkIndexAsRanged("idx_age");
+            KvTransactionsManager transactions = new(node.Kahuna);
+
+            CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
+            CompositeColumnValue cv25 = new(new ColumnValue(ColumnType.Integer64, 25L));
+            CompositeColumnValue cv50 = new(new ColumnValue(ColumnType.Integer64, 50L));
+
+            // Lock (1, 50) exclusive-exclusive on a UNIQUE index.
+            KvTransaction txA = await transactions.BeginAsync();
+            await store.AcquireBoundedIndexRangeLockAsync(txA, "idx_age", cv1, fromInclusive: false, cv50, toInclusive: false, unique: true);
+
+            // Write at value=1 (exact lower bound, exclusive) → key == startKey → NOT in range → ALLOWED.
+            KvTransaction txB = await transactions.BeginAsync();
+            ObjectIdValue rowId1 = new(0, 1, 0);
+            Assert.DoesNotThrowAsync(
+                async () => await store.PutIndexEntry(txB, "idx_age", cv1, rowId1, unique: true),
+                "write at lower-exclusive boundary (value=1) must be allowed");
+            await transactions.CommitAsync(txB);
+
+            // Write at value=25 (strictly inside) → BLOCKED.
+            KvTransaction txC = await transactions.BeginAsync();
+            ObjectIdValue rowId25 = new(0, 25, 0);
+            using CancellationTokenSource cts25 = new(TimeSpan.FromMilliseconds(500));
+            Assert.CatchAsync<OperationCanceledException>(
+                async () => await store.PutIndexEntry(txC, "idx_age", cv25, rowId25, unique: true, cancellationToken: cts25.Token),
+                "write at interior value=25 must be blocked by the exclusive (1,50) range lock");
+
+            // Write at value=50 (exact upper bound, exclusive) → key == endKey → NOT in range → ALLOWED.
+            KvTransaction txD = await transactions.BeginAsync();
+            ObjectIdValue rowId50 = new(0, 50, 0);
+            Assert.DoesNotThrowAsync(
+                async () => await store.PutIndexEntry(txD, "idx_age", cv50, rowId50, unique: true),
+                "write at upper-exclusive boundary (value=50) must be allowed");
+            await transactions.CommitAsync(txD);
+
+            await transactions.CommitAsync(txA);
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+    }
+
+    // Finding-2d: composite (String, Integer64) bounds exercise the multi-field encoding path.
+    // ("tools", 25) inside [("tools",10), ("tools",50)] → blocked.
+    // ("tools", 75) past the upper bound → allowed.
+    // ("books", 25) below the lower bound (different String prefix) → allowed.
+    [Test]
+    [NonParallelizable]
+    public async Task C2_CompositeBounds_BlocksWriteInsideRange_AllowsWriteOutside()
+    {
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2d");
+            await using EmbeddedKahuna __ = node;
+
+            store.MarkIndexAsRanged("idx_cat_age");
+            KvTransactionsManager transactions = new(node.Kahuna);
+
+            static CompositeColumnValue CV2(string cat, long age) => new(new ColumnValue[]
+            {
+                new(ColumnType.String, cat),
+                new(ColumnType.Integer64, age),
+            });
+
+            CompositeColumnValue tools10 = CV2("tools", 10L);
+            CompositeColumnValue tools25 = CV2("tools", 25L);
+            CompositeColumnValue tools50 = CV2("tools", 50L);
+            CompositeColumnValue tools75 = CV2("tools", 75L);
+            CompositeColumnValue books25 = CV2("books", 25L);
+
+            // Lock [("tools",10), ("tools",50)] inclusive.
+            KvTransaction txA = await transactions.BeginAsync();
+            await store.AcquireBoundedIndexRangeLockAsync(txA, "idx_cat_age", tools10, true, tools50, true, unique: false);
+
+            // ("tools", 25) is inside the range → blocked.
+            KvTransaction txB = await transactions.BeginAsync();
+            ObjectIdValue rowTools25 = new(1, 25, 0);
+            using CancellationTokenSource ctsTools25 = new(TimeSpan.FromMilliseconds(500));
+            Assert.CatchAsync<OperationCanceledException>(
+                async () => await store.PutIndexEntry(txB, "idx_cat_age", tools25, rowTools25, unique: false, cancellationToken: ctsTools25.Token),
+                "write at (\"tools\",25) must be blocked — it is inside [(\"tools\",10),(\"tools\",50)]");
+
+            // ("tools", 75) is past the upper bound → allowed.
+            KvTransaction txC = await transactions.BeginAsync();
+            ObjectIdValue rowTools75 = new(1, 75, 0);
+            Assert.DoesNotThrowAsync(
+                async () => await store.PutIndexEntry(txC, "idx_cat_age", tools75, rowTools75, unique: false),
+                "write at (\"tools\",75) must not be blocked — it is past the locked range");
+            await transactions.CommitAsync(txC);
+
+            // ("books", 25) has a smaller String prefix → below the lower bound → allowed.
+            KvTransaction txE = await transactions.BeginAsync();
+            ObjectIdValue rowBooks25 = new(2, 25, 0);
+            Assert.DoesNotThrowAsync(
+                async () => await store.PutIndexEntry(txE, "idx_cat_age", books25, rowBooks25, unique: false),
+                "write at (\"books\",25) must not be blocked — \"books\" < \"tools\" places it below the range");
+            await transactions.CommitAsync(txE);
+
+            await transactions.CommitAsync(txA);
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
 }

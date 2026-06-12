@@ -67,8 +67,22 @@ public sealed class KvTableStore
     // finish inside this window.
     private const int RangeLockExpiresMs = 30_000;
 
+    // Upper-bound sentinel appended to the encoded last value for non-unique index keys.
+    // Non-unique stored key = "{encodedValue}{rowId24}" where rowId24 is exactly 24 lowercase
+    // hex chars (code points 0x0030–0x0066). The sentinel U+FFFF is the highest BMP code point
+    // and exceeds every character KeyEncoder can emit:
+    //   • Integer64 / Float64 / Bool: uppercase hex digits 0x0030–0x0046
+    //   • String / Id (C3b AppendStringHex): 4-hex-per-code-unit 0x0030–0x0046, plus the
+    //     field terminator pair U+0000 U+0001 (both far below U+FFFF)
+    //   • NULL marker: 0x0030 ('0'); Present marker: 0x0031 ('1')
+    // If KeyEncoder ever emits a character ≥ U+FFFF (surrogates are illegal in C# strings;
+    // a future supplementary-plane encoding would need two code units) this sentinel would
+    // under-cover the upper bound, letting phantom inserts escape the range lock.
+    private const char IndexKeySentinel = '￿';
+
     // Exponential back-off: 1 ms, 2 ms, 4 ms, … capped at MaxRetryDelayMs.
-    private static int RetryDelayMs(int attempt) => Math.Min(1 << attempt, MaxRetryDelayMs);
+    // Guard against int overflow: `1 << attempt` becomes negative for attempt >= 31.
+    private static int RetryDelayMs(int attempt) => attempt < 6 ? 1 << attempt : MaxRetryDelayMs;
 
     public KvTableStore(IKahuna kahuna, string tableId, string tableName = "")
     {
@@ -117,83 +131,102 @@ public sealed class KvTableStore
     /// automatically on commit/rollback.
     /// </summary>
     public Task AcquireRowRangeLockAsync(KvTransaction tx, CancellationToken cancellationToken = default)
-        // When the row space is key-range routed (registered in TableOpener), prefix locks are
-        // rejected with PrefixLockUnsupportedOnRangedSpace — take a Kahuna range lock over the whole
-        // bucket instead. Otherwise keep the hash-mode prefix lock.
-        => CamusDBConfig.KeyRangeShardingEnabled
-            ? AcquireWholeBucketRangeLockAsync(tx, rowBucketPrefix, cancellationToken)
-            : AcquirePrefixLockAsync(tx, rowBucketPrefix, cancellationToken);
-
-    /// <summary>
-    /// Exclusive-locks an index's entire key range for <paramref name="tx"/> (serializable index
-    /// scan / phantom protection over the index bucket). See <see cref="AcquireRowRangeLockAsync"/>.
-    ///
-    /// When key-range sharding is enabled and the index was registered as a ranged space by
-    /// <c>TableOpener</c> (i.e. all its key columns are non-String ASCII-encoding types), a Kahuna
-    /// range lock is used instead of a prefix lock — prefix locks are rejected on ranged spaces.
-    /// String-keyed indexes are always prefix-locked regardless of the flag.
-    /// </summary>
-    public Task AcquireIndexRangeLockAsync(KvTransaction tx, string indexId, CancellationToken cancellationToken = default)
-        => CamusDBConfig.KeyRangeShardingEnabled && rangedIndexIds.Contains(indexId)
-            ? AcquireWholeBucketRangeLockAsync(tx, BuildIndexBucketPrefix(indexId), cancellationToken)
-            : AcquirePrefixLockAsync(tx, BuildIndexBucketPrefix(indexId), cancellationToken);
-
-    private async Task AcquirePrefixLockAsync(KvTransaction tx, string bucketPrefix, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(tx);
-
-        KeyValueResponseType type = await RetryOnMustRetry(
-            () => kahuna.LocateAndTryAcquireExclusivePrefixLock(
-                tx.TransactionId, bucketPrefix, RangeLockExpiresMs, KeyValueDurability.Persistent, cancellationToken),
-            cancellationToken
-        ).ConfigureAwait(false);
-
-        if (type == KeyValueResponseType.Locked)
-        {
-            // Track so the transaction releases it on commit/rollback — a read-only prefix lock is
-            // not finalized by the 2PC, which only clears intents on modified keys.
-            tx.TrackPrefixLock(bucketPrefix, KeyValueDurability.Persistent);
-            return;
-        }
-
-        if (type == KeyValueResponseType.AlreadyLocked)
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionConflict,
-                $"Range '{bucketPrefix}' is exclusively locked by another transaction");
-
-        throw new CamusDBException(
-            CamusDBErrorCodes.InvalidInternalOperation,
-            $"Failed to acquire exclusive range lock on '{bucketPrefix}': {type}");
+        // Range locks for phantom protection are only needed in key-range-sharding mode
+        // (multi-partition). In single-partition (hash) mode MVCC provides snapshot
+        // isolation without additional locks; taking an exclusive prefix lock here would
+        // block concurrent writes and break snapshot-isolated readers.
+        if (!CamusDBConfig.KeyRangeShardingEnabled)
+            return Task.CompletedTask;
+        return AcquireRangeLockAsync(tx, rowBucketPrefix, null, true, null, true, cancellationToken);
     }
 
     /// <summary>
-    /// Key-range-mode equivalent of <see cref="AcquirePrefixLockAsync"/>: takes a Kahuna exclusive
-    /// range lock over the entire bucket (<c>[null, null)</c> within <paramref name="bucketPrefix"/>).
-    /// Fanned out per intersecting range descriptor by Kahuna; disjoint ranges don't contend. The
-    /// lock is tracked on the transaction and released over the same bounds on commit/rollback.
+    /// Exclusive-locks an index's entire key range for <paramref name="tx"/> (serializable index
+    /// scan / phantom protection over the index bucket). Used for full-index scans where no
+    /// tighter bound is known. For bounded range scans use
+    /// <see cref="AcquireBoundedIndexRangeLockAsync"/>. If key-range sharding is disabled or the
+    /// index is not ranged, the call is a no-op.
     /// </summary>
-    private async Task AcquireWholeBucketRangeLockAsync(KvTransaction tx, string bucketPrefix, CancellationToken cancellationToken)
+    public Task AcquireIndexRangeLockAsync(KvTransaction tx, string indexId, CancellationToken cancellationToken = default)
     {
+        if (!CamusDBConfig.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId))
+            return Task.CompletedTask;
+        return AcquireRangeLockAsync(tx, BuildIndexBucketPrefix(indexId), null, true, null, true, cancellationToken);
+    }
+
+    /// <summary>
+    /// Like <see cref="AcquireIndexRangeLockAsync"/> but locks only the sub-range
+    /// <c>[fromBound, toBound]</c> instead of the whole bucket. This delivers the per-range
+    /// concurrency win promised by key-range sharding: two transactions scanning disjoint
+    /// portions of the same index don't conflict. The bounds are encoded with
+    /// <see cref="KeyEncoder"/> to match the stored key format. For non-unique indexes
+    /// <see cref="IndexKeySentinel"/> (U+FFFF) is appended so all rowId suffixes of the
+    /// last value are included — see the constant's declaration for the invariant this relies on.
+    /// </summary>
+    public Task AcquireBoundedIndexRangeLockAsync(
+        KvTransaction tx,
+        string indexId,
+        CompositeColumnValue? fromBound, bool fromInclusive,
+        CompositeColumnValue? toBound,   bool toInclusive,
+        bool unique,
+        CancellationToken cancellationToken = default)
+    {
+        if (!CamusDBConfig.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId))
+            return Task.CompletedTask;
+
+        string bucketPrefix = BuildIndexBucketPrefix(indexId);
+        string keyPrefix    = bucketPrefix + "/";
+
+        string? fromEncoded = fromBound is not null ? KeyEncoder.Encode(fromBound) : null;
+        string? toEncoded   = toBound   is not null ? KeyEncoder.Encode(toBound)   : null;
+
+        string? startKey = fromEncoded is not null ? keyPrefix + fromEncoded : null;
+        // Non-unique stored key = {encodedValue}{rowId24}; IndexKeySentinel makes the end bound
+        // include all rowId suffixes for the last encoded value, matching ScanIndex's convention.
+        string? endKey   = toEncoded is not null
+            ? (unique ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
+            : null;
+
+        return AcquireRangeLockAsync(tx, bucketPrefix, startKey, fromInclusive, endKey, toInclusive, cancellationToken);
+    }
+
+    /// <summary>
+    /// Core range-lock implementation used by both the whole-bucket and bounded variants.
+    /// Calls Kahuna <c>LocateAndTryAcquireExclusiveRangeLock</c>, retrying on
+    /// <c>MustRetry</c>; tracks the acquired lock on the transaction for release at
+    /// commit/rollback.
+    /// </summary>
+    private async Task AcquireRangeLockAsync(
+        KvTransaction tx,
+        string bucketPrefix,
+        string? startKey, bool startInclusive,
+        string? endKey,   bool endInclusive,
+        CancellationToken cancellationToken)
+    {
+        if (tx.IsReadOnly)
+            return;
+
         ArgumentNullException.ThrowIfNull(tx);
 
         KeyValueResponseType type = await RetryOnMustRetry(
             () => kahuna.LocateAndTryAcquireExclusiveRangeLock(
                 tx.TransactionId, bucketPrefix,
-                null, true, null, true,
+                startKey, startInclusive, endKey, endInclusive,
                 RangeLockExpiresMs, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
         if (type == KeyValueResponseType.Locked)
         {
-            tx.TrackRangeLock(bucketPrefix, null, true, null, true, KeyValueDurability.Persistent);
+            tx.TrackRangeLock(bucketPrefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent);
             return;
         }
 
         if (type == KeyValueResponseType.AlreadyLocked)
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionConflict,
-                $"Range '{bucketPrefix}' is exclusively locked by another transaction");
+                $"Range '{bucketPrefix}' [{startKey ?? "-∞"},{endKey ?? "+∞"}] is exclusively locked by another transaction");
 
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
@@ -378,11 +411,11 @@ public sealed class KvTableStore
         string? toEncoded   = to   is not null ? KeyEncoder.Encode(to)   : null;
 
         // Push bounds into the scan. For non-unique indexes the stored key is
-        // {encodedKey}{rowIdHex24}, so the end key needs a high sentinel (￿) to
-        // include all possible rowId suffixes for the last encoded value.
+        // {encodedKey}{rowIdHex24}, so the end key needs IndexKeySentinel to include all
+        // possible rowId suffixes for the last encoded value.
         string? startKey = fromEncoded is not null ? keyPrefix + fromEncoded : null;
         string? endKey   = toEncoded   is not null
-            ? (unique ? keyPrefix + toEncoded : keyPrefix + toEncoded + "￿")
+            ? (unique ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;
 
         await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(

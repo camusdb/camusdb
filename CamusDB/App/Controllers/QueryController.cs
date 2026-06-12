@@ -47,7 +47,8 @@ public sealed class QueryController : CommandsController
                 (newTransaction, txnState) = await BeginOrResumeAsync(
                     request.DatabaseName,
                     request.TxnIdPT,
-                    request.TxnIdCounter
+                    request.TxnIdCounter,
+                    readOnly: true  // C1: pure reads must not hold exclusive range locks
                 ).ConfigureAwait(false);
 
                 QueryTicket ticket = new(
@@ -114,7 +115,8 @@ public sealed class QueryController : CommandsController
             (bool _, KvTransaction txnState) = await BeginOrResumeAsync(
                 request.DatabaseName,
                 request.TxnIdPT,
-                request.TxnIdCounter
+                request.TxnIdCounter,
+                readOnly: true  // C1: pure reads must not hold exclusive range locks
             ).ConfigureAwait(false);
 
             QueryByIdTicket ticket = new(
