@@ -173,6 +173,70 @@ public class TestKeyEncoder
         AssertSorted(samples, v => Single(new ColumnValue(ColumnType.String, v)));
     }
 
+    // C3b — the load-bearing invariant for ranged String indexes: an encoded String key is PURE
+    // ASCII, so its UTF-8 byte order (how the RocksDB/SQLite persistence backends compare keys)
+    // equals its UTF-16-ordinal order (how the in-memory B-tree / range routing / scan merge compare
+    // keys) AND equals ColumnValue.CompareTo. Without the hex encoding these diverge for
+    // supplementary-plane chars, which would misroute/misorder a key-range-routed String index.
+    [Test]
+    public void StringKeysAreAsciiAndUtf8OrderMatchesOrdinalAndCompareTo()
+    {
+        // Spans the divergent zone: BMP CJK, a supplementary emoji, a PUA char, U+FFFF, plus a
+        // value containing a literal NUL and some prefixes.
+        string[] samples =
+        {
+            "", "a", "ab", "abc", " ", "a b", "a\u0000b", "\u007F",
+            "\u4E2D", "\uD83D\uDE00", "\uE000", "\uFFFF"
+        };
+
+        // 1) Every encoded String key is pure ASCII (< U+0080).
+        foreach (string s in samples)
+        {
+            string enc = KeyEncoder.Encode(Single(new ColumnValue(ColumnType.String, s)));
+            foreach (char c in enc)
+                Assert.That(c, Is.LessThan('\u0080'),
+                    $"Encoded String key must be pure ASCII; got U+{(int)c:X4} for input of length {s.Length}");
+        }
+
+        // 2) For every pair: UTF-8(encoded) byte order == ordinal(encoded) == CompareTo.
+        for (int i = 0; i < samples.Length; i++)
+        {
+            for (int j = 0; j < samples.Length; j++)
+            {
+                ColumnValue a = new(ColumnType.String, samples[i]);
+                ColumnValue b = new(ColumnType.String, samples[j]);
+
+                string ea = KeyEncoder.Encode(Single(a));
+                string eb = KeyEncoder.Encode(Single(b));
+
+                int ordinal = Math.Sign(string.CompareOrdinal(ea, eb));
+                int utf8 = Math.Sign(CompareUtf8Bytes(ea, eb));
+                int semantic = Math.Sign(a.CompareTo(b));
+
+                Assert.AreEqual(ordinal, utf8,
+                    $"UTF-8 byte order must match encoded ordinal order ('{Escape(samples[i])}' vs '{Escape(samples[j])}')");
+                Assert.AreEqual(semantic, ordinal,
+                    $"Encoded ordinal order must match CompareTo ('{Escape(samples[i])}' vs '{Escape(samples[j])}')");
+            }
+        }
+    }
+
+    private static int CompareUtf8Bytes(string a, string b)
+    {
+        byte[] ba = Encoding.UTF8.GetBytes(a);
+        byte[] bb = Encoding.UTF8.GetBytes(b);
+        int n = Math.Min(ba.Length, bb.Length);
+        for (int k = 0; k < n; k++)
+        {
+            int d = ba[k] - bb[k];
+            if (d != 0)
+                return d;
+        }
+        return ba.Length - bb.Length;
+    }
+
+    private static string Escape(string s) => System.Text.RegularExpressions.Regex.Escape(s);
+
 
     [Test]
     public void NullSortsBeforeAnyPresentValue()

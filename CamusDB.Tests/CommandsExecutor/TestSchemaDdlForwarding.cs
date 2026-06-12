@@ -35,6 +35,7 @@ using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.Transactions;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
@@ -215,6 +216,95 @@ public sealed class TestSchemaDdlForwarding
         finally
         {
             await CleanupDatabaseAsync(db, followerExecutor);
+        }
+    }
+
+    // C2 — 3-node CamusDB data-path test with key-range sharding enabled.
+    //
+    // Validates the full key-range data path end-to-end across a 3-node in-memory cluster:
+    //   1. CREATE TABLE on the schema leader.
+    //   2. INSERT from a non-schema-leader node — this opens the table on that node for the
+    //      first time, calling RegisterKeyRangeAsync, which triggers K1 seed-forwarding to the
+    //      KV meta-partition leader if the inserting node isn't that leader.
+    //   3. SELECT from a third node — asserts all rows are visible and no "no range descriptor
+    //      covers key" surfaces anywhere in the path.
+    //
+    // [NonParallelizable] because the test temporarily sets the process-static
+    // CamusDBConfig.KeyRangeShardingEnabled to true.
+    [Test]
+    [NonParallelizable]
+    public async Task ThreeNodeCluster_KeyRangeEnabled_InsertFromNonLeader_SelectFromThirdNode()
+    {
+        bool prevFlag = CamusConfig.KeyRangeShardingEnabled;
+        CamusConfig.KeyRangeShardingEnabled = true;
+
+        try
+        {
+            await using ClusterHarness cluster = await ClusterHarness.StartAsync();
+            string db = cluster.NextSchemaLogDatabaseName();
+
+            // ── DDL on the schema leader ──────────────────────────────────────────
+            EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(db);
+            CommandExecutor leaderExecutor = cluster.CreateExecutor(leader);
+            await leaderExecutor.CreateDatabase(new CreateDatabaseTicket(db, false));
+
+            // Integer64 PK so the ~pk index is key-range eligible (ASCII-encoding type, C3).
+            await leaderExecutor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "readings",
+                columns:
+                [
+                    new ColumnInfo("id", ColumnType.Id),
+                    new ColumnInfo("value", ColumnType.Integer64)
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            )).WaitAsync(TimeSpan.FromSeconds(15));
+
+            // ── INSERT from a non-schema-leader node ──────────────────────────────
+            // Choosing the first non-leader node stresses K1: LoadTable → RegisterKeyRangeAsync
+            // on a node that may not be the KV meta-partition leader → seed forwarded via RPC.
+            EmbeddedKahuna nonLeader = cluster.Nodes.First(n => n != leader);
+            CommandExecutor nonLeaderExecutor = cluster.CreateExecutor(nonLeader);
+            DatabaseDescriptor nonLeaderDb = await nonLeaderExecutor.OpenDatabase(db)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+
+            const int RowCount = 20;
+            for (int i = 0; i < RowCount; i++)
+            {
+                KvTransaction tx = await nonLeaderDb.Transactions.BeginAsync();
+                await nonLeaderExecutor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                    tx, db, $"INSERT INTO readings (id, value) VALUES (gen_id(), {i})", null))
+                    .WaitAsync(TimeSpan.FromSeconds(10));
+                await nonLeaderDb.Transactions.CommitAsync(tx);
+            }
+
+            // ── SELECT from a third node ──────────────────────────────────────────
+            EmbeddedKahuna thirdNode = cluster.Nodes.First(n => n != leader && n != nonLeader);
+            CommandExecutor thirdExecutor = cluster.CreateExecutor(thirdNode);
+            DatabaseDescriptor thirdDb = await thirdExecutor.OpenDatabase(db)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+
+            KvTransaction readTx = await thirdDb.Transactions.BeginAsync();
+            (_, IAsyncEnumerable<QueryResultRow> cursor) = await thirdExecutor.ExecuteSQLQuery(
+                new ExecuteSQLTicket(readTx, db, "SELECT id, value FROM readings", null))
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            List<QueryResultRow> rows = await cursor.ToListAsync();
+            await thirdDb.Transactions.CommitAsync(readTx);
+
+            Assert.AreEqual(RowCount, rows.Count,
+                $"All {RowCount} rows inserted from the non-leader node must be visible from a third node. " +
+                $"Got {rows.Count}. If 0, K1 seed-forwarding is broken; if < {RowCount}, replication or routing is incomplete.");
+
+            await CleanupDatabaseAsync(db, [leaderExecutor, nonLeaderExecutor, thirdExecutor]);
+        }
+        finally
+        {
+            CamusConfig.KeyRangeShardingEnabled = prevFlag;
         }
     }
 

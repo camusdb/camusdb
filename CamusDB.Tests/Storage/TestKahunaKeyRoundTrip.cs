@@ -172,13 +172,14 @@ public sealed class TestKahunaKeyRoundTrip
         const string bucketPrefix = "t0/s";
         const string keyPrefix = "t0/s/";
 
-        // These strings produce encoded keys that contain the terminator (U+0000 U+0001)
-        // and, for the last entry, also the escape sequence (U+0000 U+FFFF).
+        // These strings produce encoded keys whose bodies are pure ASCII hex ending in the
+        // terminator (U+0000 U+0001). An embedded NUL becomes the hex body "0000" — it is content,
+        // not the terminator, so it round-trips without escaping.
         string[] strings =
         {
             "",
             "hello",
-            "a" + (char)0x0000,    // embedded NUL, escapes to U+0000 U+FFFF
+            "a" + (char)0x0000,    // embedded NUL — encodes as hex "0061""0000", no escaping
             "z"
         };
 
@@ -239,14 +240,15 @@ public sealed class TestKahunaKeyRoundTrip
             );
         }
 
-        // Key for "a\0" must also contain the escape tail U+FFFF.
-        string escapedKey = keyPrefix + KeyEncoder.Encode(
+        // The encoded String body is pure ASCII hex (C3b): the key for "a\0" must contain no
+        // non-ASCII code unit — the embedded NUL is encoded as the hex digits "0000", not as a raw
+        // U+0000 in content, so its UTF-8 byte order matches its UTF-16-ordinal order everywhere.
+        string nulKey = KeyEncoder.Encode(
             new CompositeColumnValue(new[] { new ColumnValue(ColumnType.String, "a" + (char)0x0000) })
         );
-        Assert.IsTrue(
-            escapedKey.Contains((char)0xFFFF),
-            $"Escape tail U+FFFF not found in key for 'a\\0': {Readable(escapedKey)}"
-        );
+        foreach (char c in nulKey)
+            Assert.IsTrue(c == (char)0x0000 || c == (char)0x0001 || c < (char)0x0080,
+                $"Encoded String key must be ASCII (plus the U+0000/U+0001 terminator): U+{(int)c:X4} in {Readable(nulKey)}");
     }
 
     [Test]

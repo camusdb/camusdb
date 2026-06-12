@@ -153,10 +153,11 @@ internal sealed class TableOpener
     }
 
     /// <summary>
-    /// Returns true when every key column of <paramref name="entry"/> encodes to pure ASCII
-    /// (Integer64/Float64/Bool/Id/Null) and is therefore safe to place in a Kahuna key-range space
-    /// under ordinal string comparison. A single String column disqualifies the index (C3b).
-    /// Returns false when column IDs are unavailable (conservative fallback: keep hash-routed).
+    /// Returns true when this index's key columns are safe to place in a Kahuna key-range space.
+    /// All column types now encode to pure ASCII end-to-end — numeric/bool/id are inherently ASCII,
+    /// and <see cref="KeyEncoder"/> encodes String as fixed-width hex (C3b) so its UTF-8 byte order
+    /// matches the UTF-16-ordinal order the in-memory path uses. The only disqualifier left is
+    /// missing/unresolvable column IDs (conservative fallback: keep hash-routed).
     /// </summary>
     internal static bool IsIndexRangeable(TableIndexSchema entry, Dictionary<string, ColumnType> typeById)
     {
@@ -165,10 +166,8 @@ internal sealed class TableOpener
 
         foreach (string colId in entry.ColumnIds)
         {
-            if (!typeById.TryGetValue(colId, out ColumnType colType))
+            if (!typeById.TryGetValue(colId, out _))
                 return false; // unknown column — conservative
-            if (colType == ColumnType.String)
-                return false;
         }
         return true;
     }

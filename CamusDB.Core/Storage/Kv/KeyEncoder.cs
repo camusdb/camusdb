@@ -31,7 +31,14 @@ namespace CamusDB.Core.Storage.Kv;
 ///   Integer64  : 16-char uppercase hex of (ulong)value with the sign bit flipped (fixed width).
 ///   Float64    : 16-char uppercase hex of an order-preserving transform of the IEEE-754 bits.
 ///   Bool       : "0" / "1".
-///   String/Id  : the raw string with U+0000 escaped, terminated by the field terminator.
+///   String/Id  : each UTF-16 code unit as 4 uppercase hex chars (fixed width), terminated by the
+///                field terminator. The output is pure ASCII, so the key's UTF-8 byte order (how the
+///                RocksDB/SQLite persistence backends order keys) equals its UTF-16-ordinal order (how
+///                the in-memory B-tree, range routing, and scan merge order keys). Without this the
+///                two diverge for supplementary-plane characters, which would misroute/misorder a
+///                key-range-routed String secondary index. Order within the field is the code-unit
+///                order (matches <see cref="ColumnValue.CompareTo"/>). String and Id share this
+///                encoding so a String literal in a query matches an Id-typed stored key.
 ///
 /// Fixed-width fields (Integer64/Float64/Bool) need no terminator; the decoder knows their width
 /// from the column type. Variable-length fields (String/Id) are terminated so composite keys keep
@@ -43,12 +50,12 @@ namespace CamusDB.Core.Storage.Kv;
 /// </summary>
 public static class KeyEncoder
 {
-    // Terminator and escape use the lowest code units so that a terminated (shorter) field sorts
-    // before a field that continues with more content. Terminator = U+0000 U+0001; a real U+0000 in
-    // content is escaped as U+0000 U+FFFF, which sorts after the terminator and so preserves order.
+    // Field terminator = U+0000 U+0001. It uses the lowest code units so a terminated (shorter)
+    // field sorts before a field that continues with more content ("ab" before "abc"). String/Id
+    // bodies are pure hex (see AppendStringHex), so U+0000 never appears in content and no escaping
+    // is needed — the terminator lead is unambiguous.
     private const char FieldTerminatorLead = (char)0x0000;
     private const char FieldTerminatorTail = (char)0x0001;
-    private const char EscapeTail = (char)0xFFFF;
 
     private const char NullMarker = '0';
     private const char PresentMarker = '1';
@@ -96,9 +103,12 @@ public static class KeyEncoder
                 builder.Append(value.BoolValue ? '1' : '0');
                 break;
 
+            // String and Id share one encoding so a String literal in a query (e.g. WHERE id IN ('…'))
+            // produces the same key as the Id-typed value stored in the index — the two must stay
+            // interchangeable. Both use the order-preserving ASCII-hex form (C3b).
             case ColumnType.String:
             case ColumnType.Id:
-                AppendString(builder, value.StrValue ?? "");
+                AppendStringHex(builder, value.StrValue ?? "");
                 break;
 
             default:
@@ -132,19 +142,28 @@ public static class KeyEncoder
         return ((ulong)bits).ToString("X16");
     }
 
-    private static void AppendString(StringBuilder builder, string value)
+
+    private const string HexChars = "0123456789ABCDEF";
+
+    /// <summary>
+    /// Order-preserving <b>pure-ASCII</b> encoding for String keys: each UTF-16 code unit becomes 4
+    /// uppercase hex chars (fixed width). Because every output char is ASCII ('0'-'9','A'-'F'), the
+    /// key's UTF-8 byte order equals its UTF-16-ordinal order, so a String key sorts identically in
+    /// the persistence backends (RocksDB bytewise / SQLite BINARY, which order by UTF-8) and the
+    /// in-memory path (B-tree / range routing / scan merge, which order by UTF-16 ordinal). Fixed
+    /// width per code unit preserves the code-unit order (matching <see cref="ColumnValue.CompareTo"/>),
+    /// and the U+0000 U+0001 terminator — which sorts before any hex digit — preserves prefix ordering
+    /// across composite fields. A literal U+0000 inside the value is content (encoded as "0000") and is
+    /// never confused with the U+0000 terminator char, so no escaping is needed.
+    /// </summary>
+    private static void AppendStringHex(StringBuilder builder, string value)
     {
         foreach (char c in value)
         {
-            if (c == FieldTerminatorLead)
-            {
-                builder.Append(FieldTerminatorLead);
-                builder.Append(EscapeTail);
-            }
-            else
-            {
-                builder.Append(c);
-            }
+            builder.Append(HexChars[(c >> 12) & 0xF]);
+            builder.Append(HexChars[(c >> 8) & 0xF]);
+            builder.Append(HexChars[(c >> 4) & 0xF]);
+            builder.Append(HexChars[c & 0xF]);
         }
 
         builder.Append(FieldTerminatorLead);
@@ -208,35 +227,29 @@ public static class KeyEncoder
                 case ColumnType.String:
                 case ColumnType.Id:
                 {
+                    // Body is groups of 4 hex chars (one UTF-16 code unit each), ended by the
+                    // U+0000 U+0001 terminator. A literal U+0000 (0x00) only appears as the
+                    // terminator lead — never inside the hex body — so it is unambiguous.
                     StringBuilder sb = new();
                     while (true)
                     {
                         if (pos >= key.Length)
                             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unterminated string field at field {i}");
 
-                        char c = key[pos++];
-
-                        if (c != FieldTerminatorLead)
+                        if (key[pos] == FieldTerminatorLead)
                         {
-                            sb.Append(c);
-                            continue;
-                        }
-
-                        if (pos >= key.Length)
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unexpected end of key after U+0000 at field {i}");
-
-                        char next = key[pos++];
-
-                        if (next == FieldTerminatorTail)
+                            pos++;
+                            if (pos >= key.Length || key[pos] != FieldTerminatorTail)
+                                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Malformed string terminator at field {i}");
+                            pos++;
                             break;
-
-                        if (next == EscapeTail)
-                        {
-                            sb.Append(FieldTerminatorLead);
-                            continue;
                         }
 
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown escape U+0000 U+{(int)next:X4} at field {i}");
+                        if (pos + 4 > key.Length)
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated hex code unit at field {i}");
+
+                        sb.Append((char)ushort.Parse(key.AsSpan(pos, 4), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture));
+                        pos += 4;
                     }
 
                     values[i] = new ColumnValue(types[i], sb.ToString());

@@ -550,10 +550,10 @@ public sealed class TestKvTableStoreIndex
 
     // ---- IsIndexRangeable gate tests (C3) ------------------------------------
 
-    // The per-type gate is the load-bearing correctness decision of the second slice: it must
-    // classify numeric/id/bool indexes as rangeable and keep String-keyed ones hash-routed.
-    // These tests pin the classification so a regression (e.g. accidentally allowing String)
-    // is caught without a full TableOpener integration test.
+    // The per-type gate classifies which indexes may be key-range routed. After C3b (order-safe
+    // ASCII-hex String encoding in KeyEncoder) every column type is rangeable; the only remaining
+    // disqualifier is missing/unresolvable column IDs (conservative fallback). These tests pin the
+    // classification so a regression is caught without a full TableOpener integration test.
 
     [Test]
     public void IsIndexRangeable_Integer64_IsRangeable()
@@ -588,21 +588,22 @@ public sealed class TestKvTableStoreIndex
     }
 
     [Test]
-    public void IsIndexRangeable_String_IsNotRangeable()
+    public void IsIndexRangeable_String_IsRangeable()
     {
-        // String stays hash-routed until C3b lands (UTF-8 / UTF-16 persistence divergence).
+        // C3b: String now encodes to order-safe ASCII hex (KeyEncoder), so its UTF-8 byte order
+        // matches the in-memory UTF-16-ordinal order end-to-end — String indexes are rangeable.
         Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.String };
         TableIndexSchema entry = new("id1", "idx_name", new[] { "c1" }, IndexType.Unique, SchemaElementState.Public);
-        Assert.IsFalse(TableOpener.IsIndexRangeable(entry, types));
+        Assert.IsTrue(TableOpener.IsIndexRangeable(entry, types));
     }
 
     [Test]
-    public void IsIndexRangeable_CompositeWithString_IsNotRangeable()
+    public void IsIndexRangeable_CompositeWithString_IsRangeable()
     {
-        // A single String column anywhere in the composite disqualifies the whole index.
+        // A composite mixing numeric and String columns is rangeable: every field encodes to ASCII.
         Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.Integer64, ["c2"] = ColumnType.String };
         TableIndexSchema entry = new("id1", "idx_composite", new[] { "c1", "c2" }, IndexType.Multi, SchemaElementState.Public);
-        Assert.IsFalse(TableOpener.IsIndexRangeable(entry, types));
+        Assert.IsTrue(TableOpener.IsIndexRangeable(entry, types));
     }
 
     [Test]
