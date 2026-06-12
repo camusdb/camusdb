@@ -368,7 +368,7 @@ This is `WaitForPreviousVersionAcksAsync`, called *first* in
 `ReplicateAndWaitLocalApplyAsync`. It means a second DDL client cannot race ahead and
 stack a third version onto a cluster where some node is still on version N-1.
 
-> **Relaxed for liveness (H5).** The strict "*every* live node must have applied `FromVersion`"
+> **Relaxed for liveness.** The strict "*every* live node must have applied `FromVersion`"
 > barrier would let a single slow or unreachable follower stall all DDL for the full gate timeout.
 > The gate therefore proceeds on a **majority** after a backstop delay, which trades the strict
 > two-version bound for bounded DDL latency — paired with a **catch-up fence** so a lagging minority
@@ -389,30 +389,33 @@ signal it uses:
 
 - **Standalone mode** (`isClusterMode == false`): only `Raft.GetLocalEndpoint()`, because
   `GetNodes()` returns phantom witness endpoints that would otherwise wedge the gate forever.
-- **Cluster mode, infinite lease (default):** the local endpoint plus every peer from
-  `Raft.GetNodes()` — the gate waits for **every configured** member. Safe (never false-evicts)
-  but a crashed-but-configured node freezes DDL until `SchemaAckWaitTimeout`.
-- **Cluster mode, finite lease:** the local endpoint plus the peers in
+- **Cluster mode, finite lease (default — 30 s):** the local endpoint plus the peers in
   `Raft.GetActiveNodes(lease)` — the leader's **real per-follower liveness** view (Kommander
   tracks each follower's last `AppendLogs` response). A peer the leader has not heard from within
   the lease is presumed dead and dropped from the gate, so DDL completes without it; a
   **slow-but-alive** peer (still answering Raft, even if it has applied no schema delta) stays in
   the active set and must still ack. The gate runs on the schema leader (the proposer), so
-  `GetActiveNodes` reflects its follower reachability.
+  `GetActiveNodes` reflects its follower reachability. 30 s is well above the Raft heartbeat
+  interval, so a healthy-but-idle follower is never false-evicted.
+- **Cluster mode, infinite lease (strict, opt-in via config `-1`):** the local endpoint plus every
+  peer from `Raft.GetNodes()` — the gate waits for **every configured** member. Strictest (never
+  false-evicts) but a crashed-but-configured node freezes DDL until `SchemaAckWaitTimeout`.
 
 Acks are keyed on `Raft.GetLocalEndpoint()`, so each node reports under its real Raft identity.
 
 **Liveness is sourced from Raft activity, not from acks.** Because membership already filters out
-dead peers via `GetActiveNodes`, the `SchemaAckTracker` is given an **infinite** lease and simply
-waits for every member of the (already liveness-filtered) set to ack — it does **not** expire a
+dead peers via `GetActiveNodes`, the `SchemaAckTracker` itself is given an **infinite** lease and
+simply waits for every member of the (already liveness-filtered) set to ack — it does **not** expire a
 member on its own apply-derived `LastSeen`. This is what prevents false eviction: a Raft-alive but
 schema-idle node has no fresh ack, but it is still in the active set, so the gate keeps waiting for
 it. (The tracker's `LastSeen` field is retained as a recorded version stamp but no longer drives
-liveness.) `SchemaAckLiveNodeLease` defaults to `Timeout.InfiniteTimeSpan`; both it and
-`SchemaAckWaitTimeout` are tunable on `EmbeddedKahuna` and via the
-`schema_ack_live_node_lease_ms` / `schema_ack_wait_timeout_ms` config keys (validated at startup).
+liveness.) The membership filter — `SchemaAckLiveNodeLease` on `EmbeddedKahuna` — **defaults to 30 s**
+(config `schema_ack_live_node_lease_ms`, default `30_000`; set `-1` to restore the strict infinite
+lease that waits on every configured node). Both it and `SchemaAckWaitTimeout` are tunable on
+`EmbeddedKahuna` and via the `schema_ack_live_node_lease_ms` / `schema_ack_wait_timeout_ms` config
+keys (validated at startup).
 
-> **E3 (implemented).** `SchemaAckTracker` is now a per-`EmbeddedKahuna` instance field (no
+> **Ack transport.** `SchemaAckTracker` is a per-`EmbeddedKahuna` instance field (no
 > `static`). After each local apply, `RecordAndPublishSchemaApplied` records the ack locally and
 > fires a best-effort notification to the current schema-partition leader via `ISchemaAckSender`
 > (`HttpSchemaDdlForwarder` in production, `InProcessSchemaAckRelay` in tests). The leader records
@@ -421,11 +424,11 @@ liveness.) `SchemaAckLiveNodeLease` defaults to `Timeout.InfiniteTimeSpan`; both
 > through `InProcessSchemaAckRelay` rather than relying on co-location. The gate's existing
 > timeout remains the correctness backstop for dropped acks (leader change, network loss).
 
-### 6.3 DDL liveness under a slow/partitioned node — quorum backstop + catch-up fence (H5)
+### 6.3 DDL liveness under a slow/partitioned node — quorum backstop + catch-up fence
 
 The strict barrier of §6.2 (every live node must ack `FromVersion` before the next DDL) makes DDL
 hostage to the slowest node: a single follower that is slow to apply, or unreachable, stalls *all*
-DDL for the full `SchemaAckWaitTimeout` (30s). H5 replaces that with a two-part contract — a
+DDL for the full `SchemaAckWaitTimeout` (30s). The cluster replaces that with a two-part contract — a
 **liveness** rule that bounds DDL latency, and a **safety** fence that keeps the relaxation sound.
 
 **Liveness — the quorum backstop.** `SchemaAckTracker.WaitForAllLiveAsync` returns a
@@ -468,14 +471,25 @@ sound for the real threat model: a node lagging *schema-apply* while caught up o
 advancing `HeadSchemaVersion` (the entry was received) and is fenced; a *fully* partitioned node
 receives neither new schema nor new data, so it has nothing newer to mis-decode.
 
+Because the fence fires in `TableOpener.Open` *before* any write or schema-version pin, the in-flight
+transaction is untouched and the same operation is safe to re-run. `ExecuteNonSQLQuery` exploits this:
+it auto-retries a `SchemaCatchingUp` DML a few times with a short exponential backoff, so a brief lag
+clears transparently and the caller only ever sees `CADB0503` if the node stays behind across all
+attempts. (The commit-routing `TransactionMustRetry`/`CADB0504` is different — it is thrown after the
+transaction is already spent, so the caller must restart the whole operation from a new transaction
+rather than have the executor retry it in place.)
+
 **Net contract (the revised two-version invariant).** DDL proceeds once a **majority** has applied
 the delta (bounded latency); a node more than one version behind the committed head **fences itself**
 (rejects DML, `SchemaCatchingUp`) until it converges — so a lagging minority node never serves
-results against a stale schema. See `docs/cluster-schema-concurrency-hardening-spec.md` §3.4 / §3.4a.
+results against a stale schema.
 
-> **Operational note.** A `QuorumBackstop` outcome and a fenced node both mean a follower is lagging.
-> Surfacing those (a gate warning naming the laggard; a metric on `SchemaCatchingUp` rejections) is
-> tracked as the remaining H5 observability work (§3.4a #3).
+> **Operational note.** A `QuorumBackstop` outcome and a fenced node both mean a follower is lagging,
+> and both are surfaced: the post-commit gate logs a warning **naming the lagging endpoints** (and the
+> timeout error names the nodes that never acked), and always-on `SchemaMetrics` counters track
+> `QuorumBackstopActivations` and `SchemaCatchingUp` `FenceRejections` (global + per-database) so a
+> lagging follower is observable as a number, not just a log line. (Wiring those counters to an
+> external metrics exporter is left for when the codebase grows one.)
 
 ---
 
@@ -865,8 +879,9 @@ SELECTs don't run the commit-time validation step (they have a consistent snapsh
   idempotently), or abandons the job after `MaxResumeAttempts` and logs loudly — never a column
   or index left stuck in an intermediate state (§8.2).
 - **Two-version gate timeout:** if a live node never acks `FromVersion`/`ToVersion` within
-  `SchemaAckWaitTimeout`, the DDL throws. With the infinite live-node lease this is also how
-  a dead-but-un-evicted member surfaces.
+  `SchemaAckWaitTimeout`, the DDL throws. Under the strict infinite live-node lease (opt-in) this is
+  also how a dead-but-un-evicted member surfaces; the default finite lease (30 s) instead ages a dead
+  node out of the gate so DDL recovers on its own.
 
 ---
 
@@ -985,13 +1000,13 @@ on an older layout decode with their own version and read `age` with current vis
   be metadata-only (mutate `Name`, leave the immutable `Id` so no rows/indexes move) and drain
   old names across the two-version window. The positional/ID-keyed encoding (§7.4) already makes
   the data side free.
-- ~~**Ack transport / per-instance tracker.**~~ **Implemented (E3).** `SchemaAckTracker` is now
+- ~~**Ack transport / per-instance tracker.**~~ **Implemented.** `SchemaAckTracker` is now
   a per-`EmbeddedKahuna` instance. `RecordAndPublishSchemaApplied` sends follower acks to the
   leader via `ISchemaAckSender` (HTTP in production, in-process relay in tests). See §6.2.
 - **Auto-recovery without restart.** Restart-replay durability is now implemented: on open,
   the restore path reads the persisted checkpoint version as a *floor*, replays committed schema
   entries to head, re-persists the checkpoint, and clears the degraded flag (`SchemaReplicator.
-  OnSchemaRestoreFinishedAsync`, covered by `TestSchemaRestoreF1b`). A degraded node therefore
+  OnSchemaRestoreFinishedAsync`, covered by the schema-restore replay tests). A degraded node therefore
   reconciles a stale/failed checkpoint against the committed log on reopen, and a node that
   missed DDLs while offline converges. The remaining gap is doing the same reconciliation
   **without** a restart (a live degraded node re-persisting in place); today recovery still

@@ -16,11 +16,6 @@ public static class CamusDBConfig
     public static string DataDirectory = Path.GetFullPath("Data");
 
     /// <summary>
-    /// The maximum number of pages held on each bucket
-    /// </summary>
-    public static int BufferPoolSize = 65536 / Environment.ProcessorCount;
-
-    /// <summary>
     /// Minimum interval, in milliseconds, between background flushes of advisory table
     /// statistics (R8) to durable Kahuna storage, per table. Statistics are updated in
     /// memory on every DML but only persisted at most once per this interval, so a write

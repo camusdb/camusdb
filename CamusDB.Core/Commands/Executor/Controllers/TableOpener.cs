@@ -51,10 +51,13 @@ internal sealed class TableOpener
         long head = database.HeadSchemaVersion;
         long applied = database.Schema.SchemaVersion;
         if (head - applied > 1)
+        {
+            Diagnostics.SchemaMetrics.RecordFenceRejection(database.Name);
             throw new CamusDBException(
                 CamusDBErrorCodes.SchemaCatchingUp,
                 $"Database '{database.Name}' schema is catching up (head={head}, applied={applied}); retry this operation once the node has applied all committed schema changes"
             );
+        }
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, tableName);
 

@@ -145,9 +145,11 @@ public sealed class KvTransactionsManager
 
         tx.ValidateSchemaPins();
 
-        // MustRetry from LocateAndCommitTransaction is a transient routing failure (leader flip
-        // during the commit round-trip); the transaction is still server-side Pending, so we can
-        // safely retry the commit call. Aborted is permanent and must not be retried.
+        // MustRetry from LocateAndCommitTransaction is a strictly pre-execution routing signal.
+        // Kahuna returns it only when AmILeader(partitionId) was false (so no commit was attempted)
+        // but WaitForLeader then resolved to the local endpoint — a transient leadership flip.
+        // CommitTransaction is never called before MustRetry is returned, so the transaction is
+        // still server-side Pending and commit idempotency is not required. Aborted is permanent.
         const int MaxCommitRetries = 5;
         KeyValueResponseType result = KeyValueResponseType.MustRetry;
         for (int attempt = 0; attempt <= MaxCommitRetries; attempt++)
@@ -185,7 +187,11 @@ public sealed class KvTransactionsManager
         Untrack(tx);
 
         // MustRetry after all retries exhausted = transient routing failure; caller must restart
-        // the whole operation. Use CADB0504 so callers can distinguish this from a permanent abort.
+        // the whole operation from BeginAsync. CADB0504 (not CADB0501) signals this is transient.
+        // This is intentionally NOT auto-retried at the executor level: the operation may have been
+        // partially applied and the tx is spent (Status = RolledBack), so re-running the DML on the
+        // same tx is unsafe. Contrast with CADB0503 (fence), which fires before any write and IS
+        // auto-retried inside ExecuteNonSQLQuery on the same, still-usable transaction.
         if (result == KeyValueResponseType.MustRetry)
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionMustRetry,

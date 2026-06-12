@@ -605,21 +605,29 @@ public sealed class CatalogsManager
         ).ConfigureAwait(false);
 
         if (!acked)
+        {
+            string timedOutLaggards = FormatLaggards(database.Kahuna.LastGateLaggards);
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
-                $"Timed out waiting for live schema apply acknowledgements for database '{database.Name}' version {entry.ToVersion}"
+                $"Timed out waiting for live schema apply acknowledgements for database '{database.Name}' " +
+                $"version {entry.ToVersion}; nodes that never acked: {timedOutLaggards}"
             );
+        }
 
         if (database.Kahuna.LastGateOutcome == SchemaAckOutcome.QuorumBackstop)
             logger.LogWarning(
                 "Schema ack post-commit gate for database '{Database}' version {Version} " +
-                "completed via QuorumBackstop — one or more live nodes did not ack within the " +
-                "backstop window ({BackstopMs}ms); those nodes are lagging and will be fenced " +
-                "until they apply the committed schema entry",
+                "completed via QuorumBackstop — these live nodes did not ack within the " +
+                "backstop window ({BackstopMs}ms) and are lagging (will be fenced until they apply " +
+                "the committed schema entry): {Laggards}",
                 database.Name, entry.ToVersion,
-                (long)database.Kahuna.SchemaAckQuorumBackstopDelay.TotalMilliseconds
+                (long)database.Kahuna.SchemaAckQuorumBackstopDelay.TotalMilliseconds,
+                FormatLaggards(database.Kahuna.LastGateLaggards)
             );
     }
+
+    private static string FormatLaggards(IReadOnlyList<string> laggards)
+        => laggards.Count == 0 ? "(none)" : string.Join(", ", laggards);
 
     private static string? ResolveTableId(DatabaseDescriptor database, string tableName)
         => database.Schema.Tables.TryGetValue(tableName, out TableSchema? table) ? table.Id : null;

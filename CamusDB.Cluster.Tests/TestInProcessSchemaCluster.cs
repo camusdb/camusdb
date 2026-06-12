@@ -1672,6 +1672,15 @@ public sealed class TestInProcessSchemaCluster
             $"Expected QuorumBackstop but gate outcome was {leader.Kahuna.LastGateOutcome}; " +
             "the isolated follower should not have acked");
 
+        // Observability (H5 §3.4a #3): the gate must name the lagging follower, not just report
+        // "one or more nodes", and the always-on quorum-backstop metric must have ticked.
+        string pausedEndpoint = pausedFollower.Kahuna.Raft.GetLocalEndpoint();
+        CollectionAssert.Contains(leader.Kahuna.LastGateLaggards, pausedEndpoint,
+            $"LastGateLaggards must name the isolated follower {pausedEndpoint}; " +
+            $"got [{string.Join(",", leader.Kahuna.LastGateLaggards)}]");
+        Assert.GreaterOrEqual(CamusDB.Core.Diagnostics.SchemaMetrics.QuorumBackstopActivations, 1,
+            "A QuorumBackstop outcome must increment the SchemaMetrics.QuorumBackstopActivations counter");
+
         long clusterVersion = leader.Database!.Schema.SchemaVersion;
 
         // Reconnect the isolated follower, then reopen the database on it.

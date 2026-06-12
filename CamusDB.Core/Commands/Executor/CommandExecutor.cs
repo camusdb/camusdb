@@ -1134,10 +1134,14 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
-        // §3.5 H6: the schema-catch-up fence (TableOpener.Open → SchemaCatchingUp CADB0503) fires
-        // before any write or schema-pin, so the in-flight transaction is unmodified and the same
-        // tx can be safely reused on retry. The fence self-heals once the node applies pending
-        // schema entries; back off briefly and retry up to MaxFenceRetries times.
+        // §3.5 H6 retry boundary: two transient errors, two different retry owners.
+        //   CADB0503 SchemaCatchingUp — retried HERE, inside ExecuteNonSQLQuery. The fence fires
+        //     in TableOpener.Open before any write or schema-pin, so the in-flight transaction is
+        //     unmodified and the same tx is safely reused on each attempt.
+        //   CADB0504 TransactionMustRetry — NOT retried here. CommitAsync throws it after the
+        //     operation may have been partially applied and the tx is spent (Status = RolledBack).
+        //     The caller must restart the whole operation from BeginAsync. Auto-retrying here would
+        //     risk re-applying writes on a tx that can no longer be rolled back safely.
         const int MaxFenceRetries = 3;
 
         switch (ast.nodeType)

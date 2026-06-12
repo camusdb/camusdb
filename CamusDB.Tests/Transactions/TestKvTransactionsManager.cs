@@ -8,10 +8,22 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
 using NUnit.Framework;
+
+using Kahuna;
+using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.Locks.Data;
+using Kahuna.Shared.Communication.Rest;
+using Kahuna.Shared.KeyValue;
+using Kahuna.Shared.Locks;
+using Kahuna.Shared.Sequences;
+using Kommander.Data;
+using Kommander.Time;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
@@ -322,5 +334,316 @@ public sealed class TestKvTransactionsManager
         Assert.AreEqual(CamusDBErrorCodes.TransactionAlreadyCompleted, ex!.Code,
             "Committing a rolled-back tx must throw permanent CADB0501");
         Assert.AreNotEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code);
+    }
+
+    // H6 §3.5 — commit MustRetry fault injection: when LocateAndCommitTransaction returns
+    // MustRetry fewer times than MaxCommitRetries (5), CommitAsync internally retries and
+    // ultimately succeeds. The written row must be visible and the tx is Committed.
+    [Test]
+    public async Task CommitAsync_WithTransientMustRetry_RetriesAndSucceeds()
+    {
+        EmbeddedKahuna node = new();
+        await node.StartAsync(CancellationToken.None);
+        await node.WaitForLeaderAsync("fault-a/warmup", CancellationToken.None);
+        await using EmbeddedKahuna __ = node;
+
+        // 3 MustRetry responses before delegating to the real Kahuna (< MaxCommitRetries = 5).
+        CommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: 3);
+        KvTransactionsManager mgr = new(faultKahuna);
+        KvTableStore store = new(node.Kahuna, "fault-a");
+
+        TableSchema schema = SingleCol(ColumnType.Integer64);
+        CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(200, 0, 0);
+        byte[] data = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 42L) }, rowId);
+
+        KvTransaction tx = await mgr.BeginAsync();
+        await store.InsertRow(tx, rowId, data);
+        await mgr.CommitAsync(tx);
+
+        Assert.AreEqual(KvTransactionStatus.Committed, tx.Status,
+            "CommitAsync must succeed after retrying through transient MustRetry responses");
+
+        byte[]? got = await store.GetRow(HLCTimestamp.Zero, rowId);
+        Assert.IsNotNull(got, "Row written in a successfully committed tx must be visible");
+        Assert.AreEqual(data, got);
+    }
+
+    // H6 §3.5 — commit MustRetry fault injection: when LocateAndCommitTransaction returns
+    // MustRetry more times than MaxCommitRetries (5), CommitAsync exhausts all retries and
+    // throws CADB0504 (TransactionMustRetry), never CADB0501 (TransactionAlreadyCompleted).
+    [Test]
+    public async Task CommitAsync_WithPersistentMustRetry_ThrowsTransactionMustRetry()
+    {
+        EmbeddedKahuna node = new();
+        await node.StartAsync(CancellationToken.None);
+        await node.WaitForLeaderAsync("fault-b/warmup", CancellationToken.None);
+        await using EmbeddedKahuna __ = node;
+
+        // 6 MustRetry responses — exhausts all MaxCommitRetries = 5 attempts.
+        CommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: 6);
+        KvTransactionsManager mgr = new(faultKahuna);
+        KvTableStore store = new(node.Kahuna, "fault-b");
+
+        TableSchema schema = SingleCol(ColumnType.Integer64);
+        CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(201, 0, 0);
+        byte[] data = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 99L) }, rowId);
+
+        KvTransaction tx = await mgr.BeginAsync();
+        await store.InsertRow(tx, rowId, data);
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() => mgr.CommitAsync(tx));
+
+        Assert.IsNotNull(ex);
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex!.Code,
+            "Exhausted MustRetry must surface as CADB0504, not the permanent CADB0501");
+        Assert.AreNotEqual(CamusDBErrorCodes.TransactionAlreadyCompleted, ex.Code,
+            "CADB0501 is reserved for permanent failures; a routing retry-exhaustion is CADB0504");
+    }
+
+    // Delegating IKahuna wrapper that injects MustRetry responses from
+    // LocateAndCommitTransaction for the first mustRetryCount calls, then delegates to the
+    // real inner IKahuna. All other methods forward directly.
+    private sealed class CommitFaultKahuna(IKahuna inner, int mustRetryCount) : IKahuna
+    {
+        private int mustRetryRemaining = mustRetryCount;
+
+        public Task<KeyValueResponseType> LocateAndCommitTransaction(
+            string uniqueId, HLCTimestamp timestamp,
+            List<KeyValueTransactionModifiedKey> acquiredLocks,
+            List<KeyValueTransactionModifiedKey> modifiedKeys,
+            List<KeyValueTransactionReadKey> readKeys,
+            CancellationToken cancellationToken)
+        {
+            if (Interlocked.Decrement(ref mustRetryRemaining) >= 0)
+                return Task.FromResult(KeyValueResponseType.MustRetry);
+            return inner.LocateAndCommitTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, readKeys, cancellationToken);
+        }
+
+        // --- all remaining methods delegate to inner ---
+
+        public Task<(LockResponseType, long)> LocateAndTryLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryLock(resource, owner, expiresMs, durability, cancellationToken);
+
+        public Task<(LockResponseType, long)> LocateAndTryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryExtendLock(resource, owner, expiresMs, durability, cancellationToken);
+
+        public Task<LockResponseType> LocateAndTryUnlock(string resource, byte[] owner, LockDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryUnlock(resource, owner, durability, cancellationToken);
+
+        public Task<(LockResponseType, ReadOnlyLockEntry?)> LocateAndGetLock(string resource, LockDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndGetLock(resource, durability, cancellationToken);
+
+        public Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
+            => inner.TryLock(resource, owner, expiresMs, durability);
+
+        public Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability)
+            => inner.TryExtendLock(resource, owner, expiresMs, durability);
+
+        public Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockDurability durability)
+            => inner.TryUnlock(resource, owner, durability);
+
+        public Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(string resource, LockDurability durability)
+            => inner.GetLock(resource, durability);
+
+        public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, long routedGeneration = 0)
+            => inner.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, cancellationToken, routedGeneration);
+
+        public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(List<KahunaSetKeyValueRequestItem> setManyItems, CancellationToken cancellationToken)
+            => inner.LocateAndTrySetManyKeyValue(setManyItems, cancellationToken);
+
+        public Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(List<KahunaDeleteKeyValueRequestItem> deleteManyItems, CancellationToken cancellationToken)
+            => inner.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
+
+        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryExistsValue(transactionId, key, revision, durability, cancellationToken);
+
+        public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryCheckWriteIntent(transactionId, key, durability, cancellationToken);
+
+        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryGetValue(transactionId, key, revision, durability, cancellationToken);
+
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
+            => inner.LocateAndTryGetManyValues(transactionId, keys, cancellationToken);
+
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
+            => inner.LocateAndTryExistsManyValues(transactionId, keys, cancellationToken);
+
+        public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
+
+        public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
+
+        public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken);
+
+        public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
+
+        public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int pageSize, KeyValueDurability durability, CancellationToken ct)
+            => inner.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, durability, ct);
+
+        public Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, long routedGeneration = 0)
+            => inner.TrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, routedGeneration);
+
+        public Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability)
+            => inner.TryExtendKeyValue(transactionId, key, expiresMs, durability);
+
+        public Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability)
+            => inner.TryDeleteKeyValue(transactionId, key, durability);
+
+        public Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items)
+            => inner.DeleteManyNodeKeyValue(items);
+
+        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability)
+            => inner.TryGetValue(transactionId, key, revision, durability);
+
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys)
+            => inner.TryGetManyValues(transactionId, keys);
+
+        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability)
+            => inner.TryExistsValue(transactionId, key, revision, durability);
+
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys)
+            => inner.TryExistsManyValues(transactionId, keys);
+
+        public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp transactionId, string key, KeyValueDurability durability)
+            => inner.TryCheckWriteIntentValue(transactionId, key, durability);
+
+        public Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryAcquireExclusiveLock(transactionId, key, expiresMs, durability, cancellationToken);
+
+        public Task<KeyValueResponseType> LocateAndTryAcquireExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability, cancellationToken);
+
+        public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability, cancellationToken);
+
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryAcquireManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
+            => inner.LocateAndTryAcquireManyExclusiveLocks(transactionId, keys, cancellationToken);
+
+        public Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryReleaseExclusiveLock(transactionId, key, durability, cancellationToken);
+
+        public Task<KeyValueResponseType> LocateAndTryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken);
+
+        public Task<KeyValueResponseType> LocateAndTryReleaseExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken);
+
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryReleaseManyExclusiveLocks(HLCTimestamp transactionId, List<(string key, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
+            => inner.LocateAndTryReleaseManyExclusiveLocks(transactionId, keys, cancellationToken);
+
+        public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability, CancellationToken cancellationToken, long routedGeneration = 0)
+            => inner.LocateAndTryPrepareMutations(transactionId, commitId, key, durability, cancellationToken, routedGeneration);
+
+        public Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(HLCTimestamp transactionId, HLCTimestamp commitId, List<(string key, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
+            => inner.LocateAndTryPrepareManyMutations(transactionId, commitId, keys, cancellationToken);
+
+        public Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryCommitMutations(transactionId, key, ticketId, durability, cancellationToken);
+
+        public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryCommitManyMutations(HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
+            => inner.LocateAndTryCommitManyMutations(transactionId, keys, cancellationToken);
+
+        public Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancellationToken);
+
+        public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryRollbackManyMutations(HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
+            => inner.LocateAndTryRollbackManyMutations(transactionId, keys, cancellationToken);
+
+        public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken)
+            => inner.LocateAndStartTransaction(options, cancellationToken);
+
+        public Task<KeyValueResponseType> LocateAndRollbackTransaction(string uniqueId, HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, CancellationToken cancellationToken)
+            => inner.LocateAndRollbackTransaction(uniqueId, timestamp, acquiredLocks, modifiedKeys, cancellationToken);
+
+        public Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability)
+            => inner.TryAcquireExclusiveLock(transactionId, key, expiresMs, durability);
+
+        public Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, int expiresMs, KeyValueDurability durability)
+            => inner.TryAcquireExclusivePrefixLock(transactionId, prefixKey, expiresMs, durability);
+
+        public Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability)
+            => inner.TryAcquireExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, expiresMs, durability);
+
+        public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability)
+            => inner.TryReleaseExclusiveLock(transactionId, key, durability);
+
+        public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability)
+            => inner.TryReleaseExclusivePrefixLock(transactionId, prefixKey, durability);
+
+        public Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability)
+            => inner.TryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability);
+
+        public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability, long routedGeneration = 0)
+            => inner.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration);
+
+        public Task<(KeyValueResponseType, long)> TryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)
+            => inner.TryCommitMutations(transactionId, key, proposalTicketId, durability);
+
+        public Task<(KeyValueResponseType, long)> TryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability)
+            => inner.TryRollbackMutations(transactionId, key, proposalTicketId, durability);
+
+        public Task<KeyValueTransactionResult> TryExecuteTransactionScript(byte[] script, string? hash, List<KeyValueParameter>? parameters)
+            => inner.TryExecuteTransactionScript(script, hash, parameters);
+
+        public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability)
+            => inner.GetByBucket(transactionId, prefixKeyName, durability);
+
+        public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
+            => inner.ScanByPrefix(prefixKeyName, durability);
+
+        public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.ScanAllByPrefix(prefixKeyName, durability, cancellationToken);
+
+        public Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(KeyValueTransactionOptions options)
+            => inner.StartTransaction(options);
+
+        public Task<KeyValueResponseType> CommitTransaction(HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys, List<KeyValueTransactionReadKey> readKeys)
+            => inner.CommitTransaction(timestamp, acquiredLocks, modifiedKeys, readKeys);
+
+        public Task<KeyValueResponseType> RollbackTransaction(HLCTimestamp timestamp, List<KeyValueTransactionModifiedKey> acquiredLocks, List<KeyValueTransactionModifiedKey> modifiedKeys)
+            => inner.RollbackTransaction(timestamp, acquiredLocks, modifiedKeys);
+
+        public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(string name, SequenceDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndGetSequence(name, durability, cancellationToken);
+
+        public Task<(SequenceResponseType, long)> LocateAndCreateSequence(string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndCreateSequence(name, initialValue, increment, maxValue, durability, cancellationToken);
+
+        public Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(string name, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndNextSequenceValue(name, idempotencyKey, durability, cancellationToken);
+
+        public Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndReserveSequenceRange(name, count, idempotencyKey, durability, cancellationToken);
+
+        public Task<SequenceResponseType> LocateAndDeleteSequence(string name, SequenceDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndDeleteSequence(name, durability, cancellationToken);
+
+        public Task<bool> OnLogRestored(int partitionId, RaftLog log)
+            => inner.OnLogRestored(partitionId, log);
+
+        public Task<bool> OnReplicationReceived(int partitionId, RaftLog log)
+            => inner.OnReplicationReceived(partitionId, log);
+
+        public void OnReplicationError(int partitionId, RaftLog log)
+            => inner.OnReplicationError(partitionId, log);
+
+        public Task FlushPersistenceAsync()
+            => inner.FlushPersistenceAsync();
+
+        public void RegisterKeyRange(string keySpace)
+            => inner.RegisterKeyRange(keySpace);
+
+        public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default)
+            => inner.RegisterKeyRangeAsync(keySpace, cancellationToken);
+
+        public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default)
+            => inner.TriggerAutoSplitAsync(ct);
+
+        public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default)
+            => inner.TriggerAutoMergeAsync(ct);
     }
 }

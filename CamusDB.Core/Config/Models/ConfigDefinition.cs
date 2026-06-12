@@ -14,8 +14,6 @@ public class ConfigDefinition
 {
     public string DataDir { get; set; } = "";
 
-    public int BufferPoolSize { get; set; } = -1;
-
     public string Mode { get; set; } = "standalone";
 
     public string NodeName { get; set; } = "";
@@ -45,12 +43,14 @@ public class ConfigDefinition
     public int SchemaAckWaitTimeoutMs { get; set; } = 30_000;
 
     /// <summary>
-    /// How long since a live member's last ack before the gate presumes it down and
-    /// stops blocking on it. Milliseconds, or <c>-1</c> for an infinite lease (the
-    /// conservative default — wait on every member). Must be &gt; 0 or exactly -1.
+    /// How long since the schema leader last heard from a live member (via Raft activity)
+    /// before the gate presumes it down and stops blocking on it. Milliseconds, or <c>-1</c>
+    /// for an infinite lease (strict — wait on every configured member, no DDL liveness under a
+    /// node failure). Must be &gt; 0 or exactly -1. Default 30 s, so a node death does not freeze
+    /// subsequent DDL while a healthy-but-idle follower is never false-evicted.
     /// Maps to <c>EmbeddedKahuna.SchemaAckLiveNodeLease</c>.
     /// </summary>
-    public int SchemaAckLiveNodeLeaseMs { get; set; } = -1;
+    public int SchemaAckLiveNodeLeaseMs { get; set; } = 30_000;
 
     /// <summary>
     /// Minimum interval between background flushes of advisory table statistics (R8) to

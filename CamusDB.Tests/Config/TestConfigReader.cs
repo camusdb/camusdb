@@ -22,24 +22,12 @@ public class TestConfigReader
 
     [Test]
     [NonParallelizable]
-    public void TestReader()
-    {
-        string yml = "buffer_pool_size: 1000";
-
-        var configReader = new ConfigReader();
-        var configDefinition = configReader.Read(yml);
-
-        Assert.AreEqual(1000, configDefinition.BufferPoolSize);
-    }
-
-    [Test]
-    [NonParallelizable]
     public void TestReadsSchemaAckDefaults()
     {
         ConfigDefinition config = new ConfigReader().Read("mode: standalone");
 
         Assert.AreEqual(30_000, config.SchemaAckWaitTimeoutMs);
-        Assert.AreEqual(-1, config.SchemaAckLiveNodeLeaseMs);
+        Assert.AreEqual(30_000, config.SchemaAckLiveNodeLeaseMs);
     }
 
     [Test]

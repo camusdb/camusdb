@@ -91,10 +91,23 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     public TimeSpan SchemaAckWaitTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Live-node expiry used by the schema ack gate. The default is non-expiring because
-    /// this layer does not yet receive real heartbeat/membership failure signals.
+    /// Live-node expiry used by the schema ack gate (H5 §3.4). A peer the schema leader has not
+    /// heard from (via Raft activity, <see cref="Kommander.IRaft.GetActiveNodes"/>) within this
+    /// window is presumed dead and dropped from the ack gate, so a node death does not freeze
+    /// subsequent DDL on the strict pre-proposal gate.
+    ///
+    /// <para>
+    /// Default is 30 s — comfortably above the Raft heartbeat interval, so a healthy-but-idle
+    /// follower (heard from many times per second) is never false-evicted, while a genuinely dead
+    /// node is shed within the window. Set to <see cref="Timeout.InfiniteTimeSpan"/> (config
+    /// <c>-1</c>) to restore the strict "every configured node must ack" behaviour, at the cost of
+    /// DDL liveness under a node failure. Note the lease and <see cref="SchemaAckWaitTimeout"/> are
+    /// both 30 s by default, so the first DDL issued within the lease window of a node death may
+    /// still time out once before the dead node ages out of the active set; tune the lease below
+    /// the wait timeout if faster eviction is needed.
+    /// </para>
     /// </summary>
-    public TimeSpan SchemaAckLiveNodeLease { get; set; } = Timeout.InfiniteTimeSpan;
+    public TimeSpan SchemaAckLiveNodeLease { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// <b>H5 §3.4 — quorum backstop.</b> How long the schema-ack gate tries to achieve
@@ -124,6 +137,14 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// the boolean return value, not this property).
     /// </summary>
     internal SchemaAckOutcome LastGateOutcome { get; private set; }
+
+    /// <summary>
+    /// The live endpoints that had not acked the target version when the most recent
+    /// <see cref="WaitForSchemaAcksAsync"/> resolved via <see cref="SchemaAckOutcome.QuorumBackstop"/>
+    /// or <see cref="SchemaAckOutcome.Timeout"/> — i.e. the lagging nodes. Empty on full convergence.
+    /// Lets the DDL warning name who lagged (H5 §3.4a #3) instead of "one or more live nodes".
+    /// </summary>
+    internal IReadOnlyList<string> LastGateLaggards { get; private set; } = [];
 
     /// <summary>
     /// Constructs the embedded engine with the provided options.
@@ -513,12 +534,12 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// <summary>
     /// The set of nodes the schema ack gate must wait on. Always includes the local node.
     /// <para>
-    /// <b>E1 (default, infinite lease):</b> every configured Raft peer — the gate waits for
-    /// every member, so a crashed-but-configured node freezes DDL until the ack timeout. Safe
-    /// (never false-evicts) but not live.
+    /// <b>E1 (infinite lease, opt-in via config <c>-1</c>):</b> every configured Raft peer — the
+    /// gate waits for every member, so a crashed-but-configured node freezes DDL until the ack
+    /// timeout. Strictest (never false-evicts) but not live under a node failure.
     /// </para>
     /// <para>
-    /// <b>E2 (finite lease):</b> live peers are sourced from the leader's real Raft activity view
+    /// <b>E2 (finite lease, the default — 30 s):</b> live peers are sourced from the leader's real Raft activity view
     /// (<see cref="Kommander.IRaft.GetActiveNodes"/>) within the lease window. A peer the leader
     /// has not heard from within the lease is presumed dead and excluded from the gate, so DDL
     /// completes without it; a slow-but-alive peer (still answering Raft, even if not applying
@@ -602,6 +623,21 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
                 $"liveMembers=[{string.Join(",", GetLiveSchemaNodes())}]");
 
         LastGateOutcome = outcome;
+
+        // Capture who lagged (for the DDL warning) and bump the always-on metric. On full
+        // convergence there are no laggards and no backstop activation.
+        if (outcome == SchemaAckOutcome.FullConvergence)
+        {
+            LastGateLaggards = [];
+        }
+        else
+        {
+            LastGateLaggards = schemaAcks.GetLaggingNodes(db, schemaVersion, GetLiveSchemaNodes());
+
+            if (outcome == SchemaAckOutcome.QuorumBackstop)
+                Diagnostics.SchemaMetrics.RecordQuorumBackstop();
+        }
+
         return outcome != SchemaAckOutcome.Timeout;
     }
 

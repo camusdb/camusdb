@@ -234,6 +234,37 @@ internal sealed class SchemaAckTracker
         return ackedCount >= quorum;
     }
 
+    /// <summary>
+    /// Returns the endpoints in <paramref name="liveMembers"/> that have <b>not</b> acked
+    /// <paramref name="schemaVersion"/> — i.e. no ack record at all, or a recorded version still
+    /// behind the target. Used to name the laggards in the quorum-backstop / timeout warnings (H5
+    /// §3.4a #3). Lease expiry is intentionally ignored here: this answers "who is behind?", which
+    /// is exactly the set an operator wants named, independent of whether they are also presumed
+    /// dead. A best-effort snapshot — a node may catch up between this call and the log line.
+    /// </summary>
+    public IReadOnlyList<string> GetLaggingNodes(
+        string database,
+        long schemaVersion,
+        IReadOnlyCollection<string> liveMembers)
+    {
+        List<string> lagging = [];
+
+        lock (sync)
+        {
+            databases.TryGetValue(database, out DatabaseAcks? acks);
+
+            foreach (string node in liveMembers)
+            {
+                if (acks is not null && acks.Nodes.TryGetValue(node, out NodeAck ack) && ack.Version >= schemaVersion)
+                    continue; // acked the target version or newer
+
+                lagging.Add(node);
+            }
+        }
+
+        return lagging;
+    }
+
     private readonly record struct NodeAck(long Version, DateTime LastSeen);
 
     private sealed class DatabaseAcks

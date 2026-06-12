@@ -30,9 +30,6 @@ public sealed class CamusStartup
 
         ConfigDefinition config = reader.Read(ymlConfig);        
 
-        if (config.BufferPoolSize > 0)
-            CamusDBConfig.BufferPoolSize = config.BufferPoolSize;
-
         if (!string.IsNullOrEmpty(config.DataDir))
             CamusDBConfig.DataDirectory = config.DataDir;
 

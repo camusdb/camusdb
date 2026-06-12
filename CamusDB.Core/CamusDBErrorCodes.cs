@@ -47,6 +47,13 @@ public static class CamusDBErrorCodes
     /// retries (routing inconsistency during a leader flip). The transaction has been rolled back.
     /// Unlike <see cref="TransactionAlreadyCompleted"/>, this is transient — the caller should
     /// retry the entire operation from BeginAsync.
+    ///
+    /// §3.5 retry boundary: the executor auto-retries the schema-catch-up fence (<see
+    /// cref="SchemaCatchingUp"/>, CADB0503) inside ExecuteNonSQLQuery because the fence fires
+    /// before any write and the same transaction is still usable. CADB0504 is intentionally NOT
+    /// auto-retried at the executor level: by the time CommitAsync throws it, the operation may
+    /// have been partially applied and the transaction object is spent (Status = RolledBack).
+    /// The caller must rebuild the operation from scratch starting with a new BeginAsync.
     /// </summary>
     public const string TransactionMustRetry = "CADB0504";
 
