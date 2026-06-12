@@ -368,6 +368,12 @@ This is `WaitForPreviousVersionAcksAsync`, called *first* in
 `ReplicateAndWaitLocalApplyAsync`. It means a second DDL client cannot race ahead and
 stack a third version onto a cluster where some node is still on version N-1.
 
+> **Relaxed for liveness (H5).** The strict "*every* live node must have applied `FromVersion`"
+> barrier would let a single slow or unreachable follower stall all DDL for the full gate timeout.
+> The gate therefore proceeds on a **majority** after a backstop delay, which trades the strict
+> two-version bound for bounded DDL latency — paired with a **catch-up fence** so a lagging minority
+> node never serves results against a stale schema. The full contract is **§6.3**.
+
 Implemented by `SchemaAckTracker` (per-db `{node → NodeAck{Version, LastSeen}}`):
 
 - `RecordApplied(db, node, version)` is called by the apply path on every node and takes the
@@ -414,6 +420,62 @@ liveness.) `SchemaAckLiveNodeLease` defaults to `Timeout.InfiniteTimeSpan`; both
 > progress in multi-process deployments. The in-process fixture exercises the same transport path
 > through `InProcessSchemaAckRelay` rather than relying on co-location. The gate's existing
 > timeout remains the correctness backstop for dropped acks (leader change, network loss).
+
+### 6.3 DDL liveness under a slow/partitioned node — quorum backstop + catch-up fence (H5)
+
+The strict barrier of §6.2 (every live node must ack `FromVersion` before the next DDL) makes DDL
+hostage to the slowest node: a single follower that is slow to apply, or unreachable, stalls *all*
+DDL for the full `SchemaAckWaitTimeout` (30s). H5 replaces that with a two-part contract — a
+**liveness** rule that bounds DDL latency, and a **safety** fence that keeps the relaxation sound.
+
+**Liveness — the quorum backstop.** `SchemaAckTracker.WaitForAllLiveAsync` returns a
+`SchemaAckOutcome`:
+
+- `FullConvergence` — every live node acked (the fast path, normal operation);
+- `QuorumBackstop` — after `SchemaAckQuorumBackstopDelay` (default **10s**, on `EmbeddedKahuna`) a
+  **majority** `⌊N/2⌋+1` of live nodes acked. The committed Raft log already guarantees the delta is
+  durable on that majority, so DDL is safe to proceed; minority laggards catch up from the log;
+- `Timeout` — neither, by the gate deadline → DDL fails.
+
+The proposer treats `FullConvergence` and `QuorumBackstop` as success. The 10s default is generous
+enough to clear a Raft leadership election (3–6s) so a transient election is not mistaken for a slow
+follower. **Guarantee:** *DDL completes within the gate timeout whenever a majority of the cluster
+applies the delta, regardless of what the minority does — a single slow/unreachable follower caps
+DDL latency at ~`SchemaAckQuorumBackstopDelay`, not the full timeout.* Set the delay to
+`Timeout.InfiniteTimeSpan` to restore the strict "every node must ack" behaviour.
+
+**Why this needs a fence.** The backstop runs on *both* gates, including the §6.2 pre-proposal
+barrier. So the proposer can advance `N → N+1` while a minority node is still at `N-1`; under
+sustained DDL plus a persistently-slow node the divergence is otherwise **unbounded**, and a node
+behind on the schema partition but caught up on a *data* partition would decode a row written under a
+newer schema with its stale layout. The quorum backstop therefore weakens the two-version *bound*,
+and the fence restores the *guarantee that no node ever serves results against a stale schema*.
+
+**Safety — the catch-up fence.** Each node tracks `DatabaseDescriptor.HeadSchemaVersion`: the highest
+schema-log `ToVersion` it has **received** (committed in Raft and delivered to `ApplyAsync` /
+`RestoreAsync`), updated monotonically and lock-free via `ObserveSchemaEntryHead` *before* the schema
+lock is taken — so the head/applied gap is visible to concurrent DML even mid-apply. The rule:
+
+> If `HeadSchemaVersion − Schema.SchemaVersion > 1`, at least two committed schema deltas are in this
+> node's apply pipeline but not yet materialised. The node **rejects reads and DML** for that database
+> with the retryable `SchemaCatchingUp` (`CADB0503`) error until it catches up. A gap of exactly 1
+> (the entry being applied, the two-version bound) is tolerated.
+
+Enforced in `TableOpener.Open` — the choke point every query and DML passes through, checked *before*
+the descriptor cache, so a node that falls behind after opening a table is fenced on its next
+operation, and **re-admitted automatically** once apply catches the head (gap ≤ 1). The fence is
+sound for the real threat model: a node lagging *schema-apply* while caught up on *data* has an
+advancing `HeadSchemaVersion` (the entry was received) and is fenced; a *fully* partitioned node
+receives neither new schema nor new data, so it has nothing newer to mis-decode.
+
+**Net contract (the revised two-version invariant).** DDL proceeds once a **majority** has applied
+the delta (bounded latency); a node more than one version behind the committed head **fences itself**
+(rejects DML, `SchemaCatchingUp`) until it converges — so a lagging minority node never serves
+results against a stale schema. See `docs/cluster-schema-concurrency-hardening-spec.md` §3.4 / §3.4a.
+
+> **Operational note.** A `QuorumBackstop` outcome and a fenced node both mean a follower is lagging.
+> Surfacing those (a gate warning naming the laggard; a metric on `SchemaCatchingUp` rejections) is
+> tracked as the remaining H5 observability work (§3.4a #3).
 
 ---
 

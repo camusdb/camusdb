@@ -40,6 +40,15 @@ public static class CamusDBErrorCodes
     
     public const string TransactionAlreadyCompleted = "CADB0501";
     public const string TransactionConflict = "CADB0502";
+    public const string SchemaCatchingUp = "CADB0503";
+
+    /// <summary>
+    /// Kahuna returned MustRetry from LocateAndCommitTransaction after exhausting all internal
+    /// retries (routing inconsistency during a leader flip). The transaction has been rolled back.
+    /// Unlike <see cref="TransactionAlreadyCompleted"/>, this is transient — the caller should
+    /// retry the entire operation from BeginAsync.
+    /// </summary>
+    public const string TransactionMustRetry = "CADB0504";
 
     public const string InvalidConfig = "CADB0600";
 }

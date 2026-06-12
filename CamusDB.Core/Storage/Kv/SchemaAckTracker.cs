@@ -8,6 +8,25 @@
 namespace CamusDB.Core.Storage.Kv;
 
 /// <summary>
+/// How the schema-ack gate terminated.
+/// </summary>
+internal enum SchemaAckOutcome
+{
+    /// <summary>Every live node acked before the quorum backstop fired.</summary>
+    FullConvergence,
+
+    /// <summary>
+    /// A quorum of live nodes acked within <c>quorumBackstopDelay</c>; one or more minority
+    /// followers were still lagging but DDL is safe to proceed (the committed log is durable on
+    /// the majority). This is the H5 liveness path.
+    /// </summary>
+    QuorumBackstop,
+
+    /// <summary>Neither full convergence nor quorum was reached before the gate timeout.</summary>
+    Timeout,
+}
+
+/// <summary>
 /// Tracks, per database and per node endpoint, the highest schema version each node has applied
 /// ("acked"). This is the data behind the <b>two-version invariant</b>: a DDL proposer waits
 /// via <see cref="WaitForAllLiveAsync"/> until every live node has acked the previous version
@@ -19,6 +38,15 @@ namespace CamusDB.Core.Storage.Kv;
 /// counted as live. A finite <c>liveNodeLease</c> additionally drops a live member from the gate
 /// once its last ack is older than the lease (interim apply-derived liveness); the default lease
 /// is infinite, so production blocks on every member until E2 supplies a real heartbeat.
+///
+/// <para>
+/// <b>H5 quorum backstop:</b> when <c>quorumBackstopDelay</c> is finite, the gate also accepts
+/// once a majority (⌊N/2⌋+1) of live members have acked and the backstop delay has elapsed.
+/// This bounds DDL latency to <c>quorumBackstopDelay</c> even when minority followers are slow
+/// or unreachable — the committed Raft log already guarantees durability on the majority, so DDL
+/// is safe to proceed. See <see cref="SchemaAckOutcome"/> and
+/// <c>docs/cluster-schema-concurrency-hardening-spec.md</c> §3.4.
+/// </para>
 /// </summary>
 internal sealed class SchemaAckTracker
 {
@@ -47,15 +75,22 @@ internal sealed class SchemaAckTracker
 
     /// <summary>
     /// Polls until every endpoint returned by <paramref name="getLiveMembers"/> has acked
-    /// <paramref name="schemaVersion"/>, or until the timeout elapses.
-    /// <paramref name="liveNodeLease"/> is reserved for E2 heartbeat-based expiry and unused here.
+    /// <paramref name="schemaVersion"/> (full convergence), OR — when
+    /// <paramref name="quorumBackstopDelay"/> is finite — until a majority (⌊N/2⌋+1) of those
+    /// members has acked and the backstop delay has elapsed (quorum backstop, H5 §3.4).
     /// </summary>
-    public async Task<bool> WaitForAllLiveAsync(
+    /// <param name="quorumBackstopDelay">
+    /// How long to wait for full convergence before accepting quorum. Pass
+    /// <see cref="Timeout.InfiniteTimeSpan"/> to keep the original strict behaviour (every node
+    /// must ack; no quorum shortcut).
+    /// </param>
+    public async Task<SchemaAckOutcome> WaitForAllLiveAsync(
         string database,
         long schemaVersion,
         TimeSpan timeout,
         Func<IReadOnlyCollection<string>> getLiveMembers,
         TimeSpan liveNodeLease,
+        TimeSpan quorumBackstopDelay,
         CancellationToken cancellationToken
     )
     {
@@ -64,22 +99,32 @@ internal sealed class SchemaAckTracker
 
         DateTime deadline = DateTime.UtcNow.Add(timeout);
 
+        bool backstopEnabled = quorumBackstopDelay != Timeout.InfiniteTimeSpan;
+        DateTime backstopDeadline = backstopEnabled
+            ? DateTime.UtcNow.Add(quorumBackstopDelay)
+            : DateTime.MaxValue;
+
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             IReadOnlyCollection<string> liveMembers = getLiveMembers();
+            DateTime now = DateTime.UtcNow;
 
             lock (sync)
             {
                 databases.TryGetValue(database, out DatabaseAcks? acks);
-                if (HasEveryLiveNodeAcked(acks, schemaVersion, liveMembers, liveNodeLease, DateTime.UtcNow))
-                    return true;
+
+                if (HasEveryLiveNodeAcked(acks, schemaVersion, liveMembers, liveNodeLease, now))
+                    return SchemaAckOutcome.FullConvergence;
+
+                if (backstopEnabled && now >= backstopDeadline &&
+                    HasQuorumAcked(acks, schemaVersion, liveMembers, liveNodeLease, now))
+                    return SchemaAckOutcome.QuorumBackstop;
             }
 
-            DateTime now = DateTime.UtcNow;
             if (now >= deadline)
-                return false;
+                return SchemaAckOutcome.Timeout;
 
             TimeSpan remaining = deadline - now;
             TimeSpan delay = remaining < TimeSpan.FromMilliseconds(25)
@@ -145,6 +190,48 @@ internal sealed class SchemaAckTracker
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Returns true when a majority (⌊N/2⌋+1) of <paramref name="liveMembers"/> have explicitly
+    /// acked <paramref name="schemaVersion"/>. A node with no ack record at all is not counted as
+    /// having acked — the backstop requires positive evidence of apply, not just absence of a
+    /// blocking record. Nodes whose lease has expired are treated as not-acked so the backstop
+    /// cannot be gamed by a disconnected node's stale record.
+    /// </summary>
+    private static bool HasQuorumAcked(
+        DatabaseAcks? acks,
+        long schemaVersion,
+        IReadOnlyCollection<string> liveMembers,
+        TimeSpan liveNodeLease,
+        DateTime now)
+    {
+        int quorum = liveMembers.Count / 2 + 1;
+
+        if (acks is null)
+        {
+            // No records at all. Only satisfied if schemaVersion == 0 and every node implicitly
+            // counts — but schemaVersion 0 is handled by HasEveryLiveNodeAcked before the backstop
+            // fires, so this case should not arise in practice.
+            return schemaVersion == 0 && liveMembers.Count >= quorum;
+        }
+
+        bool leaseFinite = liveNodeLease != Timeout.InfiniteTimeSpan;
+        int ackedCount = 0;
+
+        foreach (string node in liveMembers)
+        {
+            if (!acks.Nodes.TryGetValue(node, out NodeAck ack))
+                continue; // no record → not acked
+
+            if (leaseFinite && now - ack.LastSeen > liveNodeLease)
+                continue; // lease expired → treat as not acked for quorum
+
+            if (ack.Version >= schemaVersion)
+                ackedCount++;
+        }
+
+        return ackedCount >= quorum;
     }
 
     private readonly record struct NodeAck(long Version, DateTime LastSeen);

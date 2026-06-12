@@ -348,7 +348,7 @@ public sealed class TestEmbeddedKahuna
             leader.RecordLocalSchemaApplied(db, 1);
 
             bool partialAck = await leader.WaitForSchemaAcksAsync(
-                db, 1, TimeSpan.FromMilliseconds(100), TimeSpan.FromMinutes(1), CancellationToken.None);
+                db, 1, TimeSpan.FromMilliseconds(100), liveNodeLease: TimeSpan.FromMinutes(1), cancellationToken: CancellationToken.None);
             Assert.IsFalse(partialAck, "Gate must block until all Raft members ack");
 
             // Deliver follower acks to the leader's per-instance tracker via RecordRemoteSchemaAck
@@ -362,7 +362,7 @@ public sealed class TestEmbeddedKahuna
             }
 
             bool allAcked = await leader.WaitForSchemaAcksAsync(
-                db, 1, TimeSpan.FromSeconds(2), TimeSpan.FromMinutes(1), CancellationToken.None);
+                db, 1, TimeSpan.FromSeconds(2), liveNodeLease: TimeSpan.FromMinutes(1), cancellationToken: CancellationToken.None);
             Assert.IsTrue(allAcked, "Gate must pass once all Raft members ack");
         }
         finally

@@ -53,27 +53,29 @@ public sealed class CatalogsManager
         if (!database.OwnsKahuna)
             return await CreateTableReplicatedAsync(database, ticket, tx).ConfigureAwait(false);
 
+        // §3.1: apply delta under the schema lock (pure in-memory), then release before
+        // the KV persist — the persist is a replicated 2PC write that must never run
+        // while the schema lock is held (see docs/cluster-schema-concurrency-hardening-spec.md).
+        TableSchema tableSchema;
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
-
             SchemaChangeLogEntry entry = CreateTableEntry(database, ticket, tx);
 
-            TableSchema tableSchema = ApplySchemaDelta(database.Schema, entry) ?? throw new CamusDBException(
+            tableSchema = ApplySchemaDelta(database.Schema, entry) ?? throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Schema change '{entry.Op}' did not create table '{ticket.TableName}'"
             );
 
-            await PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
-
             logger.LogInformation("Added table {TableName} to schema", ticket.TableName);
-
-            return tableSchema;
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
+
+        await PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
+        return tableSchema;
     }
 
     /// <summary>
@@ -88,27 +90,27 @@ public sealed class CatalogsManager
         if (!database.OwnsKahuna)
             return await AlterTableReplicatedAsync(database, ticket, tx).ConfigureAwait(false);
 
+        // §3.1: apply delta under the schema lock (pure in-memory), persist outside.
+        TableSchema tableSchema;
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
-
             SchemaChangeLogEntry entry = AlterTableEntry(database, ticket, tx);
 
-            TableSchema tableSchema = ApplySchemaDelta(database.Schema, entry) ?? throw new CamusDBException(
+            tableSchema = ApplySchemaDelta(database.Schema, entry) ?? throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Schema change '{entry.Op}' did not alter table '{ticket.TableName}'"
             );
 
-            await PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
-
             logger.LogInformation("Modifed table {TableName} schema", ticket.TableName);
-
-            return tableSchema;
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
+
+        await PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
+        return tableSchema;
     }
 
     public async Task<TableSchema?> DropTableSchema(DatabaseDescriptor database, string tableName, string tableId, KvTransaction tx)
@@ -116,21 +118,21 @@ public sealed class CatalogsManager
         if (!database.OwnsKahuna)
             return await DropTableReplicatedAsync(database, tableName, tx).ConfigureAwait(false);
 
+        // §3.1: apply delta under the schema lock (pure in-memory), persist outside.
+        TableSchema? tableSchema;
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
-
             SchemaChangeLogEntry entry = DropTableEntry(database, tableName, tx);
-            TableSchema? tableSchema = ApplySchemaDelta(database.Schema, entry);
-
-            await PersistDroppedTableAsync(database, tableId, tx).ConfigureAwait(false);
-
-            return tableSchema;
+            tableSchema = ApplySchemaDelta(database.Schema, entry);
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
+
+        await PersistDroppedTableAsync(database, tableId, tx).ConfigureAwait(false);
+        return tableSchema;
     }
 
     /// <summary>
@@ -163,7 +165,7 @@ public sealed class CatalogsManager
     {
         SchemaChangeLogEntry entry;
 
-        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
             entry = CreateTableEntry(database, ticket, tx);
@@ -171,7 +173,7 @@ public sealed class CatalogsManager
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
 
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
@@ -182,7 +184,7 @@ public sealed class CatalogsManager
     {
         SchemaChangeLogEntry entry;
 
-        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
             entry = AlterTableEntry(database, ticket, tx);
@@ -190,7 +192,7 @@ public sealed class CatalogsManager
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
 
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
@@ -201,7 +203,7 @@ public sealed class CatalogsManager
     {
         SchemaChangeLogEntry entry;
 
-        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
             entry = DropTableEntry(database, tableName, tx);
@@ -209,7 +211,7 @@ public sealed class CatalogsManager
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
 
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
@@ -295,7 +297,7 @@ public sealed class CatalogsManager
     {
         SchemaChangeLogEntry entry;
 
-        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
             entry = ticket.Operation is AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey
@@ -304,7 +306,7 @@ public sealed class CatalogsManager
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
 
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
@@ -326,7 +328,7 @@ public sealed class CatalogsManager
     {
         SchemaChangeLogEntry entry;
 
-        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
             entry = new()
@@ -353,7 +355,7 @@ public sealed class CatalogsManager
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
 
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
@@ -375,7 +377,7 @@ public sealed class CatalogsManager
     {
         SchemaChangeLogEntry entry;
 
-        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
             entry = new()
@@ -396,7 +398,7 @@ public sealed class CatalogsManager
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
 
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
@@ -417,7 +419,7 @@ public sealed class CatalogsManager
     {
         SchemaChangeLogEntry entry;
 
-        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
             entry = new()
@@ -444,7 +446,7 @@ public sealed class CatalogsManager
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
 
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
@@ -462,7 +464,7 @@ public sealed class CatalogsManager
     {
         SchemaChangeLogEntry entry;
 
-        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
             entry = new()
@@ -481,7 +483,7 @@ public sealed class CatalogsManager
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
 
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
@@ -540,6 +542,16 @@ public sealed class CatalogsManager
 
     private async Task ReplicateAndWaitLocalApplyAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
+        // H1 §3.1: replicating the schema-log delta (and the checkpoint persist below) re-enters the
+        // schema partition's serial, inline apply pipeline — which yields on the schema lock. Doing
+        // it while the lock is held deadlocks that pipeline (the §2.1 root cause). DDL proposers must
+        // build/validate + apply the delta under the lock, then RELEASE before calling this. A
+        // non-zero depth here is a §3.1 violation. (See docs/cluster-schema-concurrency-hardening-spec.md.)
+        System.Diagnostics.Debug.Assert(
+            database.Schema.LockDepth == 0,
+            $"ReplicateAndWaitLocalApplyAsync called while Schema lock is held on database '{database.Name}' — violates §3.1 (no replicated write under a schema lock)"
+        );
+
         if (database.SchemaSubsystemDegraded)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
@@ -596,6 +608,16 @@ public sealed class CatalogsManager
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Timed out waiting for live schema apply acknowledgements for database '{database.Name}' version {entry.ToVersion}"
+            );
+
+        if (database.Kahuna.LastGateOutcome == SchemaAckOutcome.QuorumBackstop)
+            logger.LogWarning(
+                "Schema ack post-commit gate for database '{Database}' version {Version} " +
+                "completed via QuorumBackstop — one or more live nodes did not ack within the " +
+                "backstop window ({BackstopMs}ms); those nodes are lagging and will be fenced " +
+                "until they apply the committed schema entry",
+                database.Name, entry.ToVersion,
+                (long)database.Kahuna.SchemaAckQuorumBackstopDelay.TotalMilliseconds
             );
     }
 
@@ -654,6 +676,13 @@ public sealed class CatalogsManager
         }
     }
 
+    // H1: schema checkpoint commits must be bounded — an unbounded CommitAsync(CT.None)
+    // hangs indefinitely when the schema partition Raft actor is stalled, converting a
+    // transient cluster hiccup into a permanent 60s test timeout (or production DDL hang).
+    // 5 s is generous for an in-process cluster; the outer retry loop treats a timeout as
+    // a persist failure and eventually takes the F1a path, keeping DDL liveness intact.
+    private static readonly TimeSpan CheckpointCommitTimeout = TimeSpan.FromSeconds(5);
+
     private async Task PersistSchemaCheckpointAsync(
         DatabaseDescriptor database,
         SchemaChangeLogEntry entry,
@@ -679,7 +708,8 @@ public sealed class CatalogsManager
                     await PersistSchemaTableAsync(database, tableSchema, entry.ToVersion, tx).ConfigureAwait(false);
             }
 
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            using CancellationTokenSource cts = new(CheckpointCommitTimeout);
+            await database.Transactions.CommitAsync(tx, cts.Token).ConfigureAwait(false);
         }
         finally
         {
@@ -702,10 +732,16 @@ public sealed class CatalogsManager
 
     private static async Task WaitForPreviousVersionAcksAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
+        // §3.4 safety: this is the PRE-PROPOSAL gate that enforces the two-version invariant.
+        // The quorum backstop MUST NOT fire here — allowing quorum-only convergence on this gate
+        // would let the proposer advance N→N+1 while a minority sits at N−1, breaking the
+        // invariant and exposing those nodes to mis-decode. enforceFullConvergence=true disables
+        // the backstop for this call while keeping it active for the post-commit gate below.
         bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
             database.Name,
             entry.FromVersion,
             database.Kahuna.SchemaAckWaitTimeout,
+            enforceFullConvergence: true,
             cancellationToken: CancellationToken.None
         ).ConfigureAwait(false);
 
@@ -1136,6 +1172,13 @@ public sealed class CatalogsManager
 
     public async Task PersistSchemaTableAsync(DatabaseDescriptor database, TableSchema tableSchema, long schemaVersion, KvTransaction tx)
     {
+        // H1 §3.1: replicated KV writes must never be issued while the schema lock is held.
+        // A non-zero depth here means a caller violated the invariant (lock-order deadlock risk).
+        System.Diagnostics.Debug.Assert(
+            database.Schema.LockDepth == 0,
+            $"PersistSchemaTableAsync called while Schema lock is held on database '{database.Name}' — violates §3.1 (no replicated write under a schema lock)"
+        );
+
         if (string.IsNullOrWhiteSpace(tableSchema.Id))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Table '{tableSchema.Name}' has no table id");
 
@@ -1165,6 +1208,11 @@ public sealed class CatalogsManager
 
     public async Task PersistDroppedTableAsync(DatabaseDescriptor database, string tableId, long schemaVersion, KvTransaction tx)
     {
+        // H1 §3.1: see PersistSchemaTableAsync above.
+        System.Diagnostics.Debug.Assert(
+            database.Schema.LockDepth == 0,
+            $"PersistDroppedTableAsync called while Schema lock is held on database '{database.Name}' — violates §3.1"
+        );
         IKahuna kahuna = database.Kahuna.Kahuna;
 
         byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
@@ -1185,6 +1233,12 @@ public sealed class CatalogsManager
         if (TestPersistCheckpointException is { } fault)
             throw fault;
 
+        // H1 §3.1: must not be called while Schema lock is held (deadlock risk — see class doc).
+        System.Diagnostics.Debug.Assert(
+            database.Schema.LockDepth == 0,
+            $"PersistFullSchemaCheckpointAsync called while Schema lock is held on database '{database.Name}' — violates §3.1"
+        );
+
         IKahuna kahuna = database.Kahuna.Kahuna;
         long schemaVersion = database.Schema.SchemaVersion;
 
@@ -1194,7 +1248,12 @@ public sealed class CatalogsManager
             byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
             await WriteMetaKey(kahuna, tx, VersionKey(database.Name), versionBytes).ConfigureAwait(false);
 
-            foreach (TableSchema table in database.Schema.Tables.Values)
+            // Snapshot the table set: callers may invoke this without holding Schema.Semaphore
+            // (e.g. OnSchemaRestoreFinishedAsync, which must not hold the apply lock across these KV
+            // writes — see the deadlock note there), so a concurrent live apply could otherwise
+            // mutate Tables mid-iteration. A best-effort checkpoint over a point-in-time snapshot is
+            // fine; the committed schema log remains the source of truth.
+            foreach (TableSchema table in database.Schema.Tables.Values.ToArray())
             {
                 if (string.IsNullOrWhiteSpace(table.Id))
                     continue;
@@ -1213,7 +1272,8 @@ public sealed class CatalogsManager
                 }
             }
 
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            using CancellationTokenSource cts = new(CheckpointCommitTimeout);
+            await database.Transactions.CommitAsync(tx, cts.Token).ConfigureAwait(false);
         }
         finally
         {
@@ -1580,12 +1640,25 @@ public sealed class CatalogsManager
         };
     }
 
+    private const int MetaKeyMaxRetries = 32;
+
     private static async Task WriteMetaKey(IKahuna kahuna, KvTransaction tx, string key, byte[] value)
     {
-        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability) =
-            await kahuna.LocateAndTryAcquireExclusiveLock(
+        KeyValueResponseType lockType;
+        KeyValueDurability lockDurability;
+        int lockRetries = 0;
+
+        do
+        {
+            if (lockRetries > 0)
+                await Task.Delay(lockRetries * 10).ConfigureAwait(false);
+
+            (lockType, _, lockDurability) = await kahuna.LocateAndTryAcquireExclusiveLock(
                 tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
+        }
+        while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
+               && ++lockRetries < MetaKeyMaxRetries);
 
         if (lockType != KeyValueResponseType.Locked)
             throw new CamusDBException(
@@ -1595,11 +1668,22 @@ public sealed class CatalogsManager
 
         tx.TrackLock(key, lockDurability);
 
-        (KeyValueResponseType setType, _, _) = await kahuna.LocateAndTrySetKeyValue(
-            tx.TransactionId, key, value, null, -1,
-            KeyValueFlags.Set, 0,
-            KeyValueDurability.Persistent, CancellationToken.None
-        ).ConfigureAwait(false);
+        KeyValueResponseType setType;
+        int setRetries = 0;
+
+        do
+        {
+            if (setRetries > 0)
+                await Task.Delay(setRetries * 10).ConfigureAwait(false);
+
+            (setType, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                tx.TransactionId, key, value, null, -1,
+                KeyValueFlags.Set, 0,
+                KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        while (setType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+               && ++setRetries < MetaKeyMaxRetries);
 
         if (setType != KeyValueResponseType.Set)
             throw new CamusDBException(
@@ -1612,10 +1696,21 @@ public sealed class CatalogsManager
 
     private static async Task DeleteMetaKey(IKahuna kahuna, KvTransaction tx, string key)
     {
-        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability) =
-            await kahuna.LocateAndTryAcquireExclusiveLock(
+        KeyValueResponseType lockType;
+        KeyValueDurability lockDurability;
+        int lockRetries = 0;
+
+        do
+        {
+            if (lockRetries > 0)
+                await Task.Delay(lockRetries * 10).ConfigureAwait(false);
+
+            (lockType, _, lockDurability) = await kahuna.LocateAndTryAcquireExclusiveLock(
                 tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
+        }
+        while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
+               && ++lockRetries < MetaKeyMaxRetries);
 
         if (lockType != KeyValueResponseType.Locked)
             throw new CamusDBException(
@@ -1625,9 +1720,20 @@ public sealed class CatalogsManager
 
         tx.TrackLock(key, lockDurability);
 
-        (KeyValueResponseType deleteType, _, _) = await kahuna.LocateAndTryDeleteKeyValue(
-            tx.TransactionId, key, KeyValueDurability.Persistent, CancellationToken.None
-        ).ConfigureAwait(false);
+        KeyValueResponseType deleteType;
+        int deleteRetries = 0;
+
+        do
+        {
+            if (deleteRetries > 0)
+                await Task.Delay(deleteRetries * 10).ConfigureAwait(false);
+
+            (deleteType, _, _) = await kahuna.LocateAndTryDeleteKeyValue(
+                tx.TransactionId, key, KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        while (deleteType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+               && ++deleteRetries < MetaKeyMaxRetries);
 
         if (deleteType is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
             throw new CamusDBException(

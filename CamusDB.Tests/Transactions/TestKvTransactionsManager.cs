@@ -281,4 +281,46 @@ public sealed class TestKvTransactionsManager
         byte[]? got = await store.GetRow(Kommander.Time.HLCTimestamp.Zero, rowId);
         Assert.IsNull(got, "Rows from rolled-back transactions must not be visible");
     }
+
+    // H6 §3.5 — error-code contract: once a transaction is committed, a second commit attempt
+    // must throw CADB0501 (TransactionAlreadyCompleted, permanent), NOT the retryable
+    // CADB0504 (TransactionMustRetry). The distinction lets callers decide:
+    //   CADB0504 = routing failure → retry the whole operation from BeginAsync
+    //   CADB0501 = permanent failure → do not retry
+    [Test]
+    public async Task CommitAsync_ThrowsTransactionAlreadyCompleted_NotMustRetry_OnDoubleCommit()
+    {
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore _) = await CreateAsync("m14");
+        await using EmbeddedKahuna __ = node;
+
+        KvTransaction tx = await mgr.BeginAsync();
+        await mgr.CommitAsync(tx);
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() => mgr.CommitAsync(tx));
+
+        Assert.IsNotNull(ex);
+        Assert.AreEqual(CamusDBErrorCodes.TransactionAlreadyCompleted, ex!.Code,
+            "Double-commit must throw permanent CADB0501, not the retryable CADB0504");
+        Assert.AreNotEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code,
+            "CADB0504 is reserved for transient routing failures; double-commit is permanent");
+    }
+
+    // H6 §3.5 — error-code contract: a rolled-back transaction cannot be committed;
+    // the error must be CADB0501 (permanent), never CADB0504 (retryable).
+    [Test]
+    public async Task CommitAsync_ThrowsTransactionAlreadyCompleted_NotMustRetry_AfterRollback()
+    {
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore _) = await CreateAsync("m15");
+        await using EmbeddedKahuna __ = node;
+
+        KvTransaction tx = await mgr.BeginAsync();
+        await mgr.RollbackAsync(tx);
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() => mgr.CommitAsync(tx));
+
+        Assert.IsNotNull(ex);
+        Assert.AreEqual(CamusDBErrorCodes.TransactionAlreadyCompleted, ex!.Code,
+            "Committing a rolled-back tx must throw permanent CADB0501");
+        Assert.AreNotEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code);
+    }
 }

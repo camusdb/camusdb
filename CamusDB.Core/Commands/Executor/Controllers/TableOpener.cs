@@ -41,6 +41,21 @@ internal sealed class TableOpener
         if (string.IsNullOrEmpty(tableName))
             throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, "Invalid or empty table name");
 
+        // §3.4 fence: if HeadSchemaVersion − SchemaVersion > 1, at least two committed schema
+        // deltas are in the apply pipeline but not yet materialised on this node. DML using a
+        // schema that is more than one version behind the committed head risks mis-decoding rows
+        // written under a newer schema. Reject with a retryable error so the caller can retry
+        // once this node has caught up. A gap of exactly 1 (the entry currently being applied
+        // under the lock) is tolerated because the two-version invariant bounds the per-row
+        // schema distance to ≤1 version.
+        long head = database.HeadSchemaVersion;
+        long applied = database.Schema.SchemaVersion;
+        if (head - applied > 1)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SchemaCatchingUp,
+                $"Database '{database.Name}' schema is catching up (head={head}, applied={applied}); retry this operation once the node has applied all committed schema changes"
+            );
+
         TableSchema tableSchema = catalogs.GetTableSchema(database, tableName);
 
         AsyncLazy<TableDescriptor> openTableLazy = database.TableDescriptors.GetOrAdd(
@@ -53,9 +68,21 @@ internal sealed class TableOpener
     public ValueTask<TableDescriptor> Open(DatabaseDescriptor database, TableSource tableSource) =>
         Open(database, tableSource.TableName);
 
-    private Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
+    private async Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
     {
         KvTableStore store = new(database.Kahuna.Kahuna, tableSchema.Id!, tableSchema.Name ?? "");
+
+        // Key-range sharding (opt-in): mark this table's row key space as key-range routed on the
+        // local node and auto-seed its initial whole-space descriptor. The Kahuna registry is
+        // node-local in-memory state (not replicated), so each node registers independently when it
+        // first opens the table; this AsyncLazy runs once per node per process, which is exactly the
+        // "every node, every startup" contract RegisterKeyRangeAsync requires. The seed itself is a
+        // single replicated meta write that only the meta-partition leader commits (a no-op on other
+        // nodes — the descriptor arrives by replication). Idempotent. First slice registers the row
+        // space only ({tableId}:r); indexes stay hash-routed. Never register {db}/meta (Kahuna rejects
+        // it — the schema log must stay hash-routed for total ordering).
+        if (CamusDBConfig.KeyRangeShardingEnabled)
+            await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.RowKeySpace);
 
         TableDescriptor tableDescriptor = new(
             tableSchema.Id ?? "",
@@ -102,7 +129,7 @@ internal sealed class TableOpener
 
         logger.LogInformation("Table {TableName} opened", tableSchema.Name);
 
-        return Task.FromResult(tableDescriptor);
+        return tableDescriptor;
     }
 
     private static string[] MapColumnsIdsToNames(List<TableColumnSchema>? columns, string[] columnIds)

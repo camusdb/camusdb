@@ -145,8 +145,8 @@ public sealed class TestSchemaReplicator
             db,
             1,
             TimeSpan.FromMilliseconds(100),
-            TimeSpan.FromMinutes(1),
-            CancellationToken.None
+            liveNodeLease: TimeSpan.FromMinutes(1),
+            cancellationToken: CancellationToken.None
         );
 
         Assert.IsTrue(acked);
@@ -169,8 +169,8 @@ public sealed class TestSchemaReplicator
             db,
             4,
             TimeSpan.FromMilliseconds(100),
-            TimeSpan.FromMinutes(1),
-            CancellationToken.None
+            liveNodeLease: TimeSpan.FromMinutes(1),
+            cancellationToken: CancellationToken.None
         );
 
         Assert.IsTrue(acked);

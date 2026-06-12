@@ -356,9 +356,14 @@ public sealed class TestKvTableStore
 
         KvTransactionsManager transactions = new(node.Kahuna);
 
+        // The lock is tracked in the prefix-lock set (hash mode) or the range-lock set (key-range
+        // mode); count whichever the active routing mode uses.
+        static int HeldLocks(KvTransaction tx) =>
+            CamusDBConfig.KeyRangeShardingEnabled ? tx.GetAcquiredRangeLocks().Count : tx.GetAcquiredPrefixLocks().Count;
+
         KvTransaction tx1 = await transactions.BeginAsync();
         await store.AcquireRowRangeLockAsync(tx1);
-        Assert.AreEqual(1, tx1.GetAcquiredPrefixLocks().Count, "tx1 must track its range lock");
+        Assert.AreEqual(1, HeldLocks(tx1), "tx1 must track its range lock");
 
         // A second transaction cannot acquire the same range while tx1 holds it.
         KvTransaction tx2 = await transactions.BeginAsync();
@@ -373,7 +378,7 @@ public sealed class TestKvTableStore
         // tx2 can now acquire it.
         Assert.DoesNotThrowAsync(async () => await store.AcquireRowRangeLockAsync(tx2),
             "the range must be lockable again once the holder commits");
-        Assert.AreEqual(1, tx2.GetAcquiredPrefixLocks().Count);
+        Assert.AreEqual(1, HeldLocks(tx2));
 
         await transactions.CommitAsync(tx2);
     }

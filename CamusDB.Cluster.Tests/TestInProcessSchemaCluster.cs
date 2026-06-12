@@ -1396,7 +1396,7 @@ public sealed class TestInProcessSchemaCluster
         leader.Kahuna.RecordLocalSchemaApplied(db, 1);
 
         bool partialAck = await leader.Kahuna.WaitForSchemaAcksAsync(
-            db, 1, TimeSpan.FromMilliseconds(100), Timeout.InfiniteTimeSpan, CancellationToken.None);
+            db, 1, TimeSpan.FromMilliseconds(100), liveNodeLease: Timeout.InfiniteTimeSpan, cancellationToken: CancellationToken.None);
         Assert.IsFalse(partialAck, "Gate must block when followers have not yet acked");
 
         // Simulate follower applies arriving via the in-process ack relay: each follower
@@ -1415,7 +1415,7 @@ public sealed class TestInProcessSchemaCluster
         await Task.Delay(TimeSpan.FromMilliseconds(200)).ConfigureAwait(false);
 
         bool allAcked = await leader.Kahuna.WaitForSchemaAcksAsync(
-            db, 1, TimeSpan.FromSeconds(3), Timeout.InfiniteTimeSpan, CancellationToken.None);
+            db, 1, TimeSpan.FromSeconds(3), liveNodeLease: Timeout.InfiniteTimeSpan, cancellationToken: CancellationToken.None);
         Assert.IsTrue(allAcked, "Gate must release once all follower acks are relayed to the leader");
     }
 
@@ -1445,7 +1445,7 @@ public sealed class TestInProcessSchemaCluster
 
         // Leader has not acked yet, and follower acks did not reach the leader's tracker.
         bool gateResult = await leader.Kahuna.WaitForSchemaAcksAsync(
-            db, 1, TimeSpan.FromMilliseconds(100), Timeout.InfiniteTimeSpan, CancellationToken.None);
+            db, 1, TimeSpan.FromMilliseconds(100), liveNodeLease: Timeout.InfiniteTimeSpan, cancellationToken: CancellationToken.None);
         Assert.IsFalse(gateResult,
             "Gate must still block: follower local acks must not bleed into the leader's per-instance tracker");
     }
@@ -1476,8 +1476,479 @@ public sealed class TestInProcessSchemaCluster
         await Task.Delay(shortLease + TimeSpan.FromMilliseconds(100)).ConfigureAwait(false);
 
         bool timedOut = await leader.Kahuna.WaitForSchemaAcksAsync(
-            db, 1, TimeSpan.FromSeconds(2), shortLease, CancellationToken.None);
+            db, 1, TimeSpan.FromSeconds(2), liveNodeLease: shortLease, cancellationToken: CancellationToken.None);
         Assert.IsTrue(timedOut,
             "Gate must proceed once the lease expires for behind followers (dropped ack backstop)");
+    }
+
+    // §3.4 / H5 safety — the quorum backstop must NOT fire on the pre-proposal gate
+    // (enforceFullConvergence=true path). The pre-proposal gate enforces the two-version
+    // invariant: relaxing it with a backstop would let the proposer advance N→N+1 while a
+    // minority sits at N−1. This test verifies the API contract: with enforceFullConvergence=true,
+    // the gate blocks even after SchemaAckQuorumBackstopDelay elapses, even when quorum (2/3)
+    // has already acked. With enforceFullConvergence=false the backstop fires for the same inputs.
+    [Test]
+    public async Task AckGate_EnforceFullConvergenceDisablesQuorumBackstop()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // Set a very short backstop so it would fire immediately if the flag were ignored.
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.SchemaAckQuorumBackstopDelay = TimeSpan.FromMilliseconds(50);
+
+        // Leader + one follower ack version 1 (quorum = 2/3); one follower is silent.
+        InProcessSchemaCluster.Node silentFollower = cluster.Nodes.First(n => n.Index != leader.Index);
+        leader.Kahuna.RecordLocalSchemaApplied(db, 0);
+        leader.Kahuna.RecordLocalSchemaApplied(db, 1);
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+        {
+            if (n.Index == leader.Index || n.Index == silentFollower.Index)
+                continue;
+            // Ack via relay so the leader's tracker sees it.
+            n.Kahuna.RecordLocalSchemaApplied(db, 0);
+            n.Kahuna.RecordAndPublishSchemaApplied(db, 1);
+        }
+
+        // Give the relay tasks time to land on the leader.
+        await Task.Delay(200).ConfigureAwait(false);
+
+        // With enforceFullConvergence=true the backstop must be suppressed — quorum (2/3) is
+        // satisfied but the silent third follower prevents full convergence → gate must time out.
+        bool blocked = await leader.Kahuna.WaitForSchemaAcksAsync(
+            db, 1,
+            timeout: TimeSpan.FromMilliseconds(150),
+            enforceFullConvergence: true,
+            cancellationToken: CancellationToken.None);
+
+        Assert.IsFalse(blocked,
+            "Pre-proposal gate with enforceFullConvergence=true must block when the third node has not acked, even after the backstop delay");
+
+        // Control: without enforceFullConvergence the backstop fires on quorum (2/3) and the gate unblocks.
+        bool backstopFired = await leader.Kahuna.WaitForSchemaAcksAsync(
+            db, 1,
+            timeout: TimeSpan.FromSeconds(2),
+            enforceFullConvergence: false,
+            cancellationToken: CancellationToken.None);
+
+        Assert.IsTrue(backstopFired,
+            "Post-commit gate without enforceFullConvergence must proceed once quorum backstop fires (2/3 acked)");
+    }
+
+    // §3.4 — fence: DML on a node whose HeadSchemaVersion is more than one version ahead of
+    // its applied SchemaVersion must be rejected with SchemaCatchingUp so the node does not
+    // decode rows with a stale schema. HeadSchemaVersion is advanced directly (simulating the
+    // window between ObserveSchemaEntryHead and the in-memory apply) to trigger the fence without
+    // needing a real partitioned follower.
+    [Test]
+    public async Task SchemaFence_RejectsDmlWhenHeadAheadByMoreThanOne()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        await leader.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "fence_tbl",
+            columns: [new ColumnInfo("id", ColumnType.Id), new ColumnInfo("val", ColumnType.String)],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        ));
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        // Advance a follower's HeadSchemaVersion by 2 without applying the delta — simulating
+        // two committed entries in the apply pipeline that have not yet acquired the lock.
+        // The gap HeadSchemaVersion − SchemaVersion = 2 > 1 must trigger the fence.
+        InProcessSchemaCluster.Node follower = cluster.Nodes.First(n => n.Index != leader.Index);
+        long appliedBefore = follower.Database!.Schema.SchemaVersion;
+        follower.Database.ObserveSchemaEntryHead(appliedBefore + 2);
+
+        Assert.AreEqual(appliedBefore + 2, follower.Database.HeadSchemaVersion,
+            "HeadSchemaVersion must reflect the injected head");
+        Assert.AreEqual(appliedBefore, follower.Database.Schema.SchemaVersion,
+            "SchemaVersion must be unchanged by ObserveSchemaEntryHead");
+
+        // DML on the fenced follower must throw SchemaCatchingUp.
+        KvTransaction tx = await follower.Database.Transactions.BeginAsync();
+        CamusDBException? ex = null;
+        try
+        {
+            await follower.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                txnState: tx,
+                database: db,
+                sql: "INSERT INTO fence_tbl (id, val) VALUES (gen_id(), 'x')",
+                parameters: null
+            ));
+        }
+        catch (CamusDBException cex)
+        {
+            ex = cex;
+        }
+        finally
+        {
+            await follower.Database.Transactions.RollbackAsync(tx);
+        }
+
+        Assert.IsNotNull(ex, "DML must be rejected while HeadSchemaVersion − SchemaVersion > 1");
+        Assert.AreEqual(CamusDBErrorCodes.SchemaCatchingUp, ex!.Code,
+            $"Error code must be SchemaCatchingUp, got: {ex.Code} — {ex.Message}");
+    }
+
+    // H5 §3.4a #2 — fault-injected quorum backstop: one follower is isolated at the Raft
+    // transport layer so it cannot receive schema-log entries and therefore cannot ack.
+    // The remaining two nodes (leader + one healthy follower) form both Raft quorum and the
+    // schema-ack quorum (⌊3/2⌋+1 = 2). After SchemaAckQuorumBackstopDelay the post-commit
+    // ack gate fires the QuorumBackstop path and DDL proceeds. On ResumeDelivery the isolated
+    // follower replays the missed entries, its schema version advances, the fence clears, and
+    // DML on that node succeeds.
+    //
+    // This is the first test that actually exercises SchemaAckOutcome.QuorumBackstop
+    // (all prior cluster tests use healthy nodes → always FullConvergence).
+    //
+    // Note: the catch-up path is ReopenDatabaseAsync (reads KV checkpoint via
+    // MemoryInterNodeCommunication), NOT organic Raft WAL replay on ResumeDelivery. This is
+    // deterministic and avoids the term-bump-on-rejoin churn, but it means this test validates
+    // fence-clears-after-KV-read rather than fence-clears-after-Raft-replay. The Raft replay
+    // path is covered indirectly by PausedNodeLagsAndCatchesUpOnResume.
+    [Test]
+    public async Task QuorumBackstop_DdlProceedsWhenOneFollowerPaused()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        // Use a short backstop so the test completes in ~2s instead of 10s.
+        const int BackstopMs = 2000;
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.SchemaAckQuorumBackstopDelay = TimeSpan.FromMilliseconds(BackstopMs);
+
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // Pick a follower to isolate. The other follower stays reachable — it will ack
+        // the committed schema entry, giving the leader its quorum (2/3).
+        InProcessSchemaCluster.Node pausedFollower = cluster.Nodes.First(n => n.Index != leader.Index);
+        cluster.PauseDelivery(pausedFollower.Index);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            // CreateTable: Raft commits with quorum (leader + healthy follower),
+            // then the post-commit ack gate waits. After ~BackstopMs the backstop fires on 2/3.
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "backstop_tbl",
+                columns: [new ColumnInfo("id", ColumnType.Id)],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            ));
+        }
+        finally
+        {
+            sw.Stop();
+        }
+
+        // DDL must succeed (no exception) — the backstop unblocked the gate.
+        long elapsedMs = sw.ElapsedMilliseconds;
+        Assert.GreaterOrEqual(elapsedMs, BackstopMs - 500,
+            $"DDL completed in {elapsedMs}ms — shorter than the {BackstopMs}ms backstop delay; " +
+            "suggests FullConvergence fired (paused follower acked unexpectedly)");
+
+        // The post-commit gate must have used the QuorumBackstop path, not FullConvergence.
+        Assert.AreEqual(SchemaAckOutcome.QuorumBackstop, leader.Kahuna.LastGateOutcome,
+            $"Expected QuorumBackstop but gate outcome was {leader.Kahuna.LastGateOutcome}; " +
+            "the isolated follower should not have acked");
+
+        long clusterVersion = leader.Database!.Schema.SchemaVersion;
+
+        // Reconnect the isolated follower, then reopen the database on it.
+        // ReopenDatabaseAsync closes+reopens via LocateAndTryGetValue → MemoryInterNodeCommunication
+        // (not the fault-injecting Raft transport) so it reads the latest KV checkpoint from the
+        // partition leader immediately, without depending on Raft WAL replay catching up.
+        cluster.ResumeDelivery(pausedFollower.Index);
+        await cluster.ReopenDatabaseAsync(pausedFollower.Index, db).ConfigureAwait(false);
+
+        // node.Database is updated by ReopenDatabaseAsync; re-bind the reference.
+        InProcessSchemaCluster.Node updatedFollower = cluster.Nodes[pausedFollower.Index];
+
+        Assert.AreEqual(clusterVersion, updatedFollower.Database!.Schema.SchemaVersion,
+            "Rejoined follower must catch up to cluster schema version via reopen");
+
+        // HeadSchemaVersion and SchemaVersion must be within 1 (fence cleared).
+        Assert.LessOrEqual(updatedFollower.Database.HeadSchemaVersion - updatedFollower.Database.Schema.SchemaVersion, 1,
+            "Fence gap must be ≤ 1 once the follower has caught up");
+
+        // DML on the previously-paused follower must succeed (fence no longer rejects).
+        KvTransaction tx = await updatedFollower.Database.Transactions.BeginAsync();
+        try
+        {
+            await updatedFollower.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                txnState: tx,
+                database: db,
+                sql: "INSERT INTO backstop_tbl (id) VALUES (gen_id())",
+                parameters: null
+            ));
+            await updatedFollower.Database.Transactions.CommitAsync(tx);
+        }
+        catch (Exception ex)
+        {
+            await updatedFollower.Database.Transactions.RollbackAsync(tx);
+            Assert.Fail($"DML on the rejoined follower must succeed after schema catch-up, got: {ex.Message}");
+        }
+    }
+
+    // §1 / H5 — dead-node liveness: DDL must proceed permanently after one node is killed,
+    // NOT via the quorum backstop (which is post-commit only) but via the pre-proposal gate
+    // evicting the dead member from GetLiveSchemaNodes().
+    //
+    // With SchemaAckLiveNodeLease set to a finite value, GetLiveSchemaNodes() calls
+    // Raft.GetActiveNodes(lease) instead of Raft.GetNodes(). After the lease elapses without a
+    // heartbeat from the dead node, GetActiveNodes drops it, and the pre-proposal gate (which uses
+    // enforceFullConvergence=true — no backstop) sees only the two surviving nodes. Both have
+    // acked the previous version → FullConvergence on the reduced set → DDL proceeds.
+    //
+    // The assertion is LastGateOutcome == FullConvergence (NOT QuorumBackstop): the dead node is
+    // fully absent from the live set, so the reduced-set full-convergence path fires, not the
+    // quorum-backstop path.
+    [Test]
+    public async Task DeadNode_PreProposalGateEvictsViaLease_DdlProceedsAsFullConvergence()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        // Use a short live-node lease so the dead follower is quickly dropped from GetLiveSchemaNodes.
+        const int LeaseMs = 1200;
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+            n.Kahuna.SchemaAckLiveNodeLease = TimeSpan.FromMilliseconds(LeaseMs);
+
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // First DDL with all 3 nodes healthy → everyone acks version 1.
+        await leader.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "tbl_v1",
+            columns: [new ColumnInfo("id", ColumnType.Id)],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        ));
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1, timeout: TimeSpan.FromSeconds(10));
+
+        // Kill one follower permanently. KillNodeAsync blocks its transport + disposes it.
+        // Raft heartbeats from the leader to the dead node will stop being answered, so
+        // GetActiveNodes will drop it from the active set once the lease expires.
+        InProcessSchemaCluster.Node deadFollower = cluster.Nodes.First(n => n.Index != leader.Index);
+        await cluster.KillNodeAsync(deadFollower.Index).ConfigureAwait(false);
+
+        // Wait for the lease to expire so the dead node is evicted from GetLiveSchemaNodes().
+        // Add a buffer so the leader's Raft clock has registered silence beyond the window.
+        await Task.Delay(LeaseMs + 400).ConfigureAwait(false);
+
+        // Second DDL: the pre-proposal gate (enforceFullConvergence=true, no backstop) now
+        // only waits on the two surviving nodes (leader + healthy follower), both of which acked
+        // version 1. Gate proceeds as FullConvergence on the reduced set.
+        await leader.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "tbl_v2",
+            columns: [new ColumnInfo("id", ColumnType.Id)],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        ));
+
+        // Gate must have used FullConvergence, NOT QuorumBackstop: the dead node is absent from
+        // the live set entirely, so HasEveryLiveNodeAcked passes on the reduced set.
+        Assert.AreEqual(SchemaAckOutcome.FullConvergence, leader.Kahuna.LastGateOutcome,
+            $"Expected FullConvergence on reduced live set after dead-node lease eviction, " +
+            $"but got {leader.Kahuna.LastGateOutcome}");
+
+        // Both surviving nodes must have the new table.
+        InProcessSchemaCluster.Node[] survivors = cluster.Nodes
+            .Where(n => n.Index != deadFollower.Index)
+            .ToArray();
+
+        Assert.True(survivors.All(n => n.Database?.Schema.Tables.ContainsKey("tbl_v2") ?? false),
+            "Both surviving nodes must have tbl_v2 after the dead-node DDL round");
+    }
+
+    // H5 §3.4a #2 — no-quorum timeout: only the leader has acked (1 of 3 nodes);
+    // quorum requires 2, so the backstop fires but HasQuorumAcked returns false →
+    // WaitForSchemaAcksAsync returns false and LastGateOutcome is Timeout.
+    // This is the path where DDL correctly blocks because quorum was never reached.
+    [Test]
+    public async Task QuorumBackstop_GateTimesOutWhenFewerThanQuorumAck()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // Set a very short backstop and a short overall timeout so the test stays fast.
+        leader.Kahuna.SchemaAckQuorumBackstopDelay = TimeSpan.FromMilliseconds(100);
+        leader.Kahuna.SchemaAckWaitTimeout = TimeSpan.FromMilliseconds(400);
+
+        // Only the leader acks version 1 (1/3). The other two have not acked.
+        // Quorum = ⌊3/2⌋+1 = 2, so HasQuorumAcked returns false → Timeout outcome.
+        leader.Kahuna.RecordLocalSchemaApplied(db, 0);
+        leader.Kahuna.RecordLocalSchemaApplied(db, 1);
+
+        // Wait long enough for the backstop to have fired.
+        await Task.Delay(200).ConfigureAwait(false);
+
+        bool result = await leader.Kahuna.WaitForSchemaAcksAsync(
+            db, 1,
+            timeout: TimeSpan.FromMilliseconds(400),
+            enforceFullConvergence: false,
+            cancellationToken: CancellationToken.None);
+
+        Assert.IsFalse(result,
+            "Gate must return false when fewer than quorum (2/3) have acked, even after the backstop elapses");
+        Assert.AreEqual(SchemaAckOutcome.Timeout, leader.Kahuna.LastGateOutcome,
+            $"Expected Timeout outcome but got {leader.Kahuna.LastGateOutcome}");
+    }
+
+    // ── C2: Key-range sharding data path across nodes ─────────────────────────
+
+    // Kahuna's RangeMapStore.MetaPartitionId — the partition whose leader is the only node that
+    // can commit a range-descriptor seed. A node that is NOT this leader must forward the seed (K1).
+    private const int MetaPartitionId = 0;
+
+    // C2 (docs/key-range-sharding-spec.md §5) — end-to-end key-range data path across a 3-node
+    // cluster with CAMUS_KEY_RANGE_SHARDING ON. This pins the K1 seed-forwarding gap: with
+    // InitialPartitions >= 2 and the flag on, the FIRST table open + INSERT is issued from a node
+    // that is NOT the meta-partition (P0) leader, so registering the row key space must forward the
+    // range-descriptor seed to the meta leader. Without K1 the first write throws
+    // "No range descriptor covers key '{tableId}:r/...'"; with the published 0.3.3 fix it succeeds.
+    // A spread of rows is then inserted from the non-leader writer and read back, ordered, from a
+    // DIFFERENT node — proving cluster-wide routing + the ordered-scan property.
+    [Test]
+    public async Task KeyRangeShardingDataPathAcrossNodesSeedsFromNonMetaLeader()
+    {
+        const int rowCount = 25;
+
+        bool previousFlag = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            // InitialPartitions = 3 keeps key-range routing genuinely multi-partition; the harness
+            // uses long, well-spread election timeouts (see CreateClusterNode) so the schema-log
+            // partition leader stays stable under in-process load — otherwise a spurious re-election
+            // misroutes a follower's schema-applied ack and CreateTable's convergence wait flakes.
+            await using InProcessSchemaCluster cluster =
+                await InProcessSchemaCluster.StartAsync(nodeCount: 3, partitions: 3, wireLeaderForwarder: true);
+            string db = cluster.NextSchemaLogDatabaseName();
+            await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+            // Wait for the schema partition leader to be stable before issuing any DDL. Without
+            // this, CreateTable can race a still-churning schema partition and time out.
+            await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+            // Choose a writer that does NOT lead the meta partition, so opening the table on it
+            // forwards the range-descriptor seed to the meta leader (the K1 path under test).
+            InProcessSchemaCluster.Node writer = await NonMetaLeaderNodeAsync(cluster);
+
+            // CREATE TABLE from the writer — forwarded to the schema leader, converges on all nodes.
+            CreateTableResult created = await writer.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns: [new ColumnInfo("id", ColumnType.Id), new ColumnInfo("name", ColumnType.String)],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            )).WaitAsync(TimeSpan.FromSeconds(60));
+
+            Assert.IsTrue(created.Success, "CREATE TABLE on the writer must forward to the leader and apply");
+            await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+            // INSERT a spread of rows from the writer. The first INSERT opens the table on the writer
+            // (non-meta-leader) node → RegisterKeyRangeAsync → K1 seed forwarding to the meta leader.
+            // A "No range descriptor covers key" here is the exact failure C2 pins; with 0.3.3 it must
+            // not surface (the call would throw a CamusDBException and fail the test).
+            for (int i = 0; i < rowCount; i++)
+            {
+                KvTransaction tx = await writer.Database!.Transactions.BeginAsync();
+                await writer.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                    txnState: tx,
+                    database: db,
+                    sql: $"INSERT INTO robots (id, name) VALUES (gen_id(), 'robot {i:D3}')",
+                    parameters: null
+                ));
+                await writer.Database.Transactions.CommitAsync(tx);
+            }
+
+            // Read back from a DIFFERENT node than the writer (its first SELECT opens + registers the
+            // row space locally too — idempotent, served from the replicated descriptor).
+            InProcessSchemaCluster.Node reader = cluster.Nodes.First(n => n.Index != writer.Index);
+
+            KvTransaction readTx = await reader.Database!.Transactions.BeginAsync();
+            (_, IAsyncEnumerable<QueryResultRow> readCursor) = await reader.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                txnState: readTx,
+                database: db,
+                sql: "SELECT id FROM robots",
+                parameters: null
+            ));
+            List<string> readIds = (await readCursor.ToListAsync()).Select(r => r.Row["id"].StrValue!).ToList();
+            await reader.Database.Transactions.CommitAsync(readTx);
+
+            // All rows visible on the reader node, regardless of which node wrote them.
+            Assert.AreEqual(rowCount, readIds.Count,
+                $"reader node {reader.Index} must see all {rowCount} rows inserted by writer node {writer.Index}");
+
+            // Ordered-scan property: a full PK scan over the key-range row space returns rows in
+            // ascending key order (ObjectId hex is order-preserving under ordinal comparison).
+            List<string> ascending = readIds.OrderBy(id => id, StringComparer.Ordinal).ToList();
+            CollectionAssert.AreEqual(ascending, readIds,
+                "key-range PK scan must return rows ordered ascending by row id");
+        }
+        finally
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = previousFlag;
+        }
+    }
+
+    // Returns a cluster node that is NOT the current leader of the meta partition (P0). Opening a
+    // table on such a node exercises the K1 seed-forwarding path (the seed must be forwarded to the
+    // meta leader rather than committed locally).
+    private static async Task<InProcessSchemaCluster.Node> NonMetaLeaderNodeAsync(InProcessSchemaCluster cluster)
+    {
+        await cluster.Nodes[0].Kahuna.Raft.WaitForLeader(MetaPartitionId, CancellationToken.None).ConfigureAwait(false);
+
+        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                if (await node.Kahuna.Raft.AmILeaderQuick(MetaPartitionId).ConfigureAwait(false))
+                    return cluster.Nodes.First(n => n.Index != node.Index);
+            }
+
+            await Task.Delay(50).ConfigureAwait(false);
+        }
+
+        throw new AssertionException($"No leader resolved for meta partition {MetaPartitionId} within 10s");
     }
 }

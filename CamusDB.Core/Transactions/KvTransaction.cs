@@ -20,6 +20,15 @@ public enum KvTransactionStatus
 }
 
 /// <summary>
+/// The bounds of a Kahuna exclusive key-range lock held by a transaction, retained so the lock can
+/// be released over the identical interval on commit/rollback. A whole-bucket lock is
+/// <c>(prefix, null, true, null, true)</c>.
+/// </summary>
+public readonly record struct RangeLockBounds(
+    string Prefix, string? StartKey, bool StartInclusive, string? EndKey, bool EndInclusive,
+    KeyValueDurability Durability);
+
+/// <summary>
 /// Holds the runtime state of a single CamusDB transaction backed by Kahuna.
 ///
 /// Each instance owns a Kahuna <see cref="HLCTimestamp"/> obtained from
@@ -50,6 +59,7 @@ public sealed class KvTransaction
     private readonly Lock trackSync = new();
     private HashSet<(string key, KeyValueDurability durability)>? acquiredLocks;
     private HashSet<(string prefix, KeyValueDurability durability)>? acquiredPrefixLocks;
+    private HashSet<RangeLockBounds>? acquiredRangeLocks;
     private HashSet<(string key, KeyValueDurability durability)>? modifiedKeys;
     private Dictionary<string, SchemaVersionPin>? schemaPins;
 
@@ -112,6 +122,34 @@ public sealed class KvTransaction
                 return [];
 
             return [.. acquiredPrefixLocks];
+        }
+    }
+
+    /// <summary>
+    /// Records that a Kahuna key-range lock was acquired for this transaction (key-range routed
+    /// spaces). Like prefix locks, range locks are read-only and not finalized by the 2PC, so
+    /// <see cref="KvTransactionsManager"/> releases them explicitly over the same bounds. Idempotent.
+    /// </summary>
+    public void TrackRangeLock(
+        string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
+        KeyValueDurability durability)
+    {
+        lock (trackSync)
+        {
+            acquiredRangeLocks ??= [];
+            acquiredRangeLocks.Add(new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability));
+        }
+    }
+
+    /// <summary>Snapshot of the key-range locks acquired by this transaction.</summary>
+    public IReadOnlyList<RangeLockBounds> GetAcquiredRangeLocks()
+    {
+        lock (trackSync)
+        {
+            if (acquiredRangeLocks is null || acquiredRangeLocks.Count == 0)
+                return [];
+
+            return [.. acquiredRangeLocks];
         }
     }
 

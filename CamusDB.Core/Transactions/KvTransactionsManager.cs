@@ -145,31 +145,54 @@ public sealed class KvTransactionsManager
 
         tx.ValidateSchemaPins();
 
-        KeyValueResponseType result = await kahuna.LocateAndCommitTransaction(
-            tx.UniqueId,
-            tx.TransactionId,
-            tx.GetAcquiredLocks(),
-            tx.GetModifiedKeys(),
-            // CamusDB does not yet track per-transaction read keys (no read-key validation);
-            // pass an empty set to preserve current commit semantics under the new Kahuna API.
-            [],
-            cancellationToken
-        ).ConfigureAwait(false);
+        // MustRetry from LocateAndCommitTransaction is a transient routing failure (leader flip
+        // during the commit round-trip); the transaction is still server-side Pending, so we can
+        // safely retry the commit call. Aborted is permanent and must not be retried.
+        const int MaxCommitRetries = 5;
+        KeyValueResponseType result = KeyValueResponseType.MustRetry;
+        for (int attempt = 0; attempt <= MaxCommitRetries; attempt++)
+        {
+            result = await kahuna.LocateAndCommitTransaction(
+                tx.UniqueId,
+                tx.TransactionId,
+                tx.GetAcquiredLocks(),
+                tx.GetModifiedKeys(),
+                // CamusDB does not yet track per-transaction read keys (no read-key validation);
+                // pass an empty set to preserve current commit semantics under the new Kahuna API.
+                [],
+                cancellationToken
+            ).ConfigureAwait(false);
+
+            if (result != KeyValueResponseType.MustRetry)
+                break;
+
+            if (attempt < MaxCommitRetries)
+                await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+        }
 
         if (result == KeyValueResponseType.Committed)
         {
             tx.Status = KvTransactionStatus.Committed;
-            await ReleasePrefixLocksAsync(tx, cancellationToken).ConfigureAwait(false);
+            await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
             Untrack(tx);
             return;
         }
 
-        // Kahuna aborted — the transaction is dead; mark it rolled back so
-        // a subsequent RollbackIfNotCompletedAsync is a no-op.
+        // Roll back the client-side transaction state so a subsequent
+        // RollbackIfNotCompletedAsync is a no-op.
         tx.Status = KvTransactionStatus.RolledBack;
-        await ReleasePrefixLocksAsync(tx, cancellationToken).ConfigureAwait(false);
+        await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
         Untrack(tx);
 
+        // MustRetry after all retries exhausted = transient routing failure; caller must restart
+        // the whole operation. Use CADB0504 so callers can distinguish this from a permanent abort.
+        if (result == KeyValueResponseType.MustRetry)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionMustRetry,
+                $"Transaction {tx.UniqueId} commit returned MustRetry after {MaxCommitRetries} retries; retry the operation from BeginAsync"
+            );
+
+        // Kahuna aborted — the transaction is permanently dead (conflict, timeout, etc.).
         throw new CamusDBException(
             CamusDBErrorCodes.TransactionAlreadyCompleted,
             $"Transaction {tx.UniqueId} commit returned {result}"
@@ -203,7 +226,7 @@ public sealed class KvTransactionsManager
             cancellationToken
         ).ConfigureAwait(false);
 
-        await ReleasePrefixLocksAsync(tx, cancellationToken).ConfigureAwait(false);
+        await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -213,6 +236,17 @@ public sealed class KvTransactionsManager
     /// Release is idempotent (a no-op if Kahuna already cleared it); failures are swallowed so a
     /// best-effort cleanup never masks the commit/rollback outcome (the expiry is the backstop).
     /// </summary>
+    /// <summary>
+    /// Releases every read-only lock the transaction holds — both hash-mode prefix locks and
+    /// key-range locks. Both kinds bypass the 2PC finalize path (which only clears write intents),
+    /// so they are released explicitly here on commit and rollback. Best-effort throughout.
+    /// </summary>
+    private async Task ReleaseHeldRangeLocksAsync(KvTransaction tx, CancellationToken cancellationToken)
+    {
+        await ReleasePrefixLocksAsync(tx, cancellationToken).ConfigureAwait(false);
+        await ReleaseRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task ReleasePrefixLocksAsync(KvTransaction tx, CancellationToken cancellationToken)
     {
         IReadOnlyList<(string prefix, KeyValueDurability durability)> prefixLocks = tx.GetAcquiredPrefixLocks();
@@ -225,6 +259,33 @@ public sealed class KvTransactionsManager
             {
                 await kahuna.LocateAndTryReleaseExclusivePrefixLock(
                     tx.TransactionId, prefix, durability, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best-effort: the lock's safety-net expiry releases it if this fails.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Releases any Kahuna key-range locks the transaction acquired (key-range routed spaces), over
+    /// the same bounds they were taken on. Like prefix locks these are read-only and not finalized by
+    /// the 2PC, so they are released explicitly here. Best-effort — the lock expiry is the backstop.
+    /// </summary>
+    private async Task ReleaseRangeLocksAsync(KvTransaction tx, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<RangeLockBounds> rangeLocks = tx.GetAcquiredRangeLocks();
+        if (rangeLocks.Count == 0)
+            return;
+
+        foreach (RangeLockBounds bounds in rangeLocks)
+        {
+            try
+            {
+                await kahuna.LocateAndTryReleaseExclusiveRangeLock(
+                    tx.TransactionId, bounds.Prefix,
+                    bounds.StartKey, bounds.StartInclusive, bounds.EndKey, bounds.EndInclusive,
+                    bounds.Durability, cancellationToken).ConfigureAwait(false);
             }
             catch
             {

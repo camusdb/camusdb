@@ -70,6 +70,35 @@ public sealed record DatabaseDescriptor : IDisposable
         await Kahuna.StepDownSchemaPartitionAsync(Name, CancellationToken.None).ConfigureAwait(false);
     }
 
+    // §3.4 fence: highest schema-log entry ToVersion received by this node (committed in Raft,
+    // delivered to ApplyAsync or RestoreAsync), regardless of whether it has been applied to the
+    // in-memory schema yet. Monotonically increasing; updated before the schema lock is acquired.
+    // The gap HeadSchemaVersion − Schema.SchemaVersion > 1 means at least two schema deltas are
+    // in the apply pipeline but not yet materialised. DML is fenced until the node catches up so
+    // it does not decode rows with a stale schema. See SchemaReplicator.ApplyAsync/RestoreAsync
+    // and TableOpener.Open (where the fence is checked).
+    private long _headSchemaVersion;
+
+    public long HeadSchemaVersion => Volatile.Read(ref _headSchemaVersion);
+
+    /// <summary>
+    /// Records that a schema-log entry with <paramref name="entryVersion"/> has been received
+    /// (committed in Raft) but may not yet be applied to <see cref="Schema"/>. Updates
+    /// <see cref="HeadSchemaVersion"/> monotonically — lower values are silently ignored.
+    /// Thread-safe; called from the schema apply / restore pipeline before acquiring the lock.
+    /// </summary>
+    internal void ObserveSchemaEntryHead(long entryVersion)
+    {
+        long current;
+        do
+        {
+            current = Volatile.Read(ref _headSchemaVersion);
+            if (entryVersion <= current)
+                return;
+        }
+        while (Interlocked.CompareExchange(ref _headSchemaVersion, entryVersion, current) != current);
+    }
+
     public Schema Schema { get; } = new();
 
     public SystemSchema SystemSchema { get; set; } = new();

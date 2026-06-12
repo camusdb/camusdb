@@ -77,4 +77,19 @@ public static class CamusDBConfig
     /// having databases with tables and data can cause unexpected problems.
     /// </summary>
     public const string PrimaryKeyInternalName = "~pk";
+
+    /// <summary>
+    /// Opt a table's row key space (<c>{tableId}:r</c>) into Kahuna key-range routing instead of
+    /// the default hash routing. When enabled, <see cref="Commands.Executor.Controllers.TableOpener"/>
+    /// registers the row space on the local node at open time (the Kahuna registry is node-local and
+    /// not replicated, so every node opens-and-registers independently), and the row range-lock path
+    /// switches from prefix locks to Kahuna range locks (prefix locks are rejected on ranged spaces).
+    ///
+    /// First slice: row space only — indexes stay hash-routed; Kahuna auto-split/merge is not wired
+    /// (logical range routing + per-range locks work without it). Default off. Toggle via the
+    /// <c>CAMUS_KEY_RANGE_SHARDING</c> environment variable.
+    /// </summary>
+    public static bool KeyRangeShardingEnabled =
+        string.Equals(Environment.GetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING"), "1", StringComparison.Ordinal) ||
+        string.Equals(Environment.GetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING"), "true", StringComparison.OrdinalIgnoreCase);
 }

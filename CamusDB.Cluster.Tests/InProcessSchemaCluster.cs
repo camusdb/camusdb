@@ -293,8 +293,8 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             databaseName,
             version,
             waitTimeout,
-            Timeout.InfiniteTimeSpan,
-            CancellationToken.None
+            liveNodeLease: Timeout.InfiniteTimeSpan,
+            cancellationToken: CancellationToken.None
         ).ConfigureAwait(false);
 
         if (acked)
@@ -576,7 +576,20 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 Port = port,
                 Storage = "memory",
                 WalStorage = "memory",
-                InitialPartitions = partitions
+                InitialPartitions = partitions,
+                // The embedded defaults (500/1500ms) are far too short for an in-process cluster
+                // running several Raft groups across nodeCount nodes on the shared .NET thread pool:
+                // under that contention a follower routinely misses a heartbeat inside 500ms and
+                // starts a spurious election, churning partition leadership. That churn misroutes
+                // schema-applied acks (a follower acks the leader it currently sees, which may no
+                // longer be the one awaiting acks), so CreateTable's 30s schema-ack convergence wait
+                // times out — the dominant cluster-test flake. Production-like timeouts with a wide
+                // randomised spread (the increments stagger nodes to avoid split votes) keep
+                // leadership stable. Matches/exceeds the real server's 2000/4000.
+                StartElectionTimeout = 3000,
+                EndElectionTimeout = 6000,
+                StartElectionTimeoutIncrement = 200,
+                EndElectionTimeoutIncrement = 400
             },
             interNode,
             raftCommunication,

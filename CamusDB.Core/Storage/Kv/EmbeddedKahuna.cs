@@ -97,6 +97,35 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     public TimeSpan SchemaAckLiveNodeLease { get; set; } = Timeout.InfiniteTimeSpan;
 
     /// <summary>
+    /// <b>H5 §3.4 — quorum backstop.</b> How long the schema-ack gate tries to achieve
+    /// <em>full</em> convergence (every live node acked) before falling back to
+    /// <em>quorum</em> convergence (⌊N/2⌋+1 of live nodes acked).
+    ///
+    /// <para>
+    /// <b>Liveness guarantee:</b> DDL completes within <see cref="SchemaAckWaitTimeout"/>
+    /// whenever a majority of the cluster applies the schema delta, regardless of what the
+    /// minority does. Specifically, a single slow or unreachable follower stalls DDL for at
+    /// most <c>SchemaAckQuorumBackstopDelay</c> rather than the full 30-second timeout.
+    /// </para>
+    ///
+    /// <para>
+    /// Default is 10 s — generous enough to clear a Raft leadership election (configured at
+    /// 3–6 s) before the backstop fires, so a transient election is never mistaken for a
+    /// permanently-slow follower. Set to <see cref="Timeout.InfiniteTimeSpan"/> to restore the
+    /// original strict behaviour where every configured node must ack before DDL proceeds.
+    /// </para>
+    /// </summary>
+    public TimeSpan SchemaAckQuorumBackstopDelay { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Records the outcome of the most recent <see cref="WaitForSchemaAcksAsync"/> call on this
+    /// node. Useful in fault-injection tests to assert whether DDL proceeded via full convergence
+    /// or via the quorum backstop (H5 §3.4). Not meaningful in production (production code checks
+    /// the boolean return value, not this property).
+    /// </summary>
+    internal SchemaAckOutcome LastGateOutcome { get; private set; }
+
+    /// <summary>
     /// Constructs the embedded engine with the provided options.
     /// </summary>
     public EmbeddedKahuna(EmbeddedKahunaOptions options, ILoggerFactory? loggerFactory = null)
@@ -392,7 +421,10 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// ack transport endpoint when a follower posts its applied version to the leader.
     /// </summary>
     public void RecordRemoteSchemaAck(string db, string nodeEndpoint, long version)
-        => schemaAcks.RecordApplied(db, nodeEndpoint, version);
+    {
+        Diagnostics.SchemaDiag.Log($"REMOTE-ACK leader={Raft.GetLocalEndpoint()} from={nodeEndpoint} db={db} ver={version}");
+        schemaAcks.RecordApplied(db, nodeEndpoint, version);
+    }
 
     /// <summary>
     /// Records the local apply ack and, if an <see cref="ISchemaAckSender"/> is wired, fires
@@ -408,24 +440,68 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         if (sender is null)
             return;
 
-        _ = Task.Run(async () =>
+        _ = Task.Run(() => PublishSchemaAckWithRetryAsync(sender, db, localEndpoint, schemaVersion));
+    }
+
+    /// <summary>
+    /// Delivers this follower's applied-version notification to the current schema-partition leader,
+    /// <b>retrying with backoff</b> until it succeeds or a deadline (under the gate's ack timeout)
+    /// elapses. A single dropped notification must not strand the leader's ack gate for its full
+    /// timeout — the dominant multi-node DDL flake. Confirmed mechanism: a follower applies the new
+    /// schema version but its one fire-and-forget ack is lost (a transient <see cref="IRaft.WaitForLeader"/>
+    /// that momentarily resolves this node as the leader and takes the "I am the leader" early-out, or
+    /// a transient send), and because the gate waits for an explicit ack from every live node and never
+    /// evicts a Raft-alive follower, the lost ack is only recovered by re-sending. Re-resolving the
+    /// leader each attempt also rides through a real leadership change.
+    /// </summary>
+    private async Task PublishSchemaAckWithRetryAsync(
+        ISchemaAckSender sender, string db, string localEndpoint, long schemaVersion)
+    {
+        long deadline = Environment.TickCount64 + 25_000;
+        int attempt = 0;
+
+        while (Environment.TickCount64 < deadline)
         {
             try
             {
                 int partitionId = SchemaLogPartition(db);
                 using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
                 string leader = await Raft.WaitForLeader(partitionId, cts.Token).ConfigureAwait(false);
+                Diagnostics.SchemaDiag.Log(
+                    $"ACK-SEND node={localEndpoint} db={db} ver={schemaVersion} attempt={attempt} part={partitionId} resolvedLeader={leader}");
 
                 if (string.Equals(leader, localEndpoint, StringComparison.Ordinal))
-                    return; // we are the leader; local record is sufficient
-
-                await sender.SendSchemaAckAsync(leader, db, localEndpoint, schemaVersion, cts.Token).ConfigureAwait(false);
+                {
+                    // We currently see ourselves as the schema leader, so our local record suffices —
+                    // BUT this view can be transient/stale. If we are genuinely the leader the gate runs
+                    // here and is satisfied locally; if our view is wrong, retry until it corrects and we
+                    // send to the real leader. Stop re-checking once we are stably the leader.
+                    if (await Raft.AmILeader(partitionId, cts.Token).ConfigureAwait(false))
+                    {
+                        Diagnostics.SchemaDiag.Log($"ACK-SELF node={localEndpoint} db={db} ver={schemaVersion} (we are the leader; local record suffices)");
+                        return;
+                    }
+                }
+                else
+                {
+                    await sender.SendSchemaAckAsync(leader, db, localEndpoint, schemaVersion, cts.Token).ConfigureAwait(false);
+                    Diagnostics.SchemaDiag.Log($"ACK-SENT node={localEndpoint} to={leader} db={db} ver={schemaVersion}");
+                    return; // delivered to the leader
+                }
             }
-            catch
+            catch (Exception ex)
             {
-                // best-effort; gate timeout is the backstop
+                Diagnostics.SchemaDiag.Log($"ACK-ERR node={localEndpoint} db={db} ver={schemaVersion} attempt={attempt} ex={ex.GetType().Name}:{ex.Message}");
+                // Transient (leader churn, transport, timeout) — fall through to backoff and retry.
             }
-        });
+
+            int delay = Math.Min(500, 50 * (1 << Math.Min(attempt, 4)));
+            attempt++;
+            try { await Task.Delay(delay).ConfigureAwait(false); }
+            catch { return; }
+        }
+
+        Diagnostics.SchemaDiag.Log($"ACK-GIVEUP node={localEndpoint} db={db} ver={schemaVersion} (deadline reached without delivering)");
     }
 
     /// <summary>
@@ -470,26 +546,63 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         return members;
     }
 
-    public Task<bool> WaitForSchemaAcksAsync(
+    /// <summary>
+    /// Waits until <paramref name="schemaVersion"/> has been applied on all live schema nodes,
+    /// with an H5 quorum backstop as a liveness escape hatch.
+    /// </summary>
+    /// <param name="enforceFullConvergence">
+    /// When <see langword="true"/> the quorum backstop is disabled — the gate waits for every
+    /// live node to ack, regardless of <see cref="SchemaAckQuorumBackstopDelay"/>. Use this
+    /// for the <em>pre-proposal</em> gate (§3.4) that enforces the two-version safety invariant:
+    /// allowing quorum-only convergence there lets a proposer advance N→N+1 while a minority
+    /// sits at N−1, breaking the invariant and risking schema mis-decode on those nodes. The
+    /// quorum backstop is appropriate only for the <em>post-commit</em> ack gate (after the
+    /// log entry is already durable), where it bounds DDL latency without affecting safety.
+    /// </param>
+    public async Task<bool> WaitForSchemaAcksAsync(
         string db,
         long schemaVersion,
         TimeSpan timeout,
         TimeSpan? liveNodeLease = null,
+        bool enforceFullConvergence = false,
         CancellationToken cancellationToken = default
     )
     {
-        return schemaAcks.WaitForAllLiveAsync(
+        TimeSpan backstopDelay = enforceFullConvergence
+            ? Timeout.InfiniteTimeSpan
+            : SchemaAckQuorumBackstopDelay;
+
+        IReadOnlyCollection<string> liveMembers = GetLiveSchemaNodes();
+
+        if (Diagnostics.SchemaDiag.Enabled)
+            Diagnostics.SchemaDiag.Log(
+                $"GATE-WAIT leader={Raft.GetLocalEndpoint()} db={db} ver={schemaVersion} " +
+                $"timeoutMs={(long)timeout.TotalMilliseconds} " +
+                $"backstopMs={(backstopDelay == Timeout.InfiniteTimeSpan ? "∞" : ((long)backstopDelay.TotalMilliseconds).ToString())} " +
+                $"liveMembers=[{string.Join(",", liveMembers)}]");
+
+        SchemaAckOutcome outcome = await schemaAcks.WaitForAllLiveAsync(
             db,
             schemaVersion,
             timeout,
             GetLiveSchemaNodes,
-            // Liveness is now carried by membership (GetLiveSchemaNodes filters dead peers out of
+            // Liveness is carried by membership (GetLiveSchemaNodes filters dead peers out of
             // the set via Raft activity, E2). The tracker must NOT also expire members on its
             // apply-derived LastSeen — that would false-evict a Raft-alive node that is merely slow
-            // to apply a schema delta. So the tracker simply waits for every live member to ack.
+            // to apply a schema delta. So the tracker waits for every live member to ack, with the
+            // quorum backstop as the H5 liveness escape hatch (post-commit gate only).
             Timeout.InfiniteTimeSpan,
+            backstopDelay,
             cancellationToken
-        );
+        ).ConfigureAwait(false);
+
+        if (Diagnostics.SchemaDiag.Enabled)
+            Diagnostics.SchemaDiag.Log(
+                $"GATE-{outcome.ToString().ToUpperInvariant()} leader={Raft.GetLocalEndpoint()} db={db} ver={schemaVersion} " +
+                $"liveMembers=[{string.Join(",", GetLiveSchemaNodes())}]");
+
+        LastGateOutcome = outcome;
+        return outcome != SchemaAckOutcome.Timeout;
     }
 
     /// <summary>

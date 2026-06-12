@@ -109,17 +109,31 @@ public sealed class SchemaReplicator
         if (!string.Equals(entry.Database, database.Name, StringComparison.Ordinal))
             return true;
 
-        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        Diagnostics.SchemaDiag.Log(
+            $"APPLY node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} part={partitionId} " +
+            $"entry={entry.FromVersion}->{entry.ToVersion} op={entry.Op} localVer={database.Schema.SchemaVersion}");
+
+        // §3.4 fence: record the committed head before acquiring the lock so the fence gap
+        // (HeadSchemaVersion − SchemaVersion) is visible to concurrent DML during apply.
+        database.ObserveSchemaEntryHead(entry.ToVersion);
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
             if (entry.FromVersion != database.Schema.SchemaVersion)
             {
                 if (entry.ToVersion <= database.Schema.SchemaVersion && WasSchemaDeltaApplied(database.Schema, entry))
                 {
+                    Diagnostics.SchemaDiag.Log(
+                        $"APPLY-DUP node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} " +
+                        $"entry={entry.FromVersion}->{entry.ToVersion} localVer={database.Schema.SchemaVersion} (already applied; re-ack)");
                     database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
                     return true;
                 }
 
+                Diagnostics.SchemaDiag.Log(
+                    $"APPLY-OOO node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} " +
+                    $"entry={entry.FromVersion}->{entry.ToVersion} localVer={database.Schema.SchemaVersion} (OUT OF ORDER; throwing)");
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"Schema change for database '{database.Name}' is out of order: expected from-version {database.Schema.SchemaVersion}, got {entry.FromVersion}"
@@ -151,13 +165,17 @@ public sealed class SchemaReplicator
                 entry.ToVersion
             );
 
+            Diagnostics.SchemaDiag.Log(
+                $"APPLIED node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} " +
+                $"entry={entry.FromVersion}->{entry.ToVersion} newLocalVer={database.Schema.SchemaVersion}");
+
             database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
 
             return true;
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
     }
 
@@ -202,10 +220,46 @@ public sealed class SchemaReplicator
     /// </summary>
     private async Task OnSchemaRestoreFinishedAsync(DatabaseDescriptor database)
     {
-        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        long restoredVersion = database.Schema.SchemaVersion;
+
+        // Nothing was replayed → nothing to checkpoint. The F1b re-persist exists to bring the
+        // durable KV checkpoint up to the head a WAL *replay* reached. On a fresh node / empty WAL,
+        // OnRestoreFinished still fires but the schema is untouched at version 0 (replaying schema
+        // deltas only ever advances the version from 0, so version 0 ⟺ no replay). Running the
+        // checkpoint's 2PC in that case is pure cost AND races the node's very first live DDL on the
+        // schema partition — the source of the CreateTable/INSERT 2PC conflicts and the deadlock
+        // below. A node that genuinely created tables persists its checkpoint via the proposer path
+        // (CatalogsManager.ReplicateAndWaitLocalApplyAsync), never here. So skip when there is no
+        // replayed schema; still clear the degraded flag (a no-op when it was never set).
+        if (restoredVersion == 0)
+        {
+            database.ClearSchemaSubsystemDegraded();
+            Diagnostics.SchemaDiag.Log($"RESTORE-FIN-SKIP node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} (nothing replayed; schema at version 0)");
+            return;
+        }
+
+        // CRITICAL: do NOT hold Schema.Semaphore across PersistFullSchemaCheckpointAsync.
+        //
+        // That call opens a full 2PC KV transaction writing the {db}/meta/* checkpoint keys, which
+        // route to the schema partition. The schema partition applies its committed log entries
+        // SERIALLY and inline (see EmbeddedKahuna.RegisterSchemaApply), and a live schema delta's
+        // ApplyAsync yields on this very semaphore — so holding it here lets the checkpoint 2PC's
+        // entries queue behind a delta's ApplyAsync that is itself blocked on the semaphore we hold:
+        // the partition's apply pipeline deadlocks, the 2PC never commits, the semaphore is never
+        // released, and the leader's schema-ack gate times out (confirmed via SCHEMA-DIAG: a node
+        // logs RESTORE-FIN-LOCKED then never PERSISTED/DONE while its APPLY for the next version
+        // never reaches APPLIED). ReplicateAndWaitLocalApplyAsync documents the same hazard and
+        // deliberately persists the checkpoint OUTSIDE the schema commit pipeline.
+        //
+        // The checkpoint is a best-effort durability optimization (the committed schema log is the
+        // source of truth and is replayed on restart), so persisting a slightly racy snapshot
+        // without the apply lock is safe; PersistFullSchemaCheckpointAsync snapshots the table set
+        // so a concurrent apply cannot corrupt the iteration.
+        Diagnostics.SchemaDiag.Log($"RESTORE-FIN-ENTER node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} localVer={restoredVersion}");
         try
         {
             await catalogs.PersistFullSchemaCheckpointAsync(database).ConfigureAwait(false);
+            Diagnostics.SchemaDiag.Log($"RESTORE-FIN-PERSISTED node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name}");
 
             database.ClearSchemaSubsystemDegraded();
 
@@ -225,7 +279,7 @@ public sealed class SchemaReplicator
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            Diagnostics.SchemaDiag.Log($"RESTORE-FIN-DONE node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name}");
         }
     }
 
@@ -239,7 +293,9 @@ public sealed class SchemaReplicator
         if (!string.Equals(entry.Database, database.Name, StringComparison.Ordinal))
             return true;
 
-        await database.Schema.Semaphore.WaitAsync().ConfigureAwait(false);
+        Diagnostics.SchemaDiag.Log($"RESTORE node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} entry={entry.FromVersion}->{entry.ToVersion} localVer={database.Schema.SchemaVersion}");
+        database.ObserveSchemaEntryHead(entry.ToVersion);
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
             if (entry.ToVersion <= database.Schema.SchemaVersion)
@@ -278,7 +334,7 @@ public sealed class SchemaReplicator
         }
         finally
         {
-            database.Schema.Semaphore.Release();
+            database.Schema.ReleaseLock();
         }
     }
 

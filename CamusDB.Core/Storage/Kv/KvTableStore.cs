@@ -78,6 +78,13 @@ public sealed class KvTableStore
         rowKeyPrefix    = $"{tableId}:r/";
     }
 
+    /// <summary>
+    /// The Kahuna key space for this table's rows (<c>{tableId}:r</c>) — the prefix before the last
+    /// <c>'/'</c> of every row key. This is the exact string to pass to
+    /// <see cref="IKahuna.RegisterKeyRange"/> when opting the row space into key-range routing.
+    /// </summary>
+    public string RowKeySpace => rowBucketPrefix;
+
     // -----------------------------------------------------------------------
     // Range (prefix) locking — opt-in serializable scans
     // -----------------------------------------------------------------------
@@ -92,7 +99,12 @@ public sealed class KvTableStore
     /// automatically on commit/rollback.
     /// </summary>
     public Task AcquireRowRangeLockAsync(KvTransaction tx, CancellationToken cancellationToken = default)
-        => AcquirePrefixLockAsync(tx, rowBucketPrefix, cancellationToken);
+        // When the row space is key-range routed (registered in TableOpener), prefix locks are
+        // rejected with PrefixLockUnsupportedOnRangedSpace — take a Kahuna range lock over the whole
+        // bucket instead. Otherwise keep the hash-mode prefix lock.
+        => CamusDBConfig.KeyRangeShardingEnabled
+            ? AcquireWholeBucketRangeLockAsync(tx, rowBucketPrefix, cancellationToken)
+            : AcquirePrefixLockAsync(tx, rowBucketPrefix, cancellationToken);
 
     /// <summary>
     /// Exclusive-locks an index's entire key range for <paramref name="tx"/> (serializable index
@@ -116,6 +128,40 @@ public sealed class KvTableStore
             // Track so the transaction releases it on commit/rollback — a read-only prefix lock is
             // not finalized by the 2PC, which only clears intents on modified keys.
             tx.TrackPrefixLock(bucketPrefix, KeyValueDurability.Persistent);
+            return;
+        }
+
+        if (type == KeyValueResponseType.AlreadyLocked)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionConflict,
+                $"Range '{bucketPrefix}' is exclusively locked by another transaction");
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Failed to acquire exclusive range lock on '{bucketPrefix}': {type}");
+    }
+
+    /// <summary>
+    /// Key-range-mode equivalent of <see cref="AcquirePrefixLockAsync"/>: takes a Kahuna exclusive
+    /// range lock over the entire bucket (<c>[null, null)</c> within <paramref name="bucketPrefix"/>).
+    /// Fanned out per intersecting range descriptor by Kahuna; disjoint ranges don't contend. The
+    /// lock is tracked on the transaction and released over the same bounds on commit/rollback.
+    /// </summary>
+    private async Task AcquireWholeBucketRangeLockAsync(KvTransaction tx, string bucketPrefix, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(tx);
+
+        KeyValueResponseType type = await RetryOnMustRetry(
+            () => kahuna.LocateAndTryAcquireExclusiveRangeLock(
+                tx.TransactionId, bucketPrefix,
+                null, true, null, true,
+                RangeLockExpiresMs, KeyValueDurability.Persistent, cancellationToken),
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        if (type == KeyValueResponseType.Locked)
+        {
+            tx.TrackRangeLock(bucketPrefix, null, true, null, true, KeyValueDurability.Persistent);
             return;
         }
 

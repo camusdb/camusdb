@@ -186,6 +186,12 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     #region DDL
 
+    // H1: DDL transaction commits must be bounded — LocateAndCommitTransaction with
+    // CancellationToken.None can hang indefinitely if the schema partition Raft actor
+    // is stalled. 10 s covers leader-election time in a healthy cluster while still
+    // converting permanent stalls into a recoverable CamusDBException.
+    private static readonly TimeSpan DdlCommitTimeout = TimeSpan.FromSeconds(10);
+
     /// <summary>
     /// Executes a DDL action in a self-managed Kahuna transaction.
     /// Begins a transaction, runs <paramref name="action"/>, commits on success,
@@ -204,7 +210,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         try
         {
             T result = await action(tx).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            using CancellationTokenSource cts = new(DdlCommitTimeout);
+            await database.Transactions.CommitAsync(tx, cts.Token).ConfigureAwait(false);
             return result;
         }
         catch (Exception ex)
@@ -1127,36 +1134,69 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
+        // §3.5 H6: the schema-catch-up fence (TableOpener.Open → SchemaCatchingUp CADB0503) fires
+        // before any write or schema-pin, so the in-flight transaction is unmodified and the same
+        // tx can be safely reused on retry. The fence self-heals once the node applies pending
+        // schema entries; back off briefly and retry up to MaxFenceRetries times.
+        const int MaxFenceRetries = 3;
+
         switch (ast.nodeType)
         {
             case NodeType.Insert:
                 {
                     InsertTicket insertTicket = await sqlExecutor.CreateInsertTicket(this, database, ticket, ast).ConfigureAwait(false);
 
-                    TableDescriptor table = await tableOpener.Open(database, insertTicket.TableName).ConfigureAwait(false);
-                    PinSchemaVersion(database, table, ticket.TxnState);
-
-                    return new(database, table, await rowInserter.Insert(database, table, insertTicket).ConfigureAwait(false));
+                    for (int fenceAttempt = 0; ; fenceAttempt++)
+                    {
+                        try
+                        {
+                            TableDescriptor table = await tableOpener.Open(database, insertTicket.TableName).ConfigureAwait(false);
+                            PinSchemaVersion(database, table, ticket.TxnState);
+                            return new(database, table, await rowInserter.Insert(database, table, insertTicket).ConfigureAwait(false));
+                        }
+                        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < MaxFenceRetries)
+                        {
+                            await Task.Delay(TimeSpan.FromMilliseconds(100 << fenceAttempt)).ConfigureAwait(false);
+                        }
+                    }
                 }
 
             case NodeType.Update:
                 {
                     UpdateTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);
 
-                    TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName).ConfigureAwait(false);
-                    PinSchemaVersion(database, table, ticket.TxnState);
-
-                    return new(database, table, await rowUpdater.Update(queryExecutor, database, table, updateTicket));
+                    for (int fenceAttempt = 0; ; fenceAttempt++)
+                    {
+                        try
+                        {
+                            TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName).ConfigureAwait(false);
+                            PinSchemaVersion(database, table, ticket.TxnState);
+                            return new(database, table, await rowUpdater.Update(queryExecutor, database, table, updateTicket));
+                        }
+                        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < MaxFenceRetries)
+                        {
+                            await Task.Delay(TimeSpan.FromMilliseconds(100 << fenceAttempt)).ConfigureAwait(false);
+                        }
+                    }
                 }
 
             case NodeType.Delete:
                 {
                     DeleteTicket deleteTicket = sqlExecutor.CreateDeleteTicket(ticket, ast);
 
-                    TableDescriptor table = await tableOpener.Open(database, deleteTicket.TableName).ConfigureAwait(false);
-                    PinSchemaVersion(database, table, ticket.TxnState);
-
-                    return new(database, table, await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false));
+                    for (int fenceAttempt = 0; ; fenceAttempt++)
+                    {
+                        try
+                        {
+                            TableDescriptor table = await tableOpener.Open(database, deleteTicket.TableName).ConfigureAwait(false);
+                            PinSchemaVersion(database, table, ticket.TxnState);
+                            return new(database, table, await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false));
+                        }
+                        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < MaxFenceRetries)
+                        {
+                            await Task.Delay(TimeSpan.FromMilliseconds(100 << fenceAttempt)).ConfigureAwait(false);
+                        }
+                    }
                 }
 
             default:
