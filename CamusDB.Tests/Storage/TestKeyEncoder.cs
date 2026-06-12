@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text;
 
 using NUnit.Framework;
 
@@ -85,12 +86,93 @@ public class TestKeyEncoder
         AssertSorted(samples, v => Single(new ColumnValue(ColumnType.Float64, v)));
     }
 
+    // Float64 corner cases -- NaN, infinities, subnormals, ±max -- must encode in exactly the order
+    // ColumnValue.CompareTo (i.e. double.CompareTo) defines, so a ranged Float64 index never misroutes
+    // a pathological value. The expected order is derived from CompareTo itself (asserted as a
+    // precondition), not hand-asserted. NB: signed zero is deliberately excluded here because it is the
+    // one CompareTo/encoding divergence -- see SignedZeroEncodesDistinctlyDespiteCompareToEquality.
+    [Test]
+    public void FloatEdgeCasesSortConsistentlyWithCompareTo()
+    {
+        // All strictly distinct under double.CompareTo: NaN < -Inf < ... < 0.0 < ... < +Inf.
+        double[] ascending =
+        {
+            double.NaN,
+            double.NegativeInfinity,
+            double.MinValue,
+            -1.0,
+            -double.Epsilon,   // largest-magnitude negative subnormal
+            0.0,
+            double.Epsilon,    // smallest positive subnormal
+            1.0,
+            double.MaxValue,
+            double.PositiveInfinity
+        };
+
+        for (int i = 0; i + 1 < ascending.Length; i++)
+        {
+            ColumnValue a = new(ColumnType.Float64, ascending[i]);
+            ColumnValue b = new(ColumnType.Float64, ascending[i + 1]);
+
+            Assert.That(a.CompareTo(b), Is.LessThan(0),
+                $"Precondition: {ascending[i]} must be < {ascending[i + 1]} under CompareTo");
+
+            string ea = KeyEncoder.Encode(Single(a));
+            string eb = KeyEncoder.Encode(Single(b));
+            Assert.That(string.CompareOrdinal(ea, eb), Is.LessThan(0),
+                $"Encoding order must match CompareTo for {ascending[i]} < {ascending[i + 1]}");
+        }
+    }
+
+    // KNOWN CAVEAT (pre-existing, independent of routing): double.CompareTo treats -0.0 and +0.0 as
+    // EQUAL, but KeyEncoder encodes them to two distinct, adjacent keys (negative-side vs positive-side
+    // of the sign boundary). Consequence for a ranged (or hash) Float64 index: a stored -0.0 sorts just
+    // before +0.0, so a half-open scan starting at +0.0 (e.g. `x >= 0`) would not see a -0.0 row. This
+    // test PINS that divergence so it is visible and intentional rather than a silent surprise; closing
+    // it would require normalising -0.0 -> +0.0 in KeyEncoder (a separate encoding change affecting all
+    // indexes, not part of C3's routing/lock work).
+    [Test]
+    public void SignedZeroEncodesDistinctlyDespiteCompareToEquality()
+    {
+        ColumnValue negZero = new(ColumnType.Float64, -0.0);
+        ColumnValue posZero = new(ColumnType.Float64, 0.0);
+
+        Assert.AreEqual(0, negZero.CompareTo(posZero),
+            "CompareTo treats -0.0 and +0.0 as equal");
+
+        string encNeg = KeyEncoder.Encode(Single(negZero));
+        string encPos = KeyEncoder.Encode(Single(posZero));
+
+        Assert.That(string.CompareOrdinal(encNeg, encPos), Is.LessThan(0),
+            "Known caveat: -0.0 encodes strictly before +0.0 even though CompareTo says they are equal");
+    }
+
     [Test]
     public void StringPrefixesSortBeforeLongerStrings()
     {
         string[] samples = { "", "a", "ab", "abc", "b" };
         AssertSorted(samples, v => Single(new ColumnValue(ColumnType.String, v)));
     }
+
+    // Ranged TEXT keys must stay order-preserving across the FULL UTF-16 range, not just ASCII --
+    // including a BMP code point above the surrogate block and a supplementary-plane code point.
+    // In UTF-16 ordinal (what KeyEncoder, CompareTo, and Kahuna's range layer all use) a
+    // supplementary char's lead surrogate (U+D83D) sorts BELOW U+E000+ BMP chars; pinning that
+    // ordering makes a future switch to UTF-8-byte comparison anywhere fail loudly.
+    [Test]
+    public void StringWithHighAndSupplementaryCharsPreservesOrdering()
+    {
+        // Ascending by UTF-16 code-unit ordinal:
+        //   U+4E2D (CJK)  <  U+1F600 (emoji, lead unit U+D83D)  <  U+E000 (PUA)  <  U+FFFF
+        string[] samples = { "\u4E2D", "\uD83D\uDE00", "\uE000", "\uFFFF" };
+
+        for (int i = 0; i + 1 < samples.Length; i++)
+            Assert.That(string.CompareOrdinal(samples[i], samples[i + 1]), Is.LessThan(0),
+                $"Precondition: sample ordinal order at {i}");
+
+        AssertSorted(samples, v => Single(new ColumnValue(ColumnType.String, v)));
+    }
+
 
     [Test]
     public void NullSortsBeforeAnyPresentValue()
@@ -334,13 +416,32 @@ public class TestKeyEncoder
         };
     }
 
+    // Tokens deliberately span the full UTF-16 range an index key can contain, not just ASCII —
+    // this is what proves ranged TEXT index keys stay order-preserving (C3). Includes: the encoder's
+    // own sentinels as CONTENT (U+0000 terminator-lead, U+0001 terminator-tail, U+FFFF escape-tail),
+    // the ASCII/Latin boundary, a Latin-1 char, a BMP CJK char (3-byte UTF-8, single UTF-16 unit), and
+    // a SUPPLEMENTARY-plane code point as a well-formed surrogate pair (😀 U+1F600 → U+D83D U+DE00).
+    // KeyEncoder, ColumnValue.CompareTo, and Kahuna's range layer all compare by UTF-16 code unit
+    // (ordinal), so the property test must agree across all of these, including the surrogate range.
+    private static readonly string[] StringTokens =
+    {
+        "a", "b", " ", "A", "B", "0", "9",
+        "\u0000",       // FieldTerminatorLead as content -> must be escaped and still ordered
+        "\u0001",       // FieldTerminatorTail as content
+        "\u007F", "\u0080", // ASCII / Latin-1 boundary
+        "\u00E9",       // e-acute (Latin-1 supplement)
+        "\u4E2D",       // CJK ideograph (BMP, 3-byte UTF-8, single UTF-16 unit)
+        "\uFFFD",       // replacement char
+        "\uFFFF",       // EscapeTail sentinel as content (unescaped -> must still order)
+        "\uD83D\uDE00"  // U+1F600 emoji (supplementary plane, well-formed surrogate pair)
+    };
+
     private static string RandomString(Random random)
     {
-        const string alphabet = "ab AB09";
-        int length = random.Next(0, 6);
-        char[] chars = new char[length];
-        for (int i = 0; i < length; i++)
-            chars[i] = alphabet[random.Next(alphabet.Length)];
-        return new string(chars);
+        int tokens = random.Next(0, 6);
+        StringBuilder sb = new();
+        for (int i = 0; i < tokens; i++)
+            sb.Append(StringTokens[random.Next(StringTokens.Length)]);
+        return sb.ToString();
     }
 }

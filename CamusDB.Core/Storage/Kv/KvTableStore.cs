@@ -52,6 +52,10 @@ public sealed class KvTableStore
     private readonly string rowBucketPrefix;       // "{tableId}:r"  — bucket prefix for LocateAndScanRange
     private readonly string rowKeyPrefix;          // "{tableId}:r/" — prepended to rowIdHex
 
+    // Index IDs (names) registered as key-range routed by TableOpener (C3).
+    // Written once during table open (inside AsyncLazy, single-threaded), then only read.
+    private readonly HashSet<string> rangedIndexIds = [];
+
     private const int RowIdHexLength = 24;
     private const int DefaultPageSize = 512;
     private const int MaxKahunaRetries = 32;
@@ -85,6 +89,20 @@ public sealed class KvTableStore
     /// </summary>
     public string RowKeySpace => rowBucketPrefix;
 
+    /// <summary>
+    /// The Kahuna key space for a secondary index (<c>{tableId}:i:{indexId}</c>). Pass to
+    /// <see cref="IKahuna.RegisterKeyRange"/> when opting a numeric/id/bool index into key-range
+    /// routing (C3). Only call this for indexes whose key columns are all non-String types.
+    /// </summary>
+    public string IndexKeySpace(string indexId) => BuildIndexBucketPrefix(indexId);
+
+    /// <summary>
+    /// Marks <paramref name="indexId"/> as key-range routed on this node. Called by
+    /// <c>TableOpener</c> after successfully registering the index space. Once marked,
+    /// <see cref="AcquireIndexRangeLockAsync"/> uses a Kahuna range lock instead of a prefix lock.
+    /// </summary>
+    public void MarkIndexAsRanged(string indexId) => rangedIndexIds.Add(indexId);
+
     // -----------------------------------------------------------------------
     // Range (prefix) locking — opt-in serializable scans
     // -----------------------------------------------------------------------
@@ -109,9 +127,16 @@ public sealed class KvTableStore
     /// <summary>
     /// Exclusive-locks an index's entire key range for <paramref name="tx"/> (serializable index
     /// scan / phantom protection over the index bucket). See <see cref="AcquireRowRangeLockAsync"/>.
+    ///
+    /// When key-range sharding is enabled and the index was registered as a ranged space by
+    /// <c>TableOpener</c> (i.e. all its key columns are non-String ASCII-encoding types), a Kahuna
+    /// range lock is used instead of a prefix lock — prefix locks are rejected on ranged spaces.
+    /// String-keyed indexes are always prefix-locked regardless of the flag.
     /// </summary>
     public Task AcquireIndexRangeLockAsync(KvTransaction tx, string indexId, CancellationToken cancellationToken = default)
-        => AcquirePrefixLockAsync(tx, BuildIndexBucketPrefix(indexId), cancellationToken);
+        => CamusDBConfig.KeyRangeShardingEnabled && rangedIndexIds.Contains(indexId)
+            ? AcquireWholeBucketRangeLockAsync(tx, BuildIndexBucketPrefix(indexId), cancellationToken)
+            : AcquirePrefixLockAsync(tx, BuildIndexBucketPrefix(indexId), cancellationToken);
 
     private async Task AcquirePrefixLockAsync(KvTransaction tx, string bucketPrefix, CancellationToken cancellationToken)
     {

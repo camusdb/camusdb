@@ -75,17 +75,26 @@ internal sealed class TableOpener
     {
         KvTableStore store = new(database.Kahuna.Kahuna, tableSchema.Id!, tableSchema.Name ?? "");
 
-        // Key-range sharding (opt-in): mark this table's row key space as key-range routed on the
-        // local node and auto-seed its initial whole-space descriptor. The Kahuna registry is
-        // node-local in-memory state (not replicated), so each node registers independently when it
-        // first opens the table; this AsyncLazy runs once per node per process, which is exactly the
-        // "every node, every startup" contract RegisterKeyRangeAsync requires. The seed itself is a
-        // single replicated meta write that only the meta-partition leader commits (a no-op on other
-        // nodes — the descriptor arrives by replication). Idempotent. First slice registers the row
-        // space only ({tableId}:r); indexes stay hash-routed. Never register {db}/meta (Kahuna rejects
-        // it — the schema log must stay hash-routed for total ordering).
+        // Key-range sharding (opt-in): mark this table's row and eligible index key spaces as
+        // key-range routed on the local node and auto-seed their initial whole-space descriptors.
+        // The Kahuna registry is node-local in-memory state (not replicated), so each node registers
+        // independently when it first opens the table; this AsyncLazy runs once per node per process,
+        // which is exactly the "every node, every startup" contract RegisterKeyRangeAsync requires.
+        // The seed itself is a single replicated meta write that only the meta-partition leader
+        // commits (a no-op on other nodes — the descriptor arrives by replication). Idempotent.
+        // Never register {db}/meta (Kahuna rejects it — the schema log must stay hash-routed for
+        // total ordering). Index spaces are registered below (C3), after column types are resolved.
         if (CamusDBConfig.KeyRangeShardingEnabled)
             await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.RowKeySpace);
+
+        // C3: build a column-ID→type lookup used by IsIndexRangeable to gate index registration.
+        // Only non-String column types (Integer64/Float64/Bool/Id/Null) encode to pure ASCII, making
+        // their key spaces safe to range under ordinal string comparison end-to-end. String columns
+        // stay hash-routed until the persistence-comparator alignment work (C3b) lands.
+        Dictionary<string, ColumnType>? columnTypeById =
+            CamusDBConfig.KeyRangeShardingEnabled && tableSchema.Columns is { Count: > 0 }
+                ? tableSchema.Columns.ToDictionary(c => c.Id, c => c.Type)
+                : null;
 
         TableDescriptor tableDescriptor = new(
             tableSchema.Id ?? "",
@@ -123,6 +132,14 @@ internal sealed class TableOpener
                     // Id must read table.Schema.Indexes, not TableDescriptor.Indexes.
                     tableDescriptor.Indexes[entry.Name] =
                         new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State);
+
+                    // C3: register this index's key space for key-range routing if every key
+                    // column is a non-String ASCII-encoding type. String stays hash-routed (C3b).
+                    if (columnTypeById is not null && IsIndexRangeable(entry, columnTypeById))
+                    {
+                        await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.IndexKeySpace(entry.Name));
+                        store.MarkIndexAsRanged(entry.Name);
+                    }
                     break;
 
                 default:
@@ -133,6 +150,27 @@ internal sealed class TableOpener
         logger.LogInformation("Table {TableName} opened", tableSchema.Name);
 
         return tableDescriptor;
+    }
+
+    /// <summary>
+    /// Returns true when every key column of <paramref name="entry"/> encodes to pure ASCII
+    /// (Integer64/Float64/Bool/Id/Null) and is therefore safe to place in a Kahuna key-range space
+    /// under ordinal string comparison. A single String column disqualifies the index (C3b).
+    /// Returns false when column IDs are unavailable (conservative fallback: keep hash-routed).
+    /// </summary>
+    internal static bool IsIndexRangeable(TableIndexSchema entry, Dictionary<string, ColumnType> typeById)
+    {
+        if (entry.ColumnIds is not { Length: > 0 })
+            return false;
+
+        foreach (string colId in entry.ColumnIds)
+        {
+            if (!typeById.TryGetValue(colId, out ColumnType colType))
+                return false; // unknown column — conservative
+            if (colType == ColumnType.String)
+                return false;
+        }
+        return true;
     }
 
     private static string[] MapColumnsIdsToNames(List<TableColumnSchema>? columns, string[] columnIds)

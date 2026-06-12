@@ -74,15 +74,18 @@ public static class CamusDBConfig
     public const string PrimaryKeyInternalName = "~pk";
 
     /// <summary>
-    /// Opt a table's row key space (<c>{tableId}:r</c>) into Kahuna key-range routing instead of
-    /// the default hash routing. When enabled, <see cref="Commands.Executor.Controllers.TableOpener"/>
-    /// registers the row space on the local node at open time (the Kahuna registry is node-local and
-    /// not replicated, so every node opens-and-registers independently), and the row range-lock path
-    /// switches from prefix locks to Kahuna range locks (prefix locks are rejected on ranged spaces).
+    /// Opt a table's row and eligible secondary-index key spaces into Kahuna key-range routing
+    /// instead of the default hash routing. When enabled,
+    /// <see cref="Commands.Executor.Controllers.TableOpener"/> registers each space on the local
+    /// node at open time (the Kahuna registry is node-local and not replicated, so every node
+    /// opens-and-registers independently), and the range-lock path switches from prefix locks to
+    /// Kahuna range locks (prefix locks are rejected on ranged spaces).
     ///
-    /// First slice: row space only — indexes stay hash-routed; Kahuna auto-split/merge is not wired
-    /// (logical range routing + per-range locks work without it). Default off. Toggle via the
-    /// <c>CAMUS_KEY_RANGE_SHARDING</c> environment variable.
+    /// Second slice (C3): secondary indexes whose key columns are all non-String ASCII-encoding
+    /// types (Integer64/Float64/Bool/Id/Null) are also registered and range-locked. String-keyed
+    /// indexes stay hash-routed until the persistence comparator is aligned (C3b). Kahuna
+    /// auto-split/merge is not wired (logical range routing + per-range locks work without it).
+    /// Default off. Toggle via the <c>CAMUS_KEY_RANGE_SHARDING</c> environment variable.
     /// </summary>
     public static bool KeyRangeShardingEnabled =
         string.Equals(Environment.GetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING"), "1", StringComparison.Ordinal) ||

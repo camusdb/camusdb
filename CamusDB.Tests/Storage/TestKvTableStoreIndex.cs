@@ -20,6 +20,7 @@ using Kommander.Time;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
@@ -503,5 +504,149 @@ public sealed class TestKvTableStoreIndex
         HashSet<string> ids = new(entries.Select(e => e.rowId.ToString()));
         foreach ((_, ObjectIdValue rowId) in scanned)
             Assert.IsTrue(ids.Contains(rowId.ToString()), $"Unexpected rowId {rowId}");
+    }
+
+    // ---- range lock tests (C3) -------------------------------------------
+
+    // Mirrors TestKvTableStore.AcquireRowRangeLock_IsExclusive_AndReleasedOnCommit for index spaces.
+    // An index marked as ranged (MarkIndexAsRanged) uses a Kahuna range lock; an unmarked index uses
+    // a prefix lock. Both are exclusive within the session and are released on commit.
+    [Test]
+    public async Task AcquireIndexRangeLock_IsExclusive_AndReleasedOnCommit()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange1");
+        await using EmbeddedKahuna __ = node;
+
+        // Mark the index as ranged (simulates what TableOpener does after RegisterKeyRangeAsync).
+        // When KeyRangeShardingEnabled is false this call is a no-op in terms of routing, but
+        // AcquireIndexRangeLockAsync checks both the flag and the set, so the lock type adapts.
+        store.MarkIndexAsRanged("idx_age");
+
+        KvTransactionsManager transactions = new(node.Kahuna);
+
+        static int HeldLocks(KvTransaction tx) =>
+            CamusDBConfig.KeyRangeShardingEnabled
+                ? tx.GetAcquiredRangeLocks().Count
+                : tx.GetAcquiredPrefixLocks().Count;
+
+        KvTransaction tx1 = await transactions.BeginAsync();
+        await store.AcquireIndexRangeLockAsync(tx1, "idx_age");
+        Assert.AreEqual(1, HeldLocks(tx1), "tx1 must track its index range lock");
+
+        KvTransaction tx2 = await transactions.BeginAsync();
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await store.AcquireIndexRangeLockAsync(tx2, "idx_age"));
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex!.Code,
+            "a concurrent index range lock must be rejected as a conflict");
+
+        await transactions.CommitAsync(tx1);
+
+        Assert.DoesNotThrowAsync(async () => await store.AcquireIndexRangeLockAsync(tx2, "idx_age"),
+            "the index range must be lockable again once the holder commits");
+        Assert.AreEqual(1, HeldLocks(tx2));
+
+        await transactions.CommitAsync(tx2);
+    }
+
+    // ---- IsIndexRangeable gate tests (C3) ------------------------------------
+
+    // The per-type gate is the load-bearing correctness decision of the second slice: it must
+    // classify numeric/id/bool indexes as rangeable and keep String-keyed ones hash-routed.
+    // These tests pin the classification so a regression (e.g. accidentally allowing String)
+    // is caught without a full TableOpener integration test.
+
+    [Test]
+    public void IsIndexRangeable_Integer64_IsRangeable()
+    {
+        Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.Integer64 };
+        TableIndexSchema entry = new("id1", "idx_age", new[] { "c1" }, IndexType.Unique, SchemaElementState.Public);
+        Assert.IsTrue(TableOpener.IsIndexRangeable(entry, types));
+    }
+
+    [Test]
+    public void IsIndexRangeable_Float64_IsRangeable()
+    {
+        Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.Float64 };
+        TableIndexSchema entry = new("id1", "idx_score", new[] { "c1" }, IndexType.Unique, SchemaElementState.Public);
+        Assert.IsTrue(TableOpener.IsIndexRangeable(entry, types));
+    }
+
+    [Test]
+    public void IsIndexRangeable_Bool_IsRangeable()
+    {
+        Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.Bool };
+        TableIndexSchema entry = new("id1", "idx_active", new[] { "c1" }, IndexType.Unique, SchemaElementState.Public);
+        Assert.IsTrue(TableOpener.IsIndexRangeable(entry, types));
+    }
+
+    [Test]
+    public void IsIndexRangeable_Id_IsRangeable()
+    {
+        Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.Id };
+        TableIndexSchema entry = new("id1", "idx_fk", new[] { "c1" }, IndexType.Unique, SchemaElementState.Public);
+        Assert.IsTrue(TableOpener.IsIndexRangeable(entry, types));
+    }
+
+    [Test]
+    public void IsIndexRangeable_String_IsNotRangeable()
+    {
+        // String stays hash-routed until C3b lands (UTF-8 / UTF-16 persistence divergence).
+        Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.String };
+        TableIndexSchema entry = new("id1", "idx_name", new[] { "c1" }, IndexType.Unique, SchemaElementState.Public);
+        Assert.IsFalse(TableOpener.IsIndexRangeable(entry, types));
+    }
+
+    [Test]
+    public void IsIndexRangeable_CompositeWithString_IsNotRangeable()
+    {
+        // A single String column anywhere in the composite disqualifies the whole index.
+        Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.Integer64, ["c2"] = ColumnType.String };
+        TableIndexSchema entry = new("id1", "idx_composite", new[] { "c1", "c2" }, IndexType.Multi, SchemaElementState.Public);
+        Assert.IsFalse(TableOpener.IsIndexRangeable(entry, types));
+    }
+
+    [Test]
+    public void IsIndexRangeable_CompositeAllNumeric_IsRangeable()
+    {
+        Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.Integer64, ["c2"] = ColumnType.Bool };
+        TableIndexSchema entry = new("id1", "idx_composite", new[] { "c1", "c2" }, IndexType.Multi, SchemaElementState.Public);
+        Assert.IsTrue(TableOpener.IsIndexRangeable(entry, types));
+    }
+
+    [Test]
+    public void IsIndexRangeable_NullColumnIds_IsNotRangeable()
+    {
+        // Legacy SystemSchema path may yield an entry without column IDs — conservative fallback.
+        Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.Integer64 };
+        TableIndexSchema entry = new("idx_legacy", new[] { "col" }, IndexType.Unique);
+        Assert.IsFalse(TableOpener.IsIndexRangeable(entry, types));
+    }
+
+    [Test]
+    public void IsIndexRangeable_UnknownColumnId_IsNotRangeable()
+    {
+        // If a column ID can't be resolved in the lookup, keep hash-routed (conservative).
+        Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.Integer64 };
+        TableIndexSchema entry = new("id1", "idx_x", new[] { "c_unknown" }, IndexType.Unique, SchemaElementState.Public);
+        Assert.IsFalse(TableOpener.IsIndexRangeable(entry, types));
+    }
+
+    // An index NOT marked as ranged always uses a prefix lock, even when KeyRangeShardingEnabled
+    // is true. This covers the String-keyed-index case (C3b) and the legacy SystemSchema path.
+    [Test]
+    public async Task AcquireIndexRangeLock_UnmarkedIndex_UsesPrefixLock()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange2");
+        await using EmbeddedKahuna __ = node;
+
+        // idx_name is NOT marked as ranged — it should use a prefix lock regardless of the flag.
+        KvTransactionsManager transactions = new(node.Kahuna);
+
+        KvTransaction tx1 = await transactions.BeginAsync();
+        await store.AcquireIndexRangeLockAsync(tx1, "idx_name");
+        Assert.AreEqual(1, tx1.GetAcquiredPrefixLocks().Count, "unmarked index must use a prefix lock");
+        Assert.AreEqual(0, tx1.GetAcquiredRangeLocks().Count, "no range lock for unmarked index");
+
+        await transactions.CommitAsync(tx1);
     }
 }
