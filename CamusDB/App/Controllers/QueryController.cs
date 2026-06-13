@@ -48,7 +48,8 @@ public sealed class QueryController : CommandsController
                     request.DatabaseName,
                     request.TxnIdPT,
                     request.TxnIdCounter,
-                    readOnly: true  // C1: pure reads must not hold exclusive range locks
+                    readOnly: true,
+                    promoteReadOnly: true  // scan: in key-range mode take a shared range lock (serializable, phantom-free)
                 ).ConfigureAwait(false);
 
                 QueryTicket ticket = new(

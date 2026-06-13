@@ -122,27 +122,28 @@ public sealed class KvTableStore
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Acquires an exclusive lock over the table's entire row range for <paramref name="tx"/>,
+    /// Acquires a <b>shared</b> lock over the table's entire row range for <paramref name="tx"/>,
     /// giving a serializable, phantom-free view: a concurrent transaction cannot insert, update,
-    /// delete, or read-lock any row in this table until <paramref name="tx"/> commits or rolls
-    /// back. Call this <b>before</b> a cursor scan (<see cref="ScanRows"/>) that must not observe
-    /// concurrent mutations across page boundaries — the default scan path only guarantees a
-    /// snapshot, not serializability. The lock is tracked on the transaction and released
-    /// automatically on commit/rollback.
+    /// or delete any row in this table until <paramref name="tx"/> commits or rolls back (the
+    /// write-path fence blocks mutations into the locked range), while other read scans over the
+    /// same range coexist. Call this <b>before</b> a cursor scan (<see cref="ScanRows"/>) that must
+    /// not observe concurrent mutations across page boundaries — the default scan path only
+    /// guarantees a snapshot, not serializability. The lock is tracked on the transaction and
+    /// released automatically on commit/rollback.
     /// </summary>
     public Task AcquireRowRangeLockAsync(KvTransaction tx, CancellationToken cancellationToken = default)
     {
         // Range locks for phantom protection are only needed in key-range-sharding mode
         // (multi-partition). In single-partition (hash) mode MVCC provides snapshot
-        // isolation without additional locks; taking an exclusive prefix lock here would
-        // block concurrent writes and break snapshot-isolated readers.
+        // isolation without additional locks; taking a range lock here would add needless
+        // write-path contention without changing the single-partition guarantees.
         if (!CamusDBConfig.KeyRangeShardingEnabled)
             return Task.CompletedTask;
         return AcquireRangeLockAsync(tx, rowBucketPrefix, null, true, null, true, cancellationToken);
     }
 
     /// <summary>
-    /// Exclusive-locks an index's entire key range for <paramref name="tx"/> (serializable index
+    /// Shared-locks an index's entire key range for <paramref name="tx"/> (serializable index
     /// scan / phantom protection over the index bucket). Used for full-index scans where no
     /// tighter bound is known. For bounded range scans use
     /// <see cref="AcquireBoundedIndexRangeLockAsync"/>. If key-range sharding is disabled or the
@@ -193,9 +194,17 @@ public sealed class KvTableStore
 
     /// <summary>
     /// Core range-lock implementation used by both the whole-bucket and bounded variants.
-    /// Calls Kahuna <c>LocateAndTryAcquireExclusiveRangeLock</c>, retrying on
-    /// <c>MustRetry</c>; tracks the acquired lock on the transaction for release at
-    /// commit/rollback.
+    /// Acquires a <b>shared</b> range lock (Kahuna <c>LocateAndTryAcquireRangeLock</c> with
+    /// <see cref="RangeLockMode.Shared"/>), retrying on <c>MustRetry</c>; tracks the acquired
+    /// lock on the transaction for release at commit/rollback.
+    ///
+    /// Shared is the correct mode for every current caller because all of them are read scans
+    /// (SELECT). Two transactions scanning overlapping ranges then coexist (S∩S), so concurrent
+    /// readers no longer conflict, while Kahuna's write-path fence still rejects any phantom
+    /// insert/update/delete from another transaction into the locked range — giving serializable,
+    /// phantom-free scans without blocking other readers. A future read-for-write range scan
+    /// (e.g. ranged UPDATE/DELETE) that needs writer-vs-writer exclusion would take Exclusive
+    /// instead; add a dedicated entry point for that rather than overloading this one.
     /// </summary>
     private async Task AcquireRangeLockAsync(
         KvTransaction tx,
@@ -204,16 +213,20 @@ public sealed class KvTableStore
         string? endKey,   bool endInclusive,
         CancellationToken cancellationToken)
     {
-        if (tx.IsReadOnly)
-            return;
-
         ArgumentNullException.ThrowIfNull(tx);
 
+        // A range lock needs a real transaction identity to own and later release it. The
+        // Zero-snapshot read-only fast path (point reads, and all reads in single-partition mode)
+        // has no such identity, so it cannot take a range lock — skip. A promoted read-only scan
+        // (real id, key-range mode) falls through and takes a shared lock like any transaction.
+        if (tx.TransactionId == HLCTimestamp.Zero)
+            return;
+
         KeyValueResponseType type = await RetryOnMustRetry(
-            () => kahuna.LocateAndTryAcquireExclusiveRangeLock(
+            () => kahuna.LocateAndTryAcquireRangeLock(
                 tx.TransactionId, bucketPrefix,
                 startKey, startInclusive, endKey, endInclusive,
-                RangeLockExpiresMs, KeyValueDurability.Persistent, cancellationToken),
+                RangeLockExpiresMs, KeyValueDurability.Persistent, RangeLockMode.Shared, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -223,6 +236,8 @@ public sealed class KvTableStore
             return;
         }
 
+        // With shared scan locks two readers no longer conflict; AlreadyLocked now means an
+        // exclusive lock (a writer-intent range lock) overlaps — a genuine serialization conflict.
         if (type == KeyValueResponseType.AlreadyLocked)
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionConflict,
@@ -230,7 +245,7 @@ public sealed class KvTableStore
 
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
-            $"Failed to acquire exclusive range lock on '{bucketPrefix}': {type}");
+            $"Failed to acquire shared range lock on '{bucketPrefix}': {type}");
     }
 
     private static async Task<KeyValueResponseType> RetryOnMustRetry(

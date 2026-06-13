@@ -126,6 +126,51 @@ public sealed class KvTransactionsManager
     public KvTransaction CreateReadOnlyTransaction() => KvTransaction.CreateReadOnly();
 
     /// <summary>
+    /// Begins a read-only transaction for a SELECT, choosing between two strategies:
+    ///
+    /// <para><b>Zero-snapshot fast path</b> (default, and always in single-partition / hash mode):
+    /// returns a synthetic transaction at <see cref="HLCTimestamp.Zero"/> — no Kahuna round-trips,
+    /// read-committed per key, commit/rollback are no-ops. Used for point reads and whenever
+    /// key-range sharding is disabled (range locks are no-ops there, so a snapshot lock would buy
+    /// nothing).</para>
+    ///
+    /// <para><b>Promoted real transaction</b> (when <paramref name="promote"/> is set <i>and</i>
+    /// key-range sharding is enabled): mints a real server-assigned transaction identity via
+    /// <c>LocateAndStartTransaction</c>. A scan can then hold a <em>shared</em> range lock for a
+    /// serializable, phantom-free read — which is impossible under <see cref="HLCTimestamp.Zero"/>
+    /// because that sentinel has no identity to own or release a lock. The caller <b>must</b>
+    /// finalize a promoted transaction (commit or rollback) so its shared range locks are released
+    /// and its MVCC snapshot is cleaned; this matches an implicit single-statement transaction.</para>
+    /// </summary>
+    public async Task<KvTransaction> BeginReadOnlyAsync(bool promote, CancellationToken cancellationToken = default)
+    {
+        if (!promote || !CamusDBConfig.KeyRangeShardingEnabled)
+            return KvTransaction.CreateReadOnly();
+
+        string uniqueId = Guid.NewGuid().ToString("N");
+
+        (KeyValueResponseType type, Kommander.Time.HLCTimestamp txId) =
+            await kahuna.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    UniqueId = uniqueId,
+                    Locking  = KeyValueTransactionLocking.Pessimistic
+                },
+                cancellationToken
+            ).ConfigureAwait(false);
+
+        if (type != KeyValueResponseType.Set)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionAlreadyCompleted,
+                $"Failed to start read-only transaction: {type}"
+            );
+
+        KvTransaction tx = new(txId, uniqueId, isReadOnly: true);
+        Track(tx);
+        return tx;
+    }
+
+    /// <summary>
     /// Commits the transaction via Kahuna 2PC.
     /// Throws <see cref="CamusDBException"/> if the transaction was already completed
     /// or if Kahuna aborts the commit.
@@ -134,8 +179,8 @@ public sealed class KvTransactionsManager
     {
         ArgumentNullException.ThrowIfNull(tx);
 
-        if (tx.IsReadOnly)
-            return; // read-only transactions have no Kahuna state to commit
+        if (tx.TransactionId == Kommander.Time.HLCTimestamp.Zero)
+            return; // Zero-snapshot read-only fast path: no Kahuna transaction to finalize
 
         if (tx.Status != KvTransactionStatus.Active)
             throw new CamusDBException(
@@ -212,8 +257,8 @@ public sealed class KvTransactionsManager
     {
         ArgumentNullException.ThrowIfNull(tx);
 
-        if (tx.IsReadOnly)
-            return; // read-only transactions have no Kahuna state to roll back
+        if (tx.TransactionId == Kommander.Time.HLCTimestamp.Zero)
+            return; // Zero-snapshot read-only fast path: no Kahuna transaction to roll back
 
         if (tx.Status != KvTransactionStatus.Active)
             throw new CamusDBException(

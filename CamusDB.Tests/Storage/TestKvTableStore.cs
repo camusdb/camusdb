@@ -344,13 +344,14 @@ public sealed class TestKvTableStore
         await CommitTransaction(node.Kahuna, tx);
     }
 
-    // Exclusive range lock (key-range-sharding mode): a transaction that acquires the table's
-    // row range lock blocks any other transaction from locking the same range, and the lock is
-    // released when the owning transaction commits. Range locks are only active when
-    // KeyRangeShardingEnabled=true; in single-partition mode the method is a no-op.
+    // Shared row range lock (key-range-sharding mode): scan range locks are shared, so two
+    // transactions scanning the same table row range coexist (S∩S) — phantom protection comes
+    // from the write-path fence, not reader-vs-reader exclusion. The lock is released when the
+    // owning transaction commits. Range locks are only active when KeyRangeShardingEnabled=true;
+    // in single-partition mode the method is a no-op.
     [Test]
     [NonParallelizable]
-    public async Task AcquireRowRangeLock_IsExclusive_AndReleasedOnCommit()
+    public async Task AcquireRowRangeLock_SharedScansCoexist_AndReleasedOnCommit()
     {
         bool prev = CamusDBConfig.KeyRangeShardingEnabled;
         CamusDBConfig.KeyRangeShardingEnabled = true;
@@ -365,19 +366,14 @@ public sealed class TestKvTableStore
             await store.AcquireRowRangeLockAsync(tx1);
             Assert.AreEqual(1, tx1.GetAcquiredRangeLocks().Count, "tx1 must track its range lock");
 
-            // A second transaction cannot acquire the same range while tx1 holds it.
+            // A second concurrent scan over the same row range must COEXIST with tx1's shared lock.
             KvTransaction tx2 = await transactions.BeginAsync();
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
-                async () => await store.AcquireRowRangeLockAsync(tx2));
-            Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex!.Code,
-                "a concurrent range lock must be rejected as a conflict");
-
-            // Committing tx1 releases the range lock.
-            await transactions.CommitAsync(tx1);
-
-            // tx2 can now acquire it.
             Assert.DoesNotThrowAsync(async () => await store.AcquireRowRangeLockAsync(tx2),
-                "the range must be lockable again once the holder commits");
+                "two shared scan locks over the same row range must coexist");
+            Assert.AreEqual(1, tx2.GetAcquiredRangeLocks().Count, "tx2 must track its own shared range lock");
+
+            // Committing tx1 releases its range lock; tx2's is unaffected.
+            await transactions.CommitAsync(tx1);
             Assert.AreEqual(1, tx2.GetAcquiredRangeLocks().Count);
 
             await transactions.CommitAsync(tx2);

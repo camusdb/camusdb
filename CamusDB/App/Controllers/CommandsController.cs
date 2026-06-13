@@ -42,6 +42,7 @@ public abstract class CommandsController : ControllerBase
         long txnIdPT,
         uint txnIdCounter,
         bool readOnly = false,
+        bool promoteReadOnly = false,
         CancellationToken cancellationToken = default)
     {
         if (txnIdPT > 0)
@@ -50,13 +51,19 @@ public abstract class CommandsController : ControllerBase
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required to start a transaction");
 
-        // Read-only queries use a zero-timestamp synthetic transaction: no LocateAndStartTransaction /
-        // LocateAndCommitTransaction round-trips to Kahuna. Kahuna treats HLCTimestamp.Zero as
-        // "read latest committed value" per key (non-transactional snapshot, read-committed per key).
+        // Read-only queries default to a zero-timestamp synthetic transaction: no
+        // LocateAndStartTransaction / LocateAndCommitTransaction round-trips to Kahuna. Kahuna treats
+        // HLCTimestamp.Zero as "read latest committed value" per key (read-committed per key).
+        //
+        // Scan SELECTs pass promoteReadOnly: in key-range sharding mode the read-only transaction is
+        // then promoted to a real transaction so the scan can hold a shared range lock (serializable,
+        // phantom-free read). A promoted transaction has a real identity and must be finalized, so we
+        // report NewTransaction = true to make the caller commit it on success / roll back on error.
         if (readOnly)
         {
-            KvTransaction roTx = await transactions.BeginReadOnlyAsync(databaseName, cancellationToken).ConfigureAwait(false);
-            return (false, roTx); // false → no commit call needed
+            KvTransaction roTx = await transactions.BeginReadOnlyAsync(databaseName, promoteReadOnly, cancellationToken).ConfigureAwait(false);
+            bool promoted = roTx.TransactionId != Kommander.Time.HLCTimestamp.Zero;
+            return (promoted, roTx);
         }
 
         KvTransaction tx = await transactions.StartAsync(databaseName, cancellationToken).ConfigureAwait(false);

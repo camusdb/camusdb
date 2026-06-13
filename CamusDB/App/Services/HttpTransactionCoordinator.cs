@@ -44,19 +44,30 @@ public sealed class HttpTransactionCoordinator
     }
 
     /// <summary>
-    /// Returns a read-only snapshot transaction that uses <c>HLCTimestamp.Zero</c> for all KV reads.
-    /// Kahuna treats the zero timestamp as "latest committed value" per key — no
-    /// <c>StartTransaction</c> / <c>CommitTransaction</c> round-trips, so commit and rollback are
-    /// no-ops. Use for SELECT queries that are not part of an explicit user transaction.
+    /// Begins a read-only transaction for a standalone SELECT. By default (and always in
+    /// single-partition / hash mode) this is a <c>HLCTimestamp.Zero</c> snapshot: Kahuna reads the
+    /// latest committed value per key with no <c>StartTransaction</c> / <c>CommitTransaction</c>
+    /// round-trips, so commit and rollback are no-ops and the transaction needs no tracking.
+    ///
+    /// When <paramref name="promote"/> is set and key-range sharding is enabled, the transaction is
+    /// promoted to a real server-minted transaction so a scan can hold a shared range lock for a
+    /// serializable, phantom-free read. A promoted transaction has a real identity, so it is
+    /// registered here for cleanup and <b>must</b> be committed or rolled back by the caller.
     /// </summary>
-    public async Task<KvTransaction> BeginReadOnlyAsync(string databaseName, CancellationToken cancellationToken = default)
+    public async Task<KvTransaction> BeginReadOnlyAsync(string databaseName, bool promote, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required");
 
         DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
-        return database.Transactions.CreateReadOnlyTransaction();
-        // Not registered in active — read-only transactions need no tracking or cleanup.
+        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote, cancellationToken).ConfigureAwait(false);
+
+        // Zero-snapshot fast-path transactions carry no identity and need no tracking or cleanup;
+        // a promoted (real-id) transaction is registered so commit/rollback can find and release it.
+        if (tx.TransactionId != Kommander.Time.HLCTimestamp.Zero)
+            Register(database.Transactions, tx);
+
+        return tx;
     }
 
     public KvTransaction GetState(long txnIdPT, uint txnIdCounter)

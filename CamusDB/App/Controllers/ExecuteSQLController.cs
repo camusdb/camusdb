@@ -54,7 +54,8 @@ public sealed class ExecuteSQLController : CommandsController
                     request.DatabaseName,
                     request.TxnIdPT,
                     request.TxnIdCounter,
-                    readOnly: true   // SELECT / SHOW always read-only; uses HLCTimestamp.Zero
+                    readOnly: true,        // SELECT / SHOW always read-only
+                    promoteReadOnly: true  // scan: in key-range mode take a shared range lock (serializable, phantom-free)
                 ).ConfigureAwait(false);
 
                 ExecuteSQLTicket ticket = new(

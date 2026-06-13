@@ -72,8 +72,9 @@
   </ItemGroup>
   
   <ItemGroup>
-    <PackageReference Include="Kahuna.Core" Version="0.3.8" />
-    <PackageReference Include="Kahuna.Shared" Version="0.3.8" />
+    <!-- Local Kahuna source (S/X range locks + write-path phantom fence) — repackage to NuGet once stable. -->
+    <ProjectReference Include="..\..\kahuna\Kahuna.Core\Kahuna.Core.csproj" />
+    <ProjectReference Include="..\..\kahuna\Kahuna.Shared\Kahuna.Shared.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.16" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />

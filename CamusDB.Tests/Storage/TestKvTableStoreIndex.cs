@@ -509,12 +509,14 @@ public sealed class TestKvTableStoreIndex
 
     // ---- range lock tests (C3) -------------------------------------------
 
-    // Mirrors TestKvTableStore.AcquireRowRangeLock_IsExclusive_AndReleasedOnCommit for index spaces.
-    // Range locks are only active when KeyRangeShardingEnabled=true AND the index is marked as
-    // ranged. In single-partition mode both methods are no-ops.
+    // Scan range locks are SHARED: two concurrent read scans over the same index range coexist
+    // (S∩S) rather than conflicting — the serializable, phantom-free guarantee comes from the
+    // write-path fence (a foreign write into the range conflicts), not from reader-vs-reader
+    // exclusion. Range locks are only active when KeyRangeShardingEnabled=true AND the index is
+    // marked as ranged; in single-partition mode the call is a no-op.
     [Test]
     [NonParallelizable]
-    public async Task AcquireIndexRangeLock_IsExclusive_AndReleasedOnCommit()
+    public async Task AcquireIndexRangeLock_SharedScansCoexist_AndReleasedOnCommit()
     {
         bool prev = CamusDBConfig.KeyRangeShardingEnabled;
         CamusDBConfig.KeyRangeShardingEnabled = true;
@@ -532,18 +534,16 @@ public sealed class TestKvTableStoreIndex
             await store.AcquireIndexRangeLockAsync(tx1, "idx_age");
             Assert.AreEqual(1, tx1.GetAcquiredRangeLocks().Count, "tx1 must track its index range lock");
 
+            // A second concurrent scan over the same range must COEXIST with tx1's shared lock.
             KvTransaction tx2 = await transactions.BeginAsync();
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
-                async () => await store.AcquireIndexRangeLockAsync(tx2, "idx_age"));
-            Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex!.Code,
-                "a concurrent index range lock must be rejected as a conflict");
+            Assert.DoesNotThrowAsync(async () => await store.AcquireIndexRangeLockAsync(tx2, "idx_age"),
+                "two shared scan locks over the same index range must coexist");
+            Assert.AreEqual(1, tx2.GetAcquiredRangeLocks().Count, "tx2 must track its own shared range lock");
 
             await transactions.CommitAsync(tx1);
 
-            Assert.DoesNotThrowAsync(async () => await store.AcquireIndexRangeLockAsync(tx2, "idx_age"),
-                "the index range must be lockable again once the holder commits");
+            // tx2's lock is unaffected by tx1 committing; it can still be released cleanly.
             Assert.AreEqual(1, tx2.GetAcquiredRangeLocks().Count);
-
             await transactions.CommitAsync(tx2);
         }
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
@@ -714,11 +714,95 @@ public sealed class TestKvTableStoreIndex
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
 
-    // C2: bounded range locks — two transactions scanning DISJOINT index ranges must not conflict;
-    // two transactions scanning OVERLAPPING ranges must conflict.
+    // A promoted read-only scan (key-range mode) is a REAL transaction: it has a non-zero identity,
+    // takes an enforced shared range lock during its scan, and releases that lock when it commits —
+    // exactly like an implicit single-statement transaction. This proves the autocommit-SELECT
+    // promotion end-to-end: the lock is real (a foreign write into the range is blocked while held)
+    // and the commit path releases it (the same write succeeds afterwards).
     [Test]
     [NonParallelizable]
-    public async Task C2_BoundedIndexRangeLock_DisjointRangesDoNotConflict_OverlappingRangesConflict()
+    public async Task PromotedReadOnlyScan_HoldsEnforcedSharedRangeLock_ReleasedOnCommit()
+    {
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-rop");
+            await using EmbeddedKahuna __ = node;
+
+            store.MarkIndexAsRanged("idx_age");
+            KvTransactionsManager transactions = new(node.Kahuna);
+
+            CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
+            CompositeColumnValue cv25 = new(new ColumnValue(ColumnType.Integer64, 25L));
+            CompositeColumnValue cv50 = new(new ColumnValue(ColumnType.Integer64, 50L));
+
+            // A scan SELECT promotes to a real read-only transaction.
+            KvTransaction roTx = await transactions.BeginReadOnlyAsync(promote: true);
+            Assert.AreNotEqual(HLCTimestamp.Zero, roTx.TransactionId, "a promoted read-only scan must have a real identity");
+            Assert.IsTrue(roTx.IsReadOnly, "the promoted scan transaction is still read-only");
+
+            // The read-only scan takes a shared range lock over [1,50].
+            await store.AcquireBoundedIndexRangeLockAsync(roTx, "idx_age", cv1, true, cv50, true, unique: false);
+            Assert.AreEqual(1, roTx.GetAcquiredRangeLocks().Count, "the read-only scan must hold its shared range lock");
+
+            // While held, a foreign write into the range is blocked (the lock is genuinely enforced).
+            KvTransaction writer = await transactions.BeginAsync();
+            ObjectIdValue rowId25 = new(25, 0, 0);
+            using CancellationTokenSource cts = new(TimeSpan.FromMilliseconds(500));
+            Assert.CatchAsync<OperationCanceledException>(
+                async () => await store.PutIndexEntry(writer, "idx_age", cv25, rowId25, unique: false, cancellationToken: cts.Token),
+                "a write inside the range must be blocked while the read-only scan holds the shared lock");
+
+            // Committing the read-only scan releases the lock (no leak, despite no writes).
+            await transactions.CommitAsync(roTx);
+
+            KvTransaction writer2 = await transactions.BeginAsync();
+            ObjectIdValue rowId25b = new(25, 0, 1);
+            Assert.DoesNotThrowAsync(
+                async () => await store.PutIndexEntry(writer2, "idx_age", cv25, rowId25b, unique: false),
+                "the write must succeed once the read-only scan commits and releases its shared lock");
+            await transactions.CommitAsync(writer2);
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+    }
+
+    // The promotion is scoped: a read-only begin stays on the lightweight HLCTimestamp.Zero snapshot
+    // when promotion is not requested, or whenever key-range sharding is disabled (single-partition
+    // mode, where range locks are no-ops). A Zero transaction has no Kahuna identity and needs no
+    // commit/rollback round-trips.
+    [Test]
+    [NonParallelizable]
+    public async Task BeginReadOnly_StaysZeroSnapshot_WhenNotPromotedOrShardingDisabled()
+    {
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        try
+        {
+            (EmbeddedKahuna node, _) = await CreateStoreAsync("irange-zero");
+            await using EmbeddedKahuna __ = node;
+            KvTransactionsManager transactions = new(node.Kahuna);
+
+            // Sharding ON but promotion NOT requested (e.g. a point read) → Zero snapshot.
+            CamusDBConfig.KeyRangeShardingEnabled = true;
+            KvTransaction noPromote = await transactions.BeginReadOnlyAsync(promote: false);
+            Assert.AreEqual(HLCTimestamp.Zero, noPromote.TransactionId, "an un-promoted read-only begin must stay on the Zero snapshot");
+
+            // Promotion requested but sharding OFF → still Zero (range locks are no-ops in hash mode).
+            CamusDBConfig.KeyRangeShardingEnabled = false;
+            KvTransaction shardingOff = await transactions.BeginReadOnlyAsync(promote: true);
+            Assert.AreEqual(HLCTimestamp.Zero, shardingOff.TransactionId, "promotion must be a no-op when key-range sharding is disabled");
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+    }
+
+    // C2: bounded scan range locks are SHARED. Two transactions scanning DISJOINT index ranges
+    // coexist (non-overlapping locks never conflict regardless of mode); two transactions scanning
+    // OVERLAPPING ranges ALSO coexist now that read scans take a shared lock (S∩S). Phantom
+    // protection for these ranges is enforced on the write path instead — see the
+    // C2_*_BlocksWriteInsideRange tests, which prove a foreign write into a held range conflicts.
+    [Test]
+    [NonParallelizable]
+    public async Task C2_BoundedIndexRangeLock_DisjointAndOverlappingSharedScansCoexist()
     {
         bool prev = CamusDBConfig.KeyRangeShardingEnabled;
         CamusDBConfig.KeyRangeShardingEnabled = true;
@@ -734,7 +818,7 @@ public sealed class TestKvTableStoreIndex
             CompositeColumnValue mid  = new(new ColumnValue(ColumnType.Integer64, 50L));
             CompositeColumnValue high = new(new ColumnValue(ColumnType.Integer64, 100L));
 
-            // --- Case 1: disjoint ranges [1,50] and [51,100] must not conflict ---
+            // --- Case 1: disjoint ranges [1,50] and [51,100] coexist ---
             CompositeColumnValue boundary = new(new ColumnValue(ColumnType.Integer64, 51L));
 
             KvTransaction txA = await transactions.BeginAsync();
@@ -750,7 +834,7 @@ public sealed class TestKvTableStoreIndex
             await transactions.CommitAsync(txA);
             await transactions.CommitAsync(txB);
 
-            // --- Case 2: overlapping ranges [1,75] and [50,100] must conflict ---
+            // --- Case 2: overlapping ranges [1,75] and [50,100] also coexist (both shared) ---
             CompositeColumnValue r1end  = new(new ColumnValue(ColumnType.Integer64, 75L));
             CompositeColumnValue r2start = mid; // 50
 
@@ -758,17 +842,12 @@ public sealed class TestKvTableStoreIndex
             await store.AcquireBoundedIndexRangeLockAsync(txC, "idx_age", low, true, r1end, true, unique: false);
 
             KvTransaction txD = await transactions.BeginAsync();
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
-                async () => await store.AcquireBoundedIndexRangeLockAsync(txD, "idx_age", r2start, true, high, true, unique: false));
-            Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex!.Code,
-                "overlapping [50,100] must conflict with active [1,75] lock");
-
-            await transactions.CommitAsync(txC);
-
-            // After txC commits, txD can now acquire the same range.
             Assert.DoesNotThrowAsync(
                 async () => await store.AcquireBoundedIndexRangeLockAsync(txD, "idx_age", r2start, true, high, true, unique: false),
-                "must be lockable again once the holder committed");
+                "two overlapping shared scan ranges must coexist");
+            Assert.AreEqual(1, txD.GetAcquiredRangeLocks().Count, "txD must hold its overlapping shared range lock");
+
+            await transactions.CommitAsync(txC);
             await transactions.CommitAsync(txD);
         }
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }

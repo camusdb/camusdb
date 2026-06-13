@@ -191,26 +191,41 @@ They serialize **conflicting writes to the same key**. They are *not* taken by r
 
 ### 6.2 Range locks — used by serializable scans, only in key-range mode
 A range lock reserves a whole *range* of keys at once, e.g. "all index entries between 10 and 50."
-Their purpose is **phantom protection**: stopping another transaction from inserting a new row into a
-range you are scanning, which would otherwise make a repeated scan return different results.
+Their purpose is **phantom protection**: stopping another transaction from inserting, changing, or
+deleting a row inside a range you are scanning, which would otherwise make a repeated scan return
+different results.
+
+Two things make range locks useful rather than a bottleneck:
+
+- **They are *shared* for scans.** Two transactions scanning overlapping ranges both succeed and run
+  side by side — a scan never blocks another scan. (Reads don't block reads, even serializable ones.)
+- **Writes respect them automatically.** A write does not need to take a range lock itself: when a
+  transaction tries to insert/update/delete a key that falls inside a range another transaction has
+  locked, that write is held back (it retries). This is what actually stops a phantom row from
+  appearing mid-scan — including a *brand-new* key that didn't exist when the scan started.
 
 Range locks are acquired by the scan paths in the query executor (full-table scans, index scans,
 bounded index range scans, and `IN`-list scans). But there are important conditions:
 
 - They are a **no-op unless key-range routing is enabled** (`CAMUS_KEY_RANGE_SHARDING=1`) for that key
   space. In the default hash-routed, single-partition setup, **no range locks are taken at all**.
-- They are **skipped for read-only transactions**. A standalone `SELECT` never takes one.
+- A scan only holds one if it has a real transaction identity. In key-range mode a standalone `SELECT`
+  is automatically promoted to a lightweight read-only transaction so it *can* hold a shared range lock
+  (and releases it the moment the query finishes). **Point lookups by id** don't scan a range, so they
+  skip this entirely and stay on the fast path.
 
 So in the default configuration the range-lock machinery is effectively dormant; it only comes alive
-when you opt into key-range routing on a multi-partition cluster.
+when you opt into key-range routing on a multi-partition cluster — and there it gives scans a
+serializable, phantom-free view without readers ever blocking each other.
 
 ```
-            Reads (autocommit SELECT)   Writes (INSERT/UPDATE/DELETE)
-            ─────────────────────────   ─────────────────────────────
-per-key     none                        one per modified key
-range       none (skipped: read-only)   none in hash mode;
-                                         range lock in key-range mode
-                                         when a read-write txn scans
+            Reads (SELECT)                Writes (INSERT/UPDATE/DELETE)
+            ──────────────────────────    ─────────────────────────────
+per-key     none                          one per modified key
+range       none in hash mode;            none taken directly; but a write
+            a SHARED range lock for a     into a range another txn has
+            scan in key-range mode        locked is held back until that
+            (scans never block scans)     txn finishes (phantom protection)
 ```
 
 ---
@@ -247,7 +262,7 @@ machinery across more nodes and partitions. Here's the mapping:
 | Routing | one place, so routing is trivial | keys routed to partitions by hash (or by range, if enabled) |
 | Where a write commits | local Raft (a one-node "quorum") | the partition **leader**, replicated to a node majority |
 | Multi-key write | 2PC, local | 2PC across the **leaders** of every partition the keys touch |
-| Range locks | dormant (hash, single partition) | active only if key-range routing is enabled (needs ≥ 2 partitions) |
+| Range locks | dormant (hash, single partition) | active if key-range routing is enabled (needs ≥ 2 partitions): shared scan locks + writes held back from locked ranges |
 | Reads | MVCC, lock-free | MVCC, lock-free (served by the partition leader of each key) |
 | Schema/DDL | a dedicated, totally-ordered key space | same key space, kept on a single partition so all nodes agree on schema order |
 
@@ -283,7 +298,8 @@ What CamusDB guarantees right now:
   overwrite each other — one fails and can retry.
 - ✅ **Non-blocking reads.** Concurrent reads never block each other or writers.
 
-What is **not yet fully guaranteed** (so design around it):
+What is **not yet fully guaranteed** in the **default (hash-routed) configuration** (so design around
+it):
 
 - ⚠️ **A single global snapshot per query is not guaranteed.** A standalone `SELECT` reads the *latest
   committed* version of each key. A single scan is internally consistent, but a query that does
@@ -293,10 +309,17 @@ What is **not yet fully guaranteed** (so design around it):
   in the default configuration. If you read a set of rows, then read again, a concurrent transaction
   may have changed or inserted rows in between.
 
-In classic terms, the practical isolation level today is approximately **Read Committed**, plus atomic
-durable writes and write-write conflict detection. For invariants that must hold under concurrency
-(e.g. "no two robots with the same serial"), rely on **unique constraints** (enforced at the key
-level) and explicit transactions, rather than assuming serializable behavior.
+In classic terms, the practical isolation level in the default configuration is approximately **Read
+Committed**, plus atomic durable writes and write-write conflict detection. For invariants that must
+hold under concurrency (e.g. "no two robots with the same serial"), rely on **unique constraints**
+(enforced at the key level) and explicit transactions, rather than assuming serializable behavior.
+
+**With key-range routing enabled, scans get stronger guarantees.** Because a scan holds a shared range
+lock and any conflicting write is held back until the scan's transaction finishes, a `SELECT` over a
+range in key-range mode is **phantom-free and sees a consistent view of that range** — two readers
+still run concurrently, but a writer can't slip a row into the range mid-scan. This is the serializable,
+range-scan behavior key-range mode is designed to provide. Point lookups by id and all reads in the
+default hash mode remain at the Read Committed level described above.
 
 > Stronger isolation (consistent snapshot reads and full serializability) is an area of active
 > development. The building blocks — server-assigned timestamps, MVCC, per-key locks, range locks, and
@@ -329,10 +352,14 @@ A map for when you want to read the real thing:
 When reasoning about a concurrency question in CamusDB, ask in this order:
 
 1. **Is it a read or a write?** Reads are lock-free MVCC; writes take per-key locks + 2PC.
-2. **Is the transaction read-only or read-write?** Read-only skips locks entirely.
-3. **Is key-range routing enabled?** If not (the default), range locks are dormant — only per-key
-   write locks are in play.
+2. **Is it a scan or a point lookup?** A point lookup (by id) just reads its key. A scan over a range is
+   what can take a range lock — and only in key-range mode.
+3. **Is key-range routing enabled?** If not (the default), range locks are dormant — only per-key write
+   locks are in play, and the isolation level is ≈ Read Committed. If it is, a scan holds a shared range
+   lock and writes are held back from a locked range, giving phantom-free, serializable range scans
+   (readers still never block readers).
 4. **Single partition or many?** Many partitions means writes/locks happen on partition leaders and a
    transaction may run a 2PC across them.
 5. **What guarantee does the app actually need?** If it needs an invariant under concurrency, lean on
-   unique constraints and explicit transactions, and remember the current level is ≈ Read Committed.
+   unique constraints and explicit transactions; remember the default level is ≈ Read Committed, with
+   stronger range-scan guarantees available under key-range routing.
