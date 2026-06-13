@@ -59,7 +59,10 @@ CamusDB *use* Kahuna's transactions?" CamusDB rows and indexes are just key/valu
   the keys (place intents), then *commit* them all at once.
 - **Partition** — a shard of the keyspace. Each partition is its own Raft group with its own leader.
   A key is routed to exactly one partition.
-- **Read-only vs read-write transaction** — a crucial distinction in CamusDB; see §4 and §5.
+- **Read-only vs read-write transaction** — a crucial distinction in CamusDB; see §4 and §5. A
+  transaction also declares this *mode* up front when it wants the stronger isolation level.
+- **Isolation level** — how strongly a transaction is shielded from concurrent ones. CamusDB has two:
+  **Read Committed** (the default, described in §4/§5) and **Serializable** (opt-in, described in §9).
 
 ---
 
@@ -189,7 +192,7 @@ There are two distinct lock mechanisms. Knowing which is taken when is most of t
 These are taken automatically during the PREPARE phase of any write (§5), one per key being modified.
 They serialize **conflicting writes to the same key**. They are *not* taken by reads.
 
-### 6.2 Range locks — used by serializable scans, only in key-range mode
+### 6.2 Range locks — phantom protection for scans
 A range lock reserves a whole *range* of keys at once, e.g. "all index entries between 10 and 50."
 Their purpose is **phantom protection**: stopping another transaction from inserting, changing, or
 deleting a row inside a range you are scanning, which would otherwise make a repeated scan return
@@ -205,27 +208,41 @@ Two things make range locks useful rather than a bottleneck:
   appearing mid-scan — including a *brand-new* key that didn't exist when the scan started.
 
 Range locks are acquired by the scan paths in the query executor (full-table scans, index scans,
-bounded index range scans, and `IN`-list scans). But there are important conditions:
+bounded index range scans, and `IN`-list scans). They fire in two situations:
 
-- They are a **no-op unless key-range routing is enabled** (`CAMUS_KEY_RANGE_SHARDING=1`) for that key
-  space. In the default hash-routed, single-partition setup, **no range locks are taken at all**.
-- A scan only holds one if it has a real transaction identity. In key-range mode a standalone `SELECT`
-  is automatically promoted to a lightweight read-only transaction so it *can* hold a shared range lock
-  (and releases it the moment the query finishes). **Point lookups by id** don't scan a range, so they
-  skip this entirely and stay on the fast path.
+- **For a Serializable read-write transaction** (see §9), on *any* configuration including the default
+  single-node hash setup — a serializable scan needs phantom protection to be correct, so the lock is
+  taken regardless of routing.
+- **In key-range routing mode**, for ordinary scans, so a scan over `[A, B)` doesn't block a writer on
+  the disjoint `[B, C)`.
 
-So in the default configuration the range-lock machinery is effectively dormant; it only comes alive
-when you opt into key-range routing on a multi-partition cluster — and there it gives scans a
-serializable, phantom-free view without readers ever blocking each other.
+Otherwise — a plain Read Committed `SELECT` in the default hash setup — **no range lock is taken**.
+
+### 6.3 Point read locks (Serializable read-write only)
+A Serializable read-write transaction also locks the *individual* keys it reads with `GetRow` or a
+unique-index lookup — a one-key "shared point lock," held until the transaction ends. This is what
+makes "read a row, then act on it" safe: no other transaction can change that exact key underneath you.
+
+- Two serializable transactions reading the **same** key coexist (both hold a shared lock).
+- A writer trying to change a key a serializable reader holds is **held back / fails to commit** until
+  the reader finishes.
+- If the *same* transaction later **writes** a key it read, its shared lock is **promoted to exclusive**
+  in place, so from that point no one else can even read that key until it commits.
+
+These point locks are taken **only** by Serializable read-write transactions. Read Committed reads and
+Serializable read-only (snapshot) reads take none.
 
 ```
-            Reads (SELECT)                Writes (INSERT/UPDATE/DELETE)
-            ──────────────────────────    ─────────────────────────────
-per-key     none                          one per modified key
-range       none in hash mode;            none taken directly; but a write
-            a SHARED range lock for a     into a range another txn has
-            scan in key-range mode        locked is held back until that
-            (scans never block scans)     txn finishes (phantom protection)
+                            Reads                         Writes (INSERT/UPDATE/DELETE)
+                            ──────────────────────────    ─────────────────────────────
+Read Committed (default)    no locks                      one per-key lock per modified key
+Serializable read-only      no locks (consistent          (read-only — no writes)
+                            MVCC snapshot, §9)
+Serializable read-write     shared point lock per key     per-key lock; plus any key it read
+                            read; shared range lock        is promoted from shared→exclusive.
+                            per scan (held to commit)      A write into a range/key another txn
+                                                           locked is held back (phantom + write
+                                                           conflict protection)
 ```
 
 ---
@@ -262,8 +279,9 @@ machinery across more nodes and partitions. Here's the mapping:
 | Routing | one place, so routing is trivial | keys routed to partitions by hash (or by range, if enabled) |
 | Where a write commits | local Raft (a one-node "quorum") | the partition **leader**, replicated to a node majority |
 | Multi-key write | 2PC, local | 2PC across the **leaders** of every partition the keys touch |
-| Range locks | dormant (hash, single partition) | active if key-range routing is enabled (needs ≥ 2 partitions): shared scan locks + writes held back from locked ranges |
+| Range locks | active for Serializable transactions; otherwise dormant in the hash default | additionally active for ordinary scans when key-range routing is enabled (≥ 2 partitions) |
 | Reads | MVCC, lock-free | MVCC, lock-free (served by the partition leader of each key) |
+| Isolation levels | Read Committed + Serializable, both work | identical — same levels, same guarantees |
 | Schema/DDL | a dedicated, totally-ordered key space | same key space, kept on a single partition so all nodes agree on schema order |
 
 A few cluster-specific notes for newcomers:
@@ -278,6 +296,9 @@ A few cluster-specific notes for newcomers:
   stores all the data; key-range routing changes *where locking and ordering happen*, letting a scan
   over `[A,B)` avoid blocking a writer working on a disjoint `[B,C)`. It does not spread storage across
   nodes.
+- **Isolation behaves identically on one node or many.** A Serializable transaction gives the same
+  result whether the data lives on one partition or several — single node is just the one-partition
+  case of the same algorithm. A client can't tell from the isolation behavior how many nodes there are.
 
 If you want the deep story on how schema changes (DDL) replicate and stay consistent across the
 cluster, see `distributed-schema-architecture.md` — this document deliberately focuses on data-path
@@ -298,33 +319,54 @@ What CamusDB guarantees right now:
   overwrite each other — one fails and can retry.
 - ✅ **Non-blocking reads.** Concurrent reads never block each other or writers.
 
-What is **not yet fully guaranteed** in the **default (hash-routed) configuration** (so design around
-it):
+Those five hold at **every** isolation level. On top of them, CamusDB offers **two isolation levels**,
+chosen per transaction (the default applies when you don't ask for anything).
 
-- ⚠️ **A single global snapshot per query is not guaranteed.** A standalone `SELECT` reads the *latest
-  committed* version of each key. A single scan is internally consistent, but a query that does
-  several sub-reads (e.g. an index lookup followed by fetching the matching rows) can observe values
-  committed at slightly different instants.
-- ⚠️ **Repeatable reads / phantom protection across a multi-statement transaction are not guaranteed**
-  in the default configuration. If you read a set of rows, then read again, a concurrent transaction
-  may have changed or inserted rows in between.
+### 9.1 Read Committed (the default)
 
-In classic terms, the practical isolation level in the default configuration is approximately **Read
-Committed**, plus atomic durable writes and write-write conflict detection. For invariants that must
-hold under concurrency (e.g. "no two robots with the same serial"), rely on **unique constraints**
-(enforced at the key level) and explicit transactions, rather than assuming serializable behavior.
+This is what every autocommit statement and every transaction gets unless it opts into more. It is the
+lock-free behavior described in §4/§5. What it does **not** promise (design around these):
 
-**With key-range routing enabled, scans get stronger guarantees.** Because a scan holds a shared range
-lock and any conflicting write is held back until the scan's transaction finishes, a `SELECT` over a
-range in key-range mode is **phantom-free and sees a consistent view of that range** — two readers
-still run concurrently, but a writer can't slip a row into the range mid-scan. This is the serializable,
-range-scan behavior key-range mode is designed to provide. Point lookups by id and all reads in the
-default hash mode remain at the Read Committed level described above.
+- ⚠️ **No single global snapshot per query.** A statement reads the *latest committed* version of each
+  key. One scan is internally consistent, but a query that does several sub-reads (an index lookup,
+  then fetching the rows) can observe values committed at slightly different instants.
+- ⚠️ **No repeatable reads / phantom protection across statements.** Read a set of rows, read again,
+  and a concurrent transaction may have changed or inserted rows in between.
+- ⚠️ **Write skew is possible.** Two transactions can each read a set, then write disjoint keys based on
+  what they read, in a way no serial order would allow.
 
-> Stronger isolation (consistent snapshot reads and full serializability) is an area of active
-> development. The building blocks — server-assigned timestamps, MVCC, per-key locks, range locks, and
-> a transaction coordinator that can validate read sets — are already in place; wiring them into a
-> stronger guarantee is ongoing.
+For invariants that must hold under concurrency at this level (e.g. "no two robots with the same
+serial"), lean on **unique constraints** (enforced at the key level) rather than read-then-decide logic.
+
+### 9.2 Serializable (opt-in)
+
+A transaction can ask for **Serializable** — the strongest level, where the end result is always
+equivalent to running the transactions one-at-a-time in *some* order. You choose it (and whether the
+transaction is read-only or read-write) when the transaction begins. Under the hood CamusDB uses two
+different strategies, picked automatically from the mode:
+
+- **Serializable read-only → a consistent snapshot.** The transaction is pinned to a single timestamp
+  at the moment it begins and reads *every* key as of that instant — across statements and across
+  partitions. It sees no write committed after it started: no read skew, no phantoms, fully repeatable.
+  And it does this **without taking any locks**, so it never blocks writers and is never blocked. This
+  is the right tool for consistent reports and multi-statement reads.
+- **Serializable read-write → strict locking.** Reads take the shared point/range locks from §6.2–6.3
+  and hold them to commit; a key the transaction reads can't be changed under it, and a key it writes
+  becomes exclusive. This catches the anomalies Read Committed allows — including **write skew**: if two
+  serializable read-write transactions would conflict, one commits and the other is told to retry.
+
+The trade-off is the usual one: serializable **read-write** transactions can block each other and may
+have to retry, so reserve them for logic that truly needs an invariant. Serializable **read-only**
+transactions stay lock-free, so prefer them for consistency-sensitive reads. And this works the same on
+one node or a whole cluster (§8).
+
+> **Status — honest about the edges.** Serializable is implemented and tested but still being hardened;
+> Read Committed is the safe default. The main known limitation: a held lock has a safety-net expiry, so
+> a serializable **read-write** transaction that stays open longer than that window could lose its
+> protection mid-flight. Keep serializable read-write transactions short, and prefer serializable
+> **read-only** (snapshot) transactions where you can. CamusDB does not (yet) provide the real-time,
+> wall-clock ordering guarantee that systems with specialized clock hardware do — its ordering is
+> logically consistent, not tied to real time.
 
 ---
 
@@ -351,15 +393,16 @@ A map for when you want to read the real thing:
 
 When reasoning about a concurrency question in CamusDB, ask in this order:
 
-1. **Is it a read or a write?** Reads are lock-free MVCC; writes take per-key locks + 2PC.
-2. **Is it a scan or a point lookup?** A point lookup (by id) just reads its key. A scan over a range is
-   what can take a range lock — and only in key-range mode.
-3. **Is key-range routing enabled?** If not (the default), range locks are dormant — only per-key write
-   locks are in play, and the isolation level is ≈ Read Committed. If it is, a scan holds a shared range
-   lock and writes are held back from a locked range, giving phantom-free, serializable range scans
-   (readers still never block readers).
+1. **What isolation level is this transaction?** Read Committed (the default) or Serializable? That
+   decides almost everything below. If nothing opted in, it's Read Committed.
+2. **Is it a read or a write?** Read Committed reads and Serializable read-only reads are lock-free
+   MVCC; Serializable read-write reads take locks; all writes take per-key locks + 2PC.
+3. **Is it a scan or a point lookup?** A point lookup reads one key; a scan over a range is what can
+   take a range (predicate) lock — for Serializable transactions, or for ordinary scans under key-range
+   routing.
 4. **Single partition or many?** Many partitions means writes/locks happen on partition leaders and a
-   transaction may run a 2PC across them.
-5. **What guarantee does the app actually need?** If it needs an invariant under concurrency, lean on
-   unique constraints and explicit transactions; remember the default level is ≈ Read Committed, with
-   stronger range-scan guarantees available under key-range routing.
+   transaction may run a 2PC across them — but the isolation guarantees are the same either way.
+5. **What guarantee does the app actually need?** Need a consistent multi-statement read? Use a
+   Serializable **read-only** transaction (lock-free snapshot). Need a read-then-write invariant? Use a
+   Serializable **read-write** transaction (and keep it short), or enforce it with a unique constraint.
+   Otherwise the Read Committed default is the cheapest and fully concurrent.
