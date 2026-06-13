@@ -130,14 +130,15 @@ public sealed class KvTableStore
     /// not observe concurrent mutations across page boundaries — the default scan path only
     /// guarantees a snapshot, not serializability. The lock is tracked on the transaction and
     /// released automatically on commit/rollback.
+    ///
+    /// In key-range-sharding mode the lock is always acquired (existing behaviour). In hash mode
+    /// (single partition per table) the lock fires only for Serializable read-write transactions
+    /// — the isolation level that requires phantom protection as part of strict two-phase locking.
+    /// Read Committed and Serializable read-only transactions are exempt.
     /// </summary>
     public Task AcquireRowRangeLockAsync(KvTransaction tx, CancellationToken cancellationToken = default)
     {
-        // Range locks for phantom protection are only needed in key-range-sharding mode
-        // (multi-partition). In single-partition (hash) mode MVCC provides snapshot
-        // isolation without additional locks; taking a range lock here would add needless
-        // write-path contention without changing the single-partition guarantees.
-        if (!CamusDBConfig.KeyRangeShardingEnabled)
+        if (!CamusDBConfig.KeyRangeShardingEnabled && !IsSerializableReadWrite(tx))
             return Task.CompletedTask;
         return AcquireRangeLockAsync(tx, rowBucketPrefix, null, true, null, true, cancellationToken);
     }
@@ -146,12 +147,15 @@ public sealed class KvTableStore
     /// Shared-locks an index's entire key range for <paramref name="tx"/> (serializable index
     /// scan / phantom protection over the index bucket). Used for full-index scans where no
     /// tighter bound is known. For bounded range scans use
-    /// <see cref="AcquireBoundedIndexRangeLockAsync"/>. If key-range sharding is disabled or the
-    /// index is not ranged, the call is a no-op.
+    /// <see cref="AcquireBoundedIndexRangeLockAsync"/>.
+    ///
+    /// Fires when key-range sharding is enabled and the index is ranged, or unconditionally for
+    /// Serializable read-write transactions (which need phantom protection regardless of sharding
+    /// mode — in hash mode the lock covers the single partition that owns the index bucket).
     /// </summary>
     public Task AcquireIndexRangeLockAsync(KvTransaction tx, string indexId, CancellationToken cancellationToken = default)
     {
-        if (!CamusDBConfig.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId))
+        if ((!CamusDBConfig.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
             return Task.CompletedTask;
         return AcquireRangeLockAsync(tx, BuildIndexBucketPrefix(indexId), null, true, null, true, cancellationToken);
     }
@@ -164,6 +168,8 @@ public sealed class KvTableStore
     /// <see cref="KeyEncoder"/> to match the stored key format. For non-unique indexes
     /// <see cref="IndexKeySentinel"/> (U+FFFF) is appended so all rowId suffixes of the
     /// last value are included — see the constant's declaration for the invariant this relies on.
+    ///
+    /// Fires under the same conditions as <see cref="AcquireIndexRangeLockAsync"/>.
     /// </summary>
     public Task AcquireBoundedIndexRangeLockAsync(
         KvTransaction tx,
@@ -173,7 +179,7 @@ public sealed class KvTableStore
         bool unique,
         CancellationToken cancellationToken = default)
     {
-        if (!CamusDBConfig.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId))
+        if ((!CamusDBConfig.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
             return Task.CompletedTask;
 
         string bucketPrefix = BuildIndexBucketPrefix(indexId);
@@ -192,26 +198,33 @@ public sealed class KvTableStore
         return AcquireRangeLockAsync(tx, bucketPrefix, startKey, fromInclusive, endKey, toInclusive, cancellationToken);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsSerializableReadWrite(KvTransaction tx)
+        => tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite;
+
     /// <summary>
     /// Core range-lock implementation used by both the whole-bucket and bounded variants.
-    /// Acquires a <b>shared</b> range lock (Kahuna <c>LocateAndTryAcquireRangeLock</c> with
-    /// <see cref="RangeLockMode.Shared"/>), retrying on <c>MustRetry</c>; tracks the acquired
-    /// lock on the transaction for release at commit/rollback.
+    /// Acquires a range lock of the given <paramref name="mode"/> (default <c>Shared</c>),
+    /// retrying on <c>MustRetry</c>; tracks the acquired lock on the transaction for release
+    /// at commit/rollback.
     ///
-    /// Shared is the correct mode for every current caller because all of them are read scans
-    /// (SELECT). Two transactions scanning overlapping ranges then coexist (S∩S), so concurrent
-    /// readers no longer conflict, while Kahuna's write-path fence still rejects any phantom
-    /// insert/update/delete from another transaction into the locked range — giving serializable,
-    /// phantom-free scans without blocking other readers. A future read-for-write range scan
-    /// (e.g. ranged UPDATE/DELETE) that needs writer-vs-writer exclusion would take Exclusive
-    /// instead; add a dedicated entry point for that rather than overloading this one.
+    /// <para><b>Shared</b> — the correct mode for read scans (SELECT). Two transactions scanning
+    /// overlapping ranges coexist (S∩S), while Kahuna's write-path fence rejects phantom mutations
+    /// from other transactions into the locked range.</para>
+    ///
+    /// <para><b>Exclusive</b> — used when a Serializable+RW txn promotes a shared singleton
+    /// lock it already holds on a key it is about to write. Kahuna promotes the existing Shared
+    /// entry to Exclusive in-place if no other transaction holds a conflicting overlapping lock;
+    /// if one does, <c>AlreadyLocked</c> is returned and the caller receives a
+    /// <see cref="CamusDBErrorCodes.TransactionConflict"/> exception.</para>
     /// </summary>
     private async Task AcquireRangeLockAsync(
         KvTransaction tx,
         string bucketPrefix,
         string? startKey, bool startInclusive,
         string? endKey,   bool endInclusive,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        RangeLockMode mode = RangeLockMode.Shared)
     {
         ArgumentNullException.ThrowIfNull(tx);
 
@@ -226,7 +239,7 @@ public sealed class KvTableStore
             () => kahuna.LocateAndTryAcquireRangeLock(
                 tx.TransactionId, bucketPrefix,
                 startKey, startInclusive, endKey, endInclusive,
-                RangeLockExpiresMs, KeyValueDurability.Persistent, RangeLockMode.Shared, cancellationToken),
+                RangeLockExpiresMs, KeyValueDurability.Persistent, mode, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -236,16 +249,68 @@ public sealed class KvTableStore
             return;
         }
 
-        // With shared scan locks two readers no longer conflict; AlreadyLocked now means an
-        // exclusive lock (a writer-intent range lock) overlaps — a genuine serialization conflict.
+        // AlreadyLocked: for Shared, another txn holds an Exclusive range lock (serialization
+        // conflict); for Exclusive, another txn holds a Shared or Exclusive range lock on an
+        // overlapping range (upgrade conflict). Both require the caller to abort the transaction.
         if (type == KeyValueResponseType.AlreadyLocked)
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionConflict,
-                $"Range '{bucketPrefix}' [{startKey ?? "-∞"},{endKey ?? "+∞"}] is exclusively locked by another transaction");
+                $"Range '{bucketPrefix}' [{startKey ?? "-∞"},{endKey ?? "+∞"}] is locked by another transaction (conflict during {mode} acquire)");
 
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
-            $"Failed to acquire shared range lock on '{bucketPrefix}': {type}");
+            $"Failed to acquire {mode} range lock on '{bucketPrefix}': {type}");
+    }
+
+    /// <summary>
+    /// Acquires a shared (S) range lock whose start and end are both the same <paramref name="key"/>,
+    /// effectively locking exactly one point. Used by read paths in Serializable read-write
+    /// transactions to implement strict 2PL: the lock is held until commit/rollback, preventing
+    /// a concurrent writer from committing a mutation to that key while this transaction is live.
+    ///
+    /// Two transactions acquiring shared point locks on the same key coexist (S∩S compatible).
+    /// Conflict is detected at the writer's prepare/commit time via Kahuna's range-lock fence.
+    /// </summary>
+    private Task AcquireSharedPointLockAsync(
+        KvTransaction tx,
+        string bucketPrefix,
+        string key,
+        CancellationToken cancellationToken)
+        => AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, cancellationToken);
+
+    /// <summary>
+    /// Upgrades a shared singleton range lock on <paramref name="key"/> to exclusive in-place.
+    /// Called by write paths in Serializable read-write transactions when the same transaction
+    /// already holds a shared point lock on the key it is about to write.
+    ///
+    /// After the upgrade no other transaction can acquire a new shared or exclusive range lock on
+    /// this key until the upgrading transaction commits or rolls back. Kahuna validates the upgrade
+    /// by checking that no other transaction holds a conflicting overlapping lock; if one does,
+    /// <c>AlreadyLocked</c> is returned and a <see cref="CamusDBErrorCodes.TransactionConflict"/>
+    /// exception is raised.
+    /// </summary>
+    private Task UpgradeToExclusivePointLockAsync(
+        KvTransaction tx,
+        string bucketPrefix,
+        string key,
+        CancellationToken cancellationToken)
+        => AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, cancellationToken, RangeLockMode.Exclusive);
+
+    /// <summary>
+    /// Returns <c>true</c> if <paramref name="tx"/> holds a singleton shared point lock
+    /// <c>[key, key]</c> for the given <paramref name="bucketPrefix"/>. Used by write paths
+    /// to detect the read-then-write pattern and trigger the S→X upgrade.
+    /// </summary>
+    private static bool HasSharedPointLock(KvTransaction tx, string bucketPrefix, string key)
+    {
+        foreach (RangeLockBounds bounds in tx.GetAcquiredRangeLocks())
+        {
+            if (bounds.Prefix == bucketPrefix
+                && bounds.StartKey == key && bounds.StartInclusive
+                && bounds.EndKey   == key && bounds.EndInclusive)
+                return true;
+        }
+        return false;
     }
 
     private static async Task<KeyValueResponseType> RetryOnMustRetry(
@@ -277,10 +342,17 @@ public sealed class KvTableStore
     /// (a Serializable read-only transaction) every read is pinned to that snapshot so the
     /// whole transaction observes one consistent cut through the version history.
     /// All other transaction types pass Zero, leaving Kahuna on the read-committed fast path.
+    ///
+    /// In a Serializable read-write transaction a shared point lock is acquired before the read
+    /// and held until commit, preventing a concurrent writer from committing a modification to
+    /// the same key while this transaction is still live.
     /// </summary>
     public async Task<byte[]?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
     {
         string key = BuildRowKey(rowId);
+
+        if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
+            await AcquireSharedPointLockAsync(tx, rowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetry(
             () => kahuna.LocateAndTryGetValue(tx.TransactionId, key, -1, tx.ReadTimestamp, KeyValueDurability.Persistent, cancellationToken),
@@ -364,6 +436,9 @@ public sealed class KvTableStore
     {
         string key = BuildRowKey(rowId);
 
+        if (IsSerializableReadWrite(tx) && HasSharedPointLock(tx, rowBucketPrefix, key))
+            await UpgradeToExclusivePointLockAsync(tx, rowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
+
         await AcquireLock(tx, key, cancellationToken).ConfigureAwait(false);
 
         (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
@@ -387,6 +462,10 @@ public sealed class KvTableStore
     ///
     /// Passes <see cref="KvTransaction.ReadTimestamp"/> to Kahuna so that a Serializable
     /// read-only transaction observes the same snapshot here as in <see cref="GetRow"/>.
+    ///
+    /// In a Serializable read-write transaction a shared point lock is acquired on the index
+    /// entry before the read and held until commit, preventing a concurrent writer from
+    /// inserting or deleting the same index key while this transaction is live.
     /// </summary>
     public async Task<ObjectIdValue?> LookupUnique(
         KvTransaction tx,
@@ -395,6 +474,9 @@ public sealed class KvTableStore
         CancellationToken cancellationToken = default)
     {
         string kvKey = BuildUniqueIndexKey(indexId, key);
+
+        if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
+            await AcquireSharedPointLockAsync(tx, BuildIndexBucketPrefix(indexId), kvKey, cancellationToken).ConfigureAwait(false);
 
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetry(
             () => kahuna.LocateAndTryGetValue(tx.TransactionId, kvKey, -1, tx.ReadTimestamp, KeyValueDurability.Persistent, cancellationToken),
@@ -543,6 +625,10 @@ public sealed class KvTableStore
 
         byte[] value = Encoding.UTF8.GetBytes(rowId.ToString());
 
+        string indexBucketPrefix = BuildIndexBucketPrefix(indexId);
+        if (IsSerializableReadWrite(tx) && HasSharedPointLock(tx, indexBucketPrefix, kvKey))
+            await UpgradeToExclusivePointLockAsync(tx, indexBucketPrefix, kvKey, cancellationToken).ConfigureAwait(false);
+
         await AcquireLock(tx, kvKey, cancellationToken).ConfigureAwait(false);
 
         KeyValueFlags flags = unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
@@ -573,6 +659,9 @@ public sealed class KvTableStore
                 throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(indexId)}'");
             }
         }
+
+        if (type == KeyValueResponseType.MustRetry)
+            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {kvKey}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
         if (type is not (KeyValueResponseType.Set or KeyValueResponseType.NotSet))
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"PutIndexEntry failed for key {kvKey}: {type}");
@@ -696,6 +785,9 @@ public sealed class KvTableStore
                     continue;
                 }
 
+                if (type == KeyValueResponseType.AlreadyLocked)
+                    throw new CamusDBException(CamusDBErrorCodes.TransactionConflict, $"Key {key} is locked by another transaction");
+
                 throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {type}");
             }
 
@@ -759,7 +851,7 @@ public sealed class KvTableStore
                 return;
 
             if (++retries >= MaxKahunaRetries)
-                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch set failed for {retry.Count} key(s) after {MaxKahunaRetries} retries");
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {retry.Count} key(s); a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             pending = retry;
@@ -822,12 +914,19 @@ public sealed class KvTableStore
             ? BuildUniqueIndexKey(indexId, key)
             : BuildNonUniqueIndexKey(indexId, key, rowId);
 
+        string indexBucketPrefixDel = BuildIndexBucketPrefix(indexId);
+        if (IsSerializableReadWrite(tx) && HasSharedPointLock(tx, indexBucketPrefixDel, kvKey))
+            await UpgradeToExclusivePointLockAsync(tx, indexBucketPrefixDel, kvKey, cancellationToken).ConfigureAwait(false);
+
         await AcquireLock(tx, kvKey, cancellationToken).ConfigureAwait(false);
 
         (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
             () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, kvKey, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
+
+        if (type == KeyValueResponseType.MustRetry)
+            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {kvKey}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
         if (type is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"DeleteIndexEntry failed for key {kvKey}: {type}");
@@ -945,12 +1044,24 @@ public sealed class KvTableStore
     {
         string key = BuildRowKey(rowId);
 
+        // If this Serializable+RW transaction already holds a shared point lock on this key
+        // (acquired during a preceding GetRow), promote it to exclusive so no new readers can
+        // acquire a shared lock on K between now and commit.
+        // AcquireLock is still called after the upgrade: the per-key write intent it sets is what
+        // drives the 2PC commit path; the exclusive range lock drives predicate/reader exclusion.
+        // Two different Kahuna mechanisms, each load-bearing for a different invariant.
+        if (IsSerializableReadWrite(tx) && HasSharedPointLock(tx, rowBucketPrefix, key))
+            await UpgradeToExclusivePointLockAsync(tx, rowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
+
         await AcquireLock(tx, key, cancellationToken).ConfigureAwait(false);
 
         (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
             () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, data, null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
+
+        if (type == KeyValueResponseType.MustRetry)
+            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {key}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
         if (type != KeyValueResponseType.Set)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"WriteRow failed for key {key}: {type}");
@@ -964,6 +1075,9 @@ public sealed class KvTableStore
             () => kahuna.LocateAndTryAcquireExclusiveLock(tx.TransactionId, key, 0, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
+
+        if (lockType == KeyValueResponseType.AlreadyLocked)
+            throw new CamusDBException(CamusDBErrorCodes.TransactionConflict, $"Key {key} is locked by another transaction");
 
         if (lockType != KeyValueResponseType.Locked)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {lockType}");

@@ -29,6 +29,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.Cluster;
 
@@ -45,6 +46,20 @@ namespace CamusDB.Tests.Cluster;
 ///
 /// The single-node and cluster scenarios must produce identical results, confirming
 /// that the MVCC snapshot boundary is determined by the timestamp alone, not by node count.
+///
+/// Coverage notes (not blockers):
+///
+/// K3 safe-time: Kahuna's prepared-but-uncommitted safe-time wait is not directly exercised
+/// here. Every write fully commits before the snapshot is opened; no test races a snapshot read
+/// against a write whose commit timestamp straddles T. Covered by Kahuna's TestSnapshotSafeTime;
+/// a CamusDB-level test would require prepare/commit injection hooks that don't exist today.
+///
+/// Single-data-partition scans: all row data for one table hashes to a single Kahuna partition
+/// ({tableId}:r), so a SELECT * scan touches only one data partition. Cross-partition 2PC is
+/// real (row data and PK-index entries live on different partitions) and directly asserted in
+/// SingleNode_SnapshotIndexAndRowAreAtomicallyConsistent, but a scan that fans out across
+/// multiple data partitions would require either a two-table join or a key-range-sharded table
+/// (where rows are distributed by key value). Optional hardening for a future test.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -471,5 +486,101 @@ public sealed class TestSnapshotReadCluster
             $"Cluster snapshot must expose exactly {preCnt} pre-snapshot rows");
         Assert.AreEqual(singleVisible, clusterVisible,
             "Single-node and cluster must report identical visible row counts for the same pre/post split");
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. Cross-partition atomicity: index and row are consistent through snapshot
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Directly asserts that the index entry and the row data are atomically
+    /// visible or invisible through a snapshot. Each INSERT in a 3-partition node
+    /// is a cross-partition 2PC: the row key ({tableId}:r/…) and the PK-index key
+    /// ({tableId}:i:~pk/…) hash to different partitions. If a half-applied write
+    /// leaked through, the index lookup and the GetRow call would disagree.
+    ///
+    /// For a pre-snapshot row:
+    ///   LookupUnique(snapshot) → non-null rowId  AND  GetRow(snapshot, rowId) → non-null bytes
+    /// For a post-snapshot row (rowId obtained via a regular read before assertion):
+    ///   LookupUnique(snapshot) → null            AND  GetRow(snapshot, rowId) → null
+    /// </summary>
+    [Test]
+    public async Task SingleNode_SnapshotIndexAndRowAreAtomicallyConsistent()
+    {
+        (EmbeddedKahuna node, string dbname, CommandExecutor executor, DatabaseDescriptor database) =
+            await CreateSingleNodeSetupAsync();
+
+        await using EmbeddedKahuna _ = node;
+
+        // Insert 3 rows before snapshot, capture their ids.
+        await InsertRowsAsync(database, executor, dbname, 3, "before");
+
+        KvTransaction collectBefore = await database.Transactions.BeginAsync();
+        List<QueryResultRow> beforeRows = await RunSelectAsync(executor, dbname, collectBefore);
+        await database.Transactions.CommitAsync(collectBefore);
+        string beforeIdStr = beforeRows.First(r => r.Row["label"].StrValue!.StartsWith("before")).Row["id"].StrValue!;
+
+        // Open snapshot.
+        KvTransaction snapshot = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
+
+        // Insert 2 rows after snapshot.
+        await InsertRowsAsync(database, executor, dbname, 2, "after");
+
+        // Collect the after-row id via a regular (non-snapshot) read.
+        KvTransaction collectAfter = await database.Transactions.BeginAsync();
+        List<QueryResultRow> allRows = await RunSelectAsync(executor, dbname, collectAfter);
+        await database.Transactions.CommitAsync(collectAfter);
+        string afterIdStr = allRows.First(r => r.Row["label"].StrValue!.StartsWith("after")).Row["id"].StrValue!;
+
+        // Open the table descriptor to access the PK index store directly.
+        // The index name "~pk" is the KV key-space prefix — in-memory TableDescriptor.Indexes
+        // entries intentionally have Id=null; callers always use the name.
+        TableDescriptor table = await executor.OpenTable(new OpenTableTicket(dbname, "things"));
+        const string pkIndexName = "~pk";
+
+        // Obtain the after-row's physical rowId via a non-snapshot lookup so we can
+        // pass it to GetRow independently of the index.
+        KvTransaction lookupTx = await database.Transactions.BeginAsync();
+        ObjectIdValue? afterRowIdNullable = await table.Store.LookupUnique(
+            lookupTx,
+            pkIndexName,
+            new CompositeColumnValue(new ColumnValue(ColumnType.Id, afterIdStr)));
+        await database.Transactions.CommitAsync(lookupTx);
+
+        Assert.IsNotNull(afterRowIdNullable,
+            "After row must be findable via a regular non-snapshot lookup (sanity check)");
+
+        ObjectIdValue afterRowId = afterRowIdNullable!.Value;
+
+        // --- Assert through the snapshot ---
+
+        // Pre-snapshot row: index entry visible → row data visible.
+        ObjectIdValue? snapBeforeIndexResult = await table.Store.LookupUnique(
+            snapshot,
+            pkIndexName,
+            new CompositeColumnValue(new ColumnValue(ColumnType.Id, beforeIdStr)));
+
+        Assert.IsNotNull(snapBeforeIndexResult,
+            "Pre-snapshot row's PK-index entry must be visible through the snapshot");
+
+        byte[]? snapBeforeRowBytes = await table.Store.GetRow(snapshot, snapBeforeIndexResult!.Value);
+
+        Assert.IsNotNull(snapBeforeRowBytes,
+            "Pre-snapshot row data must be visible through the snapshot when the index entry is visible");
+
+        // Post-snapshot row: index entry invisible → row data invisible even when rowId is known.
+        ObjectIdValue? snapAfterIndexResult = await table.Store.LookupUnique(
+            snapshot,
+            pkIndexName,
+            new CompositeColumnValue(new ColumnValue(ColumnType.Id, afterIdStr)));
+
+        Assert.IsNull(snapAfterIndexResult,
+            "Post-snapshot row's PK-index entry must be invisible through the snapshot");
+
+        byte[]? snapAfterRowBytes = await table.Store.GetRow(snapshot, afterRowId);
+
+        Assert.IsNull(snapAfterRowBytes,
+            "Post-snapshot row data must be invisible through the snapshot even when the physical rowId is known externally");
     }
 }
