@@ -71,11 +71,46 @@ public sealed class KvTransaction
     /// </summary>
     public bool IsReadOnly { get; }
 
-    public KvTransaction(HLCTimestamp transactionId, string uniqueId, bool isReadOnly = false)
+    /// <summary>
+    /// Isolation level requested when this transaction was begun.
+    /// Default is <see cref="CamusIsolationLevel.ReadCommitted"/> — behaviour is identical to the
+    /// long-standing code path. <see cref="CamusIsolationLevel.Serializable"/> is carried as metadata
+    /// only and does not yet change locking or snapshot-read behaviour.
+    /// </summary>
+    public CamusIsolationLevel IsolationLevel { get; }
+
+    /// <summary>
+    /// Mode (read-write or read-only) requested when this transaction was begun.
+    /// Default is <see cref="CamusTransactionMode.ReadWrite"/>. Carried as metadata only and does
+    /// not yet change read behaviour.
+    /// </summary>
+    public CamusTransactionMode TransactionMode { get; }
+
+    /// <summary>
+    /// Server-minted HLC timestamp that defines the MVCC snapshot for a
+    /// <see cref="CamusIsolationLevel.Serializable"/> + <see cref="CamusTransactionMode.ReadOnly"/>
+    /// transaction. Every read in the transaction uses this single <c>T</c> so the whole transaction
+    /// observes one consistent point in the version history.
+    ///
+    /// <para><see cref="HLCTimestamp.Zero"/> on all other transaction types — the default
+    /// (Read Committed) path is unchanged.</para>
+    /// </summary>
+    public HLCTimestamp ReadTimestamp { get; }
+
+    public KvTransaction(
+        HLCTimestamp transactionId,
+        string uniqueId,
+        bool isReadOnly = false,
+        CamusIsolationLevel isolationLevel = CamusIsolationLevel.ReadCommitted,
+        CamusTransactionMode transactionMode = CamusTransactionMode.ReadWrite,
+        HLCTimestamp readTimestamp = default)
     {
         TransactionId = transactionId;
         UniqueId = uniqueId;
         IsReadOnly = isReadOnly;
+        IsolationLevel = isolationLevel;
+        TransactionMode = transactionMode;
+        ReadTimestamp = readTimestamp;
     }
 
     /// <summary>
@@ -83,7 +118,8 @@ public sealed class KvTransaction
     /// performs non-transactional reads of the latest committed value — no Kahuna round-trips.
     /// </summary>
     public static KvTransaction CreateReadOnly() =>
-        new(HLCTimestamp.Zero, string.Empty, isReadOnly: true);
+        new(HLCTimestamp.Zero, string.Empty, isReadOnly: true,
+            transactionMode: CamusTransactionMode.ReadOnly);
 
     /// <summary>
     /// Records that an exclusive lock was acquired on <paramref name="key"/>.

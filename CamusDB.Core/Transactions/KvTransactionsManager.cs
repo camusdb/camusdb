@@ -91,9 +91,34 @@ public sealed class KvTransactionsManager
     /// <summary>
     /// Starts a new Kahuna transaction and returns a <see cref="KvTransaction"/> that
     /// carries the timestamp and accumulates keys for the 2PC commit.
+    ///
+    /// <para><b>Special case — Serializable + ReadOnly:</b> picks one server HLC read timestamp
+    /// <c>T</c> for the whole transaction and stores it in
+    /// <see cref="KvTransaction.ReadTimestamp"/>. The Kahuna transaction minted to obtain <c>T</c>
+    /// is immediately rolled back so no server-side transaction state persists — the RO serializable
+    /// tx is stateless on the Kahuna side (no commit/rollback needed at end) and every read is issued
+    /// as-of <c>T</c>. <see cref="KvTransaction.TransactionId"/> is
+    /// <see cref="HLCTimestamp.Zero"/>, identical to the Read Committed fast path, so
+    /// commit/rollback remain no-ops.</para>
+    ///
+    /// <para><b>All other combinations:</b> <paramref name="isolationLevel"/> and
+    /// <paramref name="transactionMode"/> are carried as metadata only, with no change to the
+    /// underlying Kahuna transaction. Selection precedence: explicit argument →
+    /// <see cref="CamusDBConfig.DefaultIsolationLevel"/> → <see cref="CamusIsolationLevel.ReadCommitted"/>.</para>
     /// </summary>
-    public async Task<KvTransaction> BeginAsync(CancellationToken cancellationToken = default)
+    public async Task<KvTransaction> BeginAsync(
+        CamusIsolationLevel? isolationLevel = null,
+        CamusTransactionMode? transactionMode = null,
+        CancellationToken cancellationToken = default)
     {
+        CamusIsolationLevel level = isolationLevel ?? CamusDBConfig.DefaultIsolationLevel;
+        CamusTransactionMode mode = transactionMode ?? CamusTransactionMode.ReadWrite;
+
+        // Serializable + ReadOnly: mint a server HLC timestamp T and return a stateless
+        // zero-identity transaction that carries T as its read snapshot.
+        if (level == CamusIsolationLevel.Serializable && mode == CamusTransactionMode.ReadOnly)
+            return await BeginSerializableReadOnlyAsync(cancellationToken).ConfigureAwait(false);
+
         string uniqueId = Guid.NewGuid().ToString("N");
 
         (KeyValueResponseType type, Kommander.Time.HLCTimestamp txId) =
@@ -112,9 +137,59 @@ public sealed class KvTransactionsManager
                 $"Failed to start Kahuna transaction: {type}"
             );
 
-        KvTransaction tx = new KvTransaction(txId, uniqueId);
+        KvTransaction tx = new(txId, uniqueId, isReadOnly: false, level, mode);
         Track(tx);
         return tx;
+    }
+
+    /// <summary>
+    /// Mints one server HLC timestamp <c>T</c> by starting and immediately rolling back a Kahuna
+    /// transaction, then returns a zero-identity read-only transaction carrying <c>T</c> as its
+    /// snapshot read timestamp. No server-side transaction state persists after this method returns —
+    /// commit and rollback are no-ops on the returned transaction.
+    /// </summary>
+    private async Task<KvTransaction> BeginSerializableReadOnlyAsync(CancellationToken cancellationToken)
+    {
+        string uniqueId = Guid.NewGuid().ToString("N");
+
+        (KeyValueResponseType type, Kommander.Time.HLCTimestamp t) =
+            await kahuna.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    UniqueId = uniqueId,
+                    Locking  = KeyValueTransactionLocking.Pessimistic
+                },
+                cancellationToken
+            ).ConfigureAwait(false);
+
+        if (type != KeyValueResponseType.Set)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionAlreadyCompleted,
+                $"Failed to mint read-timestamp for serializable RO transaction: {type}"
+            );
+
+        // Immediately discard the server-side transaction state; we only needed the HLC timestamp.
+        // Best-effort: the timestamp is already in hand, and the minting transaction wrote nothing and
+        // expires on its own, so a failed rollback must not fail the read-only begin.
+        try
+        {
+            await kahuna.LocateAndRollbackTransaction(
+                uniqueId, t, [], [], cancellationToken
+            ).ConfigureAwait(false);
+        }
+        catch
+        {
+            // ignored — the empty minting transaction will expire server-side
+        }
+
+        return new KvTransaction(
+            transactionId:  Kommander.Time.HLCTimestamp.Zero,
+            uniqueId:       string.Empty,
+            isReadOnly:     true,
+            isolationLevel: CamusIsolationLevel.Serializable,
+            transactionMode: CamusTransactionMode.ReadOnly,
+            readTimestamp:  t
+        );
     }
 
     /// <summary>
@@ -165,7 +240,8 @@ public sealed class KvTransactionsManager
                 $"Failed to start read-only transaction: {type}"
             );
 
-        KvTransaction tx = new(txId, uniqueId, isReadOnly: true);
+        KvTransaction tx = new(txId, uniqueId, isReadOnly: true,
+            transactionMode: CamusTransactionMode.ReadOnly);
         Track(tx);
         return tx;
     }

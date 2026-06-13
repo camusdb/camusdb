@@ -46,6 +46,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | begin_stmt { $$.n = $1.n; }
         | commit_stmt { $$.n = $1.n; }
         | rollback_stmt { $$.n = $1.n; }
+        | set_transaction_stmt { $$.n = $1.n; }
         ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
@@ -136,8 +137,67 @@ begin_stmt : TBEGIN { $$.n = new(NodeType.Begin, null, null, null, null, null, n
 commit_stmt : TCOMMIT { $$.n = new(NodeType.Commit, null, null, null, null, null, null, null, null); }             
             ;
 
-rollback_stmt : TROLLBACK { $$.n = new(NodeType.Rollback, null, null, null, null, null, null, null, null); }             
+rollback_stmt : TROLLBACK { $$.n = new(NodeType.Rollback, null, null, null, null, null, null, null, null); }
               ;
+
+/* SET TRANSACTION ISOLATION LEVEL SERIALIZABLE [READ ONLY | READ WRITE]
+ *
+ * Layout of the resulting NodeAst:
+ *   yytext   = isolation level string ("Serializable" or "ReadCommitted")
+ *   leftAst  = NodeType.String whose yytext is the mode ("ReadOnly" or "ReadWrite")
+ *
+ * The 5-identifier form covers:
+ *     SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+ * The 7-identifier form covers:
+ *     SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY
+ *     SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ WRITE
+ *
+ * gppg resolves the shift/reduce conflict between the two productions by preferring shift,
+ * so the 5-identifier rule fires only when the 6th token is NOT an identifier (i.e. end of
+ * statement), and the 7-identifier rule fires when it is.
+ */
+set_transaction_stmt
+    : TSET TTRANSACTION TIDENTIFIER TIDENTIFIER TIDENTIFIER
+      {
+          if (!string.Equals($3.s, "isolation", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($4.s, "level", StringComparison.OrdinalIgnoreCase))
+              throw new CamusDBException(
+                  CamusDBErrorCodes.InvalidInput,
+                  "Expected: SET TRANSACTION ISOLATION LEVEL {SERIALIZABLE}");
+          string level = $5.s.ToUpperInvariant() switch {
+              "SERIALIZABLE"   => "Serializable",
+              _ => throw new CamusDBException(
+                      CamusDBErrorCodes.InvalidInput,
+                      "Unknown isolation level '" + $5.s + "'. Expected: SERIALIZABLE")
+          };
+          $$.n = new(NodeType.SetTransaction,
+                     new(NodeType.String, null, null, null, null, null, null, null, "ReadWrite"),
+                     null, null, null, null, null, null, level);
+      }
+    | TSET TTRANSACTION TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER
+      {
+          if (!string.Equals($3.s, "isolation", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($4.s, "level", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($5.s, "serializable", StringComparison.OrdinalIgnoreCase))
+              throw new CamusDBException(
+                  CamusDBErrorCodes.InvalidInput,
+                  "Expected: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ {ONLY|WRITE}");
+          if (!string.Equals($6.s, "read", StringComparison.OrdinalIgnoreCase))
+              throw new CamusDBException(
+                  CamusDBErrorCodes.InvalidInput,
+                  "Expected READ ONLY or READ WRITE after isolation level");
+          string mode = $7.s.ToUpperInvariant() switch {
+              "ONLY"  => "ReadOnly",
+              "WRITE" => "ReadWrite",
+              _ => throw new CamusDBException(
+                      CamusDBErrorCodes.InvalidInput,
+                      "Expected ONLY or WRITE after READ, got '" + $7.s + "'")
+          };
+          $$.n = new(NodeType.SetTransaction,
+                     new(NodeType.String, null, null, null, null, null, null, null, mode),
+                     null, null, null, null, null, null, "Serializable");
+      }
+    ;
 
 create_table_stmt : TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, null, null, null, null, null); }
                   | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, null, null, null, null, null, null); }

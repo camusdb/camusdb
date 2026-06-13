@@ -399,7 +399,7 @@ internal sealed class TestPersistentIndexSchema : BaseTest
         KvTransaction scanTx = await database.Transactions.BeginAsync();
         int entries = 0;
         await foreach (var _ in table.Store.ScanIndex(
-            scanTx.TransactionId, indexInfo.IndexName, [ColumnType.String], from: null, to: null, unique: true))
+            scanTx, indexInfo.IndexName, [ColumnType.String], from: null, to: null, unique: true))
         {
             entries++;
         }

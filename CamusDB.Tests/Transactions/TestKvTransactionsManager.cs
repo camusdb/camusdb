@@ -34,7 +34,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.Transactions;
 
 /// <summary>
-/// T3.1 + T3.2 — KvTransaction status + KvTransactionsManager.
+/// KvTransaction status + KvTransactionsManager.
 ///
 /// Tests verify:
 ///   - Begin creates an active KvTransaction.
@@ -129,7 +129,7 @@ public sealed class TestKvTransactionsManager
         await store.InsertRow(tx, rowId, data);
         await mgr.CommitAsync(tx);
 
-        byte[]? got = await store.GetRow(Kommander.Time.HLCTimestamp.Zero, rowId);
+        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNotNull(got);
         Assert.AreEqual(data, got);
     }
@@ -148,7 +148,7 @@ public sealed class TestKvTransactionsManager
         await store.InsertRow(tx, rowId, data);
         await mgr.RollbackAsync(tx);
 
-        byte[]? got = await store.GetRow(Kommander.Time.HLCTimestamp.Zero, rowId);
+        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNull(got, "Rolled-back data must not be visible");
     }
 
@@ -239,8 +239,8 @@ public sealed class TestKvTransactionsManager
         await mgr.CommitAsync(tx1);
         await mgr.RollbackAsync(tx2);
 
-        byte[]? got1 = await store.GetRow(Kommander.Time.HLCTimestamp.Zero, id1);
-        byte[]? got2 = await store.GetRow(Kommander.Time.HLCTimestamp.Zero, id2);
+        byte[]? got1 = await store.GetRow(KvTransaction.CreateReadOnly(), id1);
+        byte[]? got2 = await store.GetRow(KvTransaction.CreateReadOnly(), id2);
 
         Assert.IsNotNull(got1, "Committed row must be visible");
         Assert.IsNull(got2, "Rolled-back row must not be visible");
@@ -268,7 +268,7 @@ public sealed class TestKvTransactionsManager
         }
 
         Assert.AreEqual(KvTransactionStatus.RolledBack, tx.Status);
-        byte[]? got = await store.GetRow(Kommander.Time.HLCTimestamp.Zero, rowId);
+        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNull(got, "Row written in rolled-back transaction must not be visible");
     }
 
@@ -290,11 +290,11 @@ public sealed class TestKvTransactionsManager
 
         Assert.AreEqual(KvTransactionStatus.RolledBack, tx1.Status);
         Assert.AreEqual(KvTransactionStatus.RolledBack, tx2.Status);
-        byte[]? got = await store.GetRow(Kommander.Time.HLCTimestamp.Zero, rowId);
+        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNull(got, "Rows from rolled-back transactions must not be visible");
     }
 
-    // H6 §3.5 — error-code contract: once a transaction is committed, a second commit attempt
+    // error-code contract: once a transaction is committed, a second commit attempt
     // must throw CADB0501 (TransactionAlreadyCompleted, permanent), NOT the retryable
     // CADB0504 (TransactionMustRetry). The distinction lets callers decide:
     //   CADB0504 = routing failure → retry the whole operation from BeginAsync
@@ -317,7 +317,7 @@ public sealed class TestKvTransactionsManager
             "CADB0504 is reserved for transient routing failures; double-commit is permanent");
     }
 
-    // H6 §3.5 — error-code contract: a rolled-back transaction cannot be committed;
+    // error-code contract: a rolled-back transaction cannot be committed;
     // the error must be CADB0501 (permanent), never CADB0504 (retryable).
     [Test]
     public async Task CommitAsync_ThrowsTransactionAlreadyCompleted_NotMustRetry_AfterRollback()
@@ -336,7 +336,7 @@ public sealed class TestKvTransactionsManager
         Assert.AreNotEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code);
     }
 
-    // H6 §3.5 — commit MustRetry fault injection: when LocateAndCommitTransaction returns
+    // commit MustRetry fault injection: when LocateAndCommitTransaction returns
     // MustRetry fewer times than MaxCommitRetries (5), CommitAsync internally retries and
     // ultimately succeeds. The written row must be visible and the tx is Committed.
     [Test]
@@ -363,12 +363,12 @@ public sealed class TestKvTransactionsManager
         Assert.AreEqual(KvTransactionStatus.Committed, tx.Status,
             "CommitAsync must succeed after retrying through transient MustRetry responses");
 
-        byte[]? got = await store.GetRow(HLCTimestamp.Zero, rowId);
+        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNotNull(got, "Row written in a successfully committed tx must be visible");
         Assert.AreEqual(data, got);
     }
 
-    // H6 §3.5 — commit MustRetry fault injection: when LocateAndCommitTransaction returns
+    // commit MustRetry fault injection: when LocateAndCommitTransaction returns
     // MustRetry more times than MaxCommitRetries (5), CommitAsync exhausts all retries and
     // throws CADB0504 (TransactionMustRetry), never CADB0501 (TransactionAlreadyCompleted).
     [Test]
@@ -460,8 +460,8 @@ public sealed class TestKvTransactionsManager
         public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
             => inner.LocateAndTryCheckWriteIntent(transactionId, key, durability, cancellationToken);
 
-        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
-            => inner.LocateAndTryGetValue(transactionId, key, revision, durability, cancellationToken);
+        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
 
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
             => inner.LocateAndTryGetManyValues(transactionId, keys, cancellationToken);
@@ -481,8 +481,8 @@ public sealed class TestKvTransactionsManager
         public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
             => inner.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
 
-        public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int pageSize, KeyValueDurability durability, CancellationToken ct)
-            => inner.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, durability, ct);
+        public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct)
+            => inner.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct);
 
         public Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, long routedGeneration = 0)
             => inner.TrySetKeyValue(transactionId, key, value, compareValue, compareRevision, flags, expiresMs, durability, routedGeneration);
@@ -496,8 +496,8 @@ public sealed class TestKvTransactionsManager
         public Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items)
             => inner.DeleteManyNodeKeyValue(items);
 
-        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability)
-            => inner.TryGetValue(transactionId, key, revision, durability);
+        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability)
+            => inner.TryGetValue(transactionId, key, revision, readTimestamp, durability);
 
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys)
             => inner.TryGetManyValues(transactionId, keys);

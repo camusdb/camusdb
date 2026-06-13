@@ -305,7 +305,7 @@ public sealed class RowUpdater
         ObjectIdValue rowId
     )
     {
-        byte[]? data = await table.Store.GetRow(tx.TransactionId, rowId).ConfigureAwait(false);
+        byte[]? data = await table.Store.GetRow(tx, rowId).ConfigureAwait(false);
         if (data is null || data.Length == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before update");
 

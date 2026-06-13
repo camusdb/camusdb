@@ -262,7 +262,7 @@ internal sealed class QueryExecutor
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
-        ObjectIdValue? rowId = await table.Store.LookupUnique(txId, index.Name, lookupKey).ConfigureAwait(false);
+        ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.Name, lookupKey).ConfigureAwait(false);
 
         if (scanStats is not null)
             scanStats.KvPointLookups++;
@@ -270,7 +270,7 @@ internal sealed class QueryExecutor
         if (rowId is null)
             yield break;
 
-        byte[]? data = await table.Store.GetRow(txId, rowId.Value).ConfigureAwait(false);
+        byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
         if (data is null || data.Length == 0)
             yield break;
 
@@ -320,15 +320,16 @@ internal sealed class QueryExecutor
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
-        // R1/C2: phantom-protection lock scoped to the actual scan range instead of the whole
-        // bucket. Two transactions scanning disjoint sub-ranges of the same index don't conflict.
+        // Acquire a shared range lock scoped to [fromBound, toBound] rather than the whole index
+        // bucket. This blocks phantom inserts into the locked sub-range while allowing concurrent
+        // transactions that scan disjoint sub-ranges of the same index to proceed without conflict.
         await table.Store.AcquireBoundedIndexRangeLockAsync(
             ticket.TxnState, index.Name,
             fromBound, fromInclusive, toBound, toInclusive,
             unique).ConfigureAwait(false);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
-            txId,
+            ticket.TxnState,
             index.Name,
             keyTypes,
             fromBound,
@@ -341,7 +342,7 @@ internal sealed class QueryExecutor
             if (scanStats is not null)
                 scanStats.KvScanEntries++;
 
-            byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
+            byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId).ConfigureAwait(false);
             if (data is null || data.Length == 0)
                 continue;
 
@@ -383,9 +384,10 @@ internal sealed class QueryExecutor
         HashSet<ObjectIdValue> seen = new();
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
-        // R1/C2: for a non-unique InList scan acquire a BOUNDED range lock covering [min,max] of
-        // the IN values — tighter than the whole bucket, allows concurrent scans on disjoint ranges.
-        // Unique in-list uses point lookups only (LookupUnique) so no range lock is needed.
+        // For a non-unique IN-list scan, acquire a shared range lock covering [min, max] of the IN
+        // values rather than the whole index bucket. This blocks phantom inserts into that sub-range
+        // while allowing concurrent scans on disjoint parts of the index to proceed.
+        // Unique IN-list uses per-key point lookups (LookupUnique), so no range lock is needed.
         if (!isUnique)
         {
             CompositeColumnValue? minVal = null, maxVal = null;
@@ -407,7 +409,7 @@ internal sealed class QueryExecutor
 
             if (isUnique)
             {
-                ObjectIdValue? rowId = await table.Store.LookupUnique(txId, index.Name, lookupKey).ConfigureAwait(false);
+                ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.Name, lookupKey).ConfigureAwait(false);
 
                 if (scanStats is not null)
                     scanStats.KvPointLookups++;
@@ -415,7 +417,7 @@ internal sealed class QueryExecutor
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
 
-                byte[]? data = await table.Store.GetRow(txId, rowId.Value).ConfigureAwait(false);
+                byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
                 if (data is null || data.Length == 0)
                     continue;
 
@@ -436,13 +438,13 @@ internal sealed class QueryExecutor
                 // String/Id: no total successor — use exact-match [v, v] inclusive instead.
                 // ScanIndex appends a high sentinel ("￿") to endKey for non-unique, so
                 // all "{encodedKey}{rowIdHex}" entries for key==v are captured by the raw scan,
-                // and the decoded-key bounds filter trims to exactly key==v (R15b).
+                // and the decoded-key bounds filter trims to exactly key==v.
                 CompositeColumnValue? upperBound = BuildPrefixScanUpperBound(table, index, lookupKey);
                 CompositeColumnValue toBound = upperBound ?? lookupKey;
                 bool toInclusive = upperBound is null; // inclusive only for exact-match (no successor)
 
                 await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
-                    txId, index.Name, keyTypes,
+                    ticket.TxnState, index.Name, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
                     maxRows: null).ConfigureAwait(false))
@@ -453,7 +455,7 @@ internal sealed class QueryExecutor
                     if (!seen.Add(rowId))
                         continue;
 
-                    byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
+                    byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId).ConfigureAwait(false);
                     if (data is null || data.Length == 0)
                         continue;
 
@@ -488,11 +490,11 @@ internal sealed class QueryExecutor
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        ObjectIdValue? rowId = await table.Store.LookupUnique(txId, index.Name, new CompositeColumnValue(new[] { columnId })).ConfigureAwait(false);
+        ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.Name, new CompositeColumnValue(new[] { columnId })).ConfigureAwait(false);
         if (rowId is null)
             yield break;
 
-        byte[]? data = await table.Store.GetRow(txId, rowId.Value).ConfigureAwait(false);
+        byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
         if (data is null || data.Length == 0)
             yield break;
 

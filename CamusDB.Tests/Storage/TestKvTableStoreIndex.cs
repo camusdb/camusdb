@@ -30,7 +30,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.Storage;
 
 /// <summary>
-/// T2.3 — KvTableStore secondary index operations:
+/// KvTableStore secondary index operations:
 ///   LookupUnique, ScanIndex, PutIndexEntry, DeleteIndexEntry.
 /// </summary>
 [TestFixture]
@@ -84,7 +84,7 @@ public sealed class TestKvTableStoreIndex
         await using EmbeddedKahuna __ = node;
 
         CompositeColumnValue key = CV(new ColumnValue(ColumnType.Integer64, 42L));
-        ObjectIdValue? rowId = await store.LookupUnique(HLCTimestamp.Zero, "idx_age", key);
+        ObjectIdValue? rowId = await store.LookupUnique(KvTransaction.CreateReadOnly(), "idx_age", key);
 
         Assert.IsNull(rowId);
     }
@@ -102,7 +102,7 @@ public sealed class TestKvTableStoreIndex
         await store.PutIndexEntry(tx, "idx_age", key, rowId, unique: true);
         await CommitTransaction(node.Kahuna, tx);
 
-        ObjectIdValue? found = await store.LookupUnique(HLCTimestamp.Zero, "idx_age", key);
+        ObjectIdValue? found = await store.LookupUnique(KvTransaction.CreateReadOnly(), "idx_age", key);
 
         Assert.IsNotNull(found);
         Assert.AreEqual(rowId.ToString(), found!.Value.ToString());
@@ -146,7 +146,7 @@ public sealed class TestKvTableStoreIndex
         await store.DeleteIndexEntry(tx2, "idx_x", key, rowId, unique: true);
         await CommitTransaction(node.Kahuna, tx2);
 
-        ObjectIdValue? found = await store.LookupUnique(HLCTimestamp.Zero, "idx_x", key);
+        ObjectIdValue? found = await store.LookupUnique(KvTransaction.CreateReadOnly(), "idx_x", key);
         Assert.IsNull(found);
     }
 
@@ -175,7 +175,7 @@ public sealed class TestKvTableStoreIndex
 
         List<(CompositeColumnValue key, ObjectIdValue rowId)> scanned = [];
         await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in
-            store.ScanIndex(HLCTimestamp.Zero, "idx_age", keyTypes, null, null, unique: true))
+            store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, null, unique: true))
         {
             scanned.Add((key, rowId));
         }
@@ -212,7 +212,7 @@ public sealed class TestKvTableStoreIndex
 
         List<(CompositeColumnValue key, ObjectIdValue rowId)> scanned = [];
         await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in
-            store.ScanIndex(HLCTimestamp.Zero, "idx_cat", keyTypes, null, null, unique: false))
+            store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_cat", keyTypes, null, null, unique: false))
         {
             scanned.Add((key, rowId));
         }
@@ -244,7 +244,7 @@ public sealed class TestKvTableStoreIndex
 
         List<long> scannedAges = [];
         await foreach ((CompositeColumnValue key, ObjectIdValue _) in
-            store.ScanIndex(HLCTimestamp.Zero, "idx_age", keyTypes, from, null, unique: true))
+            store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, from, null, unique: true))
         {
             scannedAges.Add(key.Values[0].LongValue);
         }
@@ -272,7 +272,7 @@ public sealed class TestKvTableStoreIndex
 
         List<long> scannedAges = [];
         await foreach ((CompositeColumnValue key, ObjectIdValue _) in
-            store.ScanIndex(HLCTimestamp.Zero, "idx_age", keyTypes, null, to, unique: true))
+            store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, to, unique: true))
         {
             scannedAges.Add(key.Values[0].LongValue);
         }
@@ -301,7 +301,7 @@ public sealed class TestKvTableStoreIndex
 
         List<long> scannedAges = [];
         await foreach ((CompositeColumnValue key, ObjectIdValue _) in
-            store.ScanIndex(HLCTimestamp.Zero, "idx_age", keyTypes, from, to, unique: true))
+            store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, from, to, unique: true))
         {
             scannedAges.Add(key.Values[0].LongValue);
         }
@@ -319,7 +319,7 @@ public sealed class TestKvTableStoreIndex
 
         List<(CompositeColumnValue, ObjectIdValue)> scanned = [];
         await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in
-            store.ScanIndex(HLCTimestamp.Zero, "idx_age", keyTypes, null, null, unique: true))
+            store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, null, unique: true))
         {
             scanned.Add((key, rowId));
         }
@@ -345,7 +345,7 @@ public sealed class TestKvTableStoreIndex
 
         List<long> scannedAges = [];
         await foreach ((CompositeColumnValue key, ObjectIdValue _) in
-            store.ScanIndex(HLCTimestamp.Zero, "idx_age", keyTypes, null, null, unique: true, maxRows: 2))
+            store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, null, unique: true, maxRows: 2))
         {
             scannedAges.Add(key.Values[0].LongValue);
         }
@@ -372,7 +372,7 @@ public sealed class TestKvTableStoreIndex
 
         List<ObjectIdValue> scannedIds = [];
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in
-            store.ScanIndex(HLCTimestamp.Zero, "idx_age", keyTypes, null, null, unique: false))
+            store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, null, unique: false))
         {
             scannedIds.Add(rowId);
         }
@@ -408,7 +408,7 @@ public sealed class TestKvTableStoreIndex
 
         List<ObjectIdValue> remaining = [];
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in
-            store.ScanIndex(HLCTimestamp.Zero, "idx_age", keyTypes, null, null, unique: false))
+            store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, null, unique: false))
         {
             remaining.Add(rowId);
         }
@@ -443,7 +443,7 @@ public sealed class TestKvTableStoreIndex
 
         List<(CompositeColumnValue key, ObjectIdValue rowId)> scanned = [];
         await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in
-            store.ScanIndex(HLCTimestamp.Zero, "idx_name_age", keyTypes, null, null, unique: true))
+            store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_name_age", keyTypes, null, null, unique: true))
         {
             scanned.Add((key, rowId));
         }
@@ -494,7 +494,7 @@ public sealed class TestKvTableStoreIndex
 
         List<(CompositeColumnValue key, ObjectIdValue rowId)> scanned = [];
         await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in
-            store.ScanIndex(tx2.TransactionId, "idx_cat", keyTypes, null, null, unique: false))
+            store.ScanIndex(tx2, "idx_cat", keyTypes, null, null, unique: false))
         {
             scanned.Add((key, rowId));
         }
@@ -507,7 +507,7 @@ public sealed class TestKvTableStoreIndex
             Assert.IsTrue(ids.Contains(rowId.ToString()), $"Unexpected rowId {rowId}");
     }
 
-    // ---- range lock tests (C3) -------------------------------------------
+    // ---- range lock tests -------------------------------------------------
 
     // Scan range locks are SHARED: two concurrent read scans over the same index range coexist
     // (S∩S) rather than conflicting — the serializable, phantom-free guarantee comes from the
@@ -549,10 +549,10 @@ public sealed class TestKvTableStoreIndex
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
 
-    // ---- IsIndexRangeable gate tests (C3) ------------------------------------
+    // ---- IsIndexRangeable gate tests -----------------------------------------
 
-    // The per-type gate classifies which indexes may be key-range routed. After C3b (order-safe
-    // ASCII-hex String encoding in KeyEncoder) every column type is rangeable; the only remaining
+    // The per-type gate classifies which indexes may be key-range routed. With the order-safe
+    // ASCII-hex String encoding in KeyEncoder, every column type is rangeable; the only remaining
     // disqualifier is missing/unresolvable column IDs (conservative fallback). These tests pin the
     // classification so a regression is caught without a full TableOpener integration test.
 
@@ -591,7 +591,7 @@ public sealed class TestKvTableStoreIndex
     [Test]
     public void IsIndexRangeable_String_IsRangeable()
     {
-        // C3b: String now encodes to order-safe ASCII hex (KeyEncoder), so its UTF-8 byte order
+        // String encodes to order-safe ASCII hex (KeyEncoder), so its UTF-8 byte order
         // matches the in-memory UTF-16-ordinal order end-to-end — String indexes are rangeable.
         Dictionary<string, ColumnType> types = new() { ["c1"] = ColumnType.String };
         TableIndexSchema entry = new("id1", "idx_name", new[] { "c1" }, IndexType.Unique, SchemaElementState.Public);
@@ -653,14 +653,14 @@ public sealed class TestKvTableStoreIndex
         await transactions.CommitAsync(tx1);
     }
 
-    // C2 / Finding-1: a bounded range lock [1,50] must BLOCK a concurrent write (PutIndexEntry) whose
+    // A bounded range lock [1,50] must BLOCK a concurrent write (PutIndexEntry) whose
     // index value falls inside the range, and must ALLOW a write whose value falls outside it.
     // This validates that the encoded bounds in AcquireBoundedIndexRangeLockAsync match actual stored-key
     // positions — the thing that the lock-vs-lock test (below) cannot catch because two self-consistent
     // encodings are always disjoint/overlapping by value order regardless of encoding bugs.
     [Test]
     [NonParallelizable]
-    public async Task C2_BoundedIndexRangeLock_BlocksWriteInsideRange_AllowsWriteOutside()
+    public async Task BoundedIndexRangeLock_BlocksWriteInsideRange_AllowsWriteOutside()
     {
         bool prev = CamusDBConfig.KeyRangeShardingEnabled;
         CamusDBConfig.KeyRangeShardingEnabled = true;
@@ -795,14 +795,14 @@ public sealed class TestKvTableStoreIndex
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
 
-    // C2: bounded scan range locks are SHARED. Two transactions scanning DISJOINT index ranges
+    // Bounded scan range locks are SHARED. Two transactions scanning DISJOINT index ranges
     // coexist (non-overlapping locks never conflict regardless of mode); two transactions scanning
     // OVERLAPPING ranges ALSO coexist now that read scans take a shared lock (S∩S). Phantom
     // protection for these ranges is enforced on the write path instead — see the
-    // C2_*_BlocksWriteInsideRange tests, which prove a foreign write into a held range conflicts.
+    // write-fence tests below, which prove a foreign write into a held range conflicts.
     [Test]
     [NonParallelizable]
-    public async Task C2_BoundedIndexRangeLock_DisjointAndOverlappingSharedScansCoexist()
+    public async Task BoundedIndexRangeLock_DisjointAndOverlappingSharedScansCoexist()
     {
         bool prev = CamusDBConfig.KeyRangeShardingEnabled;
         CamusDBConfig.KeyRangeShardingEnabled = true;
@@ -853,13 +853,13 @@ public sealed class TestKvTableStoreIndex
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
 
-    // Finding-2a: non-unique sentinel (￿) must cover every rowId suffix for the upper-bound
+    // The non-unique sentinel (￿) must cover every rowId suffix for the upper-bound
     // value.  A write at value=50 (the exact upper bound) with any rowId must be blocked; a write at
     // value=51 must pass through.  This is the case the lock-vs-lock test cannot catch: a missing or
     // wrong sentinel would silently let phantom writes at the boundary value through.
     [Test]
     [NonParallelizable]
-    public async Task C2_NonUniqueSentinel_CoversAllRowIdSuffixesAtUpperBound()
+    public async Task NonUniqueSentinel_CoversAllRowIdSuffixesAtUpperBound()
     {
         bool prev = CamusDBConfig.KeyRangeShardingEnabled;
         CamusDBConfig.KeyRangeShardingEnabled = true;
@@ -908,13 +908,13 @@ public sealed class TestKvTableStoreIndex
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
 
-    // Finding-2b: String bounds exercise the C3b AppendStringHex encoding path.  A String-indexed
+    // String bounds exercise the AppendStringHex encoding path.  A String-indexed
     // column's lock bounds are encoded via 4-hex-chars-per-code-unit + \x00\x01 terminator.  A bug
     // in that path (e.g., wrong char width or missing terminator) would silently misplace the lock
     // boundary while two lock-vs-lock tests with self-consistent encodings would still agree.
     [Test]
     [NonParallelizable]
-    public async Task C2_StringBounds_BlocksWriteInsideRange_AllowsWriteOutside()
+    public async Task StringBounds_BlocksWriteInsideRange_AllowsWriteOutside()
     {
         bool prev = CamusDBConfig.KeyRangeShardingEnabled;
         CamusDBConfig.KeyRangeShardingEnabled = true;
@@ -964,13 +964,13 @@ public sealed class TestKvTableStoreIndex
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
 
-    // Finding-2c: exclusive bounds on a UNIQUE index (no rowId suffix, so startInclusive/endInclusive
+    // Exclusive bounds on a UNIQUE index (no rowId suffix, so startInclusive/endInclusive
     // have exact-key semantics).  A write at the exact boundary value must be ALLOWED; a write
     // strictly inside must be BLOCKED.  Non-unique tests cannot cover this cleanly because any rowId
     // suffix makes the write key strictly greater than the startKey regardless of startInclusive.
     [Test]
     [NonParallelizable]
-    public async Task C2_ExclusiveBounds_UniqueIndex_BoundaryAllowed_InteriorBlocked()
+    public async Task ExclusiveBounds_UniqueIndex_BoundaryAllowed_InteriorBlocked()
     {
         bool prev = CamusDBConfig.KeyRangeShardingEnabled;
         CamusDBConfig.KeyRangeShardingEnabled = true;
@@ -1019,13 +1019,13 @@ public sealed class TestKvTableStoreIndex
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
 
-    // Finding-2d: composite (String, Integer64) bounds exercise the multi-field encoding path.
+    // Composite (String, Integer64) bounds exercise the multi-field encoding path.
     // ("tools", 25) inside [("tools",10), ("tools",50)] → blocked.
     // ("tools", 75) past the upper bound → allowed.
     // ("books", 25) below the lower bound (different String prefix) → allowed.
     [Test]
     [NonParallelizable]
-    public async Task C2_CompositeBounds_BlocksWriteInsideRange_AllowsWriteOutside()
+    public async Task CompositeBounds_BlocksWriteInsideRange_AllowsWriteOutside()
     {
         bool prev = CamusDBConfig.KeyRangeShardingEnabled;
         CamusDBConfig.KeyRangeShardingEnabled = true;

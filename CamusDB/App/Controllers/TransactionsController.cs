@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Transactions;
 using System.Text.Json;
 using CamusDB.App.Services;
+using System;
 
 namespace CamusDB.App.Controllers;
 
@@ -41,7 +42,17 @@ public sealed class TransactionsController : CommandsController
             if (string.IsNullOrEmpty(request?.DatabaseName))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required");
 
-            KvTransaction txState = await transactions.StartAsync(request.DatabaseName).ConfigureAwait(false);
+            CamusIsolationLevel? isolationLevel = request.IsolationLevel is null ? null
+                : Enum.TryParse(request.IsolationLevel, ignoreCase: true, out CamusIsolationLevel parsedLevel) && Enum.IsDefined(parsedLevel)
+                    ? parsedLevel
+                    : throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown isolation level: {request.IsolationLevel}");
+
+            CamusTransactionMode? transactionMode = request.TransactionMode is null ? null
+                : Enum.TryParse(request.TransactionMode, ignoreCase: true, out CamusTransactionMode parsedMode) && Enum.IsDefined(parsedMode)
+                    ? parsedMode
+                    : throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown transaction mode: {request.TransactionMode}");
+
+            KvTransaction txState = await transactions.StartAsync(request.DatabaseName, isolationLevel, transactionMode).ConfigureAwait(false);
 
             return new JsonResult(new StartTransactionResponse("ok", txState.TransactionId.L, txState.TransactionId.C));
         }

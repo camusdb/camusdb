@@ -35,7 +35,7 @@ using static CamusDB.Core.Util.ObjectIds.ObjectIdGenerator;
 namespace CamusDB.Tests.Storage;
 
 /// <summary>
-/// C4 — Generation-fence retry audit.
+/// Generation-fence retry audit.
 ///
 /// Every key-range-touching call site in <see cref="KvTableStore"/> must absorb a transient
 /// <see cref="KeyValueResponseType.MustRetry"/> (the generation-fence response during a
@@ -86,11 +86,11 @@ public sealed class TestKvTableStoreRetry
 
         // ---- intercepted: single-key get ----
         public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
-            HLCTimestamp txId, string key, long revision, KeyValueDurability durability, CancellationToken ct)
+            HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct)
         {
             if (InjectGetValueFaults-- > 0)
                 return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.MustRetry, null));
-            return inner.LocateAndTryGetValue(txId, key, revision, durability, ct);
+            return inner.LocateAndTryGetValue(txId, key, revision, readTimestamp, durability, ct);
         }
 
         // ---- intercepted: single-key set ----
@@ -186,8 +186,8 @@ public sealed class TestKvTableStoreRetry
             HLCTimestamp txId, string prefix,
             string? startKey, bool startInclusive,
             string? endKey, bool endInclusive,
-            int pageSize, KeyValueDurability durability, CancellationToken ct)
-            => inner.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, durability, ct);
+            int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct)
+            => inner.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct);
 
         // ---- delegated: key-range registration ----
         public void RegisterKeyRange(string keySpace) => inner.RegisterKeyRange(keySpace);
@@ -221,7 +221,7 @@ public sealed class TestKvTableStoreRetry
         public Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(HLCTimestamp txId, string key, int expiresMs, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(HLCTimestamp txId, string key, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp txId, string key, long revision, KeyValueDurability durability) => throw new NotSupportedException();
+        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp txId, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotSupportedException();
         public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(HLCTimestamp txId, string key, long revision, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp txId, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotSupportedException();
@@ -329,7 +329,7 @@ public sealed class TestKvTableStoreRetry
         stub.InjectGetValueFaults = 2;
 
         KvTransaction readTx = await BeginTransaction(stub, "rt_get_r");
-        byte[]? result = await store.GetRow(readTx.TransactionId, rowId);
+        byte[]? result = await store.GetRow(readTx, rowId);
         await CommitTransaction(stub, readTx);
 
         Assert.IsNotNull(result);
@@ -355,7 +355,7 @@ public sealed class TestKvTableStoreRetry
         Assert.AreEqual(-1, stub.InjectAcquireLockFaults, "All 2 injected lock faults were consumed");
 
         KvTransaction readTx = await BeginTransaction(stub, "rt_lock_r");
-        byte[]? result = await store.GetRow(readTx.TransactionId, rowId);
+        byte[]? result = await store.GetRow(readTx, rowId);
         await CommitTransaction(stub, readTx);
 
         Assert.IsNotNull(result);
@@ -380,7 +380,7 @@ public sealed class TestKvTableStoreRetry
         Assert.AreEqual(-1, stub.InjectSetKeyValueFaults, "All 2 injected set faults were consumed");
 
         KvTransaction readTx = await BeginTransaction(stub, "rt_set_r");
-        byte[]? result = await store.GetRow(readTx.TransactionId, rowId);
+        byte[]? result = await store.GetRow(readTx, rowId);
         await CommitTransaction(stub, readTx);
 
         Assert.IsNotNull(result);
@@ -408,7 +408,7 @@ public sealed class TestKvTableStoreRetry
         Assert.AreEqual(-1, stub.InjectDeleteKeyValueFaults, "All 2 injected delete faults were consumed");
 
         KvTransaction readTx = await BeginTransaction(stub, "rt_del_r");
-        byte[]? result = await store.GetRow(readTx.TransactionId, rowId);
+        byte[]? result = await store.GetRow(readTx, rowId);
         await CommitTransaction(stub, readTx);
 
         Assert.IsNull(result, "Row must be absent after DeleteRow");
@@ -446,7 +446,7 @@ public sealed class TestKvTableStoreRetry
         KvTransaction readTx = await BeginTransaction(stub, "rt_batchlock_r");
         foreach ((ObjectIdValue rowId, byte[] data) in expected)
         {
-            byte[]? result = await store.GetRow(readTx.TransactionId, rowId);
+            byte[]? result = await store.GetRow(readTx, rowId);
             Assert.IsNotNull(result, $"Row {rowId} must be readable after WriteRowsBatch");
             Assert.AreEqual(data, result);
         }
@@ -481,7 +481,7 @@ public sealed class TestKvTableStoreRetry
         KvTransaction readTx = await BeginTransaction(stub, "rt_batchset_r");
         foreach ((ObjectIdValue rowId, byte[] data) in expected)
         {
-            byte[]? result = await store.GetRow(readTx.TransactionId, rowId);
+            byte[]? result = await store.GetRow(readTx, rowId);
             Assert.IsNotNull(result, $"Row {rowId} must be readable after WriteRowsBatch");
             Assert.AreEqual(data, result);
         }
@@ -526,7 +526,7 @@ public sealed class TestKvTableStoreRetry
         KvTransaction readTx = await BeginTransaction(stub, "rt_delock_r");
         foreach (ObjectIdValue rowId in rowIds)
         {
-            byte[]? result = await store.GetRow(readTx.TransactionId, rowId);
+            byte[]? result = await store.GetRow(readTx, rowId);
             Assert.IsNull(result, $"Row {rowId} must be absent after DeleteRowsBatch");
         }
         await CommitTransaction(stub, readTx);
@@ -564,7 +564,7 @@ public sealed class TestKvTableStoreRetry
         KvTransaction readTx = await BeginTransaction(stub, "rt_delmany_r");
         foreach (ObjectIdValue rowId in rowIds)
         {
-            byte[]? result = await store.GetRow(readTx.TransactionId, rowId);
+            byte[]? result = await store.GetRow(readTx, rowId);
             Assert.IsNull(result, $"Row {rowId} must be absent after DeleteRowsBatch");
         }
         await CommitTransaction(stub, readTx);
@@ -625,7 +625,7 @@ public sealed class TestKvTableStoreRetry
 
         // Verify the row is readable.
         KvTransaction readTx = await BeginTransaction(stub, "rt_partial_r");
-        byte[]? result = await store.GetRow(readTx.TransactionId, rowId);
+        byte[]? result = await store.GetRow(readTx, rowId);
         await CommitTransaction(stub, readTx);
 
         Assert.IsNotNull(result, "Row must be readable after WriteRowsBatch with partial MustRetry");
@@ -633,7 +633,7 @@ public sealed class TestKvTableStoreRetry
 
         // Verify the unique index entry is present by doing a point lookup.
         KvTransaction lookupTx = await BeginTransaction(stub, "rt_partial_lu");
-        ObjectIdValue? found = await store.LookupUnique(lookupTx.TransactionId, IndexId, indexKey);
+        ObjectIdValue? found = await store.LookupUnique(lookupTx, IndexId, indexKey);
         await CommitTransaction(stub, lookupTx);
 
         Assert.AreEqual(rowId, found, "Unique index entry must map to the inserted row");

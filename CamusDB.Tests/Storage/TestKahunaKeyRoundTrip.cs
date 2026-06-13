@@ -201,6 +201,7 @@ public sealed class TestKahunaKeyRoundTrip
                 HLCTimestamp.Zero,
                 kvp.Key,
                 -1,
+                HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
                 CancellationToken.None
             );

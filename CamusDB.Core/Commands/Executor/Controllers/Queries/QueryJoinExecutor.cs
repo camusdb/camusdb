@@ -221,7 +221,7 @@ internal sealed class QueryJoinExecutor
         TableDescriptor table = source.Table;
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
 
-        ObjectIdValue? rowId = await table.Store.LookupUnique(txId, joinNode.Index.Name, lookupKey).ConfigureAwait(false);
+        ObjectIdValue? rowId = await table.Store.LookupUnique(plan.Ticket.TxnState, joinNode.Index.Name, lookupKey).ConfigureAwait(false);
 
         if (rowId is null)
             yield break;
@@ -244,7 +244,7 @@ internal sealed class QueryJoinExecutor
         ColumnValue lookupValue = lookupKey.Values[0];
 
         await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in table.Store.ScanIndex(
-            txId,
+            plan.Ticket.TxnState,
             joinNode.Index.Name,
             keyTypes,
             lookupKey,
@@ -270,7 +270,7 @@ internal sealed class QueryJoinExecutor
         NodeAst? executionFilter,
         QueryPlan plan)
     {
-        byte[]? data = await source.Table.Store.GetRow(plan.Ticket.TxnState.TransactionId, rowId).ConfigureAwait(false);
+        byte[]? data = await source.Table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
 
         if (data is null || data.Length == 0)
             return null;
@@ -349,7 +349,7 @@ internal sealed class QueryJoinExecutor
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         IReadOnlySet<string>? required = requiredColumns ?? GetRequiredColumnsForAlias(plan, source.Alias);
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(txId).ConfigureAwait(false))
+        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(plan.Ticket.TxnState).ConfigureAwait(false))
         {
             if (data.Length == 0)
                 continue;

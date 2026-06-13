@@ -643,6 +643,7 @@ public sealed class StatisticsManager
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) =
                 await database.Kahuna.Kahuna.LocateAndTryGetValue(
                     tx.TransactionId, kahunaKey, -1,
+                    Kommander.Time.HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
 

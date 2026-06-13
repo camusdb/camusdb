@@ -30,7 +30,7 @@ namespace CamusDB.Core.Storage.Kv;
 ///   Non-unique index:  {tableId}:i:{indexId}/{encodedKey}{rowIdHex24}   → rowIdHex24 (UTF-8)
 ///     (rowId appended without separator; it is always exactly 24 lowercase hex chars)
 ///
-/// Routing constraint (T0.5):
+/// Routing constraint:
 ///   LocateAndScanRange routes via SimpleHash(prefix) while individual TrySet/Delete
 ///   route via InversePrefixedStaticHash(key, '/') = SimpleHash(key[..lastSlash]).
 ///   For rows: bucket prefix "{tableId}:r" → SimpleHash("{tableId}:r") matches writes.
@@ -52,7 +52,7 @@ public sealed class KvTableStore
     private readonly string rowBucketPrefix;       // "{tableId}:r"  — bucket prefix for LocateAndScanRange
     private readonly string rowKeyPrefix;          // "{tableId}:r/" — prepended to rowIdHex
 
-    // Index IDs (names) registered as key-range routed by TableOpener (C3).
+    // Index IDs (names) registered as key-range routed by TableOpener.
     // Written once during table open (inside AsyncLazy, single-threaded), then only read.
     private readonly HashSet<string> rangedIndexIds = [];
 
@@ -105,8 +105,8 @@ public sealed class KvTableStore
 
     /// <summary>
     /// The Kahuna key space for a secondary index (<c>{tableId}:i:{indexId}</c>). Pass to
-    /// <see cref="IKahuna.RegisterKeyRange"/> when opting a numeric/id/bool index into key-range
-    /// routing (C3). Only call this for indexes whose key columns are all non-String types.
+    /// <see cref="IKahuna.RegisterKeyRange"/> when opting an index into key-range routing. All
+    /// column types are order-safe for range routing (String included, via its hex encoding).
     /// </summary>
     public string IndexKeySpace(string indexId) => BuildIndexBucketPrefix(indexId);
 
@@ -272,13 +272,18 @@ public sealed class KvTableStore
 
     /// <summary>
     /// Point-read a single row. Returns the raw serialized bytes, or <c>null</c> if not found.
+    ///
+    /// When <paramref name="tx"/> carries a non-Zero <see cref="KvTransaction.ReadTimestamp"/>
+    /// (a Serializable read-only transaction) every read is pinned to that snapshot so the
+    /// whole transaction observes one consistent cut through the version history.
+    /// All other transaction types pass Zero, leaving Kahuna on the read-committed fast path.
     /// </summary>
-    public async Task<byte[]?> GetRow(HLCTimestamp txId, ObjectIdValue rowId, CancellationToken cancellationToken = default)
+    public async Task<byte[]?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
     {
         string key = BuildRowKey(rowId);
 
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetry(
-            () => kahuna.LocateAndTryGetValue(txId, key, -1, KeyValueDurability.Persistent, cancellationToken),
+            () => kahuna.LocateAndTryGetValue(tx.TransactionId, key, -1, tx.ReadTimestamp, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -291,9 +296,13 @@ public sealed class KvTableStore
     /// <summary>
     /// Full table scan. Yields every (rowId, rowBytes) pair in ascending rowId order
     /// (ObjectId hex is time-ordered and fixed-width so natural KV order is correct).
+    ///
+    /// When <paramref name="tx"/> carries a non-Zero <see cref="KvTransaction.ReadTimestamp"/>
+    /// the scan is pinned to that snapshot for its entire duration, including across page
+    /// boundaries. All other transaction types pass Zero (read-committed fast path, unchanged).
     /// </summary>
     public async IAsyncEnumerable<(ObjectIdValue rowId, byte[] data)> ScanRows(
-        HLCTimestamp txId,
+        KvTransaction tx,
         long? maxRows = null,
         ObjectIdValue? afterRowId = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -305,11 +314,12 @@ public sealed class KvTableStore
         int prefixLen = rowKeyPrefix.Length;
 
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            txId,
+            tx.TransactionId,
             rowBucketPrefix,
             null, true,
             null, true,
             DefaultPageSize,
+            tx.ReadTimestamp,
             KeyValueDurability.Persistent,
             cancellationToken).ConfigureAwait(false))
         {
@@ -374,9 +384,12 @@ public sealed class KvTableStore
     /// <summary>
     /// Point-read a unique index entry. Returns the rowId the encoded key maps to, or
     /// <c>null</c> if no entry exists (the key is absent).
+    ///
+    /// Passes <see cref="KvTransaction.ReadTimestamp"/> to Kahuna so that a Serializable
+    /// read-only transaction observes the same snapshot here as in <see cref="GetRow"/>.
     /// </summary>
     public async Task<ObjectIdValue?> LookupUnique(
-        HLCTimestamp txId,
+        KvTransaction tx,
         string indexId,
         CompositeColumnValue key,
         CancellationToken cancellationToken = default)
@@ -384,7 +397,7 @@ public sealed class KvTableStore
         string kvKey = BuildUniqueIndexKey(indexId, key);
 
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetry(
-            () => kahuna.LocateAndTryGetValue(txId, kvKey, -1, KeyValueDurability.Persistent, cancellationToken),
+            () => kahuna.LocateAndTryGetValue(tx.TransactionId, kvKey, -1, tx.ReadTimestamp, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -401,9 +414,13 @@ public sealed class KvTableStore
     /// <paramref name="keyTypes"/> must match the column types of the index key in order.
     /// When <paramref name="unique"/> is false the stored key has the rowId hex (24 chars)
     /// appended directly to the encoded key (no separator); the rowId is stripped before decoding.
+    ///
+    /// Passes <see cref="KvTransaction.ReadTimestamp"/> to Kahuna so the scan is pinned to
+    /// the same consistent snapshot as <see cref="GetRow"/> and <see cref="LookupUnique"/>
+    /// across all pages. Zero is passed for non-snapshot transactions (read-committed fast path).
     /// </summary>
     public async IAsyncEnumerable<(CompositeColumnValue key, ObjectIdValue rowId)> ScanIndex(
-        HLCTimestamp txId,
+        KvTransaction tx,
         string indexId,
         ColumnType[] keyTypes,
         CompositeColumnValue? from,
@@ -434,11 +451,12 @@ public sealed class KvTableStore
             : null;
 
         await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            txId,
+            tx.TransactionId,
             bucketPrefix,
             startKey, fromInclusive,
             endKey, toInclusive,
             DefaultPageSize,
+            tx.ReadTimestamp,
             KeyValueDurability.Persistent,
             cancellationToken).ConfigureAwait(false))
         {
@@ -542,7 +560,7 @@ public sealed class KvTableStore
                 // already processed in a previous partial run, or a genuine duplicate key.
                 // Read back the existing entry to distinguish: same rowId → skip; different → throw.
                 (_, ReadOnlyKeyValueEntry? existing) = await RetryOnMustRetry(
-                    () => kahuna.LocateAndTryGetValue(tx.TransactionId, kvKey, -1, KeyValueDurability.Persistent, cancellationToken),
+                    () => kahuna.LocateAndTryGetValue(tx.TransactionId, kvKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cancellationToken),
                     cancellationToken
                 ).ConfigureAwait(false);
                 string existingRowId = existing?.Value is not null ? Encoding.UTF8.GetString(existing.Value) : "";
@@ -837,6 +855,7 @@ public sealed class KvTableStore
             null, true,
             null, true,
             DefaultPageSize,
+            HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
             cancellationToken).ConfigureAwait(false))
         {

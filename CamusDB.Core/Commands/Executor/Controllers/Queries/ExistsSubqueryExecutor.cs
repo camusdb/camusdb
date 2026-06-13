@@ -81,7 +81,7 @@ internal sealed class ExistsSubqueryExecutor
 
         QueryRowNameResolver combinedResolver = new(combinedTableSources, combinedDerivedSources);
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in innerTable.Store.ScanRows(txId).ConfigureAwait(false))
+        await foreach ((ObjectIdValue rowId, byte[] data) in innerTable.Store.ScanRows(txnState).ConfigureAwait(false))
         {
             if (data.Length == 0)
                 continue;

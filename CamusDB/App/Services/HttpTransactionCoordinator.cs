@@ -11,6 +11,7 @@ using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Transactions;
+using CamusDB.App.Models;
 
 namespace CamusDB.App.Services;
 
@@ -31,14 +32,36 @@ public sealed class HttpTransactionCoordinator
         this.executor = executor;
     }
 
-    public async Task<KvTransaction> StartAsync(string databaseName, CancellationToken cancellationToken = default)
+    public async Task<KvTransaction> StartAsync(string databaseName, CancellationToken cancellationToken = default) =>
+        await StartAsync(databaseName, isolationLevel: null, transactionMode: null, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Starts a new transaction with the requested isolation level and mode. When either argument
+    /// is <see langword="null"/> the server default (<see cref="CamusDBConfig.DefaultIsolationLevel"/>
+    /// and <see cref="CamusTransactionMode.ReadWrite"/>) applies.
+    /// </summary>
+    public async Task<KvTransaction> StartAsync(
+        string databaseName,
+        CamusIsolationLevel? isolationLevel,
+        CamusTransactionMode? transactionMode,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required to start a transaction");
 
+        // A serializable read-only transaction is stateless on the Kahuna side (zero identity, carries
+        // only a snapshot read timestamp), so it cannot be registered and resumed by a transaction id
+        // the way an explicit multi-statement transaction must be. Reject it here rather than hand back
+        // an unusable (0,0) handle; serializable read-only reads are available as autocommit SELECTs.
+        CamusIsolationLevel effectiveLevel = isolationLevel ?? CamusDBConfig.DefaultIsolationLevel;
+        if (effectiveLevel == CamusIsolationLevel.Serializable && transactionMode == CamusTransactionMode.ReadOnly)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Explicit serializable read-only transactions are not supported; run serializable reads as autocommit SELECTs.");
+
         DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
 
-        KvTransaction tx = await database.Transactions.BeginAsync(cancellationToken).ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(isolationLevel, transactionMode, cancellationToken).ConfigureAwait(false);
         Register(database.Transactions, tx);
         return tx;
     }

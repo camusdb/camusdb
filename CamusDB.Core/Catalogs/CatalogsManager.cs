@@ -1341,6 +1341,7 @@ public sealed class CatalogsManager
                 null, true,
                 null, true,
                 128,
+                HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
                 CancellationToken.None).ConfigureAwait(false))
             {
@@ -1378,6 +1379,7 @@ public sealed class CatalogsManager
             (KeyValueResponseType schemaType, ReadOnlyKeyValueEntry? schemaEntry) =
                 await kahuna.LocateAndTryGetValue(
                     tx.TransactionId, VersionKey(database.Name), -1,
+                    HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
 
@@ -1399,6 +1401,7 @@ public sealed class CatalogsManager
             (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
                 await kahuna.LocateAndTryGetValue(
                     tx.TransactionId, SystemKey(database.Name), -1,
+                    HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
 
@@ -1485,6 +1488,7 @@ public sealed class CatalogsManager
             null, true,
             null, true,
             512,
+            HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
             CancellationToken.None).ConfigureAwait(false))
         {
@@ -1517,6 +1521,7 @@ public sealed class CatalogsManager
                 txId,
                 HistoryKey(database.Name, tableId, version),
                 -1,
+                HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
                 CancellationToken.None
             ).ConfigureAwait(false);
@@ -1534,6 +1539,7 @@ public sealed class CatalogsManager
         (KeyValueResponseType schemaType, ReadOnlyKeyValueEntry? schemaEntry) =
             await kahuna.LocateAndTryGetValue(
                 tx.TransactionId, LegacySchemaKey(database.Name), -1,
+                HLCTimestamp.Zero,
                 KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
 

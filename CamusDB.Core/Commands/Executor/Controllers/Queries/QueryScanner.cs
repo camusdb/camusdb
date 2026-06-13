@@ -43,7 +43,7 @@ internal sealed class QueryScanner
         // idempotent (Kahuna returns Locked for the same tx). Read-only transactions skip this.
         await table.Store.AcquireRowRangeLockAsync(plan.Ticket.TxnState).ConfigureAwait(false);
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(txId, maxRows: plan.ScanRowLimit))
+        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
         {
             if (data.Length == 0)
                 continue;
@@ -102,7 +102,7 @@ internal sealed class QueryScanner
         await table.Store.AcquireIndexRangeLockAsync(ticket.TxnState, index.Name).ConfigureAwait(false);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
-            txId,
+            ticket.TxnState,
             index.Name,
             keyTypes,
             null,
@@ -115,7 +115,7 @@ internal sealed class QueryScanner
             if (scanStats is not null)
                 scanStats.KvScanEntries++;
 
-            byte[]? data = await table.Store.GetRow(txId, rowId).ConfigureAwait(false);
+            byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId).ConfigureAwait(false);
             if (data is null || data.Length == 0)
             {
                 logger.LogWarning("Row {RowId} found in index {IndexName} but data is missing in table {TableName}", rowId, index.Name, table.Name);

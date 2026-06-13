@@ -743,6 +743,7 @@ public sealed class TestMultiPartitionRouting
                 HLCTimestamp.Zero,
                 $"{dbname}/meta/schema",
                 -1,
+                HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
                 CancellationToken.None
             );
@@ -752,6 +753,7 @@ public sealed class TestMultiPartitionRouting
                 HLCTimestamp.Zero,
                 $"{dbname}/meta/table/legacy-table-id",
                 -1,
+                HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
                 CancellationToken.None
             );
@@ -835,7 +837,7 @@ public sealed class TestMultiPartitionRouting
             KvTableStore store = new(reopened.Kahuna.Kahuna, reopenedTable.Id!);
             List<Dictionary<string, ColumnValue>> rows = new();
 
-            await foreach ((ObjectIdValue rowId, byte[] data) in store.ScanRows(txn.TransactionId))
+            await foreach ((ObjectIdValue rowId, byte[] data) in store.ScanRows(txn))
                 rows.Add(await RowEncoder.DecodeAsync(reopenedTable, txn.TransactionId, rowId, data));
 
             await reopened.Transactions.CommitAsync(txn);

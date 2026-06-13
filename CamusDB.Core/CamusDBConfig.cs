@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Transactions;
+
 namespace CamusDB.Core;
 
 public static class CamusDBConfig
@@ -98,4 +100,15 @@ public static class CamusDBConfig
     public static bool KeyRangeShardingEnabled =
         string.Equals(Environment.GetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING"), "1", StringComparison.Ordinal) ||
         string.Equals(Environment.GetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING"), "true", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Cluster-wide default isolation level applied when a transaction is begun without an
+    /// explicit level. Individual transactions may override this via the begin-request field
+    /// or via <c>SET TRANSACTION ISOLATION LEVEL …</c>.
+    ///
+    /// Default: <see cref="CamusIsolationLevel.ReadCommitted"/> — existing behaviour unchanged.
+    /// Set to <see cref="CamusIsolationLevel.Serializable"/> to make every new transaction
+    /// serializable unless it overrides this.
+    /// </summary>
+    public static CamusIsolationLevel DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted;
 }

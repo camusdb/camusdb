@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Linq;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
@@ -403,7 +404,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             try
             {
                 await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(
-                    tx.TransactionId, afterRowId: afterRowId).ConfigureAwait(false))
+                    tx, afterRowId: afterRowId).ConfigureAwait(false))
                 {
                     Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
                         table.Schema, tx.TransactionId, rowId, data,
@@ -1313,12 +1314,20 @@ public sealed class CommandExecutor : IAsyncDisposable
                     return (database, explainExecutor.ExplainAnalyzeQuery(database, ast.leftAst!, ticket));
                 }
 
+            case NodeType.SetTransaction:
+                {
+                    // The statement is parsed and validated but applies no behaviour yet — isolation
+                    // level / mode are not wired to locking or snapshot reads. Returns 0 rows so the
+                    // HTTP layer's cursor-drain loop is a no-op.
+                    return (database, AsyncEnumerable.Empty<QueryResultRow>());
+                }
+
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown query AST stmt: " + ast.nodeType);
         }
     }
 
-    #endregion   
+    #endregion
 
     private static void PinSchemaVersions(
         DatabaseDescriptor database,

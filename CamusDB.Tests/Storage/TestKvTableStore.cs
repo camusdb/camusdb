@@ -29,7 +29,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.Storage;
 
 /// <summary>
-/// T2.2 — KvTableStore primary row operations.
+/// KvTableStore primary row operations.
 ///
 /// Each test boots a fresh embedded Kahuna node (in-memory) and exercises the
 /// public surface of KvTableStore against it.
@@ -102,7 +102,7 @@ public sealed class TestKvTableStore
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("t1");
         await using EmbeddedKahuna __ = node;
 
-        byte[]? result = await store.GetRow(HLCTimestamp.Zero, new ObjectIdValue(1, 2, 3));
+        byte[]? result = await store.GetRow(KvTransaction.CreateReadOnly(), new ObjectIdValue(1, 2, 3));
 
         Assert.IsNull(result);
     }
@@ -121,7 +121,7 @@ public sealed class TestKvTableStore
         await store.InsertRow(tx, rowId, data);
         await CommitTransaction(node.Kahuna, tx);
 
-        byte[]? got = await store.GetRow(HLCTimestamp.Zero, rowId);
+        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
 
         Assert.IsNotNull(got);
         Assert.AreEqual(data, got);
@@ -147,7 +147,7 @@ public sealed class TestKvTableStore
         await store.UpdateRow(tx2, rowId, v2);
         await CommitTransaction(node.Kahuna, tx2);
 
-        byte[]? got = await store.GetRow(HLCTimestamp.Zero, rowId);
+        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
 
         Assert.IsNotNull(got);
         Assert.AreEqual(v2, got);
@@ -171,7 +171,7 @@ public sealed class TestKvTableStore
         await store.DeleteRow(tx2, rowId);
         await CommitTransaction(node.Kahuna, tx2);
 
-        byte[]? got = await store.GetRow(HLCTimestamp.Zero, rowId);
+        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNull(got);
     }
 
@@ -193,7 +193,7 @@ public sealed class TestKvTableStore
         await CommitTransaction(node.Kahuna, tx);
 
         List<(ObjectIdValue rowId, byte[] data)> scanned = [];
-        await foreach ((ObjectIdValue rowId, byte[] data) in store.ScanRows(HLCTimestamp.Zero))
+        await foreach ((ObjectIdValue rowId, byte[] data) in store.ScanRows(KvTransaction.CreateReadOnly()))
             scanned.Add((rowId, data));
 
         Assert.AreEqual(3, scanned.Count, "Scan must return all inserted rows");
@@ -210,7 +210,7 @@ public sealed class TestKvTableStore
         await using EmbeddedKahuna __ = node;
 
         List<(ObjectIdValue, byte[])> scanned = [];
-        await foreach ((ObjectIdValue id, byte[] data) in store.ScanRows(HLCTimestamp.Zero))
+        await foreach ((ObjectIdValue id, byte[] data) in store.ScanRows(KvTransaction.CreateReadOnly()))
             scanned.Add((id, data));
 
         Assert.AreEqual(0, scanned.Count);
@@ -236,7 +236,7 @@ public sealed class TestKvTableStore
         await CommitTransaction(node.Kahuna, tx);
 
         List<ObjectIdValue> scannedIds = [];
-        await foreach ((ObjectIdValue rowId, _) in store.ScanRows(HLCTimestamp.Zero))
+        await foreach ((ObjectIdValue rowId, _) in store.ScanRows(KvTransaction.CreateReadOnly()))
             scannedIds.Add(rowId);
 
         Assert.AreEqual(3, scannedIds.Count);
@@ -286,7 +286,7 @@ public sealed class TestKvTableStore
         ObjectIdValue afterRowId = expected[1];
 
         List<ObjectIdValue> scannedIds = [];
-        await foreach ((ObjectIdValue rowId, _) in store.ScanRows(HLCTimestamp.Zero, afterRowId: afterRowId))
+        await foreach ((ObjectIdValue rowId, _) in store.ScanRows(KvTransaction.CreateReadOnly(), afterRowId: afterRowId))
             scannedIds.Add(rowId);
 
         Assert.AreEqual(expected.Skip(2).ToArray(), scannedIds);
@@ -319,7 +319,7 @@ public sealed class TestKvTableStore
         await CommitTransaction(node.Kahuna, tx);
 
         List<ObjectIdValue> scannedIds = [];
-        await foreach ((ObjectIdValue rowId, _) in store.ScanRows(HLCTimestamp.Zero, maxRows: 2))
+        await foreach ((ObjectIdValue rowId, _) in store.ScanRows(KvTransaction.CreateReadOnly(), maxRows: 2))
             scannedIds.Add(rowId);
 
         Assert.AreEqual(2, scannedIds.Count);

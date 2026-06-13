@@ -117,7 +117,7 @@ public sealed class QueryController : CommandsController
                 request.DatabaseName,
                 request.TxnIdPT,
                 request.TxnIdCounter,
-                readOnly: true  // C1: pure reads must not hold exclusive range locks
+                readOnly: true  // point lookup by id: a pure read, no range lock needed
             ).ConfigureAwait(false);
 
             QueryByIdTicket ticket = new(

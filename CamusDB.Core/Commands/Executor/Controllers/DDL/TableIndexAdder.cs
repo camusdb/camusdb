@@ -160,7 +160,7 @@ internal sealed class TableIndexAdder
         int rows = 0;
 
         await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(
-            tx.TransactionId,
+            tx,
             afterRowId: afterRowId).ConfigureAwait(false))
         {
             Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(

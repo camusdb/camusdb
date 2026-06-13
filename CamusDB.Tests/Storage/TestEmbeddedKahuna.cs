@@ -86,6 +86,7 @@ public sealed class TestEmbeddedKahuna
             HLCTimestamp.Zero,
             key,
             -1,
+            HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
             CancellationToken.None
         );
@@ -132,6 +133,7 @@ public sealed class TestEmbeddedKahuna
                 HLCTimestamp.Zero,
                 key,
                 -1,
+                HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
                 CancellationToken.None
             );

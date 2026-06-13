@@ -67,6 +67,7 @@ public enum NodeType
     Begin,
     Commit,
     Rollback,
+    SetTransaction,
     SortAsc,
     SortDesc,
     CreateTable,

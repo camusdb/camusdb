@@ -125,14 +125,14 @@ internal sealed class SemiJoinExecutor
 
         if (index.Type == IndexType.Unique)
         {
-            ObjectIdValue? rowId = await inner.Store.LookupUnique(txId, index.Name, key).ConfigureAwait(false);
+            ObjectIdValue? rowId = await inner.Store.LookupUnique(outerTicket.TxnState, index.Name, key).ConfigureAwait(false);
             if (rowId is null)
                 return false;
 
             if (node.InnerFilter is null)
                 return true;
 
-            byte[]? data = await inner.Store.GetRow(txId, rowId.Value).ConfigureAwait(false);
+            byte[]? data = await inner.Store.GetRow(outerTicket.TxnState, rowId.Value).ConfigureAwait(false);
             if (data is null || data.Length == 0)
                 return false;
 
@@ -152,12 +152,12 @@ internal sealed class SemiJoinExecutor
             : null;
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in inner.Store.ScanIndex(
-            txId, index.Name, new[] { keyType },
+            outerTicket.TxnState, index.Name, new[] { keyType },
             key, upperBound,
             false, true, false,
             maxRows: null))
         {
-            byte[]? data = await inner.Store.GetRow(txId, rowId).ConfigureAwait(false);
+            byte[]? data = await inner.Store.GetRow(outerTicket.TxnState, rowId).ConfigureAwait(false);
             if (data is null || data.Length == 0)
                 continue;
 
@@ -186,7 +186,7 @@ internal sealed class SemiJoinExecutor
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in inner.Store.ScanRows(txId, maxRows: null))
+        await foreach ((ObjectIdValue rowId, byte[] data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: null))
         {
             if (data.Length == 0)
                 continue;
@@ -225,7 +225,7 @@ internal sealed class SemiJoinExecutor
         // is not part of the subquery result set and must not poison the anti-join.
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in inner.Store.ScanRows(txId, maxRows: null))
+        await foreach ((ObjectIdValue rowId, byte[] data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: null))
         {
             if (data.Length == 0)
                 continue;
@@ -256,7 +256,7 @@ internal sealed class SemiJoinExecutor
         TableDescriptor inner = node.InnerTable;
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
 
-        await foreach ((ObjectIdValue _, byte[] data) in inner.Store.ScanRows(txId, maxRows: 1))
+        await foreach ((ObjectIdValue _, byte[] data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: 1))
         {
             if (data.Length > 0)
                 return true;
