@@ -1667,7 +1667,7 @@ public sealed class CatalogsManager
             if (lockRetries > 0)
                 await Task.Delay(lockRetries * 10).ConfigureAwait(false);
 
-            (lockType, _, lockDurability) = await kahuna.LocateAndTryAcquireExclusiveLock(
+            (lockType, _, lockDurability, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
                 tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
         }
@@ -1719,7 +1719,7 @@ public sealed class CatalogsManager
             if (lockRetries > 0)
                 await Task.Delay(lockRetries * 10).ConfigureAwait(false);
 
-            (lockType, _, lockDurability) = await kahuna.LocateAndTryAcquireExclusiveLock(
+            (lockType, _, lockDurability, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
                 tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
         }

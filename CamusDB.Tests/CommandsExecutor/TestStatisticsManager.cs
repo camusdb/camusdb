@@ -162,7 +162,7 @@ public sealed class TestStatisticsManager : BaseTest
         await executor.Insert(MakeInsertTicket(txn, dbname, "robots", "Solo", 2024));
         await database.Transactions.CommitAsync(txn);
 
-        KvTransaction del1 = await database.Transactions.BeginAsync();
+        KvTransaction del1 = await database.Transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
         await executor.Delete(new DeleteTicket(
             txnState: del1,
             databaseName: dbname,
@@ -175,7 +175,7 @@ public sealed class TestStatisticsManager : BaseTest
         ));
 
         // Delete again — nothing left; delta = 0, count stays 0.
-        KvTransaction del2 = await database.Transactions.BeginAsync();
+        KvTransaction del2 = await database.Transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
         await executor.Delete(new DeleteTicket(
             txnState: del2,
             databaseName: dbname,

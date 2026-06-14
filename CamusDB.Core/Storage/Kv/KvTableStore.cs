@@ -278,31 +278,61 @@ public sealed class KvTableStore
                 $"Serializable transaction {tx.UniqueId} exceeded the maximum lifetime " +
                 $"({CamusDBConfig.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
 
-        KeyValueResponseType type = await RetryOnMustRetryLocked(
-            () => kahuna.LocateAndTryAcquireRangeLock(
+        long deadline = LockWaitDeadlineTicks();
+        int retries = 0;
+
+        while (true)
+        {
+            (KeyValueResponseType type, HLCTimestamp holder) = await kahuna.LocateAndTryAcquireRangeLock(
                 tx.TransactionId, bucketPrefix,
                 startKey, startInclusive, endKey, endInclusive,
-                RangeLockExpiresMs, KeyValueDurability.Persistent, mode, cancellationToken),
-            cancellationToken
-        ).ConfigureAwait(false);
+                RangeLockExpiresMs, KeyValueDurability.Persistent, mode, cancellationToken
+            ).ConfigureAwait(false);
 
-        if (type == KeyValueResponseType.Locked)
-        {
-            tx.TrackRangeLock(bucketPrefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent, mode);
-            return;
-        }
+            if (type == KeyValueResponseType.Locked)
+            {
+                tx.TrackRangeLock(bucketPrefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent, mode);
+                return;
+            }
 
-        // AlreadyLocked: for Shared, another txn holds an Exclusive range lock (serialization
-        // conflict); for Exclusive, another txn holds a Shared or Exclusive range lock on an
-        // overlapping range (upgrade conflict). Both require the caller to abort the transaction.
-        if (type == KeyValueResponseType.AlreadyLocked)
+            // Transient (routing flip / replication-not-ready): bounded-wait, then surface MustRetry.
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            {
+                if (Stopwatch.GetTimestamp() >= deadline)
+                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+                await Task.Delay(RetryDelayMs(retries++), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            // AlreadyLocked is a serialization conflict with a foreign holder: for Shared, another txn
+            // holds an overlapping Exclusive lock; for Exclusive, another txn holds an overlapping
+            // Shared or Exclusive lock (including the S→X upgrade case).
+            //
+            // Resolve it by deadlock-avoidance ordering on the holder's start timestamp (its
+            // transaction id, returned alongside the denial). An OLDER requester (smaller HLC) WAITS
+            // for the younger holder to release; a YOUNGER requester ABORTS immediately and is replayed
+            // from BeginAsync. Waits therefore only ever point older→younger, so no wait cycle can form
+            // and two transactions contending in reverse order can never both abort — the older wins
+            // deterministically. With no holder reported (Zero), no ordering is possible, so fall back
+            // to immediate abort.
+            if (type == KeyValueResponseType.AlreadyLocked)
+            {
+                bool requesterIsOlder = holder != HLCTimestamp.Zero && tx.TransactionId.CompareTo(holder) < 0;
+                if (requesterIsOlder && Stopwatch.GetTimestamp() < deadline)
+                {
+                    await Task.Delay(RetryDelayMs(retries++), cancellationToken).ConfigureAwait(false);
+                    continue; // wait for the younger holder to finish
+                }
+
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionConflict,
+                    $"Range '{bucketPrefix}' [{startKey ?? "-∞"},{endKey ?? "+∞"}] is locked by another transaction (conflict during {mode} acquire)");
+            }
+
             throw new CamusDBException(
-                CamusDBErrorCodes.TransactionConflict,
-                $"Range '{bucketPrefix}' [{startKey ?? "-∞"},{endKey ?? "+∞"}] is locked by another transaction (conflict during {mode} acquire)");
-
-        throw new CamusDBException(
-            CamusDBErrorCodes.InvalidInternalOperation,
-            $"Failed to acquire {mode} range lock on '{bucketPrefix}': {type}");
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Failed to acquire {mode} range lock on '{bucketPrefix}': {type}");
+        }
     }
 
     /// <summary>
@@ -824,13 +854,13 @@ public sealed class KvTableStore
 
         while (pending.Count > 0)
         {
-            List<(KeyValueResponseType type, string key, KeyValueDurability durability)> responses =
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses =
                 await kahuna.LocateAndTryAcquireManyExclusiveLocks(tx.TransactionId, pending, ct).ConfigureAwait(false);
 
             // First pass: track every successfully locked key before any throw so that
             // the transaction rollback path can release them even if a later key fails.
             // Mirrors the coordinator's two-pass pattern in AcquireLocksPessimistically.
-            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in responses)
+            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, _) in responses)
             {
                 if (type == KeyValueResponseType.Locked)
                     tx.TrackLock(key, durability);
@@ -838,7 +868,7 @@ public sealed class KvTableStore
 
             // Second pass: queue transient failures for retry; throw on hard failures.
             List<(string, int, KeyValueDurability)> retry = [];
-            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in responses)
+            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, _) in responses)
             {
                 if (type == KeyValueResponseType.Locked)
                     continue;
@@ -1146,7 +1176,7 @@ public sealed class KvTableStore
 
     private async Task AcquireLock(KvTransaction tx, string key, CancellationToken cancellationToken)
     {
-        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability) = await RetryOnMustRetryLocked(
+        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability, _) = await RetryOnMustRetryLocked(
             () => kahuna.LocateAndTryAcquireExclusiveLock(tx.TransactionId, key, 0, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
@@ -1251,29 +1281,6 @@ public sealed class KvTableStore
     private static long LockWaitDeadlineTicks()
         => Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (LockWaitDeadlineMs / 1000.0));
 
-    private static async Task<KeyValueResponseType> RetryOnMustRetryLocked(
-        Func<Task<KeyValueResponseType>> fn,
-        CancellationToken ct)
-    {
-        long deadline = LockWaitDeadlineTicks();
-        KeyValueResponseType type;
-        int retries = 0;
-
-        do
-        {
-            type = await fn().ConfigureAwait(false);
-            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
-            {
-                if (Stopwatch.GetTimestamp() >= deadline)
-                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
-                await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
-            }
-        }
-        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
-
-        return type;
-    }
-
     private static async Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetryLocked(
         Func<Task<(KeyValueResponseType, long, HLCTimestamp)>> fn,
         CancellationToken ct)
@@ -1299,19 +1306,20 @@ public sealed class KvTableStore
         return (type, revision, ts);
     }
 
-    private static async Task<(KeyValueResponseType, string, KeyValueDurability)> RetryOnMustRetryLocked(
-        Func<Task<(KeyValueResponseType, string, KeyValueDurability)>> fn,
+    private static async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> RetryOnMustRetryLocked(
+        Func<Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)>> fn,
         CancellationToken ct)
     {
         long deadline = LockWaitDeadlineTicks();
         KeyValueResponseType type;
         string endpoint;
         KeyValueDurability durability;
+        HLCTimestamp holder;
         int retries = 0;
 
         do
         {
-            (type, endpoint, durability) = await fn().ConfigureAwait(false);
+            (type, endpoint, durability, holder) = await fn().ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
                 if (Stopwatch.GetTimestamp() >= deadline)
@@ -1321,7 +1329,7 @@ public sealed class KvTableStore
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
 
-        return (type, endpoint, durability);
+        return (type, endpoint, durability, holder);
     }
 
     /// <summary>

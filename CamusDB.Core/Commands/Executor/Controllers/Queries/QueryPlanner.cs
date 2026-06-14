@@ -300,15 +300,13 @@ public sealed class QueryPlanner
         //   2. The step is a predicate-driven RangeScanFromIndex (has at least one bound).
         //      Skip ORDER BY-driven unbounded scans to preserve sort elision.
         //   3. The scan is not already a unique point lookup (those always win).
-        //   4. The transaction is NOT Serializable+RW — for Serializable+RW the tightest covering
-        //      range lock matters for concurrency correctness, so the cost model must not widen it
-        //      to a whole-bucket lock by choosing a full table scan.
-        bool isSerializableRW = ticket.TxnState.IsolationLevel == CamusIsolationLevel.Serializable
-            && ticket.TxnState.TransactionMode == CamusTransactionMode.ReadWrite;
+        //   4. The scan does not hold exclusive predicate locks (UPDATE/DELETE path) — widening to a
+        //      full-table exclusive row range lock would block all concurrent writes on disjoint ranges,
+        //      defeating key-range concurrency. Shared-lock SELECTs are safe to promote to table scan.
         if (scanStep is { Type: QueryPlanStepType.RangeScanFromIndex } step
             && (step.FromBound is not null || step.ToBound is not null)
             && _stats is not null
-            && !isSerializableRW)
+            && !ticket.ExclusivePredicateLocks)
         {
             long? tableRowCount = _stats.GetRowCountEstimate(database, table);
             if (tableRowCount is { } trc && trc > 0)

@@ -553,7 +553,7 @@ public sealed class StatisticsManager
         KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
         try
         {
-            (KeyValueResponseType lockType, _, KeyValueDurability lockDurability) =
+            (KeyValueResponseType lockType, _, KeyValueDurability lockDurability, _) =
                 await database.Kahuna.Kahuna.LocateAndTryAcquireExclusiveLock(
                     tx.TransactionId, kahunaKey, 0, KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);

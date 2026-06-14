@@ -76,11 +76,11 @@ public sealed class TestKvTableStoreRetry
         public int InjectDeleteManyFaults;
 
         // ---- intercepted: single-key exclusive lock ----
-        public Task<(KeyValueResponseType, string, KeyValueDurability)> LocateAndTryAcquireExclusiveLock(
+        public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> LocateAndTryAcquireExclusiveLock(
             HLCTimestamp txId, string key, int expiresMs, KeyValueDurability durability, CancellationToken ct)
         {
             if (InjectAcquireLockFaults-- > 0)
-                return Task.FromResult((KeyValueResponseType.MustRetry, string.Empty, durability));
+                return Task.FromResult((KeyValueResponseType.MustRetry, string.Empty, durability, HLCTimestamp.Zero));
             return inner.LocateAndTryAcquireExclusiveLock(txId, key, expiresMs, durability, ct);
         }
 
@@ -113,11 +113,11 @@ public sealed class TestKvTableStoreRetry
         }
 
         // ---- intercepted: batch acquire locks ----
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryAcquireManyExclusiveLocks(
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
             HLCTimestamp txId, List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken ct)
         {
             if (InjectAcquireManyFaults-- > 0)
-                return Task.FromResult(keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability)).ToList());
+                return Task.FromResult(keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList());
             return inner.LocateAndTryAcquireManyExclusiveLocks(txId, keys, ct);
         }
 
@@ -227,9 +227,9 @@ public sealed class TestKvTableStoreRetry
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp txId, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotSupportedException();
         public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp txId, string key, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<KeyValueResponseType> LocateAndTryAcquireExclusivePrefixLock(HLCTimestamp txId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> LocateAndTryAcquireExclusiveRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> LocateAndTryAcquireRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode, CancellationToken ct) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> TryAcquireRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode) => throw new NotSupportedException();
+        public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryAcquireExclusiveRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
+        public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryAcquireRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode, CancellationToken ct) => throw new NotSupportedException();
+        public Task<(KeyValueResponseType, HLCTimestamp)> TryAcquireRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode) => throw new NotSupportedException();
         public Task<List<KeyValueRangeLock>> GetRangeLocks(string keySpace) => throw new NotSupportedException();
         public Task ImportRangeLocks(string keySpace, List<KeyValueRangeLock> locks) => throw new NotSupportedException();
         public Task<KeyValueResponseType> LocateAndTryReleaseExclusivePrefixLock(HLCTimestamp txId, string prefixKey, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
@@ -240,9 +240,9 @@ public sealed class TestKvTableStoreRetry
         public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryCommitManyMutations(HLCTimestamp txId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, CancellationToken ct) => throw new NotSupportedException();
         public Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp txId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
         public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryRollbackManyMutations(HLCTimestamp txId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, string, KeyValueDurability)> TryAcquireExclusiveLock(HLCTimestamp txId, string key, int expiresMs, KeyValueDurability durability) => throw new NotSupportedException();
+        public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> TryAcquireExclusiveLock(HLCTimestamp txId, string key, int expiresMs, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(HLCTimestamp txId, string prefixKey, int expiresMs, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> TryAcquireExclusiveRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability) => throw new NotSupportedException();
+        public Task<(KeyValueResponseType, HLCTimestamp)> TryAcquireExclusiveRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp txId, string key, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp txId, string prefixKey, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability) => throw new NotSupportedException();

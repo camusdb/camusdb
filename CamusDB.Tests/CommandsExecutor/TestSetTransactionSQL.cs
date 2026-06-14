@@ -75,7 +75,7 @@ public sealed class TestSetTransactionSQL : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupDbAsync();
 
-        KvTransaction tx = await db.Transactions.BeginAsync(); // ReadCommitted
+        KvTransaction tx = await db.Transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
         Assert.AreEqual(CamusIsolationLevel.ReadCommitted, tx.IsolationLevel, "Initial level must be ReadCommitted");
 
         await ExecuteSetTransaction(dbname, executor, tx,

@@ -49,18 +49,18 @@ public sealed class TestIsolationLevelPlumbing
     }
 
     // ------------------------------------------------------------------
-    // 1. Default: ReadCommitted + ReadWrite
+    // 1. Default: Serializable + ReadWrite
     // ------------------------------------------------------------------
 
     [Test]
-    public async Task BeginAsync_Default_IsReadCommittedReadWrite()
+    public async Task BeginAsync_Default_IsSerializableReadWrite()
     {
         (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync("iso-default");
         await using EmbeddedKahuna __ = node;
 
         KvTransaction tx = await mgr.BeginAsync();
 
-        Assert.AreEqual(CamusIsolationLevel.ReadCommitted, tx.IsolationLevel);
+        Assert.AreEqual(CamusIsolationLevel.Serializable, tx.IsolationLevel);
         Assert.AreEqual(CamusTransactionMode.ReadWrite, tx.TransactionMode);
         Assert.IsFalse(tx.IsReadOnly);
 

@@ -288,7 +288,7 @@ public sealed class TestSerializableAnomalies : SharedNodeBaseTest
         Assert.AreEqual(100L, first);
 
         // Concurrent writer tries to write alice — blocked by TxA's shared lock.
-        KvTransaction writer = await db.Transactions.BeginAsync();
+        KvTransaction writer = await db.Transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             () => UpdateBalanceAsync(dbname, executor, writer, aliceId, 999L));
         Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex?.Code,

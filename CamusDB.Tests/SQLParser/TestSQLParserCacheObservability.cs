@@ -233,6 +233,8 @@ public sealed class TestSQLParserCacheObservability : CommandsExecutor.SharedNod
             parameters: parameters);
 
         (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
-        return await cursor.ToListAsync();
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        await database.Transactions.CommitAsync(txn);
+        return rows;
     }
 }
