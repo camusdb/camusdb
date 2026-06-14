@@ -210,12 +210,12 @@ public sealed class TestKvTableStoreRetry
         public Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockDurability durability) => throw new NotSupportedException();
         public Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(string resource, LockDurability durability) => throw new NotSupportedException();
         public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue2(List<KahunaSetKeyValueRequestItem> items, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(HLCTimestamp txId, string key, long revision, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
+        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
         public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(HLCTimestamp txId, string key, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp txId, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken ct) => throw new NotSupportedException();
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(HLCTimestamp txId, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken ct) => throw new NotSupportedException();
         public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp txId, string key, int expiresMs, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp txId, string prefixedKey, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
+        public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp txId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
         public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
         public Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(HLCTimestamp txId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, long routedGeneration = 0) => throw new NotSupportedException();
         public Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(HLCTimestamp txId, string key, int expiresMs, KeyValueDurability durability) => throw new NotSupportedException();
@@ -223,7 +223,7 @@ public sealed class TestKvTableStoreRetry
         public Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items) => throw new NotSupportedException();
         public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp txId, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(HLCTimestamp txId, string key, long revision, KeyValueDurability durability) => throw new NotSupportedException();
+        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp txId, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotSupportedException();
         public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp txId, string key, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<KeyValueResponseType> LocateAndTryAcquireExclusivePrefixLock(HLCTimestamp txId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
@@ -250,9 +250,9 @@ public sealed class TestKvTableStoreRetry
         public Task<(KeyValueResponseType, long)> TryCommitMutations(HLCTimestamp txId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<(KeyValueResponseType, long)> TryRollbackMutations(HLCTimestamp txId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) => throw new NotSupportedException();
         public Task<KeyValueTransactionResult> TryExecuteTransactionScript(byte[] script, string? hash, List<KeyValueParameter>? parameters) => throw new NotSupportedException();
-        public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp txId, string prefixKeyName, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
+        public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp txId, string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotSupportedException();
+        public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotSupportedException();
+        public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
         public Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(KeyValueTransactionOptions options) => throw new NotSupportedException();
         public Task<KeyValueResponseType> CommitTransaction(HLCTimestamp ts, List<KeyValueTransactionModifiedKey> locks, List<KeyValueTransactionModifiedKey> modified, List<KeyValueTransactionReadKey> reads) => throw new NotSupportedException();
         public Task<KeyValueResponseType> RollbackTransaction(HLCTimestamp ts, List<KeyValueTransactionModifiedKey> locks, List<KeyValueTransactionModifiedKey> modified) => throw new NotSupportedException();

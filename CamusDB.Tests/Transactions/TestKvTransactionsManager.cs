@@ -454,8 +454,8 @@ public sealed class TestKvTransactionsManager
         public Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(List<KahunaDeleteKeyValueRequestItem> deleteManyItems, CancellationToken cancellationToken)
             => inner.LocateAndTryDeleteManyKeyValue(deleteManyItems, cancellationToken);
 
-        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability, CancellationToken cancellationToken)
-            => inner.LocateAndTryExistsValue(transactionId, key, revision, durability, cancellationToken);
+        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndTryExistsValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
 
         public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
             => inner.LocateAndTryCheckWriteIntent(transactionId, key, durability, cancellationToken);
@@ -475,8 +475,8 @@ public sealed class TestKvTransactionsManager
         public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp transactionId, string key, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken)
             => inner.LocateAndTryExtendKeyValue(transactionId, key, expiresMs, durability, cancellationToken);
 
-        public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, KeyValueDurability durability, CancellationToken cancellationToken)
-            => inner.LocateAndGetByBucket(transactionId, prefixedKey, durability, cancellationToken);
+        public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp transactionId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.LocateAndGetByBucket(transactionId, prefixedKey, readTimestamp, durability, cancellationToken);
 
         public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
             => inner.LocateAndGetByRange(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, limit, readTimestamp, durability, cancellationToken);
@@ -502,8 +502,8 @@ public sealed class TestKvTransactionsManager
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys)
             => inner.TryGetManyValues(transactionId, keys);
 
-        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(HLCTimestamp transactionId, string key, long revision, KeyValueDurability durability)
-            => inner.TryExistsValue(transactionId, key, revision, durability);
+        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability)
+            => inner.TryExistsValue(transactionId, key, revision, readTimestamp, durability);
 
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys)
             => inner.TryExistsManyValues(transactionId, keys);
@@ -601,14 +601,14 @@ public sealed class TestKvTransactionsManager
         public Task<KeyValueTransactionResult> TryExecuteTransactionScript(byte[] script, string? hash, List<KeyValueParameter>? parameters)
             => inner.TryExecuteTransactionScript(script, hash, parameters);
 
-        public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, KeyValueDurability durability)
-            => inner.GetByBucket(transactionId, prefixKeyName, durability);
+        public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability)
+            => inner.GetByBucket(transactionId, prefixKeyName, readTimestamp, durability);
 
-        public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, KeyValueDurability durability)
-            => inner.ScanByPrefix(prefixKeyName, durability);
+        public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability)
+            => inner.ScanByPrefix(prefixKeyName, readTimestamp, durability);
 
-        public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, KeyValueDurability durability, CancellationToken cancellationToken)
-            => inner.ScanAllByPrefix(prefixKeyName, durability, cancellationToken);
+        public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
+            => inner.ScanAllByPrefix(prefixKeyName, readTimestamp, durability, cancellationToken);
 
         public Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(KeyValueTransactionOptions options)
             => inner.StartTransaction(options);

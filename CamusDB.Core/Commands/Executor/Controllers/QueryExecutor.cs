@@ -320,13 +320,12 @@ internal sealed class QueryExecutor
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
-        // Acquire a shared range lock scoped to [fromBound, toBound] rather than the whole index
-        // bucket. This blocks phantom inserts into the locked sub-range while allowing concurrent
-        // transactions that scan disjoint sub-ranges of the same index to proceed without conflict.
+        // Acquire a range lock scoped to [fromBound, toBound]. Shared for SELECT; Exclusive for
+        // UPDATE/DELETE so concurrent Serializable+RW readers cannot enter the mutated sub-range.
         await table.Store.AcquireBoundedIndexRangeLockAsync(
             ticket.TxnState, index.Name,
             fromBound, fromInclusive, toBound, toInclusive,
-            unique).ConfigureAwait(false);
+            unique, exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             ticket.TxnState,
@@ -384,10 +383,9 @@ internal sealed class QueryExecutor
         HashSet<ObjectIdValue> seen = new();
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
-        // For a non-unique IN-list scan, acquire a shared range lock covering [min, max] of the IN
-        // values rather than the whole index bucket. This blocks phantom inserts into that sub-range
-        // while allowing concurrent scans on disjoint parts of the index to proceed.
-        // Unique IN-list uses per-key point lookups (LookupUnique), so no range lock is needed.
+        // For a non-unique IN-list scan, acquire a range lock covering [min, max] of the IN values.
+        // Shared for SELECT; Exclusive for UPDATE/DELETE. Unique IN-list uses per-key point
+        // lookups (LookupUnique), so no range lock is needed.
         if (!isUnique)
         {
             CompositeColumnValue? minVal = null, maxVal = null;
@@ -400,7 +398,7 @@ internal sealed class QueryExecutor
             await table.Store.AcquireBoundedIndexRangeLockAsync(
                 ticket.TxnState, index.Name,
                 minVal, true, maxVal, true,
-                unique: false).ConfigureAwait(false);
+                unique: false, exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
         }
 
         foreach (ColumnValue value in inListNode.Values)

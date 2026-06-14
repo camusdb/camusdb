@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Kahuna;
@@ -61,6 +62,14 @@ public sealed class KvTableStore
     private const int MaxKahunaRetries = 32;
     private const int MaxRetryDelayMs   = 50;
 
+    // Hard wall-clock cap for write and lock-acquisition retry loops. Once this many
+    // milliseconds have elapsed, the loop throws TransactionMustRetry immediately rather
+    // than spinning for the full MaxKahunaRetries budget. This caps deadlock / persistent
+    // lock-conflict latency: in a reverse-order deadlock both transactions abort within
+    // roughly LockWaitDeadlineMs rather than after the full ~1.4 s retry budget.
+    // Keep this shorter than MaxKahunaRetries × MaxRetryDelayMs (≈ 1.4 s) to be useful.
+    private const int LockWaitDeadlineMs = 500;
+
     // Safety-net expiry for an exclusive range (prefix) lock. The lock is released explicitly when
     // the owning transaction commits or rolls back; this expiry only bounds a leak if the client
     // dies mid-transaction. A range scan that needs serializable isolation should comfortably
@@ -72,7 +81,7 @@ public sealed class KvTableStore
     // hex chars (code points 0x0030–0x0066). The sentinel U+FFFF is the highest BMP code point
     // and exceeds every character KeyEncoder can emit:
     //   • Integer64 / Float64 / Bool: uppercase hex digits 0x0030–0x0046
-    //   • String / Id (C3b AppendStringHex): 4-hex-per-code-unit 0x0030–0x0046, plus the
+    //   • String / Id (AppendStringHex): 4-hex-per-code-unit 0x0030–0x0046, plus the
     //     field terminator pair U+0000 U+0001 (both far below U+FFFF)
     //   • NULL marker: 0x0030 ('0'); Present marker: 0x0031 ('1')
     // If KeyEncoder ever emits a character ≥ U+FFFF (surrogates are illegal in C# strings;
@@ -136,28 +145,34 @@ public sealed class KvTableStore
     /// — the isolation level that requires phantom protection as part of strict two-phase locking.
     /// Read Committed and Serializable read-only transactions are exempt.
     /// </summary>
-    public Task AcquireRowRangeLockAsync(KvTransaction tx, CancellationToken cancellationToken = default)
+    public Task AcquireRowRangeLockAsync(KvTransaction tx, bool exclusive = false, CancellationToken cancellationToken = default)
     {
         if (!CamusDBConfig.KeyRangeShardingEnabled && !IsSerializableReadWrite(tx))
             return Task.CompletedTask;
-        return AcquireRangeLockAsync(tx, rowBucketPrefix, null, true, null, true, cancellationToken);
+        return AcquireRangeLockAsync(tx, rowBucketPrefix, null, true, null, true, cancellationToken,
+            exclusive ? RangeLockMode.Exclusive : RangeLockMode.Shared);
     }
 
     /// <summary>
-    /// Shared-locks an index's entire key range for <paramref name="tx"/> (serializable index
+    /// Locks an index's entire key range for <paramref name="tx"/> (serializable index
     /// scan / phantom protection over the index bucket). Used for full-index scans where no
     /// tighter bound is known. For bounded range scans use
     /// <see cref="AcquireBoundedIndexRangeLockAsync"/>.
+    ///
+    /// Pass <paramref name="exclusive"/> = true for UPDATE/DELETE locate scans: the Exclusive
+    /// mode blocks concurrent Serializable+RW readers from acquiring a Shared lock on the same
+    /// range, preventing them from observing a partial mutation during the write phase.
     ///
     /// Fires when key-range sharding is enabled and the index is ranged, or unconditionally for
     /// Serializable read-write transactions (which need phantom protection regardless of sharding
     /// mode — in hash mode the lock covers the single partition that owns the index bucket).
     /// </summary>
-    public Task AcquireIndexRangeLockAsync(KvTransaction tx, string indexId, CancellationToken cancellationToken = default)
+    public Task AcquireIndexRangeLockAsync(KvTransaction tx, string indexId, bool exclusive = false, CancellationToken cancellationToken = default)
     {
         if ((!CamusDBConfig.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
             return Task.CompletedTask;
-        return AcquireRangeLockAsync(tx, BuildIndexBucketPrefix(indexId), null, true, null, true, cancellationToken);
+        return AcquireRangeLockAsync(tx, BuildIndexBucketPrefix(indexId), null, true, null, true, cancellationToken,
+            exclusive ? RangeLockMode.Exclusive : RangeLockMode.Shared);
     }
 
     /// <summary>
@@ -169,6 +184,9 @@ public sealed class KvTableStore
     /// <see cref="IndexKeySentinel"/> (U+FFFF) is appended so all rowId suffixes of the
     /// last value are included — see the constant's declaration for the invariant this relies on.
     ///
+    /// Pass <paramref name="exclusive"/> = true for UPDATE/DELETE locate scans (same rationale
+    /// as <see cref="AcquireIndexRangeLockAsync"/>).
+    ///
     /// Fires under the same conditions as <see cref="AcquireIndexRangeLockAsync"/>.
     /// </summary>
     public Task AcquireBoundedIndexRangeLockAsync(
@@ -177,6 +195,7 @@ public sealed class KvTableStore
         CompositeColumnValue? fromBound, bool fromInclusive,
         CompositeColumnValue? toBound,   bool toInclusive,
         bool unique,
+        bool exclusive = false,
         CancellationToken cancellationToken = default)
     {
         if ((!CamusDBConfig.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
@@ -195,7 +214,8 @@ public sealed class KvTableStore
             ? (unique ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;
 
-        return AcquireRangeLockAsync(tx, bucketPrefix, startKey, fromInclusive, endKey, toInclusive, cancellationToken);
+        return AcquireRangeLockAsync(tx, bucketPrefix, startKey, fromInclusive, endKey, toInclusive, cancellationToken,
+            exclusive ? RangeLockMode.Exclusive : RangeLockMode.Shared);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -235,7 +255,7 @@ public sealed class KvTableStore
         if (tx.TransactionId == HLCTimestamp.Zero)
             return;
 
-        KeyValueResponseType type = await RetryOnMustRetry(
+        KeyValueResponseType type = await RetryOnMustRetryLocked(
             () => kahuna.LocateAndTryAcquireRangeLock(
                 tx.TransactionId, bucketPrefix,
                 startKey, startInclusive, endKey, endInclusive,
@@ -441,10 +461,13 @@ public sealed class KvTableStore
 
         await AcquireLock(tx, key, cancellationToken).ConfigureAwait(false);
 
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
             () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, key, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
+
+        if (type == KeyValueResponseType.MustRetry)
+            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {key}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
         if (type is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"DeleteRow failed for key {key}: {type}");
@@ -633,7 +656,7 @@ public sealed class KvTableStore
 
         KeyValueFlags flags = unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
 
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
             () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
@@ -756,6 +779,7 @@ public sealed class KvTableStore
         CancellationToken ct)
     {
         List<(string, int, KeyValueDurability)> pending = new(keys);
+        long deadline = LockWaitDeadlineTicks();
         int retries = 0;
 
         while (pending.Count > 0)
@@ -794,8 +818,11 @@ public sealed class KvTableStore
             if (retry.Count == 0)
                 return;
 
+            if (Stopwatch.GetTimestamp() >= deadline)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+
             if (++retries >= MaxKahunaRetries)
-                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire {retry.Count} lock(s) after {MaxKahunaRetries} retries");
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {retry.Count} key(s); a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             pending = retry;
@@ -808,6 +835,7 @@ public sealed class KvTableStore
         CancellationToken ct)
     {
         List<KahunaSetKeyValueRequestItem> pending = new(items);
+        long deadline = LockWaitDeadlineTicks();
         int retries = 0;
 
         while (pending.Count > 0)
@@ -849,6 +877,9 @@ public sealed class KvTableStore
 
             if (retry.Count == 0)
                 return;
+
+            if (Stopwatch.GetTimestamp() >= deadline)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
 
             if (++retries >= MaxKahunaRetries)
                 throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {retry.Count} key(s); a concurrent transaction holds a lock — retry the operation from BeginAsync");
@@ -920,7 +951,7 @@ public sealed class KvTableStore
 
         await AcquireLock(tx, kvKey, cancellationToken).ConfigureAwait(false);
 
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
             () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, kvKey, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
@@ -997,6 +1028,7 @@ public sealed class KvTableStore
     private async Task DeleteManyWithRetry(List<KahunaDeleteKeyValueRequestItem> items, CancellationToken ct)
     {
         List<KahunaDeleteKeyValueRequestItem> pending = new(items);
+        long deadline = LockWaitDeadlineTicks();
         int retries = 0;
 
         while (pending.Count > 0)
@@ -1032,8 +1064,11 @@ public sealed class KvTableStore
             if (retry.Count == 0)
                 return;
 
+            if (Stopwatch.GetTimestamp() >= deadline)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+
             if (++retries >= MaxKahunaRetries)
-                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch delete failed for {retry.Count} key(s) after {MaxKahunaRetries} retries");
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Batch delete conflict on {retry.Count} key(s); a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             pending = retry;
@@ -1055,7 +1090,7 @@ public sealed class KvTableStore
 
         await AcquireLock(tx, key, cancellationToken).ConfigureAwait(false);
 
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetry(
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
             () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, data, null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
@@ -1071,7 +1106,7 @@ public sealed class KvTableStore
 
     private async Task AcquireLock(KvTransaction tx, string key, CancellationToken cancellationToken)
     {
-        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability) = await RetryOnMustRetry(
+        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability) = await RetryOnMustRetryLocked(
             () => kahuna.LocateAndTryAcquireExclusiveLock(tx.TransactionId, key, 0, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
@@ -1150,6 +1185,99 @@ public sealed class KvTableStore
             (type, endpoint, durability) = await fn().ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+
+        return (type, endpoint, durability);
+    }
+
+    // -----------------------------------------------------------------------
+    // Deadline-aware retry helpers (write and lock-acquisition paths)
+    //
+    // These mirror the RetryOnMustRetry overloads above but add a wall-clock
+    // deadline check on every MustRetry iteration. When the deadline elapses
+    // they throw TransactionMustRetry immediately, bounding deadlock and
+    // persistent lock-conflict latency to ≤ LockWaitDeadlineMs per operation.
+    //
+    // Used by: AcquireRangeLockAsync, AcquireLock, WriteRow, DeleteRow,
+    //          PutIndexEntry, DeleteIndexEntry, and the three manual batch loops.
+    // NOT used by: read paths (GetRow, LookupUnique, ScanRows, ScanIndex)
+    //   where MustRetry is a transient 2PC prepare-phase signal, not a lock conflict.
+    // -----------------------------------------------------------------------
+
+    private const string LockWaitDeadlineMessage =
+        "Lock-wait deadline exceeded; the operation conflicts with a long-held lock or is in a deadlock — retry the transaction from BeginAsync";
+
+    private static long LockWaitDeadlineTicks()
+        => Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (LockWaitDeadlineMs / 1000.0));
+
+    private static async Task<KeyValueResponseType> RetryOnMustRetryLocked(
+        Func<Task<KeyValueResponseType>> fn,
+        CancellationToken ct)
+    {
+        long deadline = LockWaitDeadlineTicks();
+        KeyValueResponseType type;
+        int retries = 0;
+
+        do
+        {
+            type = await fn().ConfigureAwait(false);
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            {
+                if (Stopwatch.GetTimestamp() >= deadline)
+                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+                await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+            }
+        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+
+        return type;
+    }
+
+    private static async Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetryLocked(
+        Func<Task<(KeyValueResponseType, long, HLCTimestamp)>> fn,
+        CancellationToken ct)
+    {
+        long deadline = LockWaitDeadlineTicks();
+        KeyValueResponseType type;
+        long revision;
+        HLCTimestamp ts;
+        int retries = 0;
+
+        do
+        {
+            (type, revision, ts) = await fn().ConfigureAwait(false);
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            {
+                if (Stopwatch.GetTimestamp() >= deadline)
+                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+                await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+            }
+        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+
+        return (type, revision, ts);
+    }
+
+    private static async Task<(KeyValueResponseType, string, KeyValueDurability)> RetryOnMustRetryLocked(
+        Func<Task<(KeyValueResponseType, string, KeyValueDurability)>> fn,
+        CancellationToken ct)
+    {
+        long deadline = LockWaitDeadlineTicks();
+        KeyValueResponseType type;
+        string endpoint;
+        KeyValueDurability durability;
+        int retries = 0;
+
+        do
+        {
+            (type, endpoint, durability) = await fn().ConfigureAwait(false);
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            {
+                if (Stopwatch.GetTimestamp() >= deadline)
+                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+                await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+            }
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
 

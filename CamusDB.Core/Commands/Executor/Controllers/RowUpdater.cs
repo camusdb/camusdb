@@ -197,7 +197,8 @@ public sealed class RowUpdater
             limit: ticket.Limit,
             offset: null,
             parameters: ticket.Parameters,
-            locateColumns: locateColumns
+            locateColumns: locateColumns,
+            exclusivePredicateLocks: true
         );
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);

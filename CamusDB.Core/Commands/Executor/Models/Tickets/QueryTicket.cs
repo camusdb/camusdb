@@ -73,6 +73,14 @@ public sealed class QueryTicket
     /// </summary>
     internal IReadOnlySet<string>? LocateColumns { get; }
 
+    /// <summary>
+    /// When true, predicate range locks acquired during the locate scan are Exclusive rather
+    /// than Shared. Set by UPDATE/DELETE so the scanned row/index range is held against
+    /// concurrent Serializable+RW readers until the modifying transaction commits, preventing
+    /// them from observing a partial mutation.
+    /// </summary>
+    internal bool ExclusivePredicateLocks { get; }
+
     public QueryTicket(
         KvTransaction txnState,
         string databaseName,
@@ -93,7 +101,8 @@ public sealed class QueryTicket
         bool isDistinct = false,
         SelectQuery? selectQuery = null,
         IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null,
-        IReadOnlySet<string>? locateColumns = null)
+        IReadOnlySet<string>? locateColumns = null,
+        bool exclusivePredicateLocks = false)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -115,5 +124,6 @@ public sealed class QueryTicket
         SelectQuery = selectQuery;
         SemiJoinSpecs = semiJoinSpecs;
         LocateColumns = locateColumns;
+        ExclusivePredicateLocks = exclusivePredicateLocks;
     }
 }

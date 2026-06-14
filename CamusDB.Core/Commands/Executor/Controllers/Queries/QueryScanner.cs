@@ -38,10 +38,11 @@ internal sealed class QueryScanner
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
         // R1: acquire a phantom-protection range lock on the row key space before the scan.
-        // This serialises concurrent mutations that would otherwise insert phantom rows within
-        // the scanned space between the scan and commit. Same-transaction re-acquisition is
-        // idempotent (Kahuna returns Locked for the same tx). Read-only transactions skip this.
-        await table.Store.AcquireRowRangeLockAsync(plan.Ticket.TxnState).ConfigureAwait(false);
+        // Shared for SELECT; Exclusive for UPDATE/DELETE (blocks concurrent readers from
+        // seeing the range while the mutation is in flight). Same-tx re-acquisition is
+        // idempotent. Read-only transactions skip this.
+        await table.Store.AcquireRowRangeLockAsync(plan.Ticket.TxnState,
+            exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
 
         await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
         {
@@ -99,7 +100,8 @@ internal sealed class QueryScanner
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
         // R1: phantom-protection range lock on the index key space (mirrors ScanUsingTableIndex).
-        await table.Store.AcquireIndexRangeLockAsync(ticket.TxnState, index.Name).ConfigureAwait(false);
+        await table.Store.AcquireIndexRangeLockAsync(ticket.TxnState, index.Name,
+            exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             ticket.TxnState,

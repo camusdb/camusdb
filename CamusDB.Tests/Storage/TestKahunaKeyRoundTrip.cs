@@ -92,6 +92,7 @@ public sealed class TestKahunaKeyRoundTrip
         KeyValueGetByBucketResult result = await node.Kahuna.LocateAndGetByBucket(
             HLCTimestamp.Zero,
             bucketPrefix,
+            HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
             CancellationToken.None
         );
@@ -143,6 +144,7 @@ public sealed class TestKahunaKeyRoundTrip
         KeyValueGetByBucketResult result = await node.Kahuna.LocateAndGetByBucket(
             HLCTimestamp.Zero,
             bucketPrefix,
+            HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
             CancellationToken.None
         );
@@ -218,6 +220,7 @@ public sealed class TestKahunaKeyRoundTrip
         KeyValueGetByBucketResult result = await node.Kahuna.LocateAndGetByBucket(
             HLCTimestamp.Zero,
             bucketPrefix,
+            HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
             CancellationToken.None
         );
@@ -292,6 +295,7 @@ public sealed class TestKahunaKeyRoundTrip
         KeyValueGetByBucketResult result = await node.Kahuna.LocateAndGetByBucket(
             HLCTimestamp.Zero,
             bucketPrefix,
+            HLCTimestamp.Zero,
             KeyValueDurability.Persistent,
             CancellationToken.None
         );
