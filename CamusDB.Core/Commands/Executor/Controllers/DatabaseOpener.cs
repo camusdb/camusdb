@@ -7,6 +7,7 @@
  */
 
 using Nito.AsyncEx;
+using Kommander.Time;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
@@ -103,7 +104,10 @@ internal sealed class DatabaseOpener
             await node.FlushAsync().ConfigureAwait(false);
         }
 
-        KvTransactionsManager transactions = new(node.Kahuna);
+        Func<HLCTimestamp> mintLocalT = () =>
+            node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        KvTransactionsManager transactions = new(node.Kahuna, mintLocalT);
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new();
 
         DatabaseDescriptor databaseDescriptor = new(

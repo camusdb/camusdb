@@ -1146,10 +1146,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         //   CADB0503 SchemaCatchingUp — retried HERE, inside ExecuteNonSQLQuery. The fence fires
         //     in TableOpener.Open before any write or schema-pin, so the in-flight transaction is
         //     unmodified and the same tx is safely reused on each attempt.
-        //   CADB0504 TransactionMustRetry — NOT retried here. CommitAsync throws it after the
-        //     operation may have been partially applied and the tx is spent (Status = RolledBack).
-        //     The caller must restart the whole operation from BeginAsync. Auto-retrying here would
-        //     risk re-applying writes on a tx that can no longer be rolled back safely.
+        //   CADB0502/CADB0504/CADB0505 serialization failures — retried by the HTTP controller for
+        //     autocommit statements (via SerializableRetryHelper). The controller replays from a
+        //     fresh BeginAsync each time. Explicit multi-statement transactions surface these codes
+        //     to the caller, which owns the retry loop.
         const int MaxFenceRetries = 3;
 
         switch (ast.nodeType)

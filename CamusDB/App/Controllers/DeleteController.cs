@@ -39,39 +39,64 @@ public sealed class DeleteController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Delete request is not valid");
 
-            KvTransaction? txnState = null;
-            bool newTransaction = false;
-
-            try
+            // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
+            if (request.TxnIdPT > 0)
             {
-                (newTransaction, txnState) = await BeginOrResumeAsync(
-                    request.DatabaseName,
-                    request.TxnIdPT,
-                    request.TxnIdCounter
-                ).ConfigureAwait(false);
-
-                DeleteTicket ticket = new(
-                    txnState: txnState,
-                    databaseName: request.DatabaseName ?? "",
-                    tableName: request.TableName ?? "",
-                    where: null,
-                    filters: request.Filters ?? new()
-                );
-
-                DeleteResult result = await executor.Delete(ticket).ConfigureAwait(false);
-
-                if (newTransaction)
-                    await transactions.CommitAsync(result.Database, txnState).ConfigureAwait(false);
-
-                return new JsonResult(new DeleteResponse("ok", result.DeletedRows));
+                KvTransaction? txnState = null;
+                try
+                {
+                    txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
+                    DeleteTicket ticket = new(
+                        txnState: txnState,
+                        databaseName: request.DatabaseName ?? "",
+                        tableName: request.TableName ?? "",
+                        where: null,
+                        filters: request.Filters ?? new()
+                    );
+                    DeleteResult result = await executor.Delete(ticket).ConfigureAwait(false);
+                    return new JsonResult(new DeleteResponse("ok", result.DeletedRows));
+                }
+                catch (Exception)
+                {
+                    if (txnState is not null)
+                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    throw;
+                }
             }
-            catch (Exception)
+
+            // Autocommit: retry transparently on transient serialization failures when the
+            // resolved level is Serializable; run once for Read Committed.
+            int deletedRows = 0;
+
+            async Task AutocommitBody(CancellationToken ct)
             {
-                if (txnState is not null)
-                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
-
-                throw;
+                KvTransaction tx = await transactions.StartAsync(request.DatabaseName ?? "", null, null, ct).ConfigureAwait(false);
+                try
+                {
+                    DeleteTicket ticket = new(
+                        txnState: tx,
+                        databaseName: request.DatabaseName ?? "",
+                        tableName: request.TableName ?? "",
+                        where: null,
+                        filters: request.Filters ?? new()
+                    );
+                    DeleteResult r = await executor.Delete(ticket).ConfigureAwait(false);
+                    await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
+                    deletedRows = r.DeletedRows;
+                }
+                catch
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    throw;
+                }
             }
+
+            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody).ConfigureAwait(false);
+            else
+                await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
+
+            return new JsonResult(new DeleteResponse("ok", deletedRows));
         }
         catch (CamusDBException e)
         {

@@ -41,13 +41,28 @@ namespace CamusDB.Core.Transactions;
 public sealed class KvTransactionsManager
 {
     private readonly IKahuna kahuna;
+
+    /// <summary>
+    /// Mints a local HLC timestamp without opening a Kahuna transaction. Used by the cheap
+    /// serializable read-only snapshot path (<see cref="BeginReadOnlyAsync"/> with Serializable
+    /// default) — a purely in-memory clock bump, no Raft or network round-trip.
+    /// <c>null</c> when not wired (legacy test paths); falls back to the zero-snapshot fast path.
+    /// </summary>
+    private readonly Func<Kommander.Time.HLCTimestamp>? mintLocalT;
+
     private readonly Lock activeSync = new();
     private readonly List<KvTransaction> activeTransactions = [];
 
-    public KvTransactionsManager(IKahuna kahuna)
+    // Cancellation sources for per-transaction range-lock heartbeat tasks.
+    // Keyed by TransactionId (the Kahuna HLC timestamp that uniquely identifies the tx).
+    private readonly Lock heartbeatSync = new();
+    private readonly Dictionary<Kommander.Time.HLCTimestamp, CancellationTokenSource> heartbeats = [];
+
+    public KvTransactionsManager(IKahuna kahuna, Func<Kommander.Time.HLCTimestamp>? mintLocalT = null)
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         this.kahuna = kahuna;
+        this.mintLocalT = mintLocalT;
     }
 
     /// <summary>
@@ -139,6 +154,13 @@ public sealed class KvTransactionsManager
 
         KvTransaction tx = new(txId, uniqueId, isReadOnly: false, level, mode);
         Track(tx);
+
+        // Start the range-lock heartbeat for Serializable+RW transactions. This background loop
+        // periodically re-acquires every range lock the transaction holds, refreshing their TTL
+        // so they stay valid for arbitrarily long transactions.
+        if (level == CamusIsolationLevel.Serializable && mode == CamusTransactionMode.ReadWrite)
+            StartHeartbeat(tx);
+
         return tx;
     }
 
@@ -217,7 +239,16 @@ public sealed class KvTransactionsManager
     public async Task<KvTransaction> BeginReadOnlyAsync(bool promote, CancellationToken cancellationToken = default)
     {
         if (!promote || !CamusDBConfig.KeyRangeShardingEnabled)
+        {
+            // Serializable default: mint a local HLC timestamp T and return a zero-identity
+            // snapshot transaction at T — no Kahuna round-trip, no session, no cleanup.
+            // RC default: keep the HLCTimestamp.Zero fast path (latest-committed per key).
+            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable &&
+                mintLocalT is not null)
+                return KvTransaction.CreateSnapshotReadOnly(mintLocalT());
+
             return KvTransaction.CreateReadOnly();
+        }
 
         string uniqueId = Guid.NewGuid().ToString("N");
 
@@ -283,6 +314,9 @@ public sealed class KvTransactionsManager
             }
             return;
         }
+
+        // Stop the range-lock heartbeat before committing so no concurrent renewal fires during 2PC.
+        StopHeartbeat(tx.TransactionId);
 
         tx.ValidateSchemaPins();
 
@@ -381,6 +415,8 @@ public sealed class KvTransactionsManager
                 $"Transaction {tx.UniqueId} is already {tx.Status}"
             );
 
+        StopHeartbeat(tx.TransactionId);
+
         tx.Status = KvTransactionStatus.RolledBack;
         Untrack(tx);
 
@@ -472,5 +508,81 @@ public sealed class KvTransactionsManager
             return;
 
         await RollbackAsync(tx, cancellationToken).ConfigureAwait(false);
+    }
+
+    // -----------------------------------------------------------------------
+    // Range-lock heartbeat — keeps Serializable+RW range locks alive for the
+    // full duration of the transaction by periodically re-acquiring them.
+    // -----------------------------------------------------------------------
+
+    private void StartHeartbeat(KvTransaction tx)
+    {
+        CancellationTokenSource cts = new();
+        lock (heartbeatSync)
+            heartbeats[tx.TransactionId] = cts;
+
+        _ = RangeLockHeartbeatLoopAsync(tx, cts.Token);
+    }
+
+    private void StopHeartbeat(Kommander.Time.HLCTimestamp txId)
+    {
+        CancellationTokenSource? cts;
+        lock (heartbeatSync)
+        {
+            if (!heartbeats.Remove(txId, out cts))
+                return;
+        }
+        cts.Cancel();
+        cts.Dispose();
+    }
+
+    private async Task RangeLockHeartbeatLoopAsync(KvTransaction tx, CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(CamusDBConfig.RangeLockHeartbeatIntervalMs, ct).ConfigureAwait(false);
+
+                if (ct.IsCancellationRequested || tx.Status != KvTransactionStatus.Active)
+                    break;
+
+                IReadOnlyList<RangeLockBounds> locks = tx.GetAcquiredRangeLocks();
+                foreach (RangeLockBounds b in locks)
+                {
+                    if (ct.IsCancellationRequested)
+                        break;
+                    try
+                    {
+                        // Use the loop's cancellation token (not None) so a StopHeartbeat fired by
+                        // CommitAsync/RollbackAsync cancels an in-flight renewal. Otherwise a renewal
+                        // racing the finalize could re-acquire a range lock the commit/rollback just
+                        // released (Kahuna's acquire handler does no tx-state check and would create a
+                        // fresh lock), leaving a committed transaction's lock lingering for one TTL.
+                        await kahuna.LocateAndTryAcquireRangeLock(
+                            tx.TransactionId, b.Prefix,
+                            b.StartKey, b.StartInclusive, b.EndKey, b.EndInclusive,
+                            CamusDBConfig.RangeLockExpiresMs, b.Durability, b.Mode,
+                            ct
+                        ).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Best-effort renewal: a transient failure is tolerated. If the lock
+                        // expires before the next heartbeat fires, the transaction will fail on
+                        // the next operation (which is the correct safety outcome).
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal shutdown — commit or rollback cancelled the loop.
+        }
+        catch
+        {
+            // Any other exception in the background loop is swallowed; the foreground path
+            // will detect a stale lock on the next operation.
+        }
     }
 }

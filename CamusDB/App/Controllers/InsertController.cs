@@ -45,38 +45,62 @@ public sealed class InsertController : CommandsController
             if (request.Values is null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Insert values are not valid");
 
-            KvTransaction? txnState = null;
-            bool newTransaction = false;
-
-            try
+            // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
+            if (request.TxnIdPT > 0)
             {
-                (newTransaction, txnState) = await BeginOrResumeAsync(
-                    request.DatabaseName,
-                    request.TxnIdPT,
-                    request.TxnIdCounter
-                ).ConfigureAwait(false);
-
-                InsertTicket ticket = new(
-                    txnState: txnState,
-                    databaseName: request.DatabaseName ?? "",
-                    tableName: request.TableName ?? "",
-                    values: new List<Dictionary<string, ColumnValue>>() { request.Values }
-                );
-
-                InsertResult result = await executor.Insert(ticket).ConfigureAwait(false);
-
-                if (newTransaction)
-                    await transactions.CommitAsync(result.Database, txnState).ConfigureAwait(false);
-
-                return new JsonResult(new InsertResponse("ok", result.InsertedRows));
+                KvTransaction? txnState = null;
+                try
+                {
+                    txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
+                    InsertTicket ticket = new(
+                        txnState: txnState,
+                        databaseName: request.DatabaseName ?? "",
+                        tableName: request.TableName ?? "",
+                        values: new List<Dictionary<string, ColumnValue>>() { request.Values }
+                    );
+                    InsertResult result = await executor.Insert(ticket).ConfigureAwait(false);
+                    return new JsonResult(new InsertResponse("ok", result.InsertedRows));
+                }
+                catch (Exception)
+                {
+                    if (txnState is not null)
+                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    throw;
+                }
             }
-            catch (Exception)
+
+            // Autocommit: retry transparently on transient serialization failures when the
+            // resolved level is Serializable; run once for Read Committed.
+            int insertedRows = 0;
+
+            async Task AutocommitBody(CancellationToken ct)
             {
-                if (txnState is not null)
-                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
-
-                throw;
+                KvTransaction tx = await transactions.StartAsync(request.DatabaseName ?? "", null, null, ct).ConfigureAwait(false);
+                try
+                {
+                    InsertTicket ticket = new(
+                        txnState: tx,
+                        databaseName: request.DatabaseName ?? "",
+                        tableName: request.TableName ?? "",
+                        values: new List<Dictionary<string, ColumnValue>>() { request.Values }
+                    );
+                    InsertResult r = await executor.Insert(ticket).ConfigureAwait(false);
+                    await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
+                    insertedRows = r.InsertedRows;
+                }
+                catch
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    throw;
+                }
             }
+
+            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody).ConfigureAwait(false);
+            else
+                await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
+
+            return new JsonResult(new InsertResponse("ok", insertedRows));
         }
         catch (CamusDBException e)
         {

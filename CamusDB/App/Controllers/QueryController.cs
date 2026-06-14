@@ -39,52 +39,82 @@ public sealed class QueryController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Query request is not valid");
 
-            KvTransaction? txnState = null;
-            bool newTransaction = false;
-
-            try
+            // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
+            if (request.TxnIdPT > 0)
             {
-                (newTransaction, txnState) = await BeginOrResumeAsync(
-                    request.DatabaseName,
-                    request.TxnIdPT,
-                    request.TxnIdCounter,
-                    readOnly: true,
-                    promoteReadOnly: true  // scan: in key-range mode take a shared range lock (serializable, phantom-free)
-                ).ConfigureAwait(false);
-
-                QueryTicket ticket = new(
-                    txnState: txnState,
-                    databaseName: request.DatabaseName ?? "",
-                    tableName: request.TableName ?? "",
-                    index: null,
-                    projection: null,
-                    where: null,
-                    filters: request.Filters,
-                    orderBy: request.OrderBy,
-                    limit: null,
-                    offset: null,
-                    parameters: null
-                );
-
-                List<Dictionary<string, ColumnValue>> rows = new();
-
-                (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
-
-                await foreach (QueryResultRow row in cursor)
-                    rows.Add(row.Row);
-
-                if (newTransaction)
-                    await transactions.CommitAsync(database, txnState).ConfigureAwait(false);
-
-                return new JsonResult(new QueryResponse("ok", rows.Count, rows));
+                KvTransaction? txnState = null;
+                try
+                {
+                    txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
+                    QueryTicket ticket = new(
+                        txnState: txnState,
+                        databaseName: request.DatabaseName ?? "",
+                        tableName: request.TableName ?? "",
+                        index: null,
+                        projection: null,
+                        where: null,
+                        filters: request.Filters,
+                        orderBy: request.OrderBy,
+                        limit: null,
+                        offset: null,
+                        parameters: null
+                    );
+                    List<Dictionary<string, ColumnValue>> rows = new();
+                    (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
+                    await foreach (QueryResultRow row in cursor)
+                        rows.Add(row.Row);
+                    return new JsonResult(new QueryResponse("ok", rows.Count, rows));
+                }
+                catch (Exception)
+                {
+                    if (txnState is not null)
+                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    throw;
+                }
             }
-            catch (Exception)
+
+            // Autocommit: retry transparently on transient serialization failures when the
+            // resolved level is Serializable; run once for Read Committed.
+            List<Dictionary<string, ColumnValue>> resultRows = [];
+
+            async Task AutocommitBody(CancellationToken ct)
             {
-                if (txnState is not null)
-                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
-
-                throw;
+                KvTransaction tx = await transactions.BeginReadOnlyAsync(request.DatabaseName ?? "", promote: true, ct).ConfigureAwait(false);
+                try
+                {
+                    QueryTicket ticket = new(
+                        txnState: tx,
+                        databaseName: request.DatabaseName ?? "",
+                        tableName: request.TableName ?? "",
+                        index: null,
+                        projection: null,
+                        where: null,
+                        filters: request.Filters,
+                        orderBy: request.OrderBy,
+                        limit: null,
+                        offset: null,
+                        parameters: null
+                    );
+                    List<Dictionary<string, ColumnValue>> rows = [];
+                    (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
+                    await foreach (QueryResultRow row in cursor)
+                        rows.Add(row.Row);
+                    await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
+                    resultRows = rows;
+                }
+                catch
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    throw;
+                }
             }
+
+            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody).ConfigureAwait(false);
+            else
+                await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
+
+            return new JsonResult(new QueryResponse("ok", resultRows.Count, resultRows));
         }
         catch (CamusDBException e)
         {

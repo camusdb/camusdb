@@ -74,7 +74,7 @@ public sealed class KvTableStore
     // the owning transaction commits or rolls back; this expiry only bounds a leak if the client
     // dies mid-transaction. A range scan that needs serializable isolation should comfortably
     // finish inside this window.
-    private const int RangeLockExpiresMs = 30_000;
+    private static int RangeLockExpiresMs => CamusDBConfig.RangeLockExpiresMs;
 
     // Upper-bound sentinel appended to the encoded last value for non-unique index keys.
     // Non-unique stored key = "{encodedValue}{rowId24}" where rowId24 is exactly 24 lowercase
@@ -275,7 +275,7 @@ public sealed class KvTableStore
 
         if (type == KeyValueResponseType.Locked)
         {
-            tx.TrackRangeLock(bucketPrefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent);
+            tx.TrackRangeLock(bucketPrefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent, mode);
             return;
         }
 
@@ -300,13 +300,30 @@ public sealed class KvTableStore
     ///
     /// Two transactions acquiring shared point locks on the same key coexist (S∩S compatible).
     /// Conflict is detected at the writer's prepare/commit time via Kahuna's range-lock fence.
+    ///
+    /// <para><b>Escalation:</b> once the per-bucket point-lock count reaches
+    /// <see cref="CamusDBConfig.LockEscalationThreshold"/>, a single whole-bucket Shared lock
+    /// (<c>[null,null)</c>) is acquired instead. All subsequent reads on the same bucket skip the
+    /// per-point RPC — the whole-bucket lock already covers them. Old per-point entries are kept in
+    /// tracking and released at commit.</para>
     /// </summary>
     private Task AcquireSharedPointLockAsync(
         KvTransaction tx,
         string bucketPrefix,
         string key,
         CancellationToken cancellationToken)
-        => AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, cancellationToken);
+    {
+        // Whole-bucket lock already covers this point — no new RPC needed.
+        if (tx.HasWholeBucketLock(bucketPrefix))
+            return Task.CompletedTask;
+
+        // Past the threshold: promote to a single whole-bucket Shared lock.
+        // Old per-point entries remain tracked and are released at commit/rollback.
+        if (tx.CountPointLocksForBucket(bucketPrefix) >= CamusDBConfig.LockEscalationThreshold)
+            return AcquireRangeLockAsync(tx, bucketPrefix, null, true, null, true, cancellationToken);
+
+        return AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, cancellationToken);
+    }
 
     /// <summary>
     /// Upgrades a shared singleton range lock on <paramref name="key"/> to exclusive in-place.

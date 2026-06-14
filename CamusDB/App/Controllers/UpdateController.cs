@@ -39,42 +39,70 @@ public sealed class UpdateController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Update request is not valid");
 
-            KvTransaction? txnState = null;
-            bool newTransaction = false;
-
-            try
+            // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
+            if (request.TxnIdPT > 0)
             {
-                (newTransaction, txnState) = await BeginOrResumeAsync(
-                    request.DatabaseName,
-                    request.TxnIdPT,
-                    request.TxnIdCounter
-                ).ConfigureAwait(false);
-
-                UpdateTicket ticket = new(
-                    txnState: txnState,
-                    databaseName: request.DatabaseName ?? "",
-                    tableName: request.TableName ?? "",
-                    plainValues: request.Values ?? new(),
-                    exprValues: null,
-                    where: null,
-                    filters: request.Filters ?? new(),
-                    parameters: null
-                );
-
-                UpdateResult result = await executor.Update(ticket).ConfigureAwait(false);
-
-                if (newTransaction)
-                    await transactions.CommitAsync(result.Database, txnState).ConfigureAwait(false);
-
-                return new JsonResult(new UpdateResponse("ok", result.UpdatedRows));
+                KvTransaction? txnState = null;
+                try
+                {
+                    txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
+                    UpdateTicket ticket = new(
+                        txnState: txnState,
+                        databaseName: request.DatabaseName ?? "",
+                        tableName: request.TableName ?? "",
+                        plainValues: request.Values ?? new(),
+                        exprValues: null,
+                        where: null,
+                        filters: request.Filters ?? new(),
+                        parameters: null
+                    );
+                    UpdateResult result = await executor.Update(ticket).ConfigureAwait(false);
+                    return new JsonResult(new UpdateResponse("ok", result.UpdatedRows));
+                }
+                catch (Exception)
+                {
+                    if (txnState is not null)
+                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    throw;
+                }
             }
-            catch (Exception)
+
+            // Autocommit: retry transparently on transient serialization failures when the
+            // resolved level is Serializable; run once for Read Committed.
+            int updatedRows = 0;
+
+            async Task AutocommitBody(CancellationToken ct)
             {
-                if (txnState is not null)
-                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
-
-                throw;
+                KvTransaction tx = await transactions.StartAsync(request.DatabaseName ?? "", null, null, ct).ConfigureAwait(false);
+                try
+                {
+                    UpdateTicket ticket = new(
+                        txnState: tx,
+                        databaseName: request.DatabaseName ?? "",
+                        tableName: request.TableName ?? "",
+                        plainValues: request.Values ?? new(),
+                        exprValues: null,
+                        where: null,
+                        filters: request.Filters ?? new(),
+                        parameters: null
+                    );
+                    UpdateResult r = await executor.Update(ticket).ConfigureAwait(false);
+                    await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
+                    updatedRows = r.UpdatedRows;
+                }
+                catch
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    throw;
+                }
             }
+
+            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody).ConfigureAwait(false);
+            else
+                await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
+
+            return new JsonResult(new UpdateResponse("ok", updatedRows));
         }
         catch (CamusDBException e)
         {

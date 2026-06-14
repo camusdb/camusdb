@@ -7,6 +7,7 @@
  */
 
 using System.Diagnostics;
+using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
@@ -21,13 +22,13 @@ public enum KvTransactionStatus
 }
 
 /// <summary>
-/// The bounds of a Kahuna exclusive key-range lock held by a transaction, retained so the lock can
-/// be released over the identical interval on commit/rollback. A whole-bucket lock is
-/// <c>(prefix, null, true, null, true)</c>.
+/// The bounds of a Kahuna key-range lock held by a transaction, retained so the lock can be
+/// released over the identical interval on commit/rollback and renewed by the heartbeat.
+/// A whole-bucket lock is <c>(prefix, null, true, null, true)</c>.
 /// </summary>
 public readonly record struct RangeLockBounds(
     string Prefix, string? StartKey, bool StartInclusive, string? EndKey, bool EndInclusive,
-    KeyValueDurability Durability);
+    KeyValueDurability Durability, RangeLockMode Mode = RangeLockMode.Shared);
 
 /// <summary>
 /// Holds the runtime state of a single CamusDB transaction backed by Kahuna.
@@ -141,6 +142,19 @@ public sealed class KvTransaction
             transactionMode: CamusTransactionMode.ReadOnly);
 
     /// <summary>
+    /// Creates a cheap serializable read-only snapshot transaction pinned to
+    /// <paramref name="snapshotT"/>. The transaction identity is still
+    /// <see cref="HLCTimestamp.Zero"/> (no Kahuna transaction object, no begin/commit round-trip),
+    /// but every read is issued with <c>readTimestamp = snapshotT</c> so all reads in the query
+    /// see one consistent point in the version history — exactly as a full Serializable+ReadOnly
+    /// transaction would, but without the session-open cost.
+    /// </summary>
+    public static KvTransaction CreateSnapshotReadOnly(HLCTimestamp snapshotT) =>
+        new(HLCTimestamp.Zero, string.Empty, isReadOnly: true,
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly,
+            readTimestamp: snapshotT);
+
+    /// <summary>
     /// Whether any statement (SELECT, INSERT, UPDATE, DELETE, SHOW, EXPLAIN …) has executed
     /// in this transaction. Set to <c>true</c> by <see cref="MarkStatementExecuted"/> before
     /// the first non-<c>SET TRANSACTION</c> statement runs. Used by <see cref="ApplyIsolationLevel"/>
@@ -232,12 +246,53 @@ public sealed class KvTransaction
     /// </summary>
     public void TrackRangeLock(
         string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
-        KeyValueDurability durability)
+        KeyValueDurability durability, RangeLockMode mode = RangeLockMode.Shared)
     {
         lock (trackSync)
         {
             acquiredRangeLocks ??= [];
-            acquiredRangeLocks.Add(new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability));
+            acquiredRangeLocks.Add(new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability, mode));
+        }
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> if the transaction holds a whole-bucket range lock (start and end
+    /// both <c>null</c>) on <paramref name="prefix"/>, regardless of Shared/Exclusive mode.
+    /// A whole-bucket lock already covers every point within the bucket, so callers can skip
+    /// per-point lock acquisition.
+    /// </summary>
+    public bool HasWholeBucketLock(string prefix)
+    {
+        lock (trackSync)
+        {
+            if (acquiredRangeLocks is null)
+                return false;
+            foreach (RangeLockBounds b in acquiredRangeLocks)
+            {
+                if (b.Prefix == prefix && b.StartKey is null && b.EndKey is null)
+                    return true;
+            }
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Counts singleton point locks (<c>[key,key]</c> entries) held for <paramref name="prefix"/>.
+    /// Used to decide when to escalate to a whole-bucket lock.
+    /// </summary>
+    public int CountPointLocksForBucket(string prefix)
+    {
+        lock (trackSync)
+        {
+            if (acquiredRangeLocks is null)
+                return 0;
+            int count = 0;
+            foreach (RangeLockBounds b in acquiredRangeLocks)
+            {
+                if (b.Prefix == prefix && b.StartKey is not null && b.StartKey == b.EndKey)
+                    count++;
+            }
+            return count;
         }
     }
 

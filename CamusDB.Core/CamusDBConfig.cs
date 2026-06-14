@@ -113,20 +113,53 @@ public static class CamusDBConfig
     public static CamusIsolationLevel DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted;
 
     /// <summary>
-    /// Maximum wall-clock lifetime, in milliseconds, for a <see cref="CamusIsolationLevel.Serializable"/>
-    /// + <see cref="CamusTransactionMode.ReadWrite"/> transaction. Once this duration elapses from
-    /// <c>BeginAsync</c>, any subsequent operation (range lock acquisition, commit) throws
-    /// <see cref="CamusDBErrorCodes.TransactionLifetimeExceeded"/> and the transaction must be
-    /// rolled back by the caller.
+    /// TTL, in milliseconds, granted to each Kahuna range lock acquired by a serializable
+    /// read-write transaction. The range-lock heartbeat renews each lock before this window
+    /// expires, so live transactions are not bounded by this value.
     ///
-    /// <para>This value <b>must</b> be strictly less than <c>KvTableStore.RangeLockExpiresMs</c>
-    /// (30 000 ms). The gap between this deadline and the range-lock TTL is the safety margin: a
-    /// transaction aborted at <c>MaxSerializableTransactionLifetimeMs</c> still holds valid range
-    /// locks when the abort fires, so Kahuna can release them cleanly on the subsequent rollback.
-    /// A zero or negative value disables the deadline (useful in tests that set their own
-    /// transaction-level deadline).</para>
+    /// <para>A zero or negative value tells Kahuna to hold the lock indefinitely (no TTL).
+    /// Tests may lower this to exercise renewal under a short TTL.</para>
     ///
-    /// Default: 25 000 ms (25 s) — 5 s under the 30 s range-lock TTL.
+    /// Default: 30 000 ms (30 s).
     /// </summary>
-    public static int MaxSerializableTransactionLifetimeMs = 25_000;
+    public static int RangeLockExpiresMs = 30_000;
+
+    /// <summary>
+    /// How often, in milliseconds, the background range-lock heartbeat re-acquires every range
+    /// lock held by a live Serializable+RW transaction. Must be well under
+    /// <see cref="RangeLockExpiresMs"/> to guarantee renewal before expiry.
+    ///
+    /// <para>Tests may lower this to exercise renewal without waiting 30 s.</para>
+    ///
+    /// Default: 10 000 ms (10 s) — a third of the 30 s range-lock TTL.
+    /// </summary>
+    public static int RangeLockHeartbeatIntervalMs = 10_000;
+
+    /// <summary>
+    /// Maximum wall-clock lifetime, in milliseconds, for a <see cref="CamusIsolationLevel.Serializable"/>
+    /// + <see cref="CamusTransactionMode.ReadWrite"/> transaction. Acts as an absolute backstop: once
+    /// this duration elapses from <c>BeginAsync</c>, any subsequent operation (range lock acquisition,
+    /// commit) throws <see cref="CamusDBErrorCodes.TransactionLifetimeExceeded"/>.
+    ///
+    /// <para>With the range-lock heartbeat active, range locks never expire due to TTL; this cap only
+    /// bounds runaway transactions. A zero or negative value disables the deadline (useful in tests).</para>
+    ///
+    /// Default: 3 600 000 ms (1 hour).
+    /// </summary>
+    public static int MaxSerializableTransactionLifetimeMs = 3_600_000;
+
+    /// <summary>
+    /// Per-bucket shared-point-lock count at which a Serializable+RW transaction escalates from
+    /// individual singleton <c>[key,key]</c> range locks to one whole-bucket <c>[null,null)</c>
+    /// Shared range lock. Once escalated, subsequent reads on the same bucket need no additional
+    /// lock RPCs — the whole-bucket lock already covers them. Old per-point lock entries remain
+    /// in tracking and are released at commit/rollback.
+    ///
+    /// <para>A lower value escalates earlier (fewer RPCs per read, larger lock granularity);
+    /// a very high value effectively disables escalation. Tests may set this to 1–3 to exercise
+    /// the escalation path without reading thousands of rows.</para>
+    ///
+    /// Default: 50.
+    /// </summary>
+    public static int LockEscalationThreshold = 50;
 }
