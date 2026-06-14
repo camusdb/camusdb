@@ -62,7 +62,8 @@ CamusDB *use* Kahuna's transactions?" CamusDB rows and indexes are just key/valu
 - **Read-only vs read-write transaction** — a crucial distinction in CamusDB; see §4 and §5. A
   transaction also declares this *mode* up front when it wants the stronger isolation level.
 - **Isolation level** — how strongly a transaction is shielded from concurrent ones. CamusDB has two:
-  **Read Committed** (the default, described in §4/§5) and **Serializable** (opt-in, described in §9).
+  **Serializable** (the default, described in §9) and **Read Committed** (opt-in explicit override,
+  described in §4/§5 as a baseline).
 
 ---
 
@@ -235,7 +236,7 @@ Serializable read-only (snapshot) reads take none.
 ```
                             Reads                         Writes (INSERT/UPDATE/DELETE)
                             ──────────────────────────    ─────────────────────────────
-Read Committed (default)    no locks                      one per-key lock per modified key
+Read Committed (opt-out)    no locks                      one per-key lock per modified key
 Serializable read-only      no locks (consistent          (read-only — no writes)
                             MVCC snapshot, §9)
 Serializable read-write     shared point lock per key     per-key lock; plus any key it read
@@ -322,10 +323,25 @@ What CamusDB guarantees right now:
 Those five hold at **every** isolation level. On top of them, CamusDB offers **two isolation levels**,
 chosen per transaction (the default applies when you don't ask for anything).
 
-### 9.1 Read Committed (the default)
+### 9.1 Serializable (the default)
 
-This is what every autocommit statement and every transaction gets unless it opts into more. It is the
-lock-free behavior described in §4/§5. What it does **not** promise (design around these):
+Every autocommit statement and every transaction runs at Serializable unless it opts down to Read
+Committed. See §9.2 for the full description.
+
+**Opting out to Read Committed.** If you don't need the full serializable guarantee and want the
+absolute minimum overhead, you can request Read Committed per transaction — either via the isolation
+field on the begin-request, or as the first statement of an explicit transaction:
+
+```sql
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+```
+
+There is also a server-wide knob (`DefaultIsolationLevel` in `CamusDBConfig`) to revert the default
+globally, if you need to roll back an environment to the old behaviour.
+
+### 9.2 Read Committed (explicit opt-out)
+
+This is the lock-free behavior described in §4/§5. What it does **not** promise (design around these):
 
 - ⚠️ **No single global snapshot per query.** A statement reads the *latest committed* version of each
   key. One scan is internally consistent, but a query that does several sub-reads (an index lookup,
@@ -338,7 +354,7 @@ lock-free behavior described in §4/§5. What it does **not** promise (design ar
 For invariants that must hold under concurrency at this level (e.g. "no two robots with the same
 serial"), lean on **unique constraints** (enforced at the key level) rather than read-then-decide logic.
 
-### 9.2 Serializable (opt-in)
+### 9.3 Serializable (detail)
 
 A transaction can ask for **Serializable** — the strongest level, where the end result is always
 equivalent to running the transactions one-at-a-time in *some* order. Under the hood CamusDB uses two
@@ -356,17 +372,17 @@ different strategies, picked automatically from whether the transaction is read-
   serializable read-write transactions would conflict, one commits and the other is aborted and must
   retry.
 
-**How you ask for it.** Choose the level per transaction — either when you begin the transaction (an
-isolation field on the begin request), or as the **first** statement of an explicit transaction:
+**How you ask for a specific mode.** Serializable is the default, but you can be explicit — either
+via the isolation field on the begin-request, or as the **first** statement of an explicit transaction:
 
 ```sql
-SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;            -- read-write (strict locking)
-SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY;  -- snapshot
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;            -- read-write (strict locking) — the default
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY;  -- snapshot, no locks
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;          -- opt down to read committed
 ```
 
 It must come *before* any read or write — CamusDB rejects it once the transaction has executed a
-statement, because retroactively upgrading the level would skip locks the earlier reads needed. There's
-also a server-wide default knob if you want Serializable everywhere.
+statement, because retroactively upgrading the level would skip locks the earlier reads needed.
 
 **Two practical rules:**
 - **Retry on conflict.** A serializable read-write transaction can be aborted (a serialization conflict,
@@ -385,8 +401,9 @@ rather than stalling on a lock timeout. And all of this works the same on one no
 (§8). Reserve serializable read-write transactions for logic that truly needs an invariant; everything
 else is cheaper and fully concurrent under Read Committed.
 
-> **Status — complete and verified.** Serializable is fully implemented and acceptance-tested; Read
-> Committed is still the default. Both paths are reachable through the transaction API: the **read-write**
+> **Status — complete and verified.** Serializable is fully implemented, acceptance-tested, and is now
+> the **default isolation level**. Read Committed remains available as an explicit opt-out. Both paths
+> are reachable through the transaction API: the **read-write**
 > (strict-locking) path, and the lock-free **read-only snapshot** — which you can open, resume across
 > several requests by transaction id, and commit/roll back like any explicit transaction. The anomaly
 > suite (read skew, phantoms, write skew, lost update) passes identically on a **single node and on a
@@ -429,8 +446,8 @@ A map for when you want to read the real thing:
 
 When reasoning about a concurrency question in CamusDB, ask in this order:
 
-1. **What isolation level is this transaction?** Read Committed (the default) or Serializable? That
-   decides almost everything below. If nothing opted in, it's Read Committed.
+1. **What isolation level is this transaction?** Serializable (the default) or Read Committed
+   (explicit opt-out)? That decides almost everything below. If nothing opted out, it's Serializable.
 2. **Is it a read or a write?** Read Committed reads and Serializable read-only reads are lock-free
    MVCC; Serializable read-write reads take locks; all writes take per-key locks + 2PC.
 3. **Is it a scan or a point lookup?** A point lookup reads one key; a scan over a range is what can
@@ -440,6 +457,6 @@ When reasoning about a concurrency question in CamusDB, ask in this order:
    transaction may run a 2PC across them — but the isolation guarantees are the same either way.
 5. **What guarantee does the app actually need?** Need a consistent multi-statement read? Use a
    Serializable **read-only** transaction (lock-free snapshot). Need a read-then-write invariant? Use a
-   Serializable **read-write** transaction — keep it short and wrap it in a retry loop (it can be aborted
-   on conflict) — or enforce it with a unique constraint. Otherwise the Read Committed default is the
-   cheapest and fully concurrent.
+   Serializable **read-write** transaction (the default) — keep it short and wrap it in a retry loop
+   (it can be aborted on conflict) — or enforce it with a unique constraint. For maximum throughput with
+   no invariant requirements, opt down to Read Committed explicitly.

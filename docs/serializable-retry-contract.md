@@ -1,8 +1,13 @@
 # Serializable isolation: retry contract
 
-CamusDB's serializable isolation (Serializable+ReadWrite) uses **strict two-phase locking** (S2PL).
-When two transactions conflict, one is aborted immediately. The aborted transaction must be
-**replayed from `BEGIN`** — retrying a single statement inside the same transaction is not safe.
+Serializable is the **default isolation level** in CamusDB. Serializable+ReadWrite transactions use
+**strict two-phase locking** (S2PL). When two transactions conflict, one is aborted immediately. The
+aborted transaction must be **replayed from `BEGIN`** — retrying a single statement inside the same
+transaction is not safe.
+
+For single-statement (autocommit) operations, CamusDB automatically retries on your behalf, so
+most applications never see retryable errors in practice. For explicit multi-statement transactions,
+the application owns the retry loop.
 
 ---
 
@@ -157,5 +162,5 @@ The `TransactionLifetimeExceeded` error (CADB0505) means the transaction was ope
 
 | Setting                             | Default | Description                                              |
 |-------------------------------------|---------|----------------------------------------------------------|
-| `CamusDBConfig.DefaultIsolationLevel` | `ReadCommitted` | Server default; opt in per-transaction via `BEGIN` or `SET TRANSACTION`. |
-| `CamusDBConfig.MaxSerializableTransactionLifetimeMs` | 25 000 ms | Must be less than Kahuna's `RangeLockExpiresMs` (30 s). |
+| `CamusDBConfig.DefaultIsolationLevel` | `Serializable` | Server default; opt down per-transaction via `BEGIN` or `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`. |
+| `CamusDBConfig.MaxSerializableTransactionLifetimeMs` | 3 600 000 ms (1 h) | Maximum lifetime for a Serializable+RW transaction; aborts with CADB0505 if exceeded. |
