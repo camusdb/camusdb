@@ -19,17 +19,18 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
+using CamusDB.App.Services;
 using Kommander.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Verifies explicit multi-statement Serializable read-only transactions (Task 13).
+/// Verifies explicit multi-statement Serializable read-only transactions.
 ///
-/// Before Task 13, Serializable+ReadOnly transactions carried TransactionId = Zero (because the
-/// Kahuna minting transaction was immediately rolled back), making them unregisterable and
-/// unresumable by the HTTP layer. Task 13 keeps the minting transaction alive, giving the snapshot
-/// a real, unique TransactionId that can be tracked and resumed across requests.
+/// Serializable+ReadOnly transactions carry a real, unique TransactionId (= ReadTimestamp = T),
+/// which lets the HTTP coordinator register and resume them by txnId across requests. The minting
+/// Kahuna transaction is kept alive for the duration — reads go out with readTimestamp=T (snapshot),
+/// no locks are acquired, and commit/rollback finalize the empty Kahuna tx.
 ///
 /// These tests confirm:
 ///   - Begin returns a real, non-Zero TransactionId and a non-Zero ReadTimestamp (= T).
@@ -282,5 +283,90 @@ public sealed class TestSerializableReadOnlyExplicit : SharedNodeBaseTest
             "Snapshot must still return original value even after concurrent write+commit");
 
         await db.Transactions.RollbackAsync(ro);
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. End-to-end coordinator resume: StartAsync → GetState → read → CommitAsync
+    //
+    // This is the headline deliverable: a client can BEGIN a Serializable RO transaction
+    // over HTTP, receive a (txnId.L, txnId.C) pair, use that pair to resume the transaction
+    // in a second request, observe a consistent snapshot in the second read, and COMMIT.
+    //
+    // The test simulates the HTTP request boundary by going through
+    // HttpTransactionCoordinator.StartAsync and GetState rather than calling
+    // db.Transactions.BeginAsync directly.
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task SerializableRO_HttpCoordinator_ResumeByTxnId_SnapshotStable()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupDbAsync();
+
+        // The coordinator is the HTTP-layer object that wraps the per-database transaction manager.
+        HttpTransactionCoordinator coordinator = new(executor);
+
+        string id = ObjectIdGenerator.Generate().ToString();
+
+        // Seed: write a row before the snapshot is opened.
+        KvTransaction setup = await db.Transactions.BeginAsync();
+        await InsertAsync(dbname, executor, setup, id, 77L);
+        await db.Transactions.CommitAsync(setup);
+
+        // ── Request 1: BEGIN Serializable RO ─────────────────────────────────
+        // Simulates: POST /transactions { databaseName, isolationLevel: "Serializable", transactionMode: "ReadOnly" }
+        KvTransaction tx = await coordinator.StartAsync(
+            dbname, CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
+
+        Assert.AreNotEqual(HLCTimestamp.Zero, tx.TransactionId,
+            "Coordinator must register a non-Zero TransactionId for the RO snapshot");
+
+        // First read within this request — snapshot is at T.
+        List<QueryResultRow> read1 = await ReadByIdAsync(dbname, executor, tx, id);
+        Assert.AreEqual(1, read1.Count, "Seed row must be visible at snapshot T");
+        Assert.AreEqual(77L, read1[0].Row["value"].LongValue);
+
+        // ── Intervening write (committed after T) ────────────────────────────
+        // Simulates a concurrent writer updating the row between the two client requests.
+        KvTransaction writer = await db.Transactions.BeginAsync();
+        await executor.Update(new UpdateTicket(
+            txnState: writer, databaseName: dbname, tableName: "items",
+            plainValues: new() { { "value", new(ColumnType.Integer64, 99L) } },
+            exprValues: null, where: null,
+            filters: new() { new("id", "=", new(ColumnType.Id, id)) },
+            parameters: null));
+        await db.Transactions.CommitAsync(writer);
+
+        // ── Request 2: resume the snapshot transaction by (L, C) ─────────────
+        // Simulates: the client sends the txnId it received in Request 1 and the
+        // server calls GetState to recover the exact same KvTransaction object.
+        long txnIdL = tx.TransactionId.L;
+        uint txnIdC = tx.TransactionId.C;
+
+        KvTransaction resumed = coordinator.GetState(txnIdL, txnIdC);
+
+        // The resumed transaction is the identical object: same snapshot, same identity.
+        Assert.AreSame(tx, resumed,
+            "GetState must return the exact same KvTransaction registered at StartAsync");
+        Assert.AreEqual(CamusIsolationLevel.Serializable, resumed.IsolationLevel);
+        Assert.AreEqual(CamusTransactionMode.ReadOnly, resumed.TransactionMode);
+
+        // Second read using the RESUMED transaction — must still see value=77, not 99.
+        List<QueryResultRow> read2 = await ReadByIdAsync(dbname, executor, resumed, id);
+        Assert.AreEqual(1, read2.Count, "Row must still be visible in the resumed snapshot");
+        Assert.AreEqual(77L, read2[0].Row["value"].LongValue,
+            "Resumed snapshot must observe the pre-T value — the intervening write at 99 must be invisible");
+
+        // ── Request 3: COMMIT ────────────────────────────────────────────────
+        // Simulates: POST /transactions/commit { txnId }
+        Assert.DoesNotThrowAsync(
+            async () => await coordinator.CommitAsync(db, resumed),
+            "CommitAsync on the coordinator-tracked RO snapshot must finalize cleanly");
+
+        Assert.AreEqual(KvTransactionStatus.Committed, resumed.Status);
+
+        // After commit the coordinator must have unregistered the transaction; a second
+        // GetState on the same (L, C) must fail.
+        Assert.Throws<CamusDBException>(() => coordinator.GetState(txnIdL, txnIdC),
+            "GetState after CommitAsync must throw — the coordinator unregisters on commit");
     }
 }

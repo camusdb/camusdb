@@ -416,7 +416,7 @@ public sealed class KvTableStore
         int prefixLen = rowKeyPrefix.Length;
 
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            tx.TransactionId,
+            ScanTransactionId(tx),
             rowBucketPrefix,
             null, true,
             null, true,
@@ -566,7 +566,7 @@ public sealed class KvTableStore
             : null;
 
         await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            tx.TransactionId,
+            ScanTransactionId(tx),
             bucketPrefix,
             startKey, fromInclusive,
             endKey, toInclusive,
@@ -1315,6 +1315,25 @@ public sealed class KvTableStore
         // columns in `key` do not push it outside an inclusive bound.
         return 0;
     }
+
+    /// <summary>
+    /// Returns the transaction ID to use for Kahuna scan operations (<see cref="LocateAndScanRange"/>).
+    ///
+    /// <para>Kahuna's range-scan handler always takes the transactional RYOW path when
+    /// <c>transactionId != Zero</c>, regardless of whether a <c>readTimestamp</c> is also set.
+    /// This is the correct behaviour for Serializable+RW transactions (RYOW sees the tx's own
+    /// uncommitted writes). For Serializable+ReadOnly snapshot transactions, however, the RYOW
+    /// path adds unnecessary MVCC entries and causes the "drop if LastModified > readTimestamp"
+    /// logic inside the scan handler to interact differently than the non-transactional snapshot
+    /// path. Since a Serializable+ReadOnly tx never writes anything, RYOW is not needed; passing
+    /// <c>Zero</c> directs Kahuna to use the clean non-transactional snapshot path, which
+    /// correctly serves data committed at-or-before <c>readTimestamp</c>.</para>
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static HLCTimestamp ScanTransactionId(KvTransaction tx) =>
+        tx.IsReadOnly && tx.IsolationLevel == CamusIsolationLevel.Serializable
+            ? HLCTimestamp.Zero
+            : tx.TransactionId;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildRowKey(ObjectIdValue rowId) => rowKeyPrefix + rowId.ToString();

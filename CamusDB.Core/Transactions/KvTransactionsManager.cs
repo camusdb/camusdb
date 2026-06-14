@@ -261,9 +261,13 @@ public sealed class KvTransactionsManager
                 $"Transaction {tx.UniqueId} is already {tx.Status}"
             );
 
-        // Serializable+ReadOnly transactions hold no write intents — a lightweight rollback of the
-        // empty Kahuna transaction is equivalent to commit and avoids the full 2PC roundtrip.
-        if (tx.IsReadOnly && tx.TransactionMode == CamusTransactionMode.ReadOnly)
+        // Serializable+ReadOnly transactions hold no write intents and no range locks — a lightweight
+        // rollback of the empty Kahuna transaction is equivalent to commit and avoids the full 2PC
+        // roundtrip. Promoted ReadCommitted+ReadOnly scan transactions are excluded: they may hold
+        // shared range locks that must be released via ReleaseHeldRangeLocksAsync, so they go through
+        // the normal commit path below.
+        if (tx.IsReadOnly && tx.TransactionMode == CamusTransactionMode.ReadOnly &&
+            tx.IsolationLevel == CamusIsolationLevel.Serializable)
         {
             tx.Status = KvTransactionStatus.Committed;
             Untrack(tx);

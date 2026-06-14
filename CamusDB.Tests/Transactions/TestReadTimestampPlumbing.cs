@@ -137,30 +137,38 @@ public sealed class TestReadTimestampPlumbing
     }
 
     // ------------------------------------------------------------------
-    // 5. Serializable+ReadOnly is zero-identity: TransactionId = Zero
+    // 5. Serializable+ReadOnly carries a real TransactionId (= ReadTimestamp = T)
+    //
+    // The minting Kahuna transaction is kept alive so the HTTP layer can register and
+    // resume it by txnId across multiple requests.
+    // TransactionId == ReadTimestamp == T (the server-minted HLC timestamp).
     // ------------------------------------------------------------------
 
     [Test]
-    public async Task SerializableReadOnly_TransactionIdIsZero()
+    public async Task SerializableReadOnly_HasRealTransactionId()
     {
         (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync("RT-05");
         await using EmbeddedKahuna __ = node;
 
         KvTransaction tx = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
 
-        Assert.AreEqual(HLCTimestamp.Zero, tx.TransactionId,
-            "Serializable+ReadOnly must be zero-identity — no live Kahuna transaction");
+        Assert.AreNotEqual(HLCTimestamp.Zero, tx.TransactionId,
+            "Serializable+ReadOnly must carry a real non-Zero TransactionId so the coordinator can register and resume it by txnId");
+        Assert.AreEqual(tx.TransactionId, tx.ReadTimestamp,
+            "TransactionId and ReadTimestamp must be the same minted HLC timestamp T");
         Assert.IsTrue(tx.IsReadOnly);
         Assert.AreEqual(CamusIsolationLevel.Serializable, tx.IsolationLevel);
         Assert.AreEqual(CamusTransactionMode.ReadOnly, tx.TransactionMode);
+
+        await mgr.RollbackAsync(tx);
     }
 
     // ------------------------------------------------------------------
-    // 6. Commit / rollback on Serializable+ReadOnly are no-ops (zero-id)
+    // 6. Commit / rollback on Serializable+ReadOnly finalize the empty tx cleanly
     // ------------------------------------------------------------------
 
     [Test]
-    public async Task SerializableReadOnly_CommitIsNoOp()
+    public async Task SerializableReadOnly_CommitIsClean()
     {
         (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync("RT-06a");
         await using EmbeddedKahuna __ = node;
@@ -168,11 +176,11 @@ public sealed class TestReadTimestampPlumbing
         KvTransaction tx = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
 
         Assert.DoesNotThrowAsync(async () => await mgr.CommitAsync(tx),
-            "CommitAsync on a zero-identity RO serializable tx must be a no-op");
+            "CommitAsync on a Serializable+RO tx must finalize cleanly (lightweight rollback of empty tx)");
     }
 
     [Test]
-    public async Task SerializableReadOnly_RollbackIsNoOp()
+    public async Task SerializableReadOnly_RollbackIsClean()
     {
         (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync("RT-06b");
         await using EmbeddedKahuna __ = node;
@@ -180,7 +188,7 @@ public sealed class TestReadTimestampPlumbing
         KvTransaction tx = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
 
         Assert.DoesNotThrowAsync(async () => await mgr.RollbackAsync(tx),
-            "RollbackAsync on a zero-identity RO serializable tx must be a no-op");
+            "RollbackAsync on a Serializable+RO tx must finalize cleanly");
     }
 
     // ------------------------------------------------------------------
