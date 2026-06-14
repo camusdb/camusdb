@@ -329,6 +329,53 @@ public sealed class TestSerializableBoundedPredicate : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
+    // 6. Adjacent disjoint bounds (<= V and > V) do not conflict
+    //
+    // priority <= 2 and priority > 2 partition the index at the value-2 boundary:
+    // value 2's rows belong only to the <= side. The exclusive lower bound of the
+    // > side must start strictly after all of value 2's rowId suffixes, otherwise
+    // it falsely overlaps the <= lock on value 2's row keys.
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task AdjacentDisjointBounds_LessEqualAndGreater_DoNotConflict()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupDbAsync();
+
+        for (int i = 1; i <= 4; i++)
+        {
+            string id = ObjectIdGenerator.Generate().ToString();
+            await InsertAsync(dbname, db, executor, id, priority: i, name: $"task-p{i}");
+        }
+
+        // Txn A: UPDATE WHERE priority <= 2 (exclusive X lock on [.., encode(2)] inclusive).
+        KvTransaction txA = await db.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        await executor.Update(new UpdateTicket(
+            txnState: txA, databaseName: dbname, tableName: "tasks",
+            plainValues: new() { { "name", new(ColumnType.String, "low") } },
+            exprValues: null, where: null,
+            filters: new() { new("priority", "<=", new(ColumnType.Integer64, 2L)) },
+            parameters: null));
+
+        // Txn B: UPDATE WHERE priority > 2 — disjoint with A at the value-2 boundary.
+        KvTransaction txB = await db.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        Assert.DoesNotThrowAsync(async () =>
+        {
+            await executor.Update(new UpdateTicket(
+                txnState: txB, databaseName: dbname, tableName: "tasks",
+                plainValues: new() { { "name", new(ColumnType.String, "high") } },
+                exprValues: null, where: null,
+                filters: new() { new("priority", ">", new(ColumnType.Integer64, 2L)) },
+                parameters: null));
+            await db.Transactions.CommitAsync(txB);
+        }, "UPDATE priority > 2 must not conflict with a held lock on priority <= 2");
+
+        await db.Transactions.CommitAsync(txA);
+    }
+
+    // -----------------------------------------------------------------------
     // 5. After bounded-range UPDATE commits, a new UPDATE on the same range
     //    succeeds (lock fully released)
     // -----------------------------------------------------------------------

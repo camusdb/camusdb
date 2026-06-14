@@ -724,5 +724,17 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             if (IsBlocked(manager, node)) return Task.FromResult(new BatchRequestsResponse());
             return inner.BatchRequests(manager, node, request);
         }
+
+        public Task<JoinResponse> SendJoin(RaftManager manager, RaftNode node, JoinRequest request)
+        {
+            if (IsBlocked(manager, node)) return Task.FromResult(new JoinResponse(false));
+            return inner.SendJoin(manager, node, request);
+        }
+
+        public Task<LeaveResponse> SendLeave(RaftManager manager, RaftNode node, LeaveRequest request, CancellationToken cancellationToken = default)
+        {
+            if (IsBlocked(manager, node)) return Task.FromResult(new LeaveResponse(false));
+            return inner.SendLeave(manager, node, request, cancellationToken);
+        }
     }
 }

@@ -110,7 +110,7 @@ public static class CamusDBConfig
     /// Set to <see cref="CamusIsolationLevel.Serializable"/> to make every new transaction
     /// serializable unless it overrides this.
     /// </summary>
-    public static CamusIsolationLevel DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted;
+    public static CamusIsolationLevel DefaultIsolationLevel = CamusIsolationLevel.Serializable;
 
     /// <summary>
     /// TTL, in milliseconds, granted to each Kahuna range lock acquired by a serializable

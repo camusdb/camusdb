@@ -207,13 +207,22 @@ public sealed class KvTableStore
         string? fromEncoded = fromBound is not null ? KeyEncoder.Encode(fromBound) : null;
         string? toEncoded   = toBound   is not null ? KeyEncoder.Encode(toBound)   : null;
 
-        string? startKey = fromEncoded is not null ? keyPrefix + fromEncoded : null;
-        // Non-unique stored key = {encodedValue}{rowId24}; IndexKeySentinel (U+FFFF) makes the end
-        // bound cover all rowId suffixes for the last encoded value — but ONLY when toInclusive=true.
-        // When toInclusive=false the sentinel must be omitted: appending it would extend the
-        // exclusive bound from {encode(V)} to {encode(V)+U+FFFF}, which includes {encode(V)} itself
-        // and any {encode(V)+rowId} entries, causing a false range-overlap with the next disjoint
-        // lock whose fromBound is exactly {encode(V)}.
+        // Non-unique stored key = {encodedValue}{rowId24}. The IndexKeySentinel (U+FFFF) sorts after
+        // every rowId suffix, so it is appended to push a bound past all of a value's row entries.
+        //
+        // Start bound: for an exclusive lower bound (fromInclusive=false, i.e. ">") the lock must
+        // begin strictly after value V's rows. Without the sentinel, {encode(V)} exclusive still
+        // covers {encode(V)+rowId} (those sort after {encode(V)}), wrongly locking value V and
+        // overlapping a disjoint "<= V" lock. Appending the sentinel makes the bound clear V's rows.
+        // For an inclusive lower bound (">=") value V is wanted, so no sentinel.
+        string? startKey = fromEncoded is not null
+            ? (unique || fromInclusive ? keyPrefix + fromEncoded : keyPrefix + fromEncoded + IndexKeySentinel)
+            : null;
+        // End bound: the sentinel is appended ONLY when toInclusive=true, to cover all rowId suffixes
+        // of the last value. When toInclusive=false ("<") it must be omitted: appending it would
+        // extend the exclusive bound from {encode(V)} to {encode(V)+U+FFFF}, which includes
+        // {encode(V)} itself and any {encode(V)+rowId} entries, causing a false range-overlap with
+        // the next disjoint lock whose fromBound is exactly {encode(V)}.
         string? endKey   = toEncoded is not null
             ? (unique || !toInclusive ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;
