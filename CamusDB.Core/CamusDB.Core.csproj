@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Version>0.1.2</Version>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -80,7 +80,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.16" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
-    <PackageReference Include="System.Linq.Async" Version="6.0.1" />
+    <!-- System.Linq.Async removed: .NET 10 includes IAsyncEnumerable LINQ built-in -->
     <PackageReference Include="YamlDotNet" Version="15.1.2" />
   </ItemGroup>
 </Project>

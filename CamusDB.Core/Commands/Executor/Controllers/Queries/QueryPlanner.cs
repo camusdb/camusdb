@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Statistics;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -299,9 +300,15 @@ public sealed class QueryPlanner
         //   2. The step is a predicate-driven RangeScanFromIndex (has at least one bound).
         //      Skip ORDER BY-driven unbounded scans to preserve sort elision.
         //   3. The scan is not already a unique point lookup (those always win).
+        //   4. The transaction is NOT Serializable+RW — for Serializable+RW the tightest covering
+        //      range lock matters for concurrency correctness, so the cost model must not widen it
+        //      to a whole-bucket lock by choosing a full table scan.
+        bool isSerializableRW = ticket.TxnState.IsolationLevel == CamusIsolationLevel.Serializable
+            && ticket.TxnState.TransactionMode == CamusTransactionMode.ReadWrite;
         if (scanStep is { Type: QueryPlanStepType.RangeScanFromIndex } step
             && (step.FromBound is not null || step.ToBound is not null)
-            && _stats is not null)
+            && _stats is not null
+            && !isSerializableRW)
         {
             long? tableRowCount = _stats.GetRowCountEstimate(database, table);
             if (tableRowCount is { } trc && trc > 0)

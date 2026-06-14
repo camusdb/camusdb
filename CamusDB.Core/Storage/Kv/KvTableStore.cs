@@ -208,10 +208,14 @@ public sealed class KvTableStore
         string? toEncoded   = toBound   is not null ? KeyEncoder.Encode(toBound)   : null;
 
         string? startKey = fromEncoded is not null ? keyPrefix + fromEncoded : null;
-        // Non-unique stored key = {encodedValue}{rowId24}; IndexKeySentinel makes the end bound
-        // include all rowId suffixes for the last encoded value, matching ScanIndex's convention.
+        // Non-unique stored key = {encodedValue}{rowId24}; IndexKeySentinel (U+FFFF) makes the end
+        // bound cover all rowId suffixes for the last encoded value — but ONLY when toInclusive=true.
+        // When toInclusive=false the sentinel must be omitted: appending it would extend the
+        // exclusive bound from {encode(V)} to {encode(V)+U+FFFF}, which includes {encode(V)} itself
+        // and any {encode(V)+rowId} entries, causing a false range-overlap with the next disjoint
+        // lock whose fromBound is exactly {encode(V)}.
         string? endKey   = toEncoded is not null
-            ? (unique ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
+            ? (unique || !toInclusive ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;
 
         return AcquireRangeLockAsync(tx, bucketPrefix, startKey, fromInclusive, endKey, toInclusive, cancellationToken,
