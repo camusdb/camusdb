@@ -21,4 +21,18 @@ public sealed class ExecuteSQLRequest
     public string? Sql { get; set; }
 
     public Dictionary<string, ColumnValue>? Parameters { get; set; }
+
+    /// <summary>
+    /// Optional isolation level for the autocommit transaction begun by this request.
+    /// Accepted values (case-insensitive): <c>"ReadCommitted"</c>, <c>"Serializable"</c>.
+    /// Ignored when <c>TxnIdPT</c> resumes an existing transaction.
+    /// </summary>
+    public string? IsolationLevel { get; set; }
+
+    /// <summary>
+    /// Optional transaction mode for the autocommit transaction begun by this request.
+    /// Accepted values (case-insensitive): <c>"ReadWrite"</c>, <c>"ReadOnly"</c>.
+    /// Ignored when <c>TxnIdPT</c> resumes an existing transaction.
+    /// </summary>
+    public string? TransactionMode { get; set; }
 }

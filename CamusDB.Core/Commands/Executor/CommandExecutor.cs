@@ -1039,6 +1039,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async Task<InsertResult> Insert(InsertTicket ticket)
     {
         validator.Validate(ticket);
+        ticket.TxnState.MarkStatementExecuted();
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
@@ -1058,6 +1059,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async Task<UpdateResult> Update(UpdateTicket ticket)
     {
         validator.Validate(ticket);
+        ticket.TxnState.MarkStatementExecuted();
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
@@ -1077,6 +1079,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async Task<DeleteResult> Delete(DeleteTicket ticket)
     {
         validator.Validate(ticket);
+        ticket.TxnState.MarkStatementExecuted();
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
@@ -1096,6 +1099,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async Task<(DatabaseDescriptor, IAsyncEnumerable<QueryResultRow>)> Query(QueryTicket ticket)
     {
         validator.Validate(ticket);
+        ticket.TxnState.MarkStatementExecuted();
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
@@ -1134,6 +1138,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+
+        // Mark the transaction as having executed a statement (all DML is non-SET-TRANSACTION).
+        ticket.TxnState.MarkStatementExecuted();
 
         // §3.5 H6 retry boundary: two transient errors, two different retry owners.
         //   CADB0503 SchemaCatchingUp — retried HERE, inside ExecuteNonSQLQuery. The fence fires
@@ -1222,6 +1229,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
+
+        // Mark the transaction as having executed a statement for every statement type except
+        // SET TRANSACTION — that one must be the first statement per standard SQL semantics.
+        if (ast.nodeType != NodeType.SetTransaction)
+            ticket.TxnState.MarkStatementExecuted();
 
         switch (ast.nodeType)
         {
@@ -1316,9 +1328,21 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.SetTransaction:
                 {
-                    // The statement is parsed and validated but applies no behaviour yet — isolation
-                    // level / mode are not wired to locking or snapshot reads. Returns 0 rows so the
-                    // HTTP layer's cursor-drain loop is a no-op.
+                    // yytext holds the isolation level ("Serializable"); leftAst.yytext holds the mode
+                    // ("ReadOnly" or "ReadWrite"). Both are set by the grammar (grammar cases 48/49).
+                    if (!Enum.TryParse(ast.yytext, out CamusIsolationLevel level))
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                            $"Unknown isolation level '{ast.yytext}' in SET TRANSACTION");
+
+                    string modeStr = ast.leftAst?.yytext ?? "ReadWrite";
+                    if (!Enum.TryParse(modeStr, out CamusTransactionMode mode))
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                            $"Unknown transaction mode '{modeStr}' in SET TRANSACTION");
+
+                    // ApplyIsolationLevel throws if locks are already held, ensuring the level
+                    // change cannot silently skip required read-locks already missed.
+                    ticket.TxnState.ApplyIsolationLevel(level, mode);
+
                     return (database, AsyncEnumerable.Empty<QueryResultRow>());
                 }
 

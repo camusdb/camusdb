@@ -255,6 +255,16 @@ public sealed class KvTableStore
         if (tx.TransactionId == HLCTimestamp.Zero)
             return;
 
+        // Enforce the serializable transaction lifetime deadline. Only Serializable+RW
+        // transactions acquire range locks whose expiry would silently break isolation;
+        // ReadCommitted transactions in key-range mode also take scan locks but have no
+        // serializability to protect, so they are exempt (consistent with the CommitAsync gate).
+        if (IsSerializableReadWrite(tx) && tx.IsExpired(CamusDBConfig.MaxSerializableTransactionLifetimeMs))
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionLifetimeExceeded,
+                $"Serializable transaction {tx.UniqueId} exceeded the maximum lifetime " +
+                $"({CamusDBConfig.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
+
         KeyValueResponseType type = await RetryOnMustRetryLocked(
             () => kahuna.LocateAndTryAcquireRangeLock(
                 tx.TransactionId, bucketPrefix,

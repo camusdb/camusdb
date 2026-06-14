@@ -143,10 +143,16 @@ public sealed class KvTransactionsManager
     }
 
     /// <summary>
-    /// Mints one server HLC timestamp <c>T</c> by starting and immediately rolling back a Kahuna
-    /// transaction, then returns a zero-identity read-only transaction carrying <c>T</c> as its
-    /// snapshot read timestamp. No server-side transaction state persists after this method returns —
-    /// commit and rollback are no-ops on the returned transaction.
+    /// Starts a Kahuna transaction to mint one server HLC timestamp <c>T</c>, then returns a
+    /// Serializable read-only transaction whose <see cref="KvTransaction.ReadTimestamp"/> is pinned
+    /// to <c>T</c> for the lifetime of the transaction.
+    ///
+    /// <para>Unlike the old approach (start + immediately rollback → zero-identity), the Kahuna
+    /// transaction is kept alive so the caller receives a real, registerable
+    /// <see cref="KvTransaction.TransactionId"/>. This allows the HTTP layer to track and resume the
+    /// transaction across multiple requests. The transaction never acquires any locks and never writes
+    /// any data — it is finalized via rollback on commit or rollback (see
+    /// <see cref="CommitAsync"/>).</para>
     /// </summary>
     private async Task<KvTransaction> BeginSerializableReadOnlyAsync(CancellationToken cancellationToken)
     {
@@ -168,28 +174,19 @@ public sealed class KvTransactionsManager
                 $"Failed to mint read-timestamp for serializable RO transaction: {type}"
             );
 
-        // Immediately discard the server-side transaction state; we only needed the HLC timestamp.
-        // Best-effort: the timestamp is already in hand, and the minting transaction wrote nothing and
-        // expires on its own, so a failed rollback must not fail the read-only begin.
-        try
-        {
-            await kahuna.LocateAndRollbackTransaction(
-                uniqueId, t, [], [], cancellationToken
-            ).ConfigureAwait(false);
-        }
-        catch
-        {
-            // ignored — the empty minting transaction will expire server-side
-        }
-
-        return new KvTransaction(
-            transactionId:  Kommander.Time.HLCTimestamp.Zero,
-            uniqueId:       string.Empty,
-            isReadOnly:     true,
-            isolationLevel: CamusIsolationLevel.Serializable,
+        // Keep the Kahuna transaction alive as the tracking handle — its HLC timestamp T doubles as
+        // the snapshot read timestamp. Reads go out with readTimestamp=T (no Kahuna write intents);
+        // the empty transaction is finalized (rolled back) by CommitAsync / RollbackAsync.
+        KvTransaction tx = new(
+            transactionId:   t,
+            uniqueId:        uniqueId,
+            isReadOnly:      true,
+            isolationLevel:  CamusIsolationLevel.Serializable,
             transactionMode: CamusTransactionMode.ReadOnly,
-            readTimestamp:  t
+            readTimestamp:   t
         );
+        Track(tx);
+        return tx;
     }
 
     /// <summary>
@@ -264,7 +261,45 @@ public sealed class KvTransactionsManager
                 $"Transaction {tx.UniqueId} is already {tx.Status}"
             );
 
+        // Serializable+ReadOnly transactions hold no write intents — a lightweight rollback of the
+        // empty Kahuna transaction is equivalent to commit and avoids the full 2PC roundtrip.
+        if (tx.IsReadOnly && tx.TransactionMode == CamusTransactionMode.ReadOnly)
+        {
+            tx.Status = KvTransactionStatus.Committed;
+            Untrack(tx);
+            try
+            {
+                await kahuna.LocateAndRollbackTransaction(
+                    tx.UniqueId, tx.TransactionId, [], [], cancellationToken
+                ).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best-effort: the empty tx expires server-side on its own.
+            }
+            return;
+        }
+
         tx.ValidateSchemaPins();
+
+        // Enforce the serializable transaction lifetime deadline before touching Kahuna. Only
+        // Serializable+RW transactions acquire range locks whose TTL could expire mid-transaction;
+        // ReadCommitted and Serializable+RO transactions are exempt. A Serializable+RW transaction
+        // that has outlived MaxSerializableTransactionLifetimeMs is aborted here so its range locks
+        // never expire while still considered "live" — that would silently break serializable isolation.
+        // The caller must roll back and retry from BeginAsync.
+        if (tx.IsolationLevel == CamusIsolationLevel.Serializable &&
+            tx.TransactionMode == CamusTransactionMode.ReadWrite &&
+            tx.IsExpired(CamusDBConfig.MaxSerializableTransactionLifetimeMs))
+        {
+            tx.Status = KvTransactionStatus.RolledBack;
+            await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
+            Untrack(tx);
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionLifetimeExceeded,
+                $"Serializable transaction {tx.UniqueId} exceeded the maximum lifetime " +
+                $"({CamusDBConfig.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
+        }
 
         // MustRetry from LocateAndCommitTransaction is a strictly pre-execution routing signal.
         // Kahuna returns it only when AmILeader(partitionId) was false (so no commit was attempted)

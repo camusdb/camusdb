@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.Transactions;
+using CamusDB.App.Models;
 using CamusDB.App.Services;
 
 namespace CamusDB.App.Controllers;
@@ -43,6 +44,8 @@ public abstract class CommandsController : ControllerBase
         uint txnIdCounter,
         bool readOnly = false,
         bool promoteReadOnly = false,
+        CamusIsolationLevel? isolationLevel = null,
+        CamusTransactionMode? transactionMode = null,
         CancellationToken cancellationToken = default)
     {
         if (txnIdPT > 0)
@@ -66,7 +69,30 @@ public abstract class CommandsController : ControllerBase
             return (promoted, roTx);
         }
 
-        KvTransaction tx = await transactions.StartAsync(databaseName, cancellationToken).ConfigureAwait(false);
+        KvTransaction tx = await transactions.StartAsync(databaseName, isolationLevel, transactionMode, cancellationToken).ConfigureAwait(false);
         return (true, tx);
+    }
+
+    /// <summary>
+    /// Parses the optional <c>IsolationLevel</c> and <c>TransactionMode</c> string fields from
+    /// a request into their typed enum equivalents. Unrecognised or null values resolve to
+    /// <c>null</c> — the server default (<see cref="CamusDBConfig.DefaultIsolationLevel"/> /
+    /// <see cref="CamusTransactionMode.ReadWrite"/>) applies.
+    /// </summary>
+    protected static (CamusIsolationLevel? level, CamusTransactionMode? mode) ParseRequestLevelMode(
+        ExecuteSQLRequest request)
+    {
+        CamusIsolationLevel? level = null;
+        CamusTransactionMode? mode  = null;
+
+        if (request.IsolationLevel is not null &&
+            Enum.TryParse(request.IsolationLevel, ignoreCase: true, out CamusIsolationLevel parsed))
+            level = parsed;
+
+        if (request.TransactionMode is not null &&
+            Enum.TryParse(request.TransactionMode, ignoreCase: true, out CamusTransactionMode parsedMode))
+            mode = parsedMode;
+
+        return (level, mode);
     }
 }

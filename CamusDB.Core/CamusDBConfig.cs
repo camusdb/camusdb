@@ -111,4 +111,22 @@ public static class CamusDBConfig
     /// serializable unless it overrides this.
     /// </summary>
     public static CamusIsolationLevel DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted;
+
+    /// <summary>
+    /// Maximum wall-clock lifetime, in milliseconds, for a <see cref="CamusIsolationLevel.Serializable"/>
+    /// + <see cref="CamusTransactionMode.ReadWrite"/> transaction. Once this duration elapses from
+    /// <c>BeginAsync</c>, any subsequent operation (range lock acquisition, commit) throws
+    /// <see cref="CamusDBErrorCodes.TransactionLifetimeExceeded"/> and the transaction must be
+    /// rolled back by the caller.
+    ///
+    /// <para>This value <b>must</b> be strictly less than <c>KvTableStore.RangeLockExpiresMs</c>
+    /// (30 000 ms). The gap between this deadline and the range-lock TTL is the safety margin: a
+    /// transaction aborted at <c>MaxSerializableTransactionLifetimeMs</c> still holds valid range
+    /// locks when the abort fires, so Kahuna can release them cleanly on the subsequent rollback.
+    /// A zero or negative value disables the deadline (useful in tests that set their own
+    /// transaction-level deadline).</para>
+    ///
+    /// Default: 25 000 ms (25 s) — 5 s under the 30 s range-lock TTL.
+    /// </summary>
+    public static int MaxSerializableTransactionLifetimeMs = 25_000;
 }

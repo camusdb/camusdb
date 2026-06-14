@@ -50,12 +50,15 @@ public sealed class ExecuteSQLController : CommandsController
 
             try
             {
+                (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode) = ParseRequestLevelMode(request);
                 (newTransaction, txnState) = await BeginOrResumeAsync(
                     request.DatabaseName,
                     request.TxnIdPT,
                     request.TxnIdCounter,
                     readOnly: true,        // SELECT / SHOW always read-only
-                    promoteReadOnly: true  // scan: in key-range mode take a shared range lock (serializable, phantom-free)
+                    promoteReadOnly: true, // scan: in key-range mode take a shared range lock (serializable, phantom-free)
+                    isolationLevel: reqLevel,
+                    transactionMode: reqMode
                 ).ConfigureAwait(false);
 
                 ExecuteSQLTicket ticket = new(
@@ -121,10 +124,13 @@ public sealed class ExecuteSQLController : CommandsController
 
             try
             {
+                (CamusIsolationLevel? reqLevel2, CamusTransactionMode? reqMode2) = ParseRequestLevelMode(request);
                 (newTransaction, txnState) = await BeginOrResumeAsync(
                     request.DatabaseName,
                     request.TxnIdPT,
-                    request.TxnIdCounter
+                    request.TxnIdCounter,
+                    isolationLevel: reqLevel2,
+                    transactionMode: reqMode2
                 ).ConfigureAwait(false);
 
                 ExecuteSQLTicket ticket = new(
@@ -183,10 +189,13 @@ public sealed class ExecuteSQLController : CommandsController
 
             try
             {
+                (CamusIsolationLevel? reqLevel3, CamusTransactionMode? reqMode3) = ParseRequestLevelMode(request);
                 (newTransaction, txnState) = await BeginOrResumeAsync(
                     request.DatabaseName,
                     request.TxnIdPT,
-                    request.TxnIdCounter
+                    request.TxnIdCounter,
+                    isolationLevel: reqLevel3,
+                    transactionMode: reqMode3
                 ).ConfigureAwait(false);
 
                 ExecuteSQLTicket ticket = new(

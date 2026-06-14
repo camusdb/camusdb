@@ -49,16 +49,6 @@ public sealed class HttpTransactionCoordinator
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required to start a transaction");
 
-        // A serializable read-only transaction is stateless on the Kahuna side (zero identity, carries
-        // only a snapshot read timestamp), so it cannot be registered and resumed by a transaction id
-        // the way an explicit multi-statement transaction must be. Reject it here rather than hand back
-        // an unusable (0,0) handle; serializable read-only reads are available as autocommit SELECTs.
-        CamusIsolationLevel effectiveLevel = isolationLevel ?? CamusDBConfig.DefaultIsolationLevel;
-        if (effectiveLevel == CamusIsolationLevel.Serializable && transactionMode == CamusTransactionMode.ReadOnly)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Explicit serializable read-only transactions are not supported; run serializable reads as autocommit SELECTs.");
-
         DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
 
         KvTransaction tx = await database.Transactions.BeginAsync(isolationLevel, transactionMode, cancellationToken).ConfigureAwait(false);

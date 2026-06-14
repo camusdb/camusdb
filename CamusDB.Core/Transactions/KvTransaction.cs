@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
@@ -72,19 +73,17 @@ public sealed class KvTransaction
     public bool IsReadOnly { get; }
 
     /// <summary>
-    /// Isolation level requested when this transaction was begun.
-    /// Default is <see cref="CamusIsolationLevel.ReadCommitted"/> — behaviour is identical to the
-    /// long-standing code path. <see cref="CamusIsolationLevel.Serializable"/> is carried as metadata
-    /// only and does not yet change locking or snapshot-read behaviour.
+    /// Isolation level for this transaction. Defaults to <see cref="CamusIsolationLevel.ReadCommitted"/>.
+    /// May be upgraded via <c>SET TRANSACTION ISOLATION LEVEL</c> before any locks are acquired —
+    /// the SQL handler calls <see cref="ApplyIsolationLevel"/> which guards against mid-flight changes.
     /// </summary>
-    public CamusIsolationLevel IsolationLevel { get; }
+    public CamusIsolationLevel IsolationLevel { get; private set; }
 
     /// <summary>
-    /// Mode (read-write or read-only) requested when this transaction was begun.
-    /// Default is <see cref="CamusTransactionMode.ReadWrite"/>. Carried as metadata only and does
-    /// not yet change read behaviour.
+    /// Mode (read-write or read-only) for this transaction. Defaults to <see cref="CamusTransactionMode.ReadWrite"/>.
+    /// May be changed via <c>SET TRANSACTION … READ ONLY</c> before any locks are acquired.
     /// </summary>
-    public CamusTransactionMode TransactionMode { get; }
+    public CamusTransactionMode TransactionMode { get; private set; }
 
     /// <summary>
     /// Server-minted HLC timestamp that defines the MVCC snapshot for a
@@ -96,6 +95,24 @@ public sealed class KvTransaction
     /// (Read Committed) path is unchanged.</para>
     /// </summary>
     public HLCTimestamp ReadTimestamp { get; }
+
+    /// <summary>
+    /// Monotonic elapsed-time counter started when this transaction was created. Used to enforce
+    /// <see cref="CamusDBConfig.MaxSerializableTransactionLifetimeMs"/> — immune to NTP wall-clock
+    /// jumps, consistent with the monotonic lock-wait deadline used elsewhere in the store.
+    ///
+    /// <para><c>null</c> for zero-snapshot (read-only) transactions, which have no lifetime limit.</para>
+    /// </summary>
+    private readonly Stopwatch? lifetimeWatch;
+
+    /// <summary>
+    /// Returns <c>true</c> if <paramref name="maxLifetimeMs"/> is positive and the transaction
+    /// has been open longer than that duration. Always <c>false</c> for zero-snapshot (RO) transactions.
+    /// </summary>
+    public bool IsExpired(int maxLifetimeMs) =>
+        maxLifetimeMs > 0 &&
+        lifetimeWatch is not null &&
+        lifetimeWatch.ElapsedMilliseconds > maxLifetimeMs;
 
     public KvTransaction(
         HLCTimestamp transactionId,
@@ -111,6 +128,8 @@ public sealed class KvTransaction
         IsolationLevel = isolationLevel;
         TransactionMode = transactionMode;
         ReadTimestamp = readTimestamp;
+        if (transactionId != HLCTimestamp.Zero)
+            lifetimeWatch = Stopwatch.StartNew();
     }
 
     /// <summary>
@@ -120,6 +139,51 @@ public sealed class KvTransaction
     public static KvTransaction CreateReadOnly() =>
         new(HLCTimestamp.Zero, string.Empty, isReadOnly: true,
             transactionMode: CamusTransactionMode.ReadOnly);
+
+    /// <summary>
+    /// Whether any statement (SELECT, INSERT, UPDATE, DELETE, SHOW, EXPLAIN …) has executed
+    /// in this transaction. Set to <c>true</c> by <see cref="MarkStatementExecuted"/> before
+    /// the first non-<c>SET TRANSACTION</c> statement runs. Used by <see cref="ApplyIsolationLevel"/>
+    /// to reject a level change after the transaction has already read or written data.
+    /// </summary>
+    private bool statementExecuted;
+
+    /// <summary>
+    /// Marks the transaction as having executed at least one statement. Must be called by the
+    /// executor for every statement type <b>except</b> <c>SET TRANSACTION</c> — the standard SQL
+    /// rule is that <c>SET TRANSACTION</c> must precede all other statements in the transaction.
+    /// </summary>
+    public void MarkStatementExecuted()
+    {
+        // No lock needed: a bool write is atomic on all .NET-supported architectures, and the
+        // flag only transitions false→true (never back), so a torn read is harmless.
+        statementExecuted = true;
+    }
+
+    /// <summary>
+    /// Applies a new isolation level and/or transaction mode to this transaction. Called by the
+    /// <c>SET TRANSACTION ISOLATION LEVEL</c> SQL handler.
+    ///
+    /// <para>Throws <see cref="CamusDBErrorCodes.InvalidInput"/> if any prior statement has
+    /// executed in this transaction. Standard SQL requires <c>SET TRANSACTION</c> to be the first
+    /// statement. A ReadCommitted read acquires no locks but still "touches" the transaction —
+    /// upgrading to Serializable after that read would silently omit the shared lock the new level
+    /// requires for the data already read.</para>
+    /// </summary>
+    public void ApplyIsolationLevel(CamusIsolationLevel level, CamusTransactionMode mode)
+    {
+        lock (trackSync)
+        {
+            if (statementExecuted)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "SET TRANSACTION must be the first statement of a transaction — " +
+                    $"transaction {UniqueId} has already executed a statement");
+
+            IsolationLevel  = level;
+            TransactionMode = mode;
+        }
+    }
 
     /// <summary>
     /// Records that an exclusive lock was acquired on <paramref name="key"/>.
