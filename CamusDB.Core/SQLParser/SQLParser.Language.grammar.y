@@ -163,16 +163,31 @@ set_transaction_stmt
               !string.Equals($4.s, "level", StringComparison.OrdinalIgnoreCase))
               throw new CamusDBException(
                   CamusDBErrorCodes.InvalidInput,
-                  "Expected: SET TRANSACTION ISOLATION LEVEL {SERIALIZABLE}");
+                  "Expected: SET TRANSACTION ISOLATION LEVEL {SERIALIZABLE | READ COMMITTED}");
           string level = $5.s.ToUpperInvariant() switch {
               "SERIALIZABLE"   => "Serializable",
               _ => throw new CamusDBException(
                       CamusDBErrorCodes.InvalidInput,
-                      "Unknown isolation level '" + $5.s + "'. Expected: SERIALIZABLE")
+                      "Unknown isolation level '" + $5.s + "'. Expected: SERIALIZABLE or READ COMMITTED")
           };
           $$.n = new(NodeType.SetTransaction,
                      new(NodeType.String, null, null, null, null, null, null, null, "ReadWrite"),
                      null, null, null, null, null, null, level);
+      }
+    | TSET TTRANSACTION TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER
+      {
+          // SET TRANSACTION ISOLATION LEVEL READ COMMITTED — the two-word level opts down from
+          // the Serializable default. Read Committed is read-write; there is no READ ONLY|WRITE variant.
+          if (!string.Equals($3.s, "isolation", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($4.s, "level", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($5.s, "read", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($6.s, "committed", StringComparison.OrdinalIgnoreCase))
+              throw new CamusDBException(
+                  CamusDBErrorCodes.InvalidInput,
+                  "Expected: SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+          $$.n = new(NodeType.SetTransaction,
+                     new(NodeType.String, null, null, null, null, null, null, null, "ReadWrite"),
+                     null, null, null, null, null, null, "ReadCommitted");
       }
     | TSET TTRANSACTION TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER
       {

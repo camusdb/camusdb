@@ -42,7 +42,7 @@ All others are permanent and must propagate to the caller without retrying.
 |-----------|----------------------------|---------------------------------------------------------------------------------------------------|----------------|
 | CADB0502  | `TransactionConflict`      | A shared or exclusive lock conflicted with a concurrent holder. Kahuna rejected at lock-acquire time; no 2PC was attempted. | ✓ yes |
 | CADB0504  | `TransactionMustRetry`     | Kahuna returned `MustRetry` after exhausting its routing retry budget (leader election, partition move). No data was written. | ✓ yes |
-| CADB0505  | `TransactionLifetimeExceeded` | The transaction was held open longer than `MaxSerializableTransactionLifetimeMs` (25 s). Its range locks were released before this error was raised. | ✓ yes |
+| CADB0505  | `TransactionLifetimeExceeded` | The transaction was held open longer than `MaxSerializableTransactionLifetimeMs` (about 1 h; range locks are kept alive by a renewal heartbeat up to that backstop). Its range locks were released before this error was raised. | ✓ yes |
 | CADB0300  | `DuplicateUniqueKeyValue`  | A unique-index constraint was violated.                                                           | ✗ no  |
 | CADB0301  | `NotNullViolation`         | A NOT NULL constraint was violated.                                                               | ✗ no  |
 | CADB0400  | `InvalidInput`             | Bad request (wrong type, missing field, `SET TRANSACTION` after statement, etc.).                | ✗ no  |

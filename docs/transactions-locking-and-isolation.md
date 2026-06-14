@@ -62,7 +62,7 @@ CamusDB *use* Kahuna's transactions?" CamusDB rows and indexes are just key/valu
 - **Read-only vs read-write transaction** — a crucial distinction in CamusDB; see §4 and §5. A
   transaction also declares this *mode* up front when it wants the stronger isolation level.
 - **Isolation level** — how strongly a transaction is shielded from concurrent ones. CamusDB has two:
-  **Serializable** (the default, described in §9) and **Read Committed** (opt-in explicit override,
+  **Serializable** (the default, described in §9) and **Read Committed** (explicit opt-out,
   described in §4/§5 as a baseline).
 
 ---
@@ -233,6 +233,11 @@ makes "read a row, then act on it" safe: no other transaction can change that ex
 These point locks are taken **only** by Serializable read-write transactions. Read Committed reads and
 Serializable read-only (snapshot) reads take none.
 
+**Escalation for large reads.** To keep a transaction that reads thousands of rows from accumulating
+thousands of individual point locks, once the per-table point-lock count passes a threshold the
+transaction collapses them into a single whole-table shared lock and stops taking new per-row locks.
+This bounds the lock bookkeeping at the cost of locking a little more of the table than strictly read.
+
 ```
                             Reads                         Writes (INSERT/UPDATE/DELETE)
                             ──────────────────────────    ─────────────────────────────
@@ -391,13 +396,16 @@ statement, because retroactively upgrading the level would skip locks the earlie
   a built-in helper that does the replay-with-backoff for you (`SerializableRetryHelper`); for explicit
   multi-statement transactions you replay from `BEGIN` yourself. The full contract — which error codes are
   retryable, and the patterns — is in `serializable-retry-contract.md`.
-- **Keep them short.** A serializable read-write transaction has a **maximum lifetime** (about 25
-  seconds). If it stays open longer it is **aborted with a clear error** at its next operation or at
-  commit — it never silently loses its isolation. (This bound only applies to serializable read-write;
-  it exists so a held lock can't quietly expire underneath a still-running transaction.)
+- **Long-running is supported, but bounded.** A serializable read-write transaction's range locks are
+  kept alive by a background lease-renewal heartbeat, so it can stay open for a genuinely long
+  interactive session. There is still a hard **maximum lifetime** (about one hour) as a backstop: if a
+  transaction outlives it, it is **aborted with a clear error** at its next operation or at commit — it
+  never silently loses its isolation. (This bound only applies to serializable read-write.)
 
 Conflicts are detected and resolved **promptly** — a blocked writer or a deadlock fails fast (sub-second)
-rather than stalling on a lock timeout. And all of this works the same on one node or a whole cluster
+rather than stalling on a lock timeout. Deadlocks have a **deterministic winner**: when two transactions
+contend, the older one waits and commits while the younger aborts and retries (a *wait-die* ordering), so
+two transactions can never both abort each other. And all of this works the same on one node or a whole cluster
 (§8). Reserve serializable read-write transactions for logic that truly needs an invariant; everything
 else is cheaper and fully concurrent under Read Committed.
 
@@ -417,9 +425,12 @@ else is cheaper and fully concurrent under Read Committed.
 > specialized clock hardware provide — there is no externally-consistent / commit-wait guarantee, and
 > that is a deliberate design choice, not a missing piece.
 >
-> Remaining work is **robustness refinement, not correctness**: deadlock fairness, lock escalation for
-> very large reads, and tighter predicate-lock bounds for full scans / unbounded `UPDATE`/`DELETE`.
-> These are tracked in `../specs/serializable-isolation-future-work.md`.
+> The robustness refinements that were once outstanding are now in place: a *wait-die*
+> **deadlock-fairness** ordering (a deterministic winner instead of mutual aborts), **lock escalation**
+> for very large reads (per-row read locks collapse to one whole-table lock past a threshold), and
+> **tighter predicate-lock bounds** so a bounded scan / `UPDATE` / `DELETE` locks only its key range
+> rather than the whole table. Any further optional refinements are tracked in
+> `../specs/serializable-isolation-future-work.md`.
 
 ---
 

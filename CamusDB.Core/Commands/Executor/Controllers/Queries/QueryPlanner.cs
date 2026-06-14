@@ -15,7 +15,6 @@ using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Statistics;
-using CamusDB.Core.Transactions;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 

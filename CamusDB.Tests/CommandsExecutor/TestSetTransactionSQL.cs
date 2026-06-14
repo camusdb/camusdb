@@ -131,6 +131,31 @@ public sealed class TestSetTransactionSQL : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
+    // 3b. SET TRANSACTION ISOLATION LEVEL READ COMMITTED opts down from the
+    //     Serializable default; mode defaults to ReadWrite.
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task SetTransaction_SQL_ReadCommitted_OptsDown()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupDbAsync();
+
+        KvTransaction tx = await db.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        Assert.AreEqual(CamusIsolationLevel.Serializable, tx.IsolationLevel, "Initial level must be Serializable");
+
+        await ExecuteSetTransaction(dbname, executor, tx,
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+
+        Assert.AreEqual(CamusIsolationLevel.ReadCommitted, tx.IsolationLevel,
+            "IsolationLevel must be ReadCommitted after SET TRANSACTION … READ COMMITTED");
+        Assert.AreEqual(CamusTransactionMode.ReadWrite, tx.TransactionMode,
+            "Mode must default to ReadWrite when not specified");
+
+        await db.Transactions.RollbackAsync(tx);
+    }
+
+    // -----------------------------------------------------------------------
     // 4a. SET TRANSACTION is rejected after any prior statement — locked case
     //
     // A Serializable+RW SELECT acquires shared point locks. The "already executed

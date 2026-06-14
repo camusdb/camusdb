@@ -72,11 +72,11 @@
   </ItemGroup>
   
   <ItemGroup>
-    <!-- Local Kahuna source (S/X range locks + write-path phantom fence + snapshot reads) —
-         not yet on NuGet; published 0.3.9 predates this work. Switch to a PackageReference once
-         a newer Kahuna (≥ 0.3.10, with RangeLockMode + readTimestamp) is published. -->
-    <ProjectReference Include="..\..\kahuna\Kahuna.Core\Kahuna.Core.csproj" />
-    <ProjectReference Include="..\..\kahuna\Kahuna.Shared\Kahuna.Shared.csproj" />
+    <!-- Kahuna 0.4.3: S/X range locks, write-path phantom fence, snapshot reads, range-lock
+         TTL renewal, and the lock-holder-timestamp on denied acquires (wait-die). Published on
+         NuGet, so no local project reference is needed. -->
+    <PackageReference Include="Kahuna.Core" Version="0.4.3" />
+    <PackageReference Include="Kahuna.Shared" Version="0.4.3" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.16" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
