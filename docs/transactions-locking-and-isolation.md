@@ -341,32 +341,68 @@ serial"), lean on **unique constraints** (enforced at the key level) rather than
 ### 9.2 Serializable (opt-in)
 
 A transaction can ask for **Serializable** — the strongest level, where the end result is always
-equivalent to running the transactions one-at-a-time in *some* order. You choose it (and whether the
-transaction is read-only or read-write) when the transaction begins. Under the hood CamusDB uses two
-different strategies, picked automatically from the mode:
+equivalent to running the transactions one-at-a-time in *some* order. Under the hood CamusDB uses two
+different strategies, picked automatically from whether the transaction is read-only or read-write:
 
 - **Serializable read-only → a consistent snapshot.** The transaction is pinned to a single timestamp
   at the moment it begins and reads *every* key as of that instant — across statements and across
   partitions. It sees no write committed after it started: no read skew, no phantoms, fully repeatable.
-  And it does this **without taking any locks**, so it never blocks writers and is never blocked. This
-  is the right tool for consistent reports and multi-statement reads.
+  And it does this **without taking any locks**, so it never blocks writers and is never blocked. You can
+  hold one open across **several reads** (in separate requests, resumed by transaction id) and they all
+  observe the same instant — ideal for a consistent multi-query report.
 - **Serializable read-write → strict locking.** Reads take the shared point/range locks from §6.2–6.3
   and hold them to commit; a key the transaction reads can't be changed under it, and a key it writes
   becomes exclusive. This catches the anomalies Read Committed allows — including **write skew**: if two
-  serializable read-write transactions would conflict, one commits and the other is told to retry.
+  serializable read-write transactions would conflict, one commits and the other is aborted and must
+  retry.
 
-The trade-off is the usual one: serializable **read-write** transactions can block each other and may
-have to retry, so reserve them for logic that truly needs an invariant. Serializable **read-only**
-transactions stay lock-free, so prefer them for consistency-sensitive reads. And this works the same on
-one node or a whole cluster (§8).
+**How you ask for it.** Choose the level per transaction — either when you begin the transaction (an
+isolation field on the begin request), or as the **first** statement of an explicit transaction:
 
-> **Status — honest about the edges.** Serializable is implemented and tested but still being hardened;
-> Read Committed is the safe default. The main known limitation: a held lock has a safety-net expiry, so
-> a serializable **read-write** transaction that stays open longer than that window could lose its
-> protection mid-flight. Keep serializable read-write transactions short, and prefer serializable
-> **read-only** (snapshot) transactions where you can. CamusDB does not (yet) provide the real-time,
-> wall-clock ordering guarantee that systems with specialized clock hardware do — its ordering is
-> logically consistent, not tied to real time.
+```sql
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;            -- read-write (strict locking)
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY;  -- snapshot
+```
+
+It must come *before* any read or write — CamusDB rejects it once the transaction has executed a
+statement, because retroactively upgrading the level would skip locks the earlier reads needed. There's
+also a server-wide default knob if you want Serializable everywhere.
+
+**Two practical rules:**
+- **Retry on conflict.** A serializable read-write transaction can be aborted (a serialization conflict,
+  or a lock-wait that won't clear) — the whole transaction must be replayed from the beginning. Write
+  your serializable read-write logic inside a retry loop. For single-statement (autocommit) work there's
+  a built-in helper that does the replay-with-backoff for you (`SerializableRetryHelper`); for explicit
+  multi-statement transactions you replay from `BEGIN` yourself. The full contract — which error codes are
+  retryable, and the patterns — is in `serializable-retry-contract.md`.
+- **Keep them short.** A serializable read-write transaction has a **maximum lifetime** (about 25
+  seconds). If it stays open longer it is **aborted with a clear error** at its next operation or at
+  commit — it never silently loses its isolation. (This bound only applies to serializable read-write;
+  it exists so a held lock can't quietly expire underneath a still-running transaction.)
+
+Conflicts are detected and resolved **promptly** — a blocked writer or a deadlock fails fast (sub-second)
+rather than stalling on a lock timeout. And all of this works the same on one node or a whole cluster
+(§8). Reserve serializable read-write transactions for logic that truly needs an invariant; everything
+else is cheaper and fully concurrent under Read Committed.
+
+> **Status — complete and verified.** Serializable is fully implemented and acceptance-tested; Read
+> Committed is still the default. Both paths are reachable through the transaction API: the **read-write**
+> (strict-locking) path, and the lock-free **read-only snapshot** — which you can open, resume across
+> several requests by transaction id, and commit/roll back like any explicit transaction. The anomaly
+> suite (read skew, phantoms, write skew, lost update) passes identically on a **single node and on a
+> 3-node cluster**, including multi-partition read-write transactions — the isolation behavior does not
+> depend on topology.
+>
+> Two things to keep in mind, neither a correctness gap. **(1)** A conflicting read-write transaction is
+> aborted, not auto-resolved end-to-end: use the retry helper (autocommit) or replay from `BEGIN`
+> (explicit), per the retry rule above. **(2)** CamusDB gives serializable ordering that is *logically*
+> consistent (via hybrid logical clocks), **not** the real-time, wall-clock ordering that systems with
+> specialized clock hardware provide — there is no externally-consistent / commit-wait guarantee, and
+> that is a deliberate design choice, not a missing piece.
+>
+> Remaining work is **robustness refinement, not correctness**: deadlock fairness, lock escalation for
+> very large reads, and tighter predicate-lock bounds for full scans / unbounded `UPDATE`/`DELETE`.
+> These are tracked in `../specs/serializable-isolation-future-work.md`.
 
 ---
 
@@ -404,5 +440,6 @@ When reasoning about a concurrency question in CamusDB, ask in this order:
    transaction may run a 2PC across them — but the isolation guarantees are the same either way.
 5. **What guarantee does the app actually need?** Need a consistent multi-statement read? Use a
    Serializable **read-only** transaction (lock-free snapshot). Need a read-then-write invariant? Use a
-   Serializable **read-write** transaction (and keep it short), or enforce it with a unique constraint.
-   Otherwise the Read Committed default is the cheapest and fully concurrent.
+   Serializable **read-write** transaction — keep it short and wrap it in a retry loop (it can be aborted
+   on conflict) — or enforce it with a unique constraint. Otherwise the Read Committed default is the
+   cheapest and fully concurrent.
