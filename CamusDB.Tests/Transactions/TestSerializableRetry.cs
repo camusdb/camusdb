@@ -32,6 +32,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// is resolved transparently by the helper.
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestSerializableRetry : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)>
@@ -223,17 +224,16 @@ public sealed class TestSerializableRetry : SharedNodeBaseTest
             CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
         long _ = await ReadBalanceAsync(dbname, executor, alice, id); // acquires S lock
 
-        // Bob's autocommit UPDATE is wrapped in the retry helper. His first attempt will
-        // conflict with Alice's S lock. After the back-off Alice commits and Bob's retry
-        // acquires the X lock and succeeds.
-        Task<int> aliceCommit = Task.Run(async () =>
-        {
-            // Give Bob's first attempt time to hit the conflict, then commit.
-            await Task.Delay(300);
-            await db.Transactions.CommitAsync(alice);
-            return 0;
-        });
-
+        // Bob's autocommit UPDATE filters on the non-indexed 'balance' column, forcing
+        // ScanUsingTableIndex → whole-bucket Exclusive range lock on the row space.
+        // Alice's Shared point lock on the same row conflicts with that Exclusive acquire
+        // (S∩X on overlapping ranges), so attempt 1 always fails with TransactionConflict.
+        //
+        // Alice is committed synchronously inside Bob's catch handler — before the rethrow
+        // — so her lock is guaranteed released when the retry helper fires the next attempt.
+        // Using a whole-bucket X avoids S→X upgrade mechanics entirely, making this
+        // deterministic regardless of task-scheduling jitter.
+        bool aliceCommitted = false;
         int bobAttempts = 0;
 
         await SerializableRetryHelper.ExecuteAutocommitAsync(async ct =>
@@ -243,13 +243,27 @@ public sealed class TestSerializableRetry : SharedNodeBaseTest
                 CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite, ct);
             try
             {
+                // Filter on balance (non-indexed) so the planner uses ScanUsingTableIndex
+                // and acquires a whole-bucket Exclusive range lock, not a per-row point lock.
                 await executor.Update(new UpdateTicket(
                     txnState: bob, databaseName: dbname, tableName: "accounts",
                     plainValues: new() { { "balance", new(ColumnType.Integer64, 50L) } },
                     exprValues: null, where: null,
-                    filters: new() { new("id", "=", new(ColumnType.Id, id)) },
+                    filters: new() { new("balance", "=", new(ColumnType.Integer64, 100L)) },
                     parameters: null));
                 await db.Transactions.CommitAsync(bob, ct);
+            }
+            catch (CamusDBException ex) when (SerializableRetryHelper.IsRetryable(ex))
+            {
+                await db.Transactions.RollbackIfNotCompletedAsync(bob, ct);
+                if (!aliceCommitted)
+                {
+                    // Commit Alice synchronously so her S lock is fully released
+                    // before the retry helper fires the next attempt.
+                    await db.Transactions.CommitAsync(alice);
+                    aliceCommitted = true;
+                }
+                throw;
             }
             catch
             {
@@ -257,8 +271,6 @@ public sealed class TestSerializableRetry : SharedNodeBaseTest
                 throw;
             }
         }, maxAttempts: 5);
-
-        await aliceCommit;
 
         // Bob must have needed more than one attempt (first conflicted with Alice's S lock).
         Assert.GreaterOrEqual(bobAttempts, 2,
