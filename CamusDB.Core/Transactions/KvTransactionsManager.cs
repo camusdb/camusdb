@@ -48,7 +48,7 @@ public sealed class KvTransactionsManager
     /// default) — a purely in-memory clock bump, no Raft or network round-trip.
     /// <c>null</c> when not wired (legacy test paths); falls back to the zero-snapshot fast path.
     /// </summary>
-    private readonly Func<Kommander.Time.HLCTimestamp>? mintLocalT;
+    private readonly Func<Kommander.Time.HLCTimestamp?, Kommander.Time.HLCTimestamp>? mintLocalT;
 
     private readonly Lock activeSync = new();
     private readonly List<KvTransaction> activeTransactions = [];
@@ -58,7 +58,7 @@ public sealed class KvTransactionsManager
     private readonly Lock heartbeatSync = new();
     private readonly Dictionary<Kommander.Time.HLCTimestamp, CancellationTokenSource> heartbeats = [];
 
-    public KvTransactionsManager(IKahuna kahuna, Func<Kommander.Time.HLCTimestamp>? mintLocalT = null)
+    public KvTransactionsManager(IKahuna kahuna, Func<Kommander.Time.HLCTimestamp?, Kommander.Time.HLCTimestamp>? mintLocalT = null)
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         this.kahuna = kahuna;
@@ -236,16 +236,19 @@ public sealed class KvTransactionsManager
     /// finalize a promoted transaction (commit or rollback) so its shared range locks are released
     /// and its MVCC snapshot is cleaned; this matches an implicit single-statement transaction.</para>
     /// </summary>
-    public async Task<KvTransaction> BeginReadOnlyAsync(bool promote, CancellationToken cancellationToken = default)
+    public async Task<KvTransaction> BeginReadOnlyAsync(
+        bool promote,
+        Kommander.Time.HLCTimestamp? causalToken = null,
+        CancellationToken cancellationToken = default)
     {
         if (!promote || !CamusDBConfig.KeyRangeShardingEnabled)
         {
-            // Serializable default: mint a local HLC timestamp T and return a zero-identity
-            // snapshot transaction at T — no Kahuna round-trip, no session, no cleanup.
+            // Serializable default: mint a local HLC timestamp T ≥ causalToken (when provided)
+            // and return a zero-identity snapshot transaction at T — no Kahuna round-trip.
             // RC default: keep the HLCTimestamp.Zero fast path (latest-committed per key).
             if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable &&
                 mintLocalT is not null)
-                return KvTransaction.CreateSnapshotReadOnly(mintLocalT());
+                return KvTransaction.CreateSnapshotReadOnly(mintLocalT(causalToken));
 
             return KvTransaction.CreateReadOnly();
         }
@@ -279,12 +282,19 @@ public sealed class KvTransactionsManager
     /// Throws <see cref="CamusDBException"/> if the transaction was already completed
     /// or if Kahuna aborts the commit.
     /// </summary>
-    public async Task CommitAsync(KvTransaction tx, CancellationToken cancellationToken = default)
+    public async Task<Kommander.Time.HLCTimestamp> CommitAsync(KvTransaction tx, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(tx);
 
         if (tx.TransactionId == Kommander.Time.HLCTimestamp.Zero)
-            return; // Zero-snapshot read-only fast path: no Kahuna transaction to finalize
+        {
+            // Zero-snapshot fast path: no Kahuna transaction to finalize.
+            // Return the minted snapshot T if available (Serializable snapshot reads),
+            // otherwise return the current local HLC so RC reads also emit a usable token.
+            if (!tx.ReadTimestamp.IsNull())
+                return tx.ReadTimestamp;
+            return mintLocalT?.Invoke(null) ?? Kommander.Time.HLCTimestamp.Zero;
+        }
 
         if (tx.Status != KvTransactionStatus.Active)
             throw new CamusDBException(
@@ -312,7 +322,7 @@ public sealed class KvTransactionsManager
             {
                 // Best-effort: the empty tx expires server-side on its own.
             }
-            return;
+            return mintLocalT?.Invoke(null) ?? tx.TransactionId;
         }
 
         // Stop the range-lock heartbeat before committing so no concurrent renewal fires during 2PC.
@@ -371,7 +381,7 @@ public sealed class KvTransactionsManager
             tx.Status = KvTransactionStatus.Committed;
             await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
             Untrack(tx);
-            return;
+            return mintLocalT?.Invoke(null) ?? tx.TransactionId;
         }
 
         // Roll back the client-side transaction state so a subsequent

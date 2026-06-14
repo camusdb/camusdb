@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.CommandsExecutor.Models;
+using Kommander.Time;
 
 namespace CamusDB.App.Models;
 
@@ -18,7 +19,9 @@ public sealed class DeleteRequest
 
     public string? DatabaseName { get; set; }
 
-    public string? TableName { get; set; }    
+    public string? TableName { get; set; }
 
     public List<QueryFilter>? Filters { get; set; }
+
+    public HLCTimestamp? CausalToken { get; set; }
 }

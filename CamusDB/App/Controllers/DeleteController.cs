@@ -67,6 +67,7 @@ public sealed class DeleteController : CommandsController
             // Autocommit: retry transparently on transient serialization failures when the
             // resolved level is Serializable; run once for Read Committed.
             int deletedRows = 0;
+            Kommander.Time.HLCTimestamp causalToken = default;
 
             async Task AutocommitBody(CancellationToken ct)
             {
@@ -81,7 +82,7 @@ public sealed class DeleteController : CommandsController
                         filters: request.Filters ?? new()
                     );
                     DeleteResult r = await executor.Delete(ticket).ConfigureAwait(false);
-                    await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
                     deletedRows = r.DeletedRows;
                 }
                 catch
@@ -96,7 +97,7 @@ public sealed class DeleteController : CommandsController
             else
                 await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
 
-            return new JsonResult(new DeleteResponse("ok", deletedRows));
+            return new JsonResult(new DeleteResponse("ok", deletedRows) { CausalToken = causalToken.IsNull() ? null : causalToken });
         }
         catch (CamusDBException e)
         {

@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using Kommander.Time;
+
 namespace CamusDB.App.Models;
 
 public sealed class UpdateResponse
@@ -17,6 +19,8 @@ public sealed class UpdateResponse
     public string? Code { get; set; }
 
     public string? Message { get; set; }
+
+    public HLCTimestamp? CausalToken { get; set; }
 
     public UpdateResponse(string status, int rows)
     {

@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Transactions;
 using CamusDB.App.Models;
+using Kommander.Time;
 
 namespace CamusDB.App.Services;
 
@@ -67,13 +68,17 @@ public sealed class HttpTransactionCoordinator
     /// serializable, phantom-free read. A promoted transaction has a real identity, so it is
     /// registered here for cleanup and <b>must</b> be committed or rolled back by the caller.
     /// </summary>
-    public async Task<KvTransaction> BeginReadOnlyAsync(string databaseName, bool promote, CancellationToken cancellationToken = default)
+    public async Task<KvTransaction> BeginReadOnlyAsync(
+        string databaseName,
+        bool promote,
+        HLCTimestamp? causalToken = null,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required");
 
         DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
-        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote, cancellationToken).ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote, causalToken, cancellationToken).ConfigureAwait(false);
 
         // Zero-snapshot fast-path transactions carry no identity and need no tracking or cleanup;
         // a promoted (real-id) transaction is registered so commit/rollback can find and release it.
@@ -91,10 +96,11 @@ public sealed class HttpTransactionCoordinator
         return entry.Transaction;
     }
 
-    public async Task CommitAsync(DatabaseDescriptor database, KvTransaction tx, CancellationToken cancellationToken = default)
+    public async Task<HLCTimestamp> CommitAsync(DatabaseDescriptor database, KvTransaction tx, CancellationToken cancellationToken = default)
     {
-        await database.Transactions.CommitAsync(tx, cancellationToken).ConfigureAwait(false);
+        HLCTimestamp token = await database.Transactions.CommitAsync(tx, cancellationToken).ConfigureAwait(false);
         Unregister(tx);
+        return token;
     }
 
     public async Task RollbackAsync(KvTransaction tx, CancellationToken cancellationToken = default)

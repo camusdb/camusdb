@@ -104,8 +104,12 @@ internal sealed class DatabaseOpener
             await node.FlushAsync().ConfigureAwait(false);
         }
 
-        Func<HLCTimestamp> mintLocalT = () =>
-            node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
+        Func<HLCTimestamp?, HLCTimestamp> mintLocalT = (floor) =>
+        {
+            if (floor.HasValue && !floor.Value.IsNull())
+                return node.Raft.HybridLogicalClock.ReceiveEvent(node.Raft.GetLocalNodeId(), floor.Value);
+            return node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
+        };
 
         KvTransactionsManager transactions = new(node.Kahuna, mintLocalT);
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new();

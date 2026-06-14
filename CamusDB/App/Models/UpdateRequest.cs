@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.CommandsExecutor.Models;
+using Kommander.Time;
 
 namespace CamusDB.App.Models;
 
@@ -23,4 +24,6 @@ public sealed class UpdateRequest
     public Dictionary<string, ColumnValue>? Values { get; set; }
 
     public List<QueryFilter>? Filters { get; set; }
+
+    public HLCTimestamp? CausalToken { get; set; }
 }

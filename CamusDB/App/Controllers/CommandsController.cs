@@ -64,7 +64,7 @@ public abstract class CommandsController : ControllerBase
         // report NewTransaction = true to make the caller commit it on success / roll back on error.
         if (readOnly)
         {
-            KvTransaction roTx = await transactions.BeginReadOnlyAsync(databaseName, promoteReadOnly, cancellationToken).ConfigureAwait(false);
+            KvTransaction roTx = await transactions.BeginReadOnlyAsync(databaseName, promoteReadOnly, causalToken: null, cancellationToken).ConfigureAwait(false);
             bool promoted = roTx.TransactionId != Kommander.Time.HLCTimestamp.Zero;
             return (promoted, roTx);
         }

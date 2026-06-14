@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.CommandsExecutor.Models;
+using Kommander.Time;
 
 namespace CamusDB.App.Models;
 
@@ -25,4 +26,6 @@ public sealed class QueryRequest
     public List<QueryFilter>? Filters { get; set; }
 
     public List<QueryOrderBy>? OrderBy { get; set; }
+
+    public HLCTimestamp? CausalToken { get; set; }
 }

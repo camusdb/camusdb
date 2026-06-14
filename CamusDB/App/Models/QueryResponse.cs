@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.CommandsExecutor.Models;
+using Kommander.Time;
 
 namespace CamusDB.App.Models;
 
@@ -22,8 +23,10 @@ public sealed class QueryResponse
 
     public string? Message { get; set; }
 
+    public HLCTimestamp? CausalToken { get; set; }
+
     public QueryResponse(string status, int total, List<Dictionary<string, ColumnValue>> rows)
-    {        
+    {
         Status = status;
         Total = total;
         Rows = rows;

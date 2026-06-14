@@ -72,6 +72,7 @@ public sealed class InsertController : CommandsController
             // Autocommit: retry transparently on transient serialization failures when the
             // resolved level is Serializable; run once for Read Committed.
             int insertedRows = 0;
+            Kommander.Time.HLCTimestamp causalToken = default;
 
             async Task AutocommitBody(CancellationToken ct)
             {
@@ -85,7 +86,7 @@ public sealed class InsertController : CommandsController
                         values: new List<Dictionary<string, ColumnValue>>() { request.Values }
                     );
                     InsertResult r = await executor.Insert(ticket).ConfigureAwait(false);
-                    await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
                     insertedRows = r.InsertedRows;
                 }
                 catch
@@ -100,7 +101,7 @@ public sealed class InsertController : CommandsController
             else
                 await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
 
-            return new JsonResult(new InsertResponse("ok", insertedRows));
+            return new JsonResult(new InsertResponse("ok", insertedRows) { CausalToken = causalToken.IsNull() ? null : causalToken });
         }
         catch (CamusDBException e)
         {

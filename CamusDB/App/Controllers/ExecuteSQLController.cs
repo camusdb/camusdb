@@ -77,10 +77,12 @@ public sealed class ExecuteSQLController : CommandsController
             // Autocommit: retry transparently on transient serialization failures when the
             // resolved level is Serializable; run once for Read Committed.
             List<Dictionary<string, ColumnValue>> resultRows = [];
+            Kommander.Time.HLCTimestamp causalToken = default;
 
             async Task AutocommitBody(CancellationToken ct)
             {
-                KvTransaction tx = await transactions.BeginReadOnlyAsync(request.DatabaseName ?? "", promote: true, ct).ConfigureAwait(false);
+                KvTransaction tx = await transactions.BeginReadOnlyAsync(
+                    request.DatabaseName ?? "", promote: true, request.CausalToken, ct).ConfigureAwait(false);
                 try
                 {
                     ExecuteSQLTicket ticket = new(
@@ -93,7 +95,7 @@ public sealed class ExecuteSQLController : CommandsController
                     (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false);
                     await foreach (QueryResultRow row in cursor)
                         rows.Add(row.Row);
-                    await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
                     resultRows = rows;
                 }
                 catch
@@ -109,7 +111,7 @@ public sealed class ExecuteSQLController : CommandsController
             else
                 await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
 
-            return new JsonResult(new ExecuteSQLQueryResponse("ok", resultRows.Count, resultRows));
+            return new JsonResult(new ExecuteSQLQueryResponse("ok", resultRows.Count, resultRows) { CausalToken = causalToken.IsNull() ? null : causalToken });
         }
         catch (CamusDBException e)
         {
@@ -169,6 +171,7 @@ public sealed class ExecuteSQLController : CommandsController
             // Autocommit: retry transparently on transient serialization failures when the
             // resolved level is Serializable; run once for Read Committed.
             int modifiedRows = 0;
+            Kommander.Time.HLCTimestamp causalToken2 = default;
 
             async Task AutocommitDmlBody(CancellationToken ct)
             {
@@ -182,7 +185,7 @@ public sealed class ExecuteSQLController : CommandsController
                         parameters: request.Parameters
                     );
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-                    await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
+                    causalToken2 = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
                     modifiedRows = r.ModifiedRows;
                 }
                 catch
@@ -198,7 +201,7 @@ public sealed class ExecuteSQLController : CommandsController
             else
                 await AutocommitDmlBody(CancellationToken.None).ConfigureAwait(false);
 
-            return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows));
+            return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows) { CausalToken = causalToken2.IsNull() ? null : causalToken2 });
         }
         catch (CamusDBException e)
         {

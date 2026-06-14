@@ -70,6 +70,7 @@ public sealed class UpdateController : CommandsController
             // Autocommit: retry transparently on transient serialization failures when the
             // resolved level is Serializable; run once for Read Committed.
             int updatedRows = 0;
+            Kommander.Time.HLCTimestamp causalToken = default;
 
             async Task AutocommitBody(CancellationToken ct)
             {
@@ -87,7 +88,7 @@ public sealed class UpdateController : CommandsController
                         parameters: null
                     );
                     UpdateResult r = await executor.Update(ticket).ConfigureAwait(false);
-                    await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
                     updatedRows = r.UpdatedRows;
                 }
                 catch
@@ -102,7 +103,7 @@ public sealed class UpdateController : CommandsController
             else
                 await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
 
-            return new JsonResult(new UpdateResponse("ok", updatedRows));
+            return new JsonResult(new UpdateResponse("ok", updatedRows) { CausalToken = causalToken.IsNull() ? null : causalToken });
         }
         catch (CamusDBException e)
         {

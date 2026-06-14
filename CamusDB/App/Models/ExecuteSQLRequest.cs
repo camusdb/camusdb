@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.CommandsExecutor.Models;
+using Kommander.Time;
 
 namespace CamusDB.App.Models;
 
@@ -35,4 +36,6 @@ public sealed class ExecuteSQLRequest
     /// Ignored when <c>TxnIdPT</c> resumes an existing transaction.
     /// </summary>
     public string? TransactionMode { get; set; }
+
+    public HLCTimestamp? CausalToken { get; set; }
 }
