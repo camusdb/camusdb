@@ -1117,4 +1117,63 @@ internal sealed class TestTableAlterer : SharedNodeBaseTest
         Assert.AreEqual(IndexType.Unique, table.Indexes["~pk"].Type);
         Assert.Contains("id", table.Indexes["~pk"].Columns);
     }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestAddColumnNotNullWithDefault()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupEmptyTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket sqlTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "ALTER TABLE robots ADD COLUMN archived_at INT64 NOT NULL DEFAULT (0)",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(sqlTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        await database.Transactions.CommitAsync(txnState);
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
+
+        TableColumnSchema? col = tableSchema.Columns!.FirstOrDefault(c => c.Name == "archived_at");
+        Assert.IsNotNull(col, "Column 'archived_at' was not added");
+        Assert.AreEqual(ColumnType.Integer64, col!.Type);
+        Assert.IsTrue(col.NotNull, "NOT NULL constraint was not applied");
+        Assert.IsNotNull(col.DefaultValue, "DEFAULT (0) was not stored in the schema");
+        Assert.AreEqual(ColumnType.Integer64, col.DefaultValue!.Type);
+        Assert.AreEqual(0L, col.DefaultValue.LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestAddColumnWithDefaultBeforeNotNull()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupEmptyTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket sqlTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "ALTER TABLE robots ADD COLUMN score2 INT64 DEFAULT (0) NOT NULL",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(sqlTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        await database.Transactions.CommitAsync(txnState);
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "robots");
+
+        TableColumnSchema? col = tableSchema.Columns!.FirstOrDefault(c => c.Name == "score2");
+        Assert.IsNotNull(col, "Column 'score2' was not added");
+        Assert.AreEqual(ColumnType.Integer64, col!.Type);
+        Assert.IsTrue(col.NotNull, "NOT NULL constraint was not applied");
+        Assert.IsNotNull(col.DefaultValue, "DEFAULT (0) was not stored in the schema");
+        Assert.AreEqual(0L, col.DefaultValue!.LongValue);
+    }
 }
