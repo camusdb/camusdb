@@ -345,4 +345,33 @@ public class TestExecuteSqlCreateTable : SharedNodeBaseTest
         CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () => await executor.ExecuteDDLSQL(createTableTicket));
         Assert.AreEqual("Primary key already exists on table 'robots'", exception!.Message);
     }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteCreateTableInlinePrimaryKey()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket createTableTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "CREATE TABLE t (`UsersId` OID NOT NULL, `Id` OID NOT NULL, PRIMARY KEY (`UsersId`, `Id`))",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        OpenTableTicket openTableTicket = new(databaseName: dbname, tableName: "t");
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+
+        Assert.True(table.Indexes.TryGetValue("~pk", out TableIndexSchema? pkIndex),
+            "Inline PRIMARY KEY (UsersId, Id) must create the ~pk index");
+        Assert.AreEqual(IndexType.Unique, pkIndex!.Type);
+        CollectionAssert.AreEquivalent(new[] { "usersid", "id" }, pkIndex.Columns);
+
+        await database.Transactions.CommitAsync(txnState);
+    }
 }

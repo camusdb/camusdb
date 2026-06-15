@@ -345,7 +345,9 @@ public sealed class CommandExecutor : IAsyncDisposable
             operation: AlterTableOperation.AddColumn
         );
 
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
         try
         {
             await tableColumnAlterer.BackfillColumnDefaultsAsync(queryExecutor, database, table, alterTicket, tx).ConfigureAwait(false);
@@ -397,7 +399,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         while (true)
         {
-            KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+            KvTransaction tx = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
             int batchRows = 0;
             ObjectIdValue lastRowId = default;
 
@@ -678,7 +682,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             // Phase 1: run local DDL (including backfill) and commit so the index KV
             // entries are durable and visible before the schema delta is published.
-            KvTransaction tx1 = await database.Transactions.BeginAsync().ConfigureAwait(false);
+            KvTransaction tx1 = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
             bool result;
             try
             {
@@ -700,7 +706,9 @@ public sealed class CommandExecutor : IAsyncDisposable
             // A fresh transaction supplies the HLC timestamp for the schema-log entry;
             // no KV writes happen under it (ReplicateIndexChangeAsync creates its own
             // internal checkpoint transaction via PersistSchemaCheckpointAsync).
-            KvTransaction tx2 = await database.Transactions.BeginAsync().ConfigureAwait(false);
+            KvTransaction tx2 = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
             try
             {
                 await catalogs.ReplicateIndexChangeAsync(database, ticket, table, tx2).ConfigureAwait(false);

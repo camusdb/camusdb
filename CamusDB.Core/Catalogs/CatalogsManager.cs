@@ -700,7 +700,9 @@ public sealed class CatalogsManager
         if (TestPersistCheckpointException is { } fault)
             throw fault;
 
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
 
         try
         {
@@ -1250,7 +1252,9 @@ public sealed class CatalogsManager
         IKahuna kahuna = database.Kahuna.Kahuna;
         long schemaVersion = database.Schema.SchemaVersion;
 
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
         try
         {
             byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
@@ -1298,7 +1302,9 @@ public sealed class CatalogsManager
         IKahuna kahuna = database.Kahuna.Kahuna;
         byte[] bytes = MetaJsonSerializer.Serialize(job, MetaJsonContext.Default.PersistedCoordinatorJob);
 
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
         try
         {
             await WriteMetaKey(kahuna, tx, CoordinatorKey(database.Name, job.TableName, job.ElementName), bytes).ConfigureAwait(false);
@@ -1314,7 +1320,9 @@ public sealed class CatalogsManager
     {
         IKahuna kahuna = database.Kahuna.Kahuna;
 
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
         try
         {
             await DeleteMetaKey(kahuna, tx, CoordinatorKey(database.Name, tableName, elementName)).ConfigureAwait(false);
@@ -1332,7 +1340,9 @@ public sealed class CatalogsManager
         IKahuna kahuna = database.Kahuna.Kahuna;
         string keyPrefix = CoordinatorKeyPrefix(database.Name);
 
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
         try
         {
             await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
@@ -1370,7 +1380,9 @@ public sealed class CatalogsManager
         // descriptors that captured the old references must be rebuilt.
         database.TableDescriptors.Clear();
 
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
 
         try
         {
