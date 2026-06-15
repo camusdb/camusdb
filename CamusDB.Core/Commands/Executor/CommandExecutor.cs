@@ -207,7 +207,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (!database.OwnsKahuna)
             await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
 
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
         try
         {
             T result = await action(tx).ConfigureAwait(false);
@@ -875,7 +877,22 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private static bool ForwardedCreateTableApplied(DatabaseDescriptor database, CreateTableTicket ticket)
     {
-        return database.Schema.Tables.ContainsKey(ticket.TableName);
+        if (!database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema))
+            return false;
+
+        // Also wait for all index constraints to be replicated via the schema log.
+        // ApplyAddIndex runs after ApplyCreateTable (separate Raft entries), so the table
+        // may exist before all its constraints are visible.
+        foreach (ConstraintInfo constraint in ticket.Constraints)
+        {
+            if (constraint.Type is ConstraintType.PrimaryKey or ConstraintType.IndexUnique or ConstraintType.IndexMulti)
+            {
+                if (tableSchema.Indexes?.Any(ix => string.Equals(ix.Name, constraint.Name, StringComparison.Ordinal)) != true)
+                    return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool ForwardedAlterTableApplied(DatabaseDescriptor database, AlterTableTicket ticket)

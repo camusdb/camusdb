@@ -550,7 +550,9 @@ public sealed class StatisticsManager
         byte[] bytes = MetaJsonSerializer.Serialize(snapshot, MetaJsonContext.Default.TableStatistics);
 
         string kahunaKey = KahunaKey(database.Name, table.Id);
-        KvTransaction tx = await database.Transactions.BeginAsync().ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
         try
         {
             (KeyValueResponseType lockType, _, KeyValueDurability lockDurability, _) =

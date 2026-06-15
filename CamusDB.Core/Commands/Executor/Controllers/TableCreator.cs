@@ -72,7 +72,7 @@ internal sealed class TableCreator
         }
     }
 
-    private static async Task AddConstraints(
+    private async Task AddConstraints(
         QueryExecutor queryExecutor,
         TableOpener tableOpener,
         TableIndexAlterer tableIndexAlterer,
@@ -88,48 +88,38 @@ internal sealed class TableCreator
 
         foreach (ConstraintInfo constraint in ticket.Constraints)
         {
+            AlterIndexTicket indexTicket;
+
             switch (constraint.Type)
             {
                 case ConstraintType.PrimaryKey:
-                {
-                    AlterIndexTicket indexTicket = new(
+                    indexTicket = new(
                         databaseName: database.Name,
                         tableName: ticket.TableName,
                         indexName: constraint.Name,
                         columns: constraint.Columns,
                         operation: AlterIndexOperation.AddPrimaryKey
                     );
-
-                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket, tx).ConfigureAwait(false);
-                }
                     break;
 
                 case ConstraintType.IndexMulti:
-                {
-                    AlterIndexTicket indexTicket = new(
+                    indexTicket = new(
                         databaseName: database.Name,
                         tableName: ticket.TableName,
                         indexName: constraint.Name,
                         columns: constraint.Columns,
                         operation: AlterIndexOperation.AddIndex
                     );
-
-                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket, tx).ConfigureAwait(false);
-                }
                     break;
 
                 case ConstraintType.IndexUnique:
-                {
-                    AlterIndexTicket indexTicket = new(
+                    indexTicket = new(
                         databaseName: database.Name,
                         tableName: ticket.TableName,
                         indexName: constraint.Name,
                         columns: constraint.Columns,
                         operation: AlterIndexOperation.AddUniqueIndex
                     );
-
-                    await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket, tx).ConfigureAwait(false);
-                }
                     break;
 
                 default:
@@ -138,6 +128,14 @@ internal sealed class TableCreator
                         "Unknown constraint: " + constraint.Type
                     );
             }
+
+            await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket, tx).ConfigureAwait(false);
+
+            // On cluster nodes, replicate the index change via the schema log so that all
+            // nodes apply it and the index survives restarts. For standalone nodes,
+            // PublishIndex already calls PersistSchemaTableAsync directly.
+            if (!database.OwnsKahuna)
+                await catalogs.ReplicateIndexChangeAsync(database, indexTicket, table, tx).ConfigureAwait(false);
         }
     }
 }

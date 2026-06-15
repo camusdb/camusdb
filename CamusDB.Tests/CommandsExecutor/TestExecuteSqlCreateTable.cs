@@ -374,4 +374,158 @@ public class TestExecuteSqlCreateTable : SharedNodeBaseTest
 
         await database.Transactions.CommitAsync(txnState);
     }
+
+    /// <summary>
+    /// Regression test for the bug where inline PRIMARY KEY and UNIQUE constraints were applied
+    /// only in-memory on the leader and never written to the Raft schema log, so they were
+    /// invisible after a descriptor cache eviction (which happens on every schema replication).
+    ///
+    /// After the fix, AddConstraints calls ReplicateIndexChangeAsync, which puts an AddIndex
+    /// entry in the Raft log. The fix is verified by evicting the cached TableDescriptor
+    /// (reproducing what InvalidateAppliedTableDescriptor does on every cluster node) and
+    /// confirming the index is rebuilt correctly from tableSchema.Indexes.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestInlineConstraintsPersistedAfterDescriptorEviction()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        // Case 1: PRIMARY KEY (cols) at end of column list
+        ExecuteSQLTicket createTableTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "CREATE TABLE orders (order_id OID NOT NULL, line_id OID NOT NULL, PRIMARY KEY (order_id, line_id))",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        // Evict the cached TableDescriptor — this is exactly what InvalidateAppliedTableDescriptor
+        // does when an AddIndex Raft entry is applied on any node.
+        database.TableDescriptors.TryRemove("orders", out _);
+
+        // Rebuild from tableSchema.Indexes (the persisted B1 source of truth).
+        OpenTableTicket openTableTicket = new(databaseName: dbname, tableName: "orders");
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+
+        Assert.True(table.Indexes.TryGetValue("~pk", out TableIndexSchema? pkIndex),
+            "~pk must survive descriptor cache eviction — it must be in tableSchema.Indexes");
+        Assert.AreEqual(IndexType.Unique, pkIndex!.Type);
+        CollectionAssert.AreEquivalent(new[] { "order_id", "line_id" }, pkIndex.Columns);
+
+        // Verify SHOW CREATE TABLE includes PRIMARY KEY
+        ExecuteSQLTicket showCreateTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SHOW CREATE TABLE orders",
+            parameters: null
+        );
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> showCursor) = await executor.ExecuteSQLQuery(showCreateTicket);
+        List<QueryResultRow> showRows = await showCursor.ToListAsync();
+        Assert.AreEqual(1, showRows.Count);
+        string createSql = showRows[0].Row["Create Table"].StrValue!;
+        StringAssert.Contains("PRIMARY KEY", createSql, "SHOW CREATE TABLE must include PRIMARY KEY clause");
+
+        // Verify DESC shows PRI for the pk columns
+        ExecuteSQLTicket descTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "DESC orders",
+            parameters: null
+        );
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> descCursor) = await executor.ExecuteSQLQuery(descTicket);
+        List<QueryResultRow> descRows = await descCursor.ToListAsync();
+        Assert.AreEqual(2, descRows.Count);
+        Assert.AreEqual("PRI", descRows[0].Row["Key"].StrValue, "order_id must be Key=PRI");
+        Assert.AreEqual("PRI", descRows[1].Row["Key"].StrValue, "line_id must be Key=PRI");
+
+        await database.Transactions.CommitAsync(txnState);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestInlineColumnPrimaryKeyPersistedAfterDescriptorEviction()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        // Case 2: id OID PRIMARY KEY NOT NULL (inline column constraint form)
+        ExecuteSQLTicket createTableTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "CREATE TABLE products (id OID PRIMARY KEY NOT NULL, name STRING NOT NULL)",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        // Evict the cached TableDescriptor
+        database.TableDescriptors.TryRemove("products", out _);
+
+        OpenTableTicket openTableTicket = new(databaseName: dbname, tableName: "products");
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+
+        Assert.True(table.Indexes.TryGetValue("~pk", out TableIndexSchema? pkIndex),
+            "~pk must survive descriptor cache eviction for inline column PRIMARY KEY form");
+        Assert.AreEqual(IndexType.Unique, pkIndex!.Type);
+        CollectionAssert.AreEquivalent(new[] { "id" }, pkIndex.Columns);
+
+        // Verify DESC shows PRI
+        ExecuteSQLTicket descTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "DESC products",
+            parameters: null
+        );
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> descCursor) = await executor.ExecuteSQLQuery(descTicket);
+        List<QueryResultRow> descRows = await descCursor.ToListAsync();
+        Assert.AreEqual(2, descRows.Count);
+        Assert.AreEqual("PRI", descRows.First(r => r.Row["Field"].StrValue == "id").Row["Key"].StrValue,
+            "id column must be Key=PRI after descriptor eviction");
+
+        await database.Transactions.CommitAsync(txnState);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestInlineUniqueIndexPersistedAfterDescriptorEviction()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        // Case 3: UNIQUE inline column constraint
+        ExecuteSQLTicket createTableTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "CREATE TABLE app_users2 (id STRING PRIMARY KEY NOT NULL, email STRING UNIQUE NOT NULL)",
+            parameters: null
+        );
+
+        ExecuteDDLSQLResult ddlResult = await executor.ExecuteDDLSQL(createTableTicket);
+        Assert.IsTrue(ddlResult.Success);
+
+        // Evict cached descriptor
+        database.TableDescriptors.TryRemove("app_users2", out _);
+
+        OpenTableTicket openTableTicket = new(databaseName: dbname, tableName: "app_users2");
+        TableDescriptor table = await executor.OpenTable(openTableTicket);
+
+        Assert.True(table.Indexes.TryGetValue("~pk", out TableIndexSchema? pkIndex),
+            "~pk must survive eviction");
+        Assert.AreEqual(IndexType.Unique, pkIndex!.Type);
+
+        Assert.True(table.Indexes.TryGetValue("email", out TableIndexSchema? emailIndex),
+            "UNIQUE email index must survive descriptor cache eviction");
+        Assert.AreEqual(IndexType.Unique, emailIndex!.Type);
+        CollectionAssert.AreEquivalent(new[] { "email" }, emailIndex.Columns);
+
+        await database.Transactions.CommitAsync(txnState);
+    }
 }
