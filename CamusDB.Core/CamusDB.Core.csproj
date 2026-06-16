@@ -77,10 +77,10 @@
          NuGet, so no local project reference is needed. -->
     <PackageReference Include="Kahuna.Core" Version="0.4.3" />
     <PackageReference Include="Kahuna.Shared" Version="0.4.3" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.16" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
     <!-- System.Linq.Async removed: .NET 10 includes IAsyncEnumerable LINQ built-in -->
-    <PackageReference Include="YamlDotNet" Version="15.1.2" />
+    <PackageReference Include="YamlDotNet" Version="18.0.0" />
   </ItemGroup>
 </Project>
