@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -417,6 +418,140 @@ public sealed class TestErrorMatrix : BaseTest
             "NOT IN subquery with multiple columns must use InvalidInput code");
         Assert.That(ex.Message, Does.Contain("exactly one column"),
             "Message must state the single-column requirement");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DB2.3 — Unknown-database rejection
+    //
+    // Every entry point funnels through DatabaseOpener.Open which resolves the name
+    // via DatabaseRegistry.  If the name is absent from the registry the engine throws
+    // DatabaseDoesntExist before any side-effects occur.
+    //
+    // A null KvTransaction is safe to pass here because Open throws before the txn is
+    // ever read (KvTransaction is a reference type; the ticket field is never accessed
+    // on the unknown-database path).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [Test]
+    public async Task R13_Select_UnknownDatabase_ThrowsDatabaseDoesntExist()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        string ghost = "ghost_" + Guid.NewGuid().ToString("n");
+
+        // "SELECT 1" has no FROM clause and is rejected at parse time before the database
+        // is opened. Use a valid table-scan query so the parse succeeds and the engine
+        // reaches the database-open step.
+        ExecuteSQLTicket ticket = new(null!, ghost, "SELECT id FROM items", null);
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+        {
+            (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+            await cursor.ToListAsync();
+        })!;
+
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex.Code);
+        Assert.That(ex.Message, Does.Contain(ghost));
+    }
+
+    [Test]
+    public async Task R13_Insert_UnknownDatabase_ThrowsDatabaseDoesntExist()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        string ghost = "ghost_" + Guid.NewGuid().ToString("n");
+
+        // Direct executor.Insert calls MarkStatementExecuted() on TxnState before opening
+        // the database, so null! would NullRef before reaching the DatabaseDoesntExist check.
+        // Use ExecuteNonSQLQuery (the SQL path) instead — it opens the database first.
+        ExecuteSQLTicket ticket = new(null!, ghost, "INSERT INTO t (id) VALUES ('abc')", null);
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await executor.ExecuteNonSQLQuery(ticket))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex.Code);
+        Assert.That(ex.Message, Does.Contain(ghost));
+    }
+
+    [Test]
+    public async Task R13_Update_UnknownDatabase_ThrowsDatabaseDoesntExist()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        string ghost = "ghost_" + Guid.NewGuid().ToString("n");
+
+        ExecuteSQLTicket ticket = new(null!, ghost, "UPDATE t SET x = 1 WHERE id = 'abc'", null);
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await executor.ExecuteNonSQLQuery(ticket))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex.Code);
+        Assert.That(ex.Message, Does.Contain(ghost));
+    }
+
+    [Test]
+    public async Task R13_Delete_UnknownDatabase_ThrowsDatabaseDoesntExist()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        string ghost = "ghost_" + Guid.NewGuid().ToString("n");
+
+        ExecuteSQLTicket ticket = new(null!, ghost, "DELETE FROM t WHERE id = 'abc'", null);
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await executor.ExecuteNonSQLQuery(ticket))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex.Code);
+        Assert.That(ex.Message, Does.Contain(ghost));
+    }
+
+    [Test]
+    public async Task R13_CreateTable_UnknownDatabase_ThrowsDatabaseDoesntExist()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        string ghost = "ghost_" + Guid.NewGuid().ToString("n");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: ghost,
+                tableName: "items",
+                columns: [new ColumnInfo("id", ColumnType.Id)],
+                constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])],
+                ifNotExists: false
+            )))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex.Code);
+        Assert.That(ex.Message, Does.Contain(ghost));
+    }
+
+    [Test]
+    public async Task R13_DropTable_UnknownDatabase_ThrowsDatabaseDoesntExist()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        string ghost = "ghost_" + Guid.NewGuid().ToString("n");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.DropTable(new DropTableTicket(ghost, "items", ifExists: false)))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex.Code);
+        Assert.That(ex.Message, Does.Contain(ghost));
+    }
+
+    [Test]
+    public async Task R13_DropDatabase_UnknownDatabase_ThrowsDatabaseDoesntExist()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        string ghost = "ghost_" + Guid.NewGuid().ToString("n");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.DropDatabase(new DropDatabaseTicket(ghost, ifExists: false)))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex.Code);
+        Assert.That(ex.Message, Does.Contain(ghost));
+    }
+
+    [Test]
+    public async Task R13_DropDatabaseIfExists_UnknownDatabase_IsNoOp()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        string ghost = "ghost_" + Guid.NewGuid().ToString("n");
+
+        // DROP DATABASE IF EXISTS on an unknown name must complete without throwing.
+        Assert.DoesNotThrowAsync(async () =>
+            await executor.DropDatabase(new DropDatabaseTicket(ghost, ifExists: true)));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

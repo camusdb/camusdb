@@ -34,9 +34,54 @@ internal sealed class DatabaseDropper
     public async Task Drop(string id)
     {
         if (!databaseDescriptors.Descriptors.TryRemove(id, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
+        {
+            // No cached descriptor — the database was never opened in this process (e.g. crash
+            // during CREATE before Open returned, or the process was restarted between Unregister
+            // and Drop).  In standalone mode the id-directory may still exist (sentinel + partial
+            // contents); delete it so the "drop and recreate" recovery path actually reclaims it.
+            // In cluster mode there is no per-database directory, so this is a no-op.
+            string orphanPath = Path.Combine(CamusConfig.DataDirectory, id);
+            if (Directory.Exists(orphanPath))
+            {
+                try
+                {
+                    Directory.Delete(orphanPath, recursive: true);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Failed to delete orphaned data directory for uncached database (id={Id}); " +
+                        "the directory may need to be removed manually", id);
+                }
+            }
             return;
+        }
 
-        DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
+        DatabaseDescriptor databaseDescriptor;
+        try
+        {
+            databaseDescriptor = await databaseDescriptorLazy;
+        }
+        catch
+        {
+            // The cached lazy is faulted (e.g. LoadDatabase threw DatabaseCreationIncomplete
+            // during a prior Open attempt). The name is already unregistered by the caller
+            // before Drop is invoked, so clean up the id-directory and return.
+            string orphanPath = Path.Combine(CamusConfig.DataDirectory, id);
+            if (Directory.Exists(orphanPath))
+            {
+                try
+                {
+                    Directory.Delete(orphanPath, recursive: true);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Failed to delete orphaned data directory after faulted lazy (id={Id})", id);
+                }
+            }
+            return;
+        }
 
         // Signal all new AddRef calls to fail immediately with DatabaseDoesntExist.
         databaseDescriptor.MarkDropped();

@@ -126,6 +126,28 @@ internal sealed class DatabaseOpener
         {
             // Standalone mode: data directory must already exist (created by CreateDatabase).
             string dataPath = Path.Combine(CamusConfig.DataDirectory, id);
+            string sentinelPath = Path.Combine(dataPath, "creating.lock");
+
+            if (File.Exists(sentinelPath))
+            {
+                if (Directory.Exists(Path.Combine(dataPath, "kv")))
+                {
+                    // kv/ exists: creation completed but File.Delete(sentinel) was interrupted
+                    // (e.g. the process was killed between Open returning and the sentinel
+                    // cleanup in CreateDatabase).  Auto-heal: remove the stale sentinel.
+                    try { File.Delete(sentinelPath); } catch { /* non-fatal */ }
+                }
+                else
+                {
+                    // kv/ absent: the process crashed between RegisterAsync and Create/Open
+                    // finishing.  Surface a distinct, actionable error.
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.DatabaseCreationIncomplete,
+                        $"Database '{name}' (id={id}) was not fully initialised — the process " +
+                        $"may have crashed during setup. Drop the database and recreate it to recover.");
+                }
+            }
+
             if (!Directory.Exists(Path.Combine(dataPath, "kv")))
                 throw new CamusDBException(
                     CamusDBErrorCodes.SystemSpaceCorrupt,

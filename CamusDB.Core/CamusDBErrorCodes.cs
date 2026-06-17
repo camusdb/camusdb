@@ -20,6 +20,14 @@ public static class CamusDBErrorCodes
     public const string InvalidIndexLayout = "CADB0017";
     public const string DatabaseNameReserved = "CADB0018";
 
+    /// <summary>
+    /// Standalone mode: the database directory exists with a <c>creating.lock</c> sentinel but
+    /// without a <c>kv/</c> sub-directory, indicating the process crashed after
+    /// <c>RegisterAsync</c> committed but before <c>DatabaseCreator.Create</c> finished.
+    /// The database is recoverable — drop it and recreate it.
+    /// </summary>
+    public const string DatabaseCreationIncomplete = "CADB0019";
+
     public const string InvalidPageOffset = "CADB00297";
 
     public const string InvalidInternalOperation = "CADB0099";

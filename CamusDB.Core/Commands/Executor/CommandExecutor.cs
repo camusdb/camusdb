@@ -188,6 +188,30 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
 
         string id = ObjectIdGenerator.Generate().ToString();
+
+        // Standalone mode: write a creating.lock sentinel before registering the name.
+        // If the process crashes between RegisterAsync and Create/Open completing, the sentinel
+        // makes the failure detectable on the next Open as DatabaseCreationIncomplete (actionable)
+        // rather than SystemSpaceCorrupt (misleading).  Cluster mode uses no per-db directories.
+        if (!isClusterMode)
+        {
+            string idDir = Path.Combine(CamusDBConfig.DataDirectory, id);
+            try
+            {
+                Directory.CreateDirectory(idDir);
+                await File.WriteAllTextAsync(
+                    Path.Combine(idDir, "creating.lock"), name).ConfigureAwait(false);
+            }
+            catch (Exception sentinelEx)
+            {
+                // Clean up the dangling directory; no registry entry was written yet.
+                try { Directory.Delete(Path.Combine(CamusDBConfig.DataDirectory, id), recursive: true); } catch { }
+                throw new CamusDBException(
+                    CamusDBErrorCodes.SystemSpaceCorrupt,
+                    $"Failed to initialise data directory for database '{name}' (id={id}): {sentinelEx.Message}");
+            }
+        }
+
         await registry.RegisterAsync(name, id).ConfigureAwait(false);
 
         try
@@ -196,14 +220,31 @@ public sealed class CommandExecutor : IAsyncDisposable
             if (!isClusterMode)
                 await databaseCreator.Create(name, id).ConfigureAwait(false);
 
-            return await databaseOpener.Open(name).ConfigureAwait(false);
+            DatabaseDescriptor descriptor = await databaseOpener.Open(name).ConfigureAwait(false);
+
+            // Remove the sentinel now that the database is fully initialised.
+            if (!isClusterMode)
+            {
+                try
+                {
+                    File.Delete(Path.Combine(CamusDBConfig.DataDirectory, id, "creating.lock"));
+                }
+                catch (Exception delEx)
+                {
+                    logger.LogWarning(delEx,
+                        "Could not remove creating.lock for database '{Name}' (id={Id}); " +
+                        "the stale sentinel will be auto-healed on the next Open", name, id);
+                }
+            }
+
+            return descriptor;
         }
         catch (Exception openEx)
         {
             // Best-effort rollback — two independent cleanup steps so that failure of one
             // does not skip the other.  Both are swallowed (the original exception is rethrown).
 
-            // 1. Remove the on-disk directory created above (standalone mode only).
+            // 1. Remove the on-disk directory (also deletes the sentinel and any partial kv/).
             if (!isClusterMode)
             {
                 try
