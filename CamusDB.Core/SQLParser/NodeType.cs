@@ -109,6 +109,7 @@ public enum NodeType
     ShowDatabase,
     DropDatabase,
     DropDatabaseIfExists,
+    RenameDatabase,
     ShowIndexes,
     Explain,
     ExplainLogical,

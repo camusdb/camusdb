@@ -447,4 +447,122 @@ internal sealed class TestDatabaseRegistry
             "after live KV backfill, in-memory cache must be warm");
         Assert.AreEqual(id, cachedId);
     }
+
+    // -----------------------------------------------------------------------
+    // DB2.4 — Cross-node concurrent CREATE serialisation (SetIfNotExists CAS)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// DB2.4 — Cross-node stale-cache race: Node A creates a database; Node B's in-memory
+    /// cache is stale (misses A's write) but when it tries to register the same name its
+    /// SetIfNotExists write hits a KV entry that A already committed, so B is rejected with
+    /// DatabaseAlreadyExists rather than silently overwriting A's id.
+    ///
+    /// This is the primary correctness scenario for DB2.4: the CAS protects the namespace
+    /// split that would occur if B's blind write overwrote A's entry (both sides then believe
+    /// they own the database but write to different key-space prefixes id_A/… vs id_B/…).
+    /// </summary>
+    [Test]
+    public async Task ClusterMode_StaleCache_SecondRegistration_ThrowsDatabaseAlreadyExists()
+    {
+        await using EmbeddedKahuna clusterNode = new(new EmbeddedKahunaOptions
+        {
+            NodeName = "registry-cas-test-" + Guid.NewGuid().ToString("n"),
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        });
+
+        await clusterNode.StartAsync(CancellationToken.None);
+        await clusterNode.WaitForLeaderAsync("warmup", CancellationToken.None);
+        await clusterNode.FlushAsync();
+
+        // Two separate registry instances on the same shared Kahuna node.
+        // r1 represents Node A; r2 represents Node B whose cache opened before A's write.
+        await using DatabaseRegistry r1 = await DatabaseRegistry.OpenAsync(clusterNode);
+        await using DatabaseRegistry r2 = await DatabaseRegistry.OpenAsync(clusterNode);
+
+        string name = "racedb_" + Guid.NewGuid().ToString("n");
+        string idA = NewId();
+        string idB = NewId();
+
+        // Node A creates the database.  r2's cache never saw this write.
+        await r1.RegisterAsync(name, idA);
+
+        // Confirm r2's in-memory cache is stale — it doesn't know about A's registration.
+        Assert.IsFalse(r2.TryResolveId(name, out _),
+            "r2 cache must be stale (did not witness r1's registration)");
+
+        // Node B now tries to create the same database (bypasses its stale local check
+        // because ContainsKey = false).  The SetIfNotExists CAS at the KV level must reject it.
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await r2.RegisterAsync(name, idB));
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseAlreadyExists, ex!.Code,
+            "SetIfNotExists must prevent B from overwriting A's entry");
+
+        // The name must still resolve to A's id on both registries.
+        string? r1Resolved = await r1.TryResolveIdAsync(name);
+        string? r2Resolved = await r2.TryResolveIdAsync(name);
+        Assert.AreEqual(idA, r1Resolved, "r1 must resolve to the original id");
+        Assert.AreEqual(idA, r2Resolved, "r2 must resolve to the original id via live-KV fallback");
+    }
+
+    /// <summary>
+    /// DB2.4 — RenameAsync CAS guard: Node A renames "alpha" to a target name; Node B's cache
+    /// is stale (doesn't know the target name is taken) and passes the in-memory
+    /// <c>byName.ContainsKey(newName)</c> check, but the SetIfNotExists KV write is rejected
+    /// because A already committed the target key.  B's "delta" registration is preserved.
+    /// </summary>
+    [Test]
+    public async Task ClusterMode_StaleCache_RenameToTakenTarget_Throws()
+    {
+        await using EmbeddedKahuna clusterNode = new(new EmbeddedKahunaOptions
+        {
+            NodeName = "registry-rename-cas-test-" + Guid.NewGuid().ToString("n"),
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        });
+
+        await clusterNode.StartAsync(CancellationToken.None);
+        await clusterNode.WaitForLeaderAsync("warmup", CancellationToken.None);
+        await clusterNode.FlushAsync();
+
+        // r1 = Node A, r2 = Node B — both open before any registrations; caches start empty.
+        await using DatabaseRegistry r1 = await DatabaseRegistry.OpenAsync(clusterNode);
+        await using DatabaseRegistry r2 = await DatabaseRegistry.OpenAsync(clusterNode);
+
+        string idAlpha  = NewId();
+        string idDelta  = NewId();
+        string alpha    = "alpha_"   + Guid.NewGuid().ToString("n");
+        string delta    = "delta_"   + Guid.NewGuid().ToString("n");
+        string newName  = "newname_" + Guid.NewGuid().ToString("n");
+
+        // Node A owns "alpha"; Node B owns "delta" (each registers its own db independently).
+        await r1.RegisterAsync(alpha, idAlpha);
+        await r2.RegisterAsync(delta, idDelta);
+
+        // Node A renames alpha → newName.  r2's cache is still stale — it never saw "newName".
+        await r1.RenameAsync(alpha, newName);
+        Assert.IsFalse(r2.TryResolveId(newName, out _),
+            "r2 cache must not know about newName (stale)");
+
+        // Node B tries to rename delta → newName.
+        // In-memory check passes (byName has no "newName").
+        // KV SetIfNotExists must reject because r1 already wrote that key.
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await r2.RenameAsync(delta, newName));
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseAlreadyExists, ex!.Code,
+            "SetIfNotExists must prevent r2 from overwriting r1's rename target");
+
+        // "delta" must still exist and still map to idDelta (the rename was rolled back).
+        string? deltaResolved = await r2.TryResolveIdAsync(delta);
+        Assert.AreEqual(idDelta, deltaResolved,
+            "delta must still resolve to its original id after the failed rename");
+
+        // "newName" must still resolve to alpha's id (r1's rename is intact).
+        string? newNameResolved = await r2.TryResolveIdAsync(newName);
+        Assert.AreEqual(idAlpha, newNameResolved,
+            "newName must resolve to alpha's id — r1's rename must not have been disturbed");
+    }
 }

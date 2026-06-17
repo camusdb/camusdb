@@ -281,7 +281,18 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             ).ConfigureAwait(false);
             try
             {
-                await WriteRegistryKey(tx, NameKey(name), entryBytes).ConfigureAwait(false);
+                // ifAbsent=true: write only when key is currently absent (SetIfNotExists).
+                // If another node races to register the same name and commits first, this
+                // returns false — throw DatabaseAlreadyExists rather than silently overwriting
+                // the winning node's entry and splitting the namespace into two id-based spaces.
+                bool written = await WriteRegistryKey(tx, NameKey(name), entryBytes, ifAbsent: true).ConfigureAwait(false);
+                if (!written)
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.DatabaseAlreadyExists,
+                        $"Database '{name}' is already registered");
+                }
                 await transactions.CommitAsync(tx).ConfigureAwait(false);
             }
             catch
@@ -382,7 +393,16 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             ).ConfigureAwait(false);
             try
             {
-                await WriteRegistryKey(tx, NameKey(newName), updatedBytes).ConfigureAwait(false);
+                // ifAbsent=true: protect against a concurrent node registering newName between
+                // our local byName check above and the KV commit.
+                bool written = await WriteRegistryKey(tx, NameKey(newName), updatedBytes, ifAbsent: true).ConfigureAwait(false);
+                if (!written)
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.DatabaseAlreadyExists,
+                        $"Database '{newName}' is already registered");
+                }
                 await DeleteRegistryKey(tx, NameKey(oldName)).ConfigureAwait(false);
                 await transactions.CommitAsync(tx).ConfigureAwait(false);
             }
@@ -406,7 +426,14 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // KV helpers — mirror CatalogsManager.WriteMetaKey / DeleteMetaKey
     // -----------------------------------------------------------------------
 
-    private async Task WriteRegistryKey(KvTransaction tx, string key, byte[] value)
+    /// <summary>
+    /// Writes <paramref name="value"/> to <paramref name="key"/> within the supplied transaction.
+    /// When <paramref name="ifAbsent"/> is <c>true</c>, uses <see cref="KeyValueFlags.SetIfNotExists"/>:
+    /// the write succeeds only when the key is currently absent.  Returns <c>true</c> if the key
+    /// was written, <c>false</c> if the key already existed (only possible when <paramref name="ifAbsent"/>
+    /// is <c>true</c>; always returns <c>true</c> for plain writes).
+    /// </summary>
+    private async Task<bool> WriteRegistryKey(KvTransaction tx, string key, byte[] value, bool ifAbsent = false)
     {
         KeyValueResponseType lockType;
         KeyValueDurability lockDurability;
@@ -432,6 +459,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
         tx.TrackLock(key, lockDurability);
 
+        KeyValueFlags flags = ifAbsent ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
         KeyValueResponseType setType;
         int setRetries = 0;
 
@@ -442,12 +470,16 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
             (setType, _, _) = await kahuna.LocateAndTrySetKeyValue(
                 tx.TransactionId, key, value, null, -1,
-                KeyValueFlags.Set, 0,
+                flags, 0,
                 KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
         }
         while (setType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
                && ++setRetries < MaxRetries);
+
+        // NotSet is only returned when ifAbsent=true and the key already exists — not an error.
+        if (setType == KeyValueResponseType.NotSet)
+            return false;
 
         if (setType != KeyValueResponseType.Set)
             throw new CamusDBException(
@@ -455,6 +487,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 $"Failed to write registry key '{key}': {setType}");
 
         tx.TrackModified(key, KeyValueDurability.Persistent);
+        return true;
     }
 
     private async Task DeleteRegistryKey(KvTransaction tx, string key)

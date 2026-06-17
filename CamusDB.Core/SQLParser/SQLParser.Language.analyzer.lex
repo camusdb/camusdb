@@ -73,6 +73,8 @@ TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
 TStart          (S|s)(T|t)(A|a)(R|r)(T|t)
 TCommit         (C|c)(O|o)(M|m)(M|m)(I|i)(T|t)
 TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
+TRename         (R|r)(E|e)(N|n)(A|a)(M|m)(E|e)
+TTo             (T|t)(O|o)
 TTransaction    (T|t)(R|r)(A|a)(N|n)(S|s)(A|a)(C|c)(T|t)(I|i)(O|o)(N|n)
 LParen          \(
 RParen          \)
@@ -146,6 +148,8 @@ TDot            \.
 {TBegin} { return (int)Token.TBEGIN; }
 
 {TRollback} { return (int)Token.TROLLBACK; }
+{TRename} { return (int)Token.TRENAME; }
+{TTo} { return (int)Token.TTO; }
 
 {TCommit} { return (int)Token.TCOMMIT; }
 

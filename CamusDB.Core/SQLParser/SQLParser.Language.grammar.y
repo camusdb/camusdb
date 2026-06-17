@@ -27,6 +27,7 @@
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
+%token TRENAME TTO
 
 %%
 
@@ -41,6 +42,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | create_table_stmt { $$.n = $1.n; }
         | drop_table_stmt { $$.n = $1.n; }
         | drop_database_stmt { $$.n = $1.n; }
+        | rename_database_stmt { $$.n = $1.n; }
         | alter_table_stmt { $$.n = $1.n; }
         | show_stmt { $$.n = $1.n; }
         | create_index_stmt { $$.n = $1.n; }
@@ -228,6 +230,9 @@ drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $
 drop_database_stmt : TDROP TDATABASE any_identifier { $$.n = new(NodeType.DropDatabase, $3.n, null, null, null, null, null, null, null); }
                    | TDROP TDATABASE TIF TEXISTS any_identifier { $$.n = new(NodeType.DropDatabaseIfExists, $5.n, null, null, null, null, null, null, null); }
 				;
+
+rename_database_stmt : TRENAME TDATABASE any_identifier TTO any_identifier { $$.n = new(NodeType.RenameDatabase, $3.n, $5.n, null, null, null, null, null, null); }
+                     ;
 
 alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, $6.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, $6.n, $7.n, null, null, null, null); }

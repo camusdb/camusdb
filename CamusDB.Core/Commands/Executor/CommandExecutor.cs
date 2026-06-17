@@ -280,6 +280,41 @@ public sealed class CommandExecutor : IAsyncDisposable
         await databaseDroper.Drop(entry.Id).ConfigureAwait(false);
     }
 
+    public async Task RenameDatabase(RenameDatabaseTicket ticket)
+    {
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+
+        // Delegates all validation (old-exists, new-free, reserved-name check) to the registry.
+        await registry.RenameAsync(ticket.OldName, ticket.NewName).ConfigureAwait(false);
+
+        // The descriptor cache is keyed by id (which is unchanged after rename), so the existing
+        // cached descriptor continues to serve Open(newName) via the same live Kahuna node.
+        // Do NOT evict the descriptor: evicting without flushing/disposing the node would orphan
+        // the running SQLite+Raft process (standalone) or leak the schema-replication subscription
+        // (cluster), and a second Load would open a second node on the same storage (double-writer).
+        // Name is display-only after DB5 (logs, error messages) and never a storage or routing key,
+        // so a stale Name on the cached descriptor is functionally harmless.
+
+        // Update the human-readable manifest in standalone mode (diagnostics only).
+        // The registry is the source of truth; name.txt is never read by the engine.
+        if (!isClusterMode && registry.TryResolveId(ticket.NewName, out string id))
+        {
+            string manifestPath = Path.Combine(CamusDBConfig.DataDirectory, id, "name.txt");
+            try
+            {
+                await File.WriteAllTextAsync(manifestPath, ticket.NewName.ToLowerInvariant())
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Could not update name.txt for database (id={Id}) after rename to '{NewName}'; " +
+                    "the manifest is stale but the registry is the source of truth",
+                    id, ticket.NewName);
+            }
+        }
+    }
+
     #endregion
 
     #region DDL
@@ -1267,13 +1302,21 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
-        // DROP DATABASE does not require an open database context — dispatch before Open so
-        // we don't accidentally load the descriptor we're about to destroy.
+        // DROP/RENAME DATABASE do not require an open database context — dispatch before Open so
+        // we don't accidentally load the descriptor we're about to destroy or rename.
         if (ast.nodeType is NodeType.DropDatabase or NodeType.DropDatabaseIfExists)
         {
             string targetName = ast.leftAst!.yytext!;
             bool ifExists = ast.nodeType == NodeType.DropDatabaseIfExists;
             await DropDatabase(new DropDatabaseTicket(targetName, ifExists)).ConfigureAwait(false);
+            return default;
+        }
+
+        if (ast.nodeType is NodeType.RenameDatabase)
+        {
+            string oldName = ast.leftAst!.yytext!;
+            string newName = ast.rightAst!.yytext!;
+            await RenameDatabase(new RenameDatabaseTicket(oldName, newName)).ConfigureAwait(false);
             return default;
         }
 
