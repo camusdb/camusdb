@@ -263,12 +263,21 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
         DatabaseRegistryEntry? entry = registry.Get(ticket.DatabaseName);
         if (entry is null)
+        {
+            if (ticket.IfExists)
+                return;
             throw new CamusDBException(
                 CamusDBErrorCodes.DatabaseDoesntExist,
                 $"Database '{ticket.DatabaseName}' does not exist");
+        }
 
-        await databaseDroper.Drop(entry.Id).ConfigureAwait(false);
+        // Unregister first: once the registry KV entry is deleted and the in-memory cache
+        // cleared, any concurrent Open(name) gets DatabaseDoesntExist immediately — the name
+        // is unreachable before the descriptor is removed from the descriptor cache.
+        // If Drop throws after this point, the name is already freed for recreate rather
+        // than wedged (better failure mode than registering after Drop).
         await registry.UnregisterAsync(ticket.DatabaseName).ConfigureAwait(false);
+        await databaseDroper.Drop(entry.Id).ConfigureAwait(false);
     }
 
     #endregion
@@ -1257,6 +1266,16 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
+
+        // DROP DATABASE does not require an open database context — dispatch before Open so
+        // we don't accidentally load the descriptor we're about to destroy.
+        if (ast.nodeType is NodeType.DropDatabase or NodeType.DropDatabaseIfExists)
+        {
+            string targetName = ast.leftAst!.yytext!;
+            bool ifExists = ast.nodeType == NodeType.DropDatabaseIfExists;
+            await DropDatabase(new DropDatabaseTicket(targetName, ifExists)).ConfigureAwait(false);
+            return default;
+        }
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();

@@ -54,6 +54,9 @@ public abstract class SharedNodeBaseTest : BaseTest
             await sharedNode.DisposeAsync();
     }
 
+    /// <summary>Exposes the shared node's IKahuna so tests can inspect raw KV state.</summary>
+    protected IKahuna SharedKahuna => sharedNode!.Kahuna;
+
     protected override Task<DatabaseRegistry> CreateRegistryAsync()
         => DatabaseRegistry.OpenAsync(clusterNode: sharedNode!, loggerFactory: SharedLoggerFactory);
 

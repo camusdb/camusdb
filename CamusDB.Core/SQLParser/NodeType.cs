@@ -107,6 +107,8 @@ public enum NodeType
     ShowTables,
     ShowCreateTable,
     ShowDatabase,
+    DropDatabase,
+    DropDatabaseIfExists,
     ShowIndexes,
     Explain,
     ExplainLogical,
