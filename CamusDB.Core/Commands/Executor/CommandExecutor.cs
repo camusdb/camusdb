@@ -194,7 +194,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             // Cluster mode: data lives in the shared Kahuna node — no per-database directories.
             if (!isClusterMode)
-                databaseCreator.Create(name, id);
+                await databaseCreator.Create(name, id).ConfigureAwait(false);
 
             return await databaseOpener.Open(name).ConfigureAwait(false);
         }

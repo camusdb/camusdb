@@ -55,6 +55,17 @@ internal sealed class TestDatabaseExplicitCreate : BaseTest
     }
 
     [Test]
+    public async Task CreateDatabase_WritesNameManifest()
+    {
+        (string dbname, DatabaseDescriptor descriptor, CommandExecutor _) = await CreateDatabase();
+
+        string manifestPath = Path.Combine(CamusConfig.DataDirectory, descriptor.Id, "name.txt");
+        Assert.IsTrue(File.Exists(manifestPath), "name.txt must be written inside DataDirectory/{id}");
+        Assert.AreEqual(dbname, File.ReadAllText(manifestPath),
+            "name.txt must contain the user-facing database name");
+    }
+
+    [Test]
     public async Task CreateDatabase_Twice_WithoutIfNotExists_ThrowsDatabaseAlreadyExists()
     {
         (string dbname, _, CommandExecutor executor) = await CreateDatabase();

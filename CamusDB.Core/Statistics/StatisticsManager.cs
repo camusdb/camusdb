@@ -95,22 +95,6 @@ public sealed class StatisticsManager
     }
 
     /// <summary>
-    /// Returns the estimated row count by raw key components.
-    /// <paramref name="dbId"/> must be <see cref="DatabaseDescriptor.Id"/> — the opaque
-    /// identifier, NOT the user-facing name. Passing the name silently misses the cache.
-    /// Prefer the <c>(DatabaseDescriptor, TableDescriptor)</c> overload when both objects
-    /// are available; this overload exists only for callers that have an id string but no
-    /// descriptor (e.g. after a reopen when the lazy <c>TableDescriptors</c> is empty).
-    /// </summary>
-    public long? GetRowCountEstimate(string dbId, string tableId)
-    {
-        string key = CacheKey(dbId, tableId);
-        if (_cache.TryGetValue(key, out Entry? entry) && entry.Loaded)
-            return entry.RowCount >= 0 ? entry.RowCount : null;
-        return null;
-    }
-
-    /// <summary>
     /// Returns the estimated entry count for <paramref name="indexName"/> in <paramref name="table"/>,
     /// or null if no statistics have been collected yet (R9b).
     /// </summary>

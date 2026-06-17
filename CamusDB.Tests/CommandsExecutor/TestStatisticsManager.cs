@@ -217,15 +217,12 @@ public sealed class TestStatisticsManager : BaseTest
         TrackDatabase(dbname, executor2);
         DatabaseDescriptor db2 = await executor2.OpenDatabase(dbname);
 
-        // After reopen, TableDescriptors is empty (lazy). Use Schema.Tables to get the table ID
-        // and directly trigger a Kahuna load via LoadByIdAsync.
-        Assert.IsTrue(db2.Schema.Tables.TryGetValue("robots2", out TableSchema? schema),
-            "Table 'robots2' should be in the reopened schema");
-        string tableId = schema!.Id!;
+        TableDescriptor table2 = await executor2.OpenTable(new OpenTableTicket(dbname, "robots2"))
+            .WaitAsync(TimeSpan.FromSeconds(10));
 
-        await executor2.Statistics.LoadByIdAsync(db2, tableId);
+        await executor2.Statistics.LoadByIdAsync(db2, table2.Id);
 
-        long? estimate = executor2.Statistics.GetRowCountEstimate(db2.Id, tableId);
+        long? estimate = executor2.Statistics.GetRowCountEstimate(db2, table2);
         Assert.IsNotNull(estimate, "Expected persisted stats to be reloaded after database reopen");
         Assert.AreEqual(10L, estimate!.Value);
     }
@@ -254,12 +251,12 @@ public sealed class TestStatisticsManager : BaseTest
         TrackDatabase(dbname, executor2);
         DatabaseDescriptor db2 = await executor2.OpenDatabase(dbname);
 
-        Assert.IsTrue(db2.Schema.Tables.TryGetValue("ch_robots", out TableSchema? schema));
-        string tableId = schema!.Id!;
+        TableDescriptor table2 = await executor2.OpenTable(new OpenTableTicket(dbname, "ch_robots"))
+            .WaitAsync(TimeSpan.FromSeconds(10));
 
-        await executor2.Statistics.LoadByIdAsync(db2, tableId);
+        await executor2.Statistics.LoadByIdAsync(db2, table2.Id);
 
-        long? estimate = executor2.Statistics.GetRowCountEstimate(db2.Id, tableId);
+        long? estimate = executor2.Statistics.GetRowCountEstimate(db2, table2);
         Assert.IsNotNull(estimate, "Close hook should have persisted stats so reopen finds them");
         Assert.AreEqual(8L, estimate!.Value);
     }
@@ -292,11 +289,12 @@ public sealed class TestStatisticsManager : BaseTest
         await db2.Transactions.CommitAsync(txn2);
 
         // Now load the base from Kahuna. Should merge: 10 (base) + 2 (delta) = 12.
-        Assert.IsTrue(db2.Schema.Tables.TryGetValue("robots3", out TableSchema? schema));
-        string tableId = schema!.Id!;
-        await executor2.Statistics.LoadByIdAsync(db2, tableId);
+        // OpenTable resolves the lazy descriptor that was populated by the inserts above.
+        TableDescriptor table2 = await executor2.OpenTable(new OpenTableTicket(dbname, "robots3"))
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        await executor2.Statistics.LoadByIdAsync(db2, table2.Id);
 
-        long? estimate = executor2.Statistics.GetRowCountEstimate(db2.Id, tableId);
+        long? estimate = executor2.Statistics.GetRowCountEstimate(db2, table2);
         Assert.IsNotNull(estimate, "Estimate should be available after load");
         Assert.AreEqual(12L, estimate!.Value, "Base (10) + pending delta (2) should be 12, not 2");
     }

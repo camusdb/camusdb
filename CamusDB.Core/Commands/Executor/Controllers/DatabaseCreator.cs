@@ -27,11 +27,16 @@ internal sealed class DatabaseCreator
     // Called only after the registry has been checked and the id allocated.
     // Creates the physical data directories for a new database (standalone mode only).
     // In cluster mode, data lives in the shared Kahuna node — no directories needed.
-    public void Create(string name, string id)
+    public async Task Create(string name, string id)
     {
         string dbPath = Path.Combine(CamusConfig.DataDirectory, id);
         Directory.CreateDirectory(Path.Combine(dbPath, "kv"));
         Directory.CreateDirectory(Path.Combine(dbPath, "wal"));
+
+        // Human-readable manifest for diagnostics: operators browsing DataDirectory can
+        // identify which folder belongs to which database without querying the registry.
+        // The registry is the source of truth; this file is never read by the engine.
+        await File.WriteAllTextAsync(Path.Combine(dbPath, "name.txt"), name).ConfigureAwait(false);
 
         Log.LogDatabaseCreated(logger, name, dbPath);
     }

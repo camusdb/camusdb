@@ -129,7 +129,10 @@ internal sealed class DatabaseOpener
             if (!Directory.Exists(Path.Combine(dataPath, "kv")))
                 throw new CamusDBException(
                     CamusDBErrorCodes.SystemSpaceCorrupt,
-                    $"Data directory for database '{name}' (id={id}) is missing — the database may be corrupt or was created before the id-based layout migration.");
+                    $"Data directory for database '{name}' (id={id}) is missing or incomplete. " +
+                    $"The database may not have finished creating (possible crash during setup), " +
+                    $"or its data directory may have been deleted or corrupted. " +
+                    $"Drop the database and recreate it to recover.");
 
             node = EmbeddedKahuna.CreateSqlite(dataPath, loggerFactory);
         }
