@@ -44,7 +44,7 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 
         databaseDescriptor.Dispose();
 
-        logger.LogInformation("Database {Name} closed", name);
+        Log.LogDatabaseClosed(logger, name);
     }
 
     public async ValueTask DisposeAsync()

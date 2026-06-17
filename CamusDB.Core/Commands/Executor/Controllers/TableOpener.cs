@@ -158,7 +158,7 @@ internal sealed class TableOpener
             }
         }
 
-        logger.LogInformation("Table {TableName} opened", tableSchema.Name);
+        Log.LogTableOpened(logger, tableSchema.Name!);
 
         return tableDescriptor;
     }

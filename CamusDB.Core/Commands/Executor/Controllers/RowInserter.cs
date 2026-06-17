@@ -196,11 +196,7 @@ internal sealed class RowInserter
 
         TimeSpan timeTaken = timer.GetElapsedTime();
 
-        logger.LogInformation(
-             "Inserted {Rows} rows, Time taken: {Time}",
-             state.InsertedRows,
-             timeTaken.ToString(@"m\:ss\.fff")
-         );
+        Log.LogRowsInserted(logger, state.InsertedRows, timeTaken);
 
         return state.InsertedRows;
     }

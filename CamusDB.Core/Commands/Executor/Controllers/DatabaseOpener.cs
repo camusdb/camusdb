@@ -127,7 +127,7 @@ internal sealed class DatabaseOpener
         if (!databaseDescriptor.OwnsKahuna)
             schemaReplicator.Register(databaseDescriptor, coordinator);
 
-        logger.LogInformation("Database {DbName} opened", name);
+        Log.LogDatabaseOpened(logger, name);
 
         return databaseDescriptor;
     }

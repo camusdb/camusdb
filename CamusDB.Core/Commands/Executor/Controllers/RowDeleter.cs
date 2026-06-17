@@ -129,7 +129,7 @@ internal sealed class RowDeleter
         state.DeletedRows += batch.Count;
 
         foreach (KvTableStore.RowDelete row in batch)
-            logger.LogInformation("Row with rowid {RowId} deleted", row.RowId);
+            Log.LogRowDeleted(logger, row.RowId);
 
         return FluxAction.Continue;
     }
@@ -192,11 +192,7 @@ internal sealed class RowDeleter
 
         TimeSpan timeTaken = timer.GetElapsedTime();
 
-        logger.LogInformation(
-            "Deleted {Rows} rows, Time taken: {Time}",
-            state.DeletedRows,
-            timeTaken.ToString(@"m\:ss\.fff")
-        );
+        Log.LogRowsDeleted(logger, state.DeletedRows, timeTaken);
 
         return state.DeletedRows;
     }

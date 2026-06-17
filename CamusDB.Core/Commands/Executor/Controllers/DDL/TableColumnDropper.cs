@@ -156,11 +156,7 @@ public sealed class TableColumnDropper
 
         TimeSpan timeTaken = timer.GetElapsedTime();
 
-        logger.LogInformation(
-            "Column dropped, modified {Rows} rows, Time taken: {Time}",
-            state.ModifiedRows,
-            timeTaken.ToString(@"m\:ss\.fff")
-        );
+        Log.LogColumnDropped(logger, state.ModifiedRows, timeTaken);
 
         return state.ModifiedRows;
     }

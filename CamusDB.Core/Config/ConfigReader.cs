@@ -1,5 +1,5 @@
 ﻿
-
+using System.Collections;
 using CamusDB.Core.Config.Models;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -15,6 +15,8 @@ public class ConfigReader
 
     public ConfigDefinition Read(string yml)
     {
+        ValidateUnknownKahunaKeys(yml);
+
         IDeserializer deserializer = new DeserializerBuilder()
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
             .Build();
@@ -28,5 +30,35 @@ public class ConfigReader
 
         return config;
     }
-}
 
+  private static void ValidateUnknownKahunaKeys(string yml)
+    {
+        if (string.IsNullOrWhiteSpace(yml))
+            return;
+
+        IDeserializer raw = new DeserializerBuilder()
+            .WithNamingConvention(UnderscoredNamingConvention.Instance)
+            .Build();
+
+        Dictionary<string, object>? root = raw.Deserialize<Dictionary<string, object>>(yml);
+        if (root is null || !root.TryGetValue("kahuna", out object? kahunaRaw) || kahunaRaw is null)
+            return;
+
+        if (kahunaRaw is not IDictionary kahunaDict)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidConfig,
+                "'kahuna' must be a mapping of option names to values");
+
+        foreach (object key in kahunaDict.Keys)
+        {
+            string name = key.ToString() ?? "";
+            if (!KahunaOptionsConfig.AllowedYamlKeys.Contains(name))
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidConfig,
+                    $"Unknown 'kahuna' option '{name}'; allowed keys: " +
+                    string.Join(", ", KahunaOptionsConfig.AllowedYamlKeys.OrderBy(k => k)));
+            }
+        }
+    }
+}

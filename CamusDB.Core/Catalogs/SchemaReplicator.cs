@@ -157,13 +157,7 @@ public sealed class SchemaReplicator
             TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, entry);
             InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
 
-            logger.LogInformation(
-                "Applied schema change {SchemaOp} for database {DbName}: {FromVersion}->{ToVersion}",
-                entry.Op,
-                database.Name,
-                entry.FromVersion,
-                entry.ToVersion
-            );
+            Log.LogSchemaChangeApplied(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
 
             Diagnostics.SchemaDiag.Log(
                 $"APPLIED node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} " +
@@ -263,11 +257,7 @@ public sealed class SchemaReplicator
 
             database.ClearSchemaSubsystemDegraded();
 
-            logger.LogInformation(
-                "F1b: schema checkpoint re-persisted at version {Version} for database {DbName} after log restore",
-                database.Schema.SchemaVersion,
-                database.Name
-            );
+            Log.LogSchemaCheckpointRepersisted(logger, database.Schema.SchemaVersion, database.Name);
         }
         catch (Exception ex)
         {
@@ -320,13 +310,7 @@ public sealed class SchemaReplicator
 
             CatalogsManager.ApplySchemaDelta(database.Schema, entry);
 
-            logger.LogInformation(
-                "Restored schema change {SchemaOp} for database {DbName}: {FromVersion}->{ToVersion}",
-                entry.Op,
-                database.Name,
-                entry.FromVersion,
-                entry.ToVersion
-            );
+            Log.LogSchemaChangeRestored(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
 
             database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
 

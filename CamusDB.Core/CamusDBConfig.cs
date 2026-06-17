@@ -95,11 +95,10 @@ public static class CamusDBConfig
     /// warning is emitted when the flag is on and <c>InitialPartitions &lt; 2</c>. Production
     /// clusters must set <c>initial_partitions: 2</c> (or more) to activate key-range sharding.
     ///
-    /// Default off. Toggle via the <c>CAMUS_KEY_RANGE_SHARDING</c> environment variable.
+    /// Default off. Set via <c>key_range_sharding</c> in <c>config.yml</c>; the
+    /// <c>CAMUS_KEY_RANGE_SHARDING</c> environment variable overrides YAML when set.
     /// </summary>
-    public static bool KeyRangeShardingEnabled =
-        string.Equals(Environment.GetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING"), "1", StringComparison.Ordinal) ||
-        string.Equals(Environment.GetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING"), "true", StringComparison.OrdinalIgnoreCase);
+    public static bool KeyRangeShardingEnabled;
 
     /// <summary>
     /// Cluster-wide default isolation level applied when a transaction is begun without an
@@ -162,4 +161,17 @@ public static class CamusDBConfig
     /// Default: 50.
     /// </summary>
     public static int LockEscalationThreshold = 50;
+
+    /// <summary>
+    /// Wall-clock cap, in milliseconds, for a single lock-acquire retry loop during Serializable
+    /// conflicts. Bounds deadlock and persistent lock-conflict latency per operation.
+    /// Default: 500 ms.
+    /// </summary>
+    public static int LockWaitDeadlineMs = 500;
+
+    /// <summary>
+    /// Resolved Kahuna engine overrides from <c>config.yml</c>. Applied when constructing embedded
+    /// nodes in cluster and standalone modes.
+    /// </summary>
+    public static Config.Models.KahunaOptionsConfig Kahuna = new();
 }

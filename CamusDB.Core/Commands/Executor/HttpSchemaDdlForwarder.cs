@@ -136,11 +136,11 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         }
         catch (HttpRequestException ex)
         {
-            logger.LogDebug(ex, "Schema ack to {Endpoint} failed (transport error); will retry on next apply", endpoint);
+            Log.LogSchemaAckFailed(logger, ex, endpoint);
         }
         catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
-            logger.LogDebug(ex, "Schema ack to {Endpoint} timed out; will retry on next apply", endpoint);
+            Log.LogSchemaAckTimedOut(logger, ex, endpoint);
         }
         finally
         {
@@ -153,7 +153,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         Uri baseUri = endpointResolver(leader);
         Uri endpoint = new(baseUri, $"/internal/schema-ddl/{operation}");
 
-        logger.LogDebug("Forwarding DDL {Operation} to {Endpoint}", operation, endpoint);
+        Log.LogForwardingDdl(logger, operation, endpoint);
 
         // Transport failures at any point — connection refused, DNS failure,
         // mid-election TCP reset, HTTP-client timeout, or a connection drop

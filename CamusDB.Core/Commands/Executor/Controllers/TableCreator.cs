@@ -64,7 +64,7 @@ internal sealed class TableCreator
 
             database.SystemSchema.Tables.TryAdd(tableObject.Id, tableObject);
 
-            logger.LogInformation("Registered table {TableName} in system space", tableSchema.Name);
+            Log.LogTableRegisteredInSystemSpace(logger, tableSchema.Name!);
         }
         finally
         {

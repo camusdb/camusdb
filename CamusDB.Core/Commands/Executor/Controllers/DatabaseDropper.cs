@@ -36,6 +36,6 @@ internal sealed class DatabaseDropper
             databaseDescriptor.Dispose();
         }
 
-        logger.LogInformation("Database {Name} dropped", name);
+        Log.LogDatabaseDropped(logger, name);
     }
 }

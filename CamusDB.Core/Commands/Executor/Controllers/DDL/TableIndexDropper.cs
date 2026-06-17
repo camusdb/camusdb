@@ -47,7 +47,7 @@ internal sealed class TableIndexDropper
         // Delete all KV entries for the index before removing it from the schema.
         // Both happen in state.Tx so the purge is atomic with the schema update.
         int purged = await table.Store.DropIndexEntries(state.Tx, ticket.IndexName).ConfigureAwait(false);
-        logger.LogInformation("Purged {Count} KV entries for index {IndexName}", purged, ticket.IndexName);
+        Log.LogIndexEntriesPurged(logger, purged, ticket.IndexName);
 
         try
         {

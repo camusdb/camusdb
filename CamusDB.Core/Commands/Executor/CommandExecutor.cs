@@ -467,7 +467,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 await TestInterceptAfterBackfillCheckpoint().ConfigureAwait(false);
         }
 
-        logger.LogInformation("Backfilled {Rows} rows into index {IndexName}", totalRows, indexInfo.IndexName);
+        Log.LogIndexBackfillComplete(logger, totalRows, indexInfo.IndexName);
     }
 
     /// <summary>

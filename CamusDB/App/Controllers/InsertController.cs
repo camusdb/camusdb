@@ -36,7 +36,7 @@ public sealed class InsertController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
-            logger.LogInformation("{Body}", body);
+            Log.LogRequestBody(logger, body);
 
             InsertRequest? request = JsonSerializer.Deserialize<InsertRequest>(body, jsonOptions);
             if (request == null)

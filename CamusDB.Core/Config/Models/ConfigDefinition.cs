@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.Core.Config.Models;
 
@@ -85,7 +86,64 @@ public class ConfigDefinition
     /// </summary>
     public int SqlParserCacheSweepSeconds { get; set; } = 60;
 
+    /// <summary>Numeric Raft node id for cluster mode. Maps to <c>EmbeddedKahunaOptions.NodeId</c>.</summary>
+    public int RaftNodeId { get; set; } = 1;
+
+    /// <summary>HTTP API listen port. Default 5095.</summary>
+    public int HttpPort { get; set; } = 5095;
+
+    /// <summary>HTTPS API listen port when a certificate is configured. Default 7141.</summary>
+    public int HttpsPort { get; set; } = 7141;
+
+    /// <summary>Path to a PFX certificate for the HTTPS API port; empty disables HTTPS.</summary>
+    public string HttpsCertificate { get; set; } = "";
+
+    /// <summary>Path to a PFX certificate for the Raft gRPC port in cluster mode.</summary>
+    public string RaftCertificate { get; set; } = "";
+
+    /// <summary>
+    /// Cluster-wide default isolation when a transaction omits an explicit level:
+    /// <c>serializable</c> or <c>read_committed</c>.
+    /// </summary>
+    public string DefaultIsolationLevel { get; set; } = "serializable";
+
+    /// <summary>Range-lock TTL in milliseconds. &lt;= 0 disables expiry. Default 30 000.</summary>
+    public int RangeLockExpiresMs { get; set; } = 30_000;
+
+    /// <summary>Range-lock heartbeat interval in milliseconds. Must be &lt; <see cref="RangeLockExpiresMs"/> when expiry is enabled.</summary>
+    public int RangeLockHeartbeatIntervalMs { get; set; } = 10_000;
+
+    /// <summary>Absolute Serializable+RW transaction lifetime cap in milliseconds. &lt;= 0 disables.</summary>
+    public int MaxSerializableTransactionLifetimeMs { get; set; } = 3_600_000;
+
+    /// <summary>Per-bucket shared-point-lock count before whole-bucket escalation. Default 50.</summary>
+    public int LockEscalationThreshold { get; set; } = 50;
+
+    /// <summary>Wall-clock cap per lock-acquire retry loop for Serializable conflicts. Default 500 ms.</summary>
+    public int LockWaitDeadlineMs { get; set; } = 500;
+
+    /// <summary>
+    /// Opt tables into Kahuna key-range routing. Overridden by <c>CAMUS_KEY_RANGE_SHARDING</c> when set.
+    /// </summary>
+    public bool KeyRangeSharding { get; set; }
+
+    /// <summary>Allow-listed Kahuna engine tunables for cluster and standalone nodes.</summary>
+    public KahunaOptionsConfig Kahuna { get; set; } = new();
+
     public bool IsClusterMode => Mode == "cluster" || Peers.Count > 0;
+
+    /// <summary>Parses <see cref="DefaultIsolationLevel"/> to the engine enum.</summary>
+    public CamusIsolationLevel ParseDefaultIsolationLevel()
+    {
+        return DefaultIsolationLevel switch
+        {
+            "serializable" => CamusIsolationLevel.Serializable,
+            "read_committed" => CamusIsolationLevel.ReadCommitted,
+            _ => throw Invalid(
+                "'default_isolation_level' must be 'serializable' or 'read_committed', got '" +
+                DefaultIsolationLevel + "'"),
+        };
+    }
 
     /// <summary>
     /// Validates the configuration, throwing <see cref="CamusDBException"/> with
@@ -130,6 +188,32 @@ public class ConfigDefinition
         if (SqlParserCacheSweepSeconds <= 0)
             throw Invalid(
                 $"'sql_parser_cache_sweep_seconds' must be > 0, got {SqlParserCacheSweepSeconds}");
+
+        if (HttpPort is <= 0 or > 65535)
+            throw Invalid($"'http_port' must be in 1..65535, got {HttpPort}");
+
+        if (HttpsPort is <= 0 or > 65535)
+            throw Invalid($"'https_port' must be in 1..65535, got {HttpsPort}");
+
+        if (RaftNodeId <= 0)
+            throw Invalid($"'raft_node_id' must be > 0, got {RaftNodeId}");
+
+        if (DefaultIsolationLevel is not ("serializable" or "read_committed"))
+            throw Invalid(
+                "'default_isolation_level' must be 'serializable' or 'read_committed', got '" +
+                DefaultIsolationLevel + "'");
+
+        if (RangeLockExpiresMs > 0 && RangeLockHeartbeatIntervalMs >= RangeLockExpiresMs)
+            throw Invalid(
+                "'range_lock_heartbeat_interval_ms' must be < 'range_lock_expires_ms' when expiry is enabled");
+
+        if (LockEscalationThreshold <= 0)
+            throw Invalid($"'lock_escalation_threshold' must be > 0, got {LockEscalationThreshold}");
+
+        if (LockWaitDeadlineMs <= 0)
+            throw Invalid($"'lock_wait_deadline_ms' must be > 0, got {LockWaitDeadlineMs}");
+
+        Kahuna.Validate();
 
         // Forwarding endpoints: http_peers, when supplied, must be parallel to peers so
         // the raft-endpoint → HTTP base-URI map in Program.cs is unambiguous. An entry

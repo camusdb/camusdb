@@ -291,7 +291,7 @@ public sealed class RowUpdater
 
             await UpdateMultiIndexes(table, tx, rowId, oldRow, rowValues).ConfigureAwait(false);
 
-            logger.LogInformation("Row with rowid {RowId} updated", rowId);
+            Log.LogRowUpdated(logger, rowId);
 
             state.ModifiedRows++;
         }
@@ -378,11 +378,7 @@ public sealed class RowUpdater
 
         TimeSpan timeTaken = timer.GetElapsedTime();
 
-        logger.LogInformation(
-            "Updated {Rows} rows, Time taken: {Time}",
-            state.ModifiedRows,
-            timeTaken.ToString(@"m\:ss\.fff")
-        );
+        Log.LogRowsUpdated(logger, state.ModifiedRows, timeTaken);
 
         return state.ModifiedRows;
     }

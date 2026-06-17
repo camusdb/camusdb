@@ -1,4 +1,24 @@
+# CamusDB configuration reference
+#
+# Precedence (highest wins): CLI flag > environment variable > config.yml > built-in default.
+# Only explicitly provided CLI flags override YAML — omitting a flag keeps the YAML value.
+#
+# Environment overrides:
+#   CAMUS_KEY_RANGE_SHARDING — when set to 1 or true, enables key_range_sharding regardless of YAML.
+
 data_dir: /tmp/camusdb/
+
+# ── Server mode ───────────────────────────────────────────────────────────────
+# mode: standalone          # standalone | cluster
+# node_name: camus-node-1  # cluster: unique node name (defaults to machine name)
+# raft_node_id: 1          # cluster: numeric Raft node id (> 0)
+# raft_host: localhost     # cluster: Raft bind/advertise host
+# raft_port: 7070          # cluster: Raft gRPC port (1..65535)
+# initial_partitions: 1    # cluster: Raft partition count (>= 1)
+# http_port: 5095          # HTTP API port (1..65535)
+# https_port: 7141         # HTTPS API port when https_certificate is set (1..65535)
+# https_certificate:       # path to PFX for HTTPS; omit to disable HTTPS
+# raft_certificate:        # path to PFX for Raft gRPC TLS in cluster mode
 
 # Cluster mode example (uncomment and fill in)
 # mode: cluster
@@ -18,7 +38,7 @@ data_dir: /tmp/camusdb/
 #
 # Per-peer HTTP addresses (parallel to peers, same index order).
 # Required for heterogeneous HTTP ports or multiple nodes per host.
-# If omitted, the leader's host is reused with this node's --http-port (uniform-port assumption).
+# If omitted, the leader's host is reused with this node's http_port (uniform-port assumption).
 # http_peers:
 #   - 192.168.1.10:5095
 #   - 192.168.1.11:5095
@@ -33,26 +53,54 @@ data_dir: /tmp/camusdb/
 # schema_ack_wait_timeout_ms: 30000
 # schema_ack_live_node_lease_ms: -1
 
-# Advisory table statistics (R8). Row-count estimates are updated in memory on every
-# DML and flushed to durable storage at most once per this interval (milliseconds),
-# per table, so a write burst costs a single disk write instead of one per row.
+# ── Isolation and locking ─────────────────────────────────────────────────────
+# default_isolation_level: serializable   # serializable | read_committed
+# range_lock_expires_ms: 30000            # range-lock TTL; <= 0 = no expiry
+# range_lock_heartbeat_interval_ms: 10000 # must be < range_lock_expires_ms when expiry enabled
+# max_serializable_transaction_lifetime_ms: 3600000  # <= 0 disables absolute cap
+# lock_escalation_threshold: 50           # shared-point locks before bucket escalation (> 0)
+# lock_wait_deadline_ms: 500              # per-operation Serializable conflict cap (> 0)
+# key_range_sharding: false               # opt tables into Kahuna key-range routing
+
+# ── Advisory table statistics ─────────────────────────────────────────────────
+# Row-count estimates are updated in memory on every DML and flushed to durable storage
+# at most once per this interval (milliseconds), per table.
 #   0  = flush after every change (highest durability, highest write amplification)
 #   -1 = never auto-flush; persist only on explicit flush / database close
 #   >0 = cap flush frequency to roughly once per interval per table (default 5000)
 # stats_flush_interval_ms: 5000
 
-# SQL parser AST cache (PC1–PC3). Identical SQL texts skip lexing+parsing on the
-# second and later executions; the cached NodeAst is immutable and shared safely
-# across concurrent requests. Parameters are not part of the AST, so a parameterized
-# query with different values reuses the same cached tree.
-#
-# sql_parser_cache_ttl_seconds: sliding TTL in seconds; each cache hit extends the
-#   deadline. 0 disables the cache entirely (pre-cache behaviour). Default: 300.
-# sql_parser_cache_max_entries: cap on the number of distinct SQL texts held at once.
-#   When full, new statements are skipped until the sweep reclaims expired entries.
-#   0 = unbounded (no cap). Default: 10000.
-# sql_parser_cache_sweep_seconds: how often the background sweep task removes expired
-#   entries. Must be > 0. Default: 60.
+# ── SQL parser AST cache ──────────────────────────────────────────────────────
+# Identical SQL texts skip lexing+parsing on the second and later executions.
+# sql_parser_cache_ttl_seconds: sliding TTL in seconds; 0 disables the cache. Default: 300.
+# sql_parser_cache_max_entries: cap on distinct SQL texts; 0 = unbounded. Default: 2048.
+# sql_parser_cache_sweep_seconds: background sweep interval; must be > 0. Default: 60.
 # sql_parser_cache_ttl_seconds: 300
 # sql_parser_cache_max_entries: 2048
 # sql_parser_cache_sweep_seconds: 60
+
+# ── Kahuna engine (cluster and standalone) ────────────────────────────────────
+# Allow-listed passthrough to EmbeddedKahunaOptions. Omit the section or any key to
+# keep the mode-specific CamusDB baseline (cluster: sqlite + election 2000/4000 ms;
+# standalone: sqlite per-database node). Unknown keys are rejected at startup.
+# kahuna:
+#   storage: sqlite              # memory | sqlite | rocksdb
+#   storage_revision: v1
+#   wal_storage: sqlite           # memory | sqlite | rocksdb
+#   wal_revision: v1
+#   wal_sync_writes: true
+#   default_transaction_timeout_ms: 5000
+#   locks_workers: 8
+#   key_value_workers: 8
+#   background_writer_workers: 1
+#   read_io_threads: 8
+#   write_io_threads: 8
+#   start_election_timeout_ms: 2000    # must be < end_election_timeout_ms
+#   end_election_timeout_ms: 4000
+#   start_election_timeout_increment_ms: 100
+#   end_election_timeout_increment_ms: 200
+#   heartbeat_interval_ms: 500
+#   voting_timeout_ms: 1500
+#   max_entries_per_actor: 50000
+#   max_bytes_per_actor: 268435456
+#   compact_every_operations: 1000

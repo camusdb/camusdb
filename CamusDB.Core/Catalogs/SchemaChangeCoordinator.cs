@@ -331,9 +331,8 @@ public sealed class SchemaChangeCoordinator
                 persisted.Attempts++;
                 await catalogs.PersistCoordinatorJobAsync(database, persisted).ConfigureAwait(false);
 
-                logger?.LogInformation(
-                    "Resuming coordinator job for {TableName}.{ElementName} → {TargetState} on database {DbName} (attempt {Attempt})",
-                    persisted.TableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
+                if (logger is not null)
+                    Log.LogResumingCoordinatorJob(logger, persisted.TableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
 
                 await DriveToTargetAsync(database, job, columnDefinition, indexBuildInfo, persisted.StartOffset, current, path, persisted.Attempts, CancellationToken.None)
                     .ConfigureAwait(false);

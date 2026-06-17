@@ -86,7 +86,7 @@ internal sealed class QueryExecutor
         for (int i = 0; i < plan.Steps.Count; i++)
         {
             QueryPlanStep step = plan.Steps[i];
-            logger.LogInformation("Executing step {Type}", step.Type);
+            Log.LogExecutingQueryStep(logger, step.Type);
 
             switch (step.Type)
             {

@@ -184,9 +184,13 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     {
         List<RaftNode> peerNodes = [.. peers.Select(p => new RaftNode(p))];
 
+        KahunaConfiguration kahunaConfig = new();
+        ILogger<GrpcInterNodeCommunication> grpcLogger = (loggerFactory ?? LoggerFactory.Create(_ => { }))
+            .CreateLogger<GrpcInterNodeCommunication>();
+
         return new EmbeddedKahuna(
             options,
-            new GrpcInterNodeCommunication(new KahunaConfiguration()),
+            new GrpcInterNodeCommunication(kahunaConfig, grpcLogger),
             new GrpcCommunication(),
             new StaticDiscovery(peerNodes),
             loggerFactory
@@ -215,7 +219,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// Suitable for single-process embedded use and tests that require persistence across close/reopen.
     /// </summary>
     public static EmbeddedKahuna CreateSqlite(string dataPath, ILoggerFactory? loggerFactory = null)
-        => new(SqliteOptions(dataPath), loggerFactory);
+        => new(EmbeddedKahunaOptionsBuilder.BuildStandalone(dataPath, CamusDBConfig.Kahuna), loggerFactory);
 
     /// <summary>
     /// Starts the Raft cluster and waits for the initial partition to elect a leader.

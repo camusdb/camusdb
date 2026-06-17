@@ -32,34 +32,25 @@ CamusCommandLineOptions opts = optsResult.Value ?? new();
 string configYml = await File.ReadAllTextAsync("Config/config.yml");
 ConfigDefinition config = new ConfigReader().Read(configYml);
 
-// CLI flags override config.yml values where explicitly provided.
-if (opts.Mode != "standalone") config.Mode = opts.Mode;
-if (!string.IsNullOrEmpty(opts.RaftNodeName)) config.NodeName = opts.RaftNodeName;
-if (opts.RaftHost != "localhost") config.RaftHost = opts.RaftHost;
-if (opts.RaftPort != 7070) config.RaftPort = opts.RaftPort;
-if (opts.InitialClusterPartitions > 1) config.InitialPartitions = opts.InitialClusterPartitions;
-if (opts.InitialCluster.Any()) config.Peers = [.. opts.InitialCluster];
-
-// Apply process-wide tunables (all modes) before the engine starts.
-CamusDBConfig.StatsFlushIntervalMs = config.StatsFlushIntervalMs;
-CamusDBConfig.SqlParserCacheTtlSeconds = config.SqlParserCacheTtlSeconds;
-CamusDBConfig.SqlParserCacheMaxEntries = config.SqlParserCacheMaxEntries;
-CamusDBConfig.SqlParserCacheSweepSeconds = config.SqlParserCacheSweepSeconds;
+// CLI > env > YAML > default — only explicitly provided flags override YAML.
+ConfigResolver.ApplyCliOverrides(config, opts.ToOverrides());
+config.Validate();
+ConfigResolver.ApplyToCamusDBConfig(config);
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 builder.WebHost.ConfigureKestrel(kestrel =>
 {
-    kestrel.ListenAnyIP(opts.HttpPort);
-    if (!string.IsNullOrEmpty(opts.HttpsCertificate))
-        kestrel.ListenAnyIP(opts.HttpsPort, o => o.UseHttps(opts.HttpsCertificate));
+    kestrel.ListenAnyIP(config.HttpPort);
+    if (!string.IsNullOrEmpty(config.HttpsCertificate))
+        kestrel.ListenAnyIP(config.HttpsPort, o => o.UseHttps(config.HttpsCertificate));
     if (config.IsClusterMode)
     {
         kestrel.ListenAnyIP(config.RaftPort, o =>
         {
             o.Protocols = HttpProtocols.Http2;
-            if (!string.IsNullOrEmpty(opts.RaftCertificate))
-                o.UseHttps(opts.RaftCertificate);
+            if (!string.IsNullOrEmpty(config.RaftCertificate))
+                o.UseHttps(config.RaftCertificate);
         });
     }
 });
@@ -85,7 +76,7 @@ if (config.IsClusterMode)
         // each entry gives the exact HTTP address for that node regardless of port
         // or host topology.  When http_peers is absent the resolver falls back to
         // extracting the host from the raft endpoint and appending this node's
-        // --http-port, which is correct for uniform-port clusters.
+        // HTTP port, which is correct for uniform-port clusters.
         Dictionary<string, Uri> peerEndpointMap = [];
         if (config.HttpPeers.Count == config.Peers.Count && config.HttpPeers.Count > 0)
         {
@@ -93,7 +84,7 @@ if (config.IsClusterMode)
                 peerEndpointMap[config.Peers[i]] = new Uri($"http://{config.HttpPeers[i]}");
         }
 
-        int httpPort = opts.HttpPort;
+        int httpPort = config.HttpPort;
         ILogger<ICamusDB> resolverLogger = services.GetRequiredService<ILogger<ICamusDB>>();
         Func<string, Uri> resolver = raftEndpoint =>
         {
@@ -144,22 +135,7 @@ if (config.IsClusterMode)
 {
     builder.Services.AddSingleton<EmbeddedKahuna>(services =>
     {
-        EmbeddedKahunaOptions options = new()
-        {
-            NodeName = !string.IsNullOrEmpty(config.NodeName) ? config.NodeName : Environment.MachineName,
-            NodeId = opts.RaftNodeId,
-            Host = config.RaftHost,
-            Port = config.RaftPort,
-            InitialPartitions = config.InitialPartitions,
-            Storage = "sqlite",
-            StoragePath = Path.Combine(config.DataDir, "kv"),
-            StorageRevision = "v1",
-            WalStorage = "sqlite",
-            WalPath = Path.Combine(config.DataDir, "wal"),
-            WalRevision = "v1",
-            StartElectionTimeout = 2000,
-            EndElectionTimeout = 4000
-        };
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildCluster(config);
 
         ILoggerFactory loggerFactory = services.GetRequiredService<ILoggerFactory>();
         EmbeddedKahuna kahuna = EmbeddedKahuna.CreateCluster(options, config.Peers, loggerFactory);
@@ -195,7 +171,7 @@ WebApplication app = builder.Build();
 // harmless but silent — operators must know they need ≥ 2 partitions to benefit.
 if (CamusDBConfig.KeyRangeShardingEnabled && config.InitialPartitions < 2)
     app.Logger.LogWarning(
-        "CAMUS_KEY_RANGE_SHARDING is enabled but initial_partitions={InitialPartitions} < 2; " +
+        "key_range_sharding is enabled but initial_partitions={InitialPartitions} < 2; " +
         "key-range routing is a no-op on a single-partition node. " +
         "Set initial_partitions >= 2 in config.yml to activate key-range sharding.",
         config.InitialPartitions);
@@ -213,7 +189,7 @@ if (!app.Environment.IsDevelopment())
     app.UseHsts();
 }
 
-if (!config.IsClusterMode && !string.IsNullOrEmpty(opts.HttpsCertificate))
+if (!config.IsClusterMode && !string.IsNullOrEmpty(config.HttpsCertificate))
     app.UseHttpsRedirection();
 app.UseStaticFiles();
 
@@ -245,7 +221,7 @@ CamusStartup camus = new(
     app.Services.GetRequiredService<CommandExecutor>()
 );
 
-await camus.Initialize(configYml);
+await camus.Initialize();
 
 CommandExecutor commandExecutor = app.Services.GetRequiredService<CommandExecutor>();
 

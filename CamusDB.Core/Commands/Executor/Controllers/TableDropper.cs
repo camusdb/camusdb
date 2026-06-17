@@ -64,14 +64,14 @@ internal sealed class TableDropper
 
         TableSchema? droppedSchema = await catalogs.DropTableSchema(database, ticket.TableName, tableId, tx).ConfigureAwait(false);
         if (droppedSchema is not null || !database.OwnsKahuna)
-            logger.LogInformation("Removed table {TableName} from database schema", ticket.TableName);
+            Log.LogTableRemovedFromDatabaseSchema(logger, ticket.TableName);
 
         try
         {
             await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
 
             if (database.SystemSchema.Tables.Remove(table.Id))
-                logger.LogInformation("Removed table {TableName} from system schema", ticket.TableName);
+                Log.LogTableRemovedFromSystemSchema(logger, ticket.TableName);
 
             await catalogs.PersistMetaAsync(database, tx).ConfigureAwait(false);
         }
@@ -82,7 +82,7 @@ internal sealed class TableDropper
 
         database.TableDescriptors.TryRemove(ticket.TableName, out _);
 
-        logger.LogInformation("Dropped table {TableName}", ticket.TableName);
+        Log.LogTableDropped(logger, ticket.TableName);
 
         return true;
     }

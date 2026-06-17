@@ -67,7 +67,7 @@ public sealed class CatalogsManager
                 $"Schema change '{entry.Op}' did not create table '{ticket.TableName}'"
             );
 
-            logger.LogInformation("Added table {TableName} to schema", ticket.TableName);
+            Log.LogTableAddedToSchema(logger, ticket.TableName);
         }
         finally
         {
@@ -102,7 +102,7 @@ public sealed class CatalogsManager
                 $"Schema change '{entry.Op}' did not alter table '{ticket.TableName}'"
             );
 
-            logger.LogInformation("Modifed table {TableName} schema", ticket.TableName);
+            Log.LogTableSchemaModified(logger, ticket.TableName);
         }
         finally
         {
@@ -668,13 +668,7 @@ public sealed class CatalogsManager
                 // in single-partition clusters the schema and KV partitions are the same: stepping
                 // down before CommitAsync would invalidate the in-flight KV transaction.
                 // F1b restart replay will recover the checkpoint on the next open.
-                logger.LogCritical(
-                    ex,
-                    "Schema checkpoint persist exhausted all {MaxAttempts} attempts for database {DbName} version {Version}; marking node degraded and scheduling schema partition step-down",
-                    maxAttempts,
-                    database.Name,
-                    entry.ToVersion
-                );
+                Log.LogSchemaCheckpointExhausted(logger, ex, maxAttempts, database.Name, entry.ToVersion);
 
                 database.MarkSchemaSubsystemDegraded();
                 database.RequestDeferredSchemaStepDown();
@@ -1434,11 +1428,7 @@ public sealed class CatalogsManager
             // PersistSchemaTableAsync (which includes Indexes via WithoutHistory).
             MigrateIndexesFromSystemSchema(database);
 
-            logger.LogInformation(
-                "Schema loaded: {Tables} table(s), {Indexes} index object(s)",
-                database.Schema.Tables.Count,
-                database.SystemSchema.Indexes.Count
-            );
+            Log.LogSchemaLoaded(logger, database.Schema.Tables.Count, database.SystemSchema.Indexes.Count);
         }
         finally
         {

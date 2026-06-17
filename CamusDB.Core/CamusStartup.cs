@@ -24,16 +24,6 @@ public sealed class CamusStartup
         this.executor = executor;
     }
 
-    public Task Initialize(string ymlConfig)
-    {
-        ConfigReader reader = new();
-
-        ConfigDefinition config = reader.Read(ymlConfig);        
-
-        if (!string.IsNullOrEmpty(config.DataDir))
-            CamusDBConfig.DataDirectory = config.DataDir;
-
-        //await CheckRecovery();
-        return Task.CompletedTask;
-    }
+    public Task Initialize()
+        => Task.CompletedTask;
 }

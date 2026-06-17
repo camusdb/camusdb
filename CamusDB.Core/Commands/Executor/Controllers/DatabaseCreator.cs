@@ -42,7 +42,7 @@ internal sealed class DatabaseCreator
         if (name == "information_schema")
             throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Reserved database name");
 
-        logger.LogInformation("Database {Name} successfully created at {DbPath}", name, dbPath);
+        Log.LogDatabaseCreated(logger, name, dbPath);
 
         return true;
     }

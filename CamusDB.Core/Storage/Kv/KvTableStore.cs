@@ -66,9 +66,8 @@ public sealed class KvTableStore
     // milliseconds have elapsed, the loop throws TransactionMustRetry immediately rather
     // than spinning for the full MaxKahunaRetries budget. This caps deadlock / persistent
     // lock-conflict latency: in a reverse-order deadlock both transactions abort within
-    // roughly LockWaitDeadlineMs rather than after the full ~1.4 s retry budget.
+    // roughly CamusDBConfig.LockWaitDeadlineMs rather than after the full ~1.4 s retry budget.
     // Keep this shorter than MaxKahunaRetries × MaxRetryDelayMs (≈ 1.4 s) to be useful.
-    private const int LockWaitDeadlineMs = 500;
 
     // Safety-net expiry for an exclusive range (prefix) lock. The lock is released explicitly when
     // the owning transaction commits or rolls back; this expiry only bounds a leak if the client
@@ -1279,7 +1278,7 @@ public sealed class KvTableStore
         "Lock-wait deadline exceeded; the operation conflicts with a long-held lock or is in a deadlock — retry the transaction from BeginAsync";
 
     private static long LockWaitDeadlineTicks()
-        => Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (LockWaitDeadlineMs / 1000.0));
+        => Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (CamusDBConfig.LockWaitDeadlineMs / 1000.0));
 
     private static async Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetryLocked(
         Func<Task<(KeyValueResponseType, long, HLCTimestamp)>> fn,

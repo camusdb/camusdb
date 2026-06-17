@@ -182,10 +182,7 @@ public sealed class TableColumnAdder
             modifiedRows++;
         }
 
-        logger.LogInformation(
-            "Backfilled {ModifiedRows} rows for column '{Column}'",
-            modifiedRows, ticket.Column.Name
-        );
+        Log.LogColumnBackfillComplete(logger, modifiedRows, ticket.Column.Name);
 
         return modifiedRows;
     }
@@ -205,11 +202,7 @@ public sealed class TableColumnAdder
 
         TimeSpan timeTaken = timer.GetElapsedTime();
 
-        logger.LogInformation(
-            "Column added, modified {ModifiedRows} rows, Time taken: {Time}",
-            state.ModifiedRows,
-            timeTaken.ToString(@"m\:ss\.fff")
-        );
+        Log.LogColumnAdded(logger, state.ModifiedRows, timeTaken);
 
         return state.ModifiedRows;
     }

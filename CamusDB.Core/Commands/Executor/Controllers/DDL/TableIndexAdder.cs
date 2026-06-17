@@ -201,7 +201,7 @@ internal sealed class TableIndexAdder
 
         state.ModifiedRows = rows;
 
-        logger.LogInformation("Added {Rows} rows to index {IndexName}", rows, ticket.IndexName);
+        Log.LogIndexRowsAdded(logger, rows, ticket.IndexName);
 
         return FluxAction.Continue;
     }
@@ -299,12 +299,7 @@ internal sealed class TableIndexAdder
 
         TimeSpan timeTaken = timer.GetElapsedTime();
 
-        logger.LogInformation(
-            "Added index {IndexName} to {Name}, Time taken: {Time}",
-            ticket.IndexName,
-            table.Name,
-            timeTaken.ToString(@"m\:ss\.fff")
-        );
+        Log.LogIndexAdded(logger, ticket.IndexName, table.Name, timeTaken);
 
         return state.ModifiedRows;
     }

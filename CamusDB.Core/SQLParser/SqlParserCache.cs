@@ -228,9 +228,8 @@ public sealed class SqlParserCache : IAsyncDisposable
 
             Sweep();
 
-            _logger?.LogDebug(
-                "SQL parser cache sweep: {Count} entries, {Hits} hits, {Misses} misses, {Evictions} evictions (cumulative)",
-                Count, Hits, Misses, Evictions);
+            if (_logger is not null)
+                Log.LogParserCacheSweep(_logger, Count, Hits, Misses, Evictions);
         }
     }
 
