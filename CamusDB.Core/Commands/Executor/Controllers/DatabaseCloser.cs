@@ -27,9 +27,9 @@ internal sealed class DatabaseCloser : IAsyncDisposable
         this.logger = logger;
     }
 
-    public async Task Close(string name)
+    public async Task Close(string id)
     {
-        if (!databaseDescriptors.Descriptors.TryRemove(name, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
+        if (!databaseDescriptors.Descriptors.TryRemove(id, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
             return;
 
         DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
@@ -44,7 +44,7 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 
         databaseDescriptor.Dispose();
 
-        Log.LogDatabaseClosed(logger, name);
+        Log.LogDatabaseClosed(logger, databaseDescriptor.Name);
     }
 
     public async ValueTask DisposeAsync()

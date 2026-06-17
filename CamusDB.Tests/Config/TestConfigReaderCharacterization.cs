@@ -37,6 +37,18 @@ public sealed class TestConfigReaderCharacterization
     }
 
     [Test]
+    public void RejectsUnknownRootKey()
+    {
+        // A typo on a real key (htttp_port) must fail loudly rather than silently leaving
+        // http_port at its default — YamlDotNet would otherwise drop the unknown property.
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("htttp_port: 6000"))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("htttp_port"));
+    }
+
+    [Test]
     public void RejectsUnknownKahunaKey()
     {
         CamusDBException ex = Assert.Throws<CamusDBException>(

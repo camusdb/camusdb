@@ -54,18 +54,18 @@ public sealed class SchemaReplicator
     {
         ArgumentNullException.ThrowIfNull(database);
 
-        database.Kahuna.RecordAndPublishSchemaApplied(database.Name, database.Schema.SchemaVersion);
+        database.Kahuna.RecordAndPublishSchemaApplied(database.Id, database.Schema.SchemaVersion);
 
         IDisposable applySubscription = database.Kahuna.RegisterSchemaApply(
             (partitionId, bytes) => ApplyAsync(database, partitionId, bytes),
             (_, bytes) => RestoreAsync(database, bytes),
-            db: database.Name,
+            db: database.Id,
             onRestoreFinished: () => OnSchemaRestoreFinishedAsync(database)
         );
 
         IDisposable? leaderSubscription = coordinator is not null
             ? database.Kahuna.RegisterSchemaLeaderCallback(
-                database.Name,
+                database.Id,
                 async () =>
                 {
                     try
@@ -106,7 +106,7 @@ public sealed class SchemaReplicator
 
         SchemaChangeLogEntry entry = DecodeEntry(bytes);
 
-        if (!string.Equals(entry.Database, database.Name, StringComparison.Ordinal))
+        if (!string.Equals(entry.Database, database.Id, StringComparison.Ordinal))
             return true;
 
         Diagnostics.SchemaDiag.Log(
@@ -127,7 +127,7 @@ public sealed class SchemaReplicator
                     Diagnostics.SchemaDiag.Log(
                         $"APPLY-DUP node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} " +
                         $"entry={entry.FromVersion}->{entry.ToVersion} localVer={database.Schema.SchemaVersion} (already applied; re-ack)");
-                    database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
+                    database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
                     return true;
                 }
 
@@ -142,7 +142,7 @@ public sealed class SchemaReplicator
 
             if (entry.ToVersion <= database.Schema.SchemaVersion)
             {
-                database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
+                database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
                 return true;
             }
 
@@ -163,7 +163,7 @@ public sealed class SchemaReplicator
                 $"APPLIED node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} " +
                 $"entry={entry.FromVersion}->{entry.ToVersion} newLocalVer={database.Schema.SchemaVersion}");
 
-            database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
+            database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
 
             return true;
         }
@@ -280,7 +280,7 @@ public sealed class SchemaReplicator
 
         SchemaChangeLogEntry entry = DecodeEntry(bytes);
 
-        if (!string.Equals(entry.Database, database.Name, StringComparison.Ordinal))
+        if (!string.Equals(entry.Database, database.Id, StringComparison.Ordinal))
             return true;
 
         Diagnostics.SchemaDiag.Log($"RESTORE node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} entry={entry.FromVersion}->{entry.ToVersion} localVer={database.Schema.SchemaVersion}");
@@ -290,7 +290,7 @@ public sealed class SchemaReplicator
         {
             if (entry.ToVersion <= database.Schema.SchemaVersion)
             {
-                database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
+                database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
                 return true;
             }
 
@@ -312,7 +312,7 @@ public sealed class SchemaReplicator
 
             Log.LogSchemaChangeRestored(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
 
-            database.Kahuna.RecordAndPublishSchemaApplied(database.Name, entry.ToVersion);
+            database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
 
             return true;
         }

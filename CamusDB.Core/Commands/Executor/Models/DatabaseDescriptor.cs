@@ -7,14 +7,35 @@
  */
 
 using Nito.AsyncEx;
+using CamusDB.Core;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using System.Collections.Concurrent;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
+/// <summary>
+/// Scoped handle returned by <see cref="DatabaseDescriptor.Use"/>.
+/// Holds a use-reference on the descriptor; the reference is released when
+/// <see cref="Dispose"/> is called (i.e. at the end of a <c>using</c> block).
+/// </summary>
+internal sealed class DatabaseUseHandle : IDisposable
+{
+    private DatabaseDescriptor? _db;
+
+    internal DatabaseUseHandle(DatabaseDescriptor db) => _db = db;
+
+    public void Dispose()
+    {
+        DatabaseDescriptor? db = Interlocked.Exchange(ref _db, null);
+        db?.Release();
+    }
+}
+
 public sealed record DatabaseDescriptor : IDisposable
 {
+    public string Id { get; }
+
     public string Name { get; }
 
     public EmbeddedKahuna Kahuna { get; }
@@ -67,7 +88,7 @@ public sealed record DatabaseDescriptor : IDisposable
             return;
 
         ClearDeferredSchemaStepDown();
-        await Kahuna.StepDownSchemaPartitionAsync(Name, CancellationToken.None).ConfigureAwait(false);
+        await Kahuna.StepDownSchemaPartitionAsync(Id, CancellationToken.None).ConfigureAwait(false);
     }
 
     // §3.4 fence: highest schema-log entry ToVersion received by this node (committed in Raft,
@@ -105,9 +126,89 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> TableDescriptors { get; }
 
+    // -----------------------------------------------------------------------
+    // Drop-quiesce: atomic ref-count + drain
+    //
+    // MarkDropped() — called by Drop before disposing the node:
+    //   Sets the dropped flag; if nobody holds a ref the drain TCS is completed
+    //   immediately so Drop can proceed without waiting.
+    //
+    // AddRef() / Release() — called at every database-operation entry point:
+    //   AddRef increments the count (or throws DatabaseDoesntExist if the
+    //   database is already being dropped).  Release decrements; when the last
+    //   ref is released after a drop, the TCS is completed and Drop unblocks.
+    //   The dropped flag is re-checked AFTER the increment: MarkDropped can set
+    //   it and observe useCount == 0 in the window between AddRef's pre-check and
+    //   its CAS, which would let Drop drain and dispose while AddRef still acquired
+    //   a ref. Re-checking post-increment (and backing the ref out if dropped) closes
+    //   that race so a successful AddRef can never coexist with a completed drain.
+    //
+    // WhenDrainedAsync() — awaited by Drop after MarkDropped:
+    //   Returns when all in-flight AddRef holders have called Release.
+    // -----------------------------------------------------------------------
+    private int _useCount;
+    private volatile int _dropped;
+    private readonly TaskCompletionSource _drainedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public bool IsDropped => _dropped != 0;
+
+    internal void MarkDropped()
+    {
+        Interlocked.Exchange(ref _dropped, 1);
+        if (Volatile.Read(ref _useCount) == 0)
+            _drainedTcs.TrySetResult();
+    }
+
+    internal void AddRef()
+    {
+        int current;
+        do {
+            current = Volatile.Read(ref _useCount);
+            if (_dropped != 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.DatabaseDoesntExist,
+                    $"Database '{Name}' is being dropped");
+        } while (Interlocked.CompareExchange(ref _useCount, current + 1, current) != current);
+
+        // Re-check after the increment. If MarkDropped set _dropped (and possibly already
+        // observed useCount == 0 and completed the drain) between the pre-check above and the
+        // CAS, our ref must not stand — Drop may already be disposing the node. Back the ref
+        // out, completing the drain if we were the last holder, and refuse the use.
+        if (_dropped != 0)
+        {
+            if (Interlocked.Decrement(ref _useCount) == 0)
+                _drainedTcs.TrySetResult();
+            throw new CamusDBException(
+                CamusDBErrorCodes.DatabaseDoesntExist,
+                $"Database '{Name}' is being dropped");
+        }
+    }
+
+    internal void Release()
+    {
+        if (Interlocked.Decrement(ref _useCount) == 0 && _dropped != 0)
+            _drainedTcs.TrySetResult();
+    }
+
+    internal Task WhenDrainedAsync() => _drainedTcs.Task;
+
+    /// <summary>
+    /// Acquires a use-reference and returns an <see cref="IDisposable"/> handle
+    /// that releases it on <see cref="IDisposable.Dispose"/>.  Use with <c>using</c>
+    /// in every operation entry point that accesses the database.
+    /// Throws <see cref="CamusDBException"/> (<c>DatabaseDoesntExist</c>) if the
+    /// database is already being dropped.
+    /// </summary>
+    internal DatabaseUseHandle Use()
+    {
+        AddRef();
+        return new DatabaseUseHandle(this);
+    }
+
     private IDisposable? schemaReplicationSubscription;
 
     public DatabaseDescriptor(
+        string id,
         string name,
         EmbeddedKahuna kahuna,
         KvTransactionsManager transactions,
@@ -115,6 +216,7 @@ public sealed record DatabaseDescriptor : IDisposable
         bool ownsKahuna = true
     )
     {
+        Id = id;
         Name = name;
         Kahuna = kahuna;
         OwnsKahuna = ownsKahuna;

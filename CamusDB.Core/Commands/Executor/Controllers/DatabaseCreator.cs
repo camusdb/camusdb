@@ -8,7 +8,6 @@
 
 using Microsoft.Extensions.Logging;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -25,25 +24,15 @@ internal sealed class DatabaseCreator
         this.logger = logger;
     }
 
-    public bool Create(CreateDatabaseTicket ticket)
+    // Called only after the registry has been checked and the id allocated.
+    // Creates the physical data directories for a new database (standalone mode only).
+    // In cluster mode, data lives in the shared Kahuna node — no directories needed.
+    public void Create(string name, string id)
     {
-        string name = ticket.DatabaseName;
-                
-        string dbPath = Path.Combine(CamusConfig.DataDirectory, name);
-
-        if (Directory.Exists(dbPath))
-        {
-            if (ticket.IfNotExists)
-                return false;
-
-            throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Database already exists");
-        }
-
-        if (name == "information_schema")
-            throw new CamusDBException(CamusDBErrorCodes.DatabaseAlreadyExists, "Reserved database name");
+        string dbPath = Path.Combine(CamusConfig.DataDirectory, id);
+        Directory.CreateDirectory(Path.Combine(dbPath, "kv"));
+        Directory.CreateDirectory(Path.Combine(dbPath, "wal"));
 
         Log.LogDatabaseCreated(logger, name, dbPath);
-
-        return true;
     }
 }

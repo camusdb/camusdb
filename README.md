@@ -1,6 +1,6 @@
 CamusDB
 =======
-CamusDB is an open-source NewSQL distributed database written in C# on .NET 9. It combines a familiar SQL interface with a Raft-based distributed storage layer, supports multi-node clusters with automatic leader election and partition routing, and exposes a JSON/HTTP API. The project is alpha-quality — APIs and storage formats may change between versions.
+CamusDB is an open-source NewSQL distributed database written in C# on .NET 10. It combines a familiar SQL interface with a Raft-based distributed storage layer, supports multi-node clusters with automatic leader election and partition routing, and exposes a JSON/HTTP API. The project is alpha-quality — APIs and storage formats may change between versions.
 
 **This is an alpha project. Do not use it in production.**
 
@@ -20,11 +20,11 @@ Features
 - **Query introspection** — `EXPLAIN`, `EXPLAIN (LOGICAL)`, `EXPLAIN (PHYSICAL)`, and `EXPLAIN (ANALYZE)` return the plan as result rows (node names, details, estimated rows/cost, and — for `ANALYZE` — actual row counts and KV access counters).
 - **Indexes** — PRIMARY KEY, inline UNIQUE column constraints, UNIQUE indexes, multi-column indexes, CREATE INDEX IF NOT EXISTS, CREATE UNIQUE INDEX IF NOT EXISTS, and ALTER TABLE ADD/DROP INDEX.
 - **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, ALTER TABLE ADD/DROP COLUMN.
-- **ACID transactions** — pessimistic locking with read-committed isolation; cross-partition writes use two-phase commit (2PC).
+- **ACID transactions** — pessimistic locking; serializable isolation is the default (range/predicate locks with wait-die deadlock avoidance and snapshot reads), with read-committed available per transaction (`SET TRANSACTION` or the begin-request field) or as a process default; cross-partition writes use two-phase commit (2PC).
 - **Multi-node cluster** — Raft consensus (via Kommander) partitions data across nodes; each partition elects its own leader. Nodes join a cluster with `--mode=cluster` and a static peer list.
 - **Standalone mode** — runs as a single embedded process with no cluster configuration required.
 - **HTTP API** — all database operations are accessible over a JSON/HTTP endpoint.
-- **Multi-platform** — runs on any platform supported by .NET 9.
+- **Multi-platform** — runs on any platform supported by .NET 10.
 
 Column Types
 ------------
@@ -134,8 +134,13 @@ Distributed Schema
 
 See [docs/distributed-schema-architecture.md](docs/distributed-schema-architecture.md) for a full developer reference on how DDL works across a cluster: schema as a replicated state machine over an ordered Raft log, the schema-change delta and the two-version invariant, ack-based convergence, the staged online-schema state machine (`DeleteOnly → WriteOnly → Public`) with a convergence gate between steps, the resumable change coordinator and crash-safe index backfill, follower→leader DDL forwarding with idempotent dedup, positional row encoding (why renames are free), schema-version pinning, the checkpoint persist-failure policy, an invariants checklist, and known limitations.
 
+Configuration
+-------------
+
+CamusDB reads `CamusDB/Config/config.yml` at startup and merges CLI flags and environment variables into a single resolved configuration (precedence: CLI flag > environment variable > `config.yml` > built-in default). See [docs/configuration.md](docs/configuration.md) for the full reference: the precedence model, the CLI ↔ YAML mapping, the isolation/locking and parser-cache tunables, the allow-listed `kahuna:` engine passthrough, and the validation error matrix.
+
 ## Requirements
-- .NET 9 (SDK 9.0.100)
+- .NET 10 SDK
 - Docker (optional, for cluster setup)
 
 ## Testing

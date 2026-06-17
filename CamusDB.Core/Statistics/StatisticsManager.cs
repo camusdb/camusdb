@@ -34,7 +34,9 @@ namespace CamusDB.Core.Statistics;
 ///   (read-modify-write on struct fields requires a lock).
 ///   Flushes are fire-and-forget; at most one runs per table at a time.
 ///
-/// Key layout in Kahuna: <c>{dbname}:stats:{tableId}</c>
+/// Key layout in Kahuna: <c>{dbId}:stats:{tableId}</c> where <c>dbId</c> is
+/// <see cref="CamusDB.Core.CommandsExecutor.Models.DatabaseDescriptor.Id"/> — the opaque
+/// identifier, not the user-facing name, so keys are stable across future renames.
 /// </summary>
 public sealed class StatisticsManager
 {
@@ -84,7 +86,7 @@ public sealed class StatisticsManager
     /// <summary>Returns the estimated row count, or null if no statistics have been collected.</summary>
     public long? GetRowCountEstimate(DatabaseDescriptor database, TableDescriptor table)
     {
-        string key = CacheKey(database.Name, table.Id);
+        string key = CacheKey(database.Id, table.Id);
         if (_cache.TryGetValue(key, out Entry? entry) && entry.Loaded)
             return entry.RowCount >= 0 ? entry.RowCount : null;
 
@@ -92,10 +94,17 @@ public sealed class StatisticsManager
         return null;
     }
 
-    /// <summary>Returns the estimated row count using raw cache-key components.</summary>
-    public long? GetRowCountEstimate(string dbname, string tableId)
+    /// <summary>
+    /// Returns the estimated row count by raw key components.
+    /// <paramref name="dbId"/> must be <see cref="DatabaseDescriptor.Id"/> — the opaque
+    /// identifier, NOT the user-facing name. Passing the name silently misses the cache.
+    /// Prefer the <c>(DatabaseDescriptor, TableDescriptor)</c> overload when both objects
+    /// are available; this overload exists only for callers that have an id string but no
+    /// descriptor (e.g. after a reopen when the lazy <c>TableDescriptors</c> is empty).
+    /// </summary>
+    public long? GetRowCountEstimate(string dbId, string tableId)
     {
-        string key = CacheKey(dbname, tableId);
+        string key = CacheKey(dbId, tableId);
         if (_cache.TryGetValue(key, out Entry? entry) && entry.Loaded)
             return entry.RowCount >= 0 ? entry.RowCount : null;
         return null;
@@ -107,7 +116,7 @@ public sealed class StatisticsManager
     /// </summary>
     public long? GetIndexEntryCount(DatabaseDescriptor database, TableDescriptor table, string indexName)
     {
-        string key = CacheKey(database.Name, table.Id);
+        string key = CacheKey(database.Id, table.Id);
         if (!_cache.TryGetValue(key, out Entry? entry) || !entry.Loaded)
             return null;
 
@@ -120,7 +129,7 @@ public sealed class StatisticsManager
     /// </summary>
     public ColumnMinMax? GetColumnMinMax(DatabaseDescriptor database, TableDescriptor table, string columnName)
     {
-        string key = CacheKey(database.Name, table.Id);
+        string key = CacheKey(database.Id, table.Id);
         if (!_cache.TryGetValue(key, out Entry? entry) || !entry.Loaded)
             return null;
 
@@ -159,7 +168,7 @@ public sealed class StatisticsManager
 
         ApplyRowDelta(database, table, delta);
 
-        string key = CacheKey(database.Name, table.Id);
+        string key = CacheKey(database.Id, table.Id);
         Entry entry = GetOrCreateEntry(database, table, key);
 
         // Collect the set of writable indexes once to avoid repeated dict lookup.
@@ -183,7 +192,7 @@ public sealed class StatisticsManager
 
         ApplyRowDelta(database, table, -delta);
 
-        string key = CacheKey(database.Name, table.Id);
+        string key = CacheKey(database.Id, table.Id);
         Entry entry = GetOrCreateEntry(database, table, key);
 
         foreach (TableIndexSchema index in GetWritableIndexes(table))
@@ -213,7 +222,7 @@ public sealed class StatisticsManager
         if (updatedValues is null || updatedValues.Count == 0)
             return;
 
-        string key = CacheKey(database.Name, table.Id);
+        string key = CacheKey(database.Id, table.Id);
         Entry entry = GetOrCreateEntry(database, table, key);
 
         IReadOnlyList<TableIndexSchema> writableIndexes = GetWritableIndexes(table);
@@ -258,7 +267,7 @@ public sealed class StatisticsManager
     /// <summary>Flushes in-memory statistics for every opened table before closing a database.</summary>
     public async Task FlushAllAsync(DatabaseDescriptor database)
     {
-        string prefix = string.Concat(database.Name, ":");
+        string prefix = string.Concat(database.Id, ":");
 
         foreach (KeyValuePair<string, Entry> kv in _cache)
         {
@@ -291,7 +300,7 @@ public sealed class StatisticsManager
     /// <summary>Loads persisted statistics from Kahuna for the given table ID into the cache.</summary>
     public async Task LoadByIdAsync(DatabaseDescriptor database, string tableId)
     {
-        string key = CacheKey(database.Name, tableId);
+        string key = CacheKey(database.Id, tableId);
         if (_cache.TryGetValue(key, out Entry? existing) && existing.Loaded)
             return;
 
@@ -328,7 +337,7 @@ public sealed class StatisticsManager
 
     private void ApplyRowDelta(DatabaseDescriptor database, TableDescriptor table, long delta)
     {
-        string key = CacheKey(database.Name, table.Id);
+        string key = CacheKey(database.Id, table.Id);
 
         bool isFirstEntry = false;
         Entry entry = _cache.GetOrAdd(key, _ =>
@@ -475,7 +484,7 @@ public sealed class StatisticsManager
         if (interval < 0)
             return;
 
-        string key = CacheKey(database.Name, table.Id);
+        string key = CacheKey(database.Id, table.Id);
         if (!_cache.TryGetValue(key, out Entry? entry))
             return;
 
@@ -510,7 +519,7 @@ public sealed class StatisticsManager
 
     private async Task FlushInternalAsync(DatabaseDescriptor database, TableDescriptor table)
     {
-        string cacheKey = CacheKey(database.Name, table.Id);
+        string cacheKey = CacheKey(database.Id, table.Id);
         if (!_cache.TryGetValue(cacheKey, out Entry? entry))
             return;
 
@@ -549,7 +558,7 @@ public sealed class StatisticsManager
 
         byte[] bytes = MetaJsonSerializer.Serialize(snapshot, MetaJsonContext.Default.TableStatistics);
 
-        string kahunaKey = KahunaKey(database.Name, table.Id);
+        string kahunaKey = KahunaKey(database.Id, table.Id);
         KvTransaction tx = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
         ).ConfigureAwait(false);
@@ -593,7 +602,7 @@ public sealed class StatisticsManager
 
     private async Task LoadAndCacheAsync(DatabaseDescriptor database, TableDescriptor table)
     {
-        string key = CacheKey(database.Name, table.Id);
+        string key = CacheKey(database.Id, table.Id);
 
         if (_cache.TryGetValue(key, out Entry? existing) && existing.Loaded)
             return;
@@ -630,7 +639,7 @@ public sealed class StatisticsManager
 
     private async Task<TableStatistics?> LoadFromKahunaByIdAsync(DatabaseDescriptor database, string tableId)
     {
-        string kahunaKey = KahunaKey(database.Name, tableId);
+        string kahunaKey = KahunaKey(database.Id, tableId);
 
         // Statistics are advisory metadata read for planning/cost estimation; a stale or
         // missing value is harmless. Use a synthetic read-only transaction (HLCTimestamp.Zero)
@@ -660,9 +669,9 @@ public sealed class StatisticsManager
         }
     }
 
-    private static string CacheKey(string dbName, string tableId)
-        => string.Concat(dbName, ":", tableId);
+    private static string CacheKey(string dbId, string tableId)
+        => string.Concat(dbId, ":", tableId);
 
-    private static string KahunaKey(string dbName, string tableId)
-        => string.Concat(dbName, ":stats:", tableId);
+    private static string KahunaKey(string dbId, string tableId)
+        => string.Concat(dbId, ":stats:", tableId);
 }

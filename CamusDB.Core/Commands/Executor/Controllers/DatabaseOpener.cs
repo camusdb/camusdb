@@ -43,13 +43,16 @@ internal sealed class DatabaseOpener
 
     private readonly EmbeddedKahuna? clusterNode;
 
+    private readonly Task<DatabaseRegistry> registryTask;
+
     public DatabaseOpener(
         CommandExecutor commandExecutor,
         DatabaseDescriptors databaseDescriptors,
         CatalogsManager catalogs,
         ILogger<ICamusDB> logger,
-        EmbeddedKahuna? clusterNode = null,
-        ILoggerFactory? loggerFactory = null)
+        EmbeddedKahuna? clusterNode,
+        ILoggerFactory? loggerFactory,
+        Task<DatabaseRegistry> registryTask)
     {
         this.commandExecutor = commandExecutor;
         this.databaseDescriptors = databaseDescriptors;
@@ -71,33 +74,72 @@ internal sealed class DatabaseOpener
         this.logger = logger;
         this.clusterNode = clusterNode;
         this.loggerFactory = loggerFactory;
+        this.registryTask = registryTask;
     }
 
     public async ValueTask<DatabaseDescriptor> Open(string name, bool recoveryMode = false)
     {
-        AsyncLazy<DatabaseDescriptor> openDatabaseLazy = databaseDescriptors.Descriptors.GetOrAdd(name, LoadOrCreateDatabaseLazy);
-        return await openDatabaseLazy;
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+
+        string id;
+        if (!registry.TryResolveId(name, out id))
+        {
+            // Cache miss — fall back to a live KV read so that databases created on other
+            // cluster nodes (whose Raft-replicated write is visible in the shared store but
+            // not yet in this node's in-memory cache) are found without requiring a restart.
+            string? liveId = await registry.TryResolveIdAsync(name).ConfigureAwait(false);
+            if (liveId is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.DatabaseDoesntExist,
+                    $"Database '{name}' does not exist");
+            id = liveId;
+        }
+
+        AsyncLazy<DatabaseDescriptor> lazy = databaseDescriptors.Descriptors.GetOrAdd(
+            id, _ => new(() => LoadDatabase(id, name)));
+
+        DatabaseDescriptor descriptor = await lazy;
+
+        // Guard: if the database was dropped after we resolved the lazy, fail fast
+        // with a clean error rather than letting callers hit a disposed Kahuna node.
+        if (descriptor.IsDropped)
+        {
+            databaseDescriptors.Descriptors.TryRemove(id, out _);
+            throw new CamusDBException(
+                CamusDBErrorCodes.DatabaseDoesntExist,
+                $"Database '{name}' does not exist");
+        }
+
+        return descriptor;
     }
 
-    private AsyncLazy<DatabaseDescriptor> LoadOrCreateDatabaseLazy(string name)
+    private async Task<DatabaseDescriptor> LoadDatabase(string id, string name)
     {
-        return new(() => LoadDatabase(name));
-    }
+        EmbeddedKahuna node;
 
-    private async Task<DatabaseDescriptor> LoadDatabase(string name)
-    {
-        string dataPath = Path.Combine(CamusConfig.DataDirectory, name);
-        Directory.CreateDirectory(Path.Combine(dataPath, "kv"));
-        Directory.CreateDirectory(Path.Combine(dataPath, "wal"));
+        if (clusterNode is not null)
+        {
+            // Cluster mode: data lives in the shared node; no per-database directory.
+            node = clusterNode;
+        }
+        else
+        {
+            // Standalone mode: data directory must already exist (created by CreateDatabase).
+            string dataPath = Path.Combine(CamusConfig.DataDirectory, id);
+            if (!Directory.Exists(Path.Combine(dataPath, "kv")))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.SystemSpaceCorrupt,
+                    $"Data directory for database '{name}' (id={id}) is missing — the database may be corrupt or was created before the id-based layout migration.");
 
-        EmbeddedKahuna node = clusterNode ?? EmbeddedKahuna.CreateSqlite(dataPath, loggerFactory);
+            node = EmbeddedKahuna.CreateSqlite(dataPath, loggerFactory);
+        }
 
         // Only start/wait if we own the node (standalone per-database instance).
         // The cluster node is started once at process startup in Program.cs.
         if (clusterNode is null)
         {
             await node.StartAsync(CancellationToken.None).ConfigureAwait(false);
-            await node.WaitForLeaderAsync($"{name}/warmup", CancellationToken.None).ConfigureAwait(false);
+            await node.WaitForLeaderAsync($"{id}/warmup", CancellationToken.None).ConfigureAwait(false);
 
             // WAL replay queues dirty writes to the background writer. Flush them now so
             // SQLite is fully populated before LoadMetaAsync reads schema keys from storage.
@@ -115,6 +157,7 @@ internal sealed class DatabaseOpener
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new();
 
         DatabaseDescriptor databaseDescriptor = new(
+            id: id,
             name: name,
             kahuna: node,
             transactions: transactions,

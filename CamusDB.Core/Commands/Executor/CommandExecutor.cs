@@ -97,26 +97,44 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>
     /// Initializes the commands executor
     /// </summary>
+    private readonly Task<DatabaseRegistry> registryTask;
+    private readonly bool ownsRegistry;
+    private readonly bool isClusterMode;
+
     /// <param name="validator"></param>
     /// <param name="catalogs"></param>
     /// <param name="logger"></param>
     /// <param name="loggerFactory">Optional factory forwarded to the embedded Kahuna node so its internal logs are visible.</param>
     /// <param name="clusterNode">Process-level Kahuna node shared across all databases in cluster mode; null in standalone mode.</param>
+    /// <param name="registry">Optional pre-created registry; if supplied the executor does not own it and will not dispose it.</param>
     public CommandExecutor(
         CommandValidator validator,
         CatalogsManager catalogs,
         ILogger<ICamusDB> logger,
         ILoggerFactory? loggerFactory = null,
         EmbeddedKahuna? clusterNode = null,
-        ISchemaDdlForwarder? schemaDdlForwarder = null)
+        ISchemaDdlForwarder? schemaDdlForwarder = null,
+        DatabaseRegistry? registry = null)
     {
         this.validator = validator;
         this.catalogs = catalogs;
         this.logger = logger;
         this.schemaDdlForwarder = schemaDdlForwarder;
+        this.isClusterMode = clusterNode is not null;
+
+        if (registry is not null)
+        {
+            registryTask = Task.FromResult(registry);
+            ownsRegistry = false;
+        }
+        else
+        {
+            registryTask = DatabaseRegistry.OpenAsync(clusterNode, loggerFactory);
+            ownsRegistry = true;
+        }
 
         databaseDescriptors = new();
-        databaseOpener = new(this, databaseDescriptors, catalogs, logger, clusterNode, loggerFactory);
+        databaseOpener = new(this, databaseDescriptors, catalogs, logger, clusterNode, loggerFactory, registryTask);
         databaseCloser = new(databaseDescriptors, logger);
         databaseDroper = new(databaseDescriptors, logger);
         databaseCreator = new(logger);
@@ -155,9 +173,70 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         validator.Validate(ticket);
 
-        databaseCreator.Create(ticket);
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        string name = ticket.DatabaseName;
 
-        return await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        DatabaseRegistryEntry? existing = registry.Get(name);
+        if (existing is not null)
+        {
+            if (ticket.IfNotExists)
+                return await databaseOpener.Open(name).ConfigureAwait(false);
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.DatabaseAlreadyExists,
+                $"Database '{name}' already exists");
+        }
+
+        string id = ObjectIdGenerator.Generate().ToString();
+        await registry.RegisterAsync(name, id).ConfigureAwait(false);
+
+        try
+        {
+            // Cluster mode: data lives in the shared Kahuna node — no per-database directories.
+            if (!isClusterMode)
+                databaseCreator.Create(name, id);
+
+            return await databaseOpener.Open(name).ConfigureAwait(false);
+        }
+        catch (Exception openEx)
+        {
+            // Best-effort rollback — two independent cleanup steps so that failure of one
+            // does not skip the other.  Both are swallowed (the original exception is rethrown).
+
+            // 1. Remove the on-disk directory created above (standalone mode only).
+            if (!isClusterMode)
+            {
+                try
+                {
+                    string dbPath = Path.Combine(CamusDBConfig.DataDirectory, id);
+                    if (Directory.Exists(dbPath))
+                        Directory.Delete(dbPath, recursive: true);
+                }
+                catch (Exception delEx)
+                {
+                    logger.LogWarning(delEx,
+                        "Failed to delete orphaned directory for database '{Name}' (id={Id}) during rollback",
+                        name, id);
+                }
+            }
+
+            // 2. Remove the registry entry so the name can be recreated.
+            //    If this also fails, log it — the name is now wedged (AlreadyExists but un-openable).
+            try
+            {
+                await registry.UnregisterAsync(name).ConfigureAwait(false);
+            }
+            catch (Exception unregEx)
+            {
+                logger.LogError(unregEx,
+                    "Failed to unregister database '{Name}' (id={Id}) after failed create — " +
+                    "the name is now wedged: it appears registered but cannot be opened",
+                    name, id);
+            }
+
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(openEx).Throw();
+            throw; // unreachable — keeps the compiler happy
+        }
     }
 
     public async Task<DatabaseDescriptor> OpenDatabase(string database, bool recoveryMode = false)
@@ -171,16 +250,25 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         // Flush tail stats before the descriptor is torn down so debounced deltas survive shutdown.
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
         await statisticsManager.FlushAllAsync(database).ConfigureAwait(false);
 
-        await databaseCloser.Close(ticket.DatabaseName).ConfigureAwait(false);
+        await databaseCloser.Close(database.Id).ConfigureAwait(false);
     }
 
     public async Task DropDatabase(DropDatabaseTicket ticket)
     {
         validator.Validate(ticket);
 
-        await databaseDroper.Drop(ticket.DatabaseName).ConfigureAwait(false);
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        DatabaseRegistryEntry? entry = registry.Get(ticket.DatabaseName);
+        if (entry is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.DatabaseDoesntExist,
+                $"Database '{ticket.DatabaseName}' does not exist");
+
+        await databaseDroper.Drop(entry.Id).ConfigureAwait(false);
+        await registry.UnregisterAsync(ticket.DatabaseName).ConfigureAwait(false);
     }
 
     #endregion
@@ -255,6 +343,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
 
         bool? forwarded = await TryForwardCreateTableAsync(database, ticket).ConfigureAwait(false);
         if (forwarded is not null)
@@ -272,6 +361,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
 
         bool? forwarded = await TryForwardAlterTableAsync(database, ticket).ConfigureAwait(false);
         if (forwarded is not null)
@@ -617,6 +707,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
 
         bool? forwarded = await TryForwardAlterIndexAsync(database, ticket).ConfigureAwait(false);
         if (forwarded is not null)
@@ -734,6 +825,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
 
         bool? forwarded = await TryForwardDropTableAsync(database, ticket).ConfigureAwait(false);
         if (forwarded is not null)
@@ -752,7 +844,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async Task<TableDescriptor> OpenTable(OpenTableTicket ticket)
     {
         DatabaseDescriptor descriptor = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
-
+        using DatabaseUseHandle _ = descriptor.Use();
         return await tableOpener.Open(descriptor, ticket.TableName).ConfigureAwait(false);
     }
 
@@ -814,12 +906,12 @@ public sealed class CommandExecutor : IAsyncDisposable
                 $"Schema subsystem for database '{database.Name}' is degraded; DDL proposals are rejected until the node recovers"
             );
 
-        if (await database.Kahuna.AmISchemaLeaderAsync(database.Name, CancellationToken.None).ConfigureAwait(false))
+        if (await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
             return null;
 
         if (schemaDdlForwarder is null)
         {
-            string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Name, CancellationToken.None).ConfigureAwait(false);
+            string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"DDL must be executed by schema leader '{leader}' for database '{database.Name}'"
@@ -837,7 +929,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             for (int attempt = 0; attempt < 3; attempt++)
             {
-                string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Name, CancellationToken.None).ConfigureAwait(false);
+                string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
                 bool? result = await forward(leader, operationId, CancellationToken.None).ConfigureAwait(false);
                 if (result is not null)
                 {
@@ -941,6 +1033,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
 
         switch (ast.nodeType)
         {
@@ -1067,6 +1160,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         ticket.TxnState.MarkStatementExecuted();
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
         PinSchemaVersion(database, table, ticket.TxnState);
@@ -1087,6 +1181,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         ticket.TxnState.MarkStatementExecuted();
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
         PinSchemaVersion(database, table, ticket.TxnState);
@@ -1107,6 +1202,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         ticket.TxnState.MarkStatementExecuted();
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
         PinSchemaVersion(database, table, ticket.TxnState);
@@ -1163,6 +1259,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
 
         // Mark the transaction as having executed a statement (all DML is non-SET-TRANSACTION).
         ticket.TxnState.MarkStatementExecuted();
@@ -1390,7 +1487,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private static void PinSchemaVersion(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx)
     {
-        string resource = $"{database.Name}/{table.Id}";
+        string resource = $"{database.Id}/{table.Id}";
         tx.PinSchemaVersion(
             resource,
             table.Schema.Version,
@@ -1404,5 +1501,11 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         await databaseCloser.DisposeAsync();
         await sqlParserCache.DisposeAsync().ConfigureAwait(false);
+
+        if (ownsRegistry)
+        {
+            DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+            await registry.DisposeAsync().ConfigureAwait(false);
+        }
     }
 }

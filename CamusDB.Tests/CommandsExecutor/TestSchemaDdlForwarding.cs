@@ -30,6 +30,7 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -54,8 +55,16 @@ public sealed class TestSchemaDdlForwarding
         await using ClusterHarness cluster = await ClusterHarness.StartAsync();
         string db = cluster.NextSchemaLogDatabaseName();
 
-        EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(db);
+        // Create on any node first to discover the database Id, then find the schema
+        // leader for that Id (after DB3 the schema partition key is the Id, not the name).
+        CommandExecutor creatorExecutor = cluster.CreateExecutor(cluster.Nodes[0]);
+        DatabaseDescriptor createdDesc = await creatorExecutor
+            .CreateDatabase(new CreateDatabaseTicket(db, ifNotExists: false))
+            .WaitAsync(TimeSpan.FromSeconds(15));
+
+        EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(createdDesc.Id);
         EmbeddedKahuna follower = cluster.Nodes.First(node => node != leader);
+        CommandExecutor leaderExecutor = cluster.CreateExecutor(leader);
         CommandExecutor followerExecutor = cluster.CreateExecutor(follower);
 
         try
@@ -70,7 +79,7 @@ public sealed class TestSchemaDdlForwarding
         }
         finally
         {
-            await CleanupDatabaseAsync(db, followerExecutor);
+            await CleanupDatabaseAsync(db, [leaderExecutor, followerExecutor, creatorExecutor]);
         }
     }
 
@@ -81,8 +90,14 @@ public sealed class TestSchemaDdlForwarding
         SimulatedDdlForwarder forwarder = new();
         string db = cluster.NextSchemaLogDatabaseName();
 
-        EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(db);
+        CommandExecutor creatorExecutor = cluster.CreateExecutor(cluster.Nodes[0]);
+        DatabaseDescriptor createdDesc = await creatorExecutor
+            .CreateDatabase(new CreateDatabaseTicket(db, ifNotExists: false))
+            .WaitAsync(TimeSpan.FromSeconds(15));
+
+        EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(createdDesc.Id);
         EmbeddedKahuna follower = cluster.Nodes.First(node => node != leader);
+        CommandExecutor leaderExecutor = cluster.CreateExecutor(leader);
         CommandExecutor followerExecutor = cluster.CreateExecutor(follower, forwarder);
 
         try
@@ -95,7 +110,7 @@ public sealed class TestSchemaDdlForwarding
         }
         finally
         {
-            await CleanupDatabaseAsync(db, followerExecutor);
+            await CleanupDatabaseAsync(db, [leaderExecutor, followerExecutor, creatorExecutor]);
         }
     }
 
@@ -106,8 +121,14 @@ public sealed class TestSchemaDdlForwarding
         SimulatedDdlForwarder forwarder = new();
         string db = cluster.NextSchemaLogDatabaseName();
 
-        EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(db);
+        CommandExecutor creatorExecutor = cluster.CreateExecutor(cluster.Nodes[0]);
+        DatabaseDescriptor createdDesc = await creatorExecutor
+            .CreateDatabase(new CreateDatabaseTicket(db, ifNotExists: false))
+            .WaitAsync(TimeSpan.FromSeconds(15));
+
+        EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(createdDesc.Id);
         EmbeddedKahuna follower = cluster.Nodes.First(node => node != leader);
+        CommandExecutor leaderExecutor = cluster.CreateExecutor(leader);
         CommandExecutor followerExecutor = cluster.CreateExecutor(follower, forwarder);
 
         try
@@ -142,7 +163,7 @@ public sealed class TestSchemaDdlForwarding
         }
         finally
         {
-            await CleanupDatabaseAsync(db, followerExecutor);
+            await CleanupDatabaseAsync(db, [leaderExecutor, followerExecutor, creatorExecutor]);
         }
     }
 
@@ -163,7 +184,12 @@ public sealed class TestSchemaDdlForwarding
         await using ClusterHarness cluster = await ClusterHarness.StartAsync();
         string db = cluster.NextSchemaLogDatabaseName();
 
-        EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(db);
+        CommandExecutor creatorExecutor = cluster.CreateExecutor(cluster.Nodes[0]);
+        DatabaseDescriptor createdDesc = await creatorExecutor
+            .CreateDatabase(new CreateDatabaseTicket(db, ifNotExists: false))
+            .WaitAsync(TimeSpan.FromSeconds(15));
+
+        EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(createdDesc.Id);
         EmbeddedKahuna follower = cluster.Nodes.First(node => node != leader);
 
         // Build an endpoint map that mirrors what Program.cs does from config:
@@ -187,6 +213,7 @@ public sealed class TestSchemaDdlForwarding
             NullLogger<ICamusDB>.Instance
         );
 
+        CommandExecutor leaderExecutor = cluster.CreateExecutor(leader);
         CommandExecutor followerExecutor = cluster.CreateExecutor(follower, forwarder);
 
         try
@@ -215,7 +242,7 @@ public sealed class TestSchemaDdlForwarding
         }
         finally
         {
-            await CleanupDatabaseAsync(db, followerExecutor);
+            await CleanupDatabaseAsync(db, [leaderExecutor, followerExecutor, creatorExecutor]);
         }
     }
 
@@ -244,9 +271,15 @@ public sealed class TestSchemaDdlForwarding
             string db = cluster.NextSchemaLogDatabaseName();
 
             // ── DDL on the schema leader ──────────────────────────────────────────
-            EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(db);
+            // Create on any node first to discover the database Id, then route DDL
+            // to the schema leader for that Id (after DB3 the partition key is the Id).
+            CommandExecutor creatorExecutor = cluster.CreateExecutor(cluster.Nodes[0]);
+            DatabaseDescriptor createdDesc = await creatorExecutor
+                .CreateDatabase(new CreateDatabaseTicket(db, false))
+                .WaitAsync(TimeSpan.FromSeconds(15));
+
+            EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(createdDesc.Id);
             CommandExecutor leaderExecutor = cluster.CreateExecutor(leader);
-            await leaderExecutor.CreateDatabase(new CreateDatabaseTicket(db, false));
 
             // Integer64 PK so the ~pk index is key-range eligible (ASCII-encoding type, C3).
             await leaderExecutor.CreateTable(new CreateTableTicket(
@@ -300,7 +333,7 @@ public sealed class TestSchemaDdlForwarding
                 $"All {RowCount} rows inserted from the non-leader node must be visible from a third node. " +
                 $"Got {rows.Count}. If 0, K1 seed-forwarding is broken; if < {RowCount}, replication or routing is incomplete.");
 
-            await CleanupDatabaseAsync(db, [leaderExecutor, nonLeaderExecutor, thirdExecutor]);
+            await CleanupDatabaseAsync(db, [leaderExecutor, nonLeaderExecutor, thirdExecutor, creatorExecutor]);
         }
         finally
         {
@@ -475,12 +508,14 @@ public sealed class TestSchemaDdlForwarding
     {
         private static int nextPortBase = 9300;
 
-        private ClusterHarness(EmbeddedKahuna[] nodes)
+        private ClusterHarness(EmbeddedKahuna[] nodes, DatabaseRegistry sharedRegistry)
         {
             Nodes = nodes;
+            SharedRegistry = sharedRegistry;
         }
 
         public EmbeddedKahuna[] Nodes { get; }
+        public DatabaseRegistry SharedRegistry { get; }
 
         public static async Task<ClusterHarness> StartAsync()
         {
@@ -507,7 +542,13 @@ public sealed class TestSchemaDdlForwarding
                 .WaitAsync(TimeSpan.FromSeconds(10))
                 .ConfigureAwait(false);
 
-            return new(nodes);
+            // One shared registry for the whole cluster — all executors share the same
+            // in-memory name→id cache so CreateDatabase on any node is visible to all.
+            DatabaseRegistry sharedRegistry = await DatabaseRegistry.OpenAsync(
+                clusterNode: nodes[0],
+                loggerFactory: LoggerFactory).ConfigureAwait(false);
+
+            return new(nodes, sharedRegistry);
         }
 
         public CommandExecutor CreateExecutor(EmbeddedKahuna node, ISchemaDdlForwarder? forwarder = null)
@@ -517,7 +558,8 @@ public sealed class TestSchemaDdlForwarding
             return new(validator, catalogs, Logger,
                 loggerFactory: LoggerFactory,
                 clusterNode: node,
-                schemaDdlForwarder: forwarder);
+                schemaDdlForwarder: forwarder,
+                registry: SharedRegistry);
         }
 
         public string NextSchemaLogDatabaseName()
@@ -561,6 +603,8 @@ public sealed class TestSchemaDdlForwarding
 
         public async ValueTask DisposeAsync()
         {
+            try { await SharedRegistry.DisposeAsync().ConfigureAwait(false); } catch { }
+
             foreach (EmbeddedKahuna node in Nodes)
             {
                 try

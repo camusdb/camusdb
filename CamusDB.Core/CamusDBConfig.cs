@@ -12,10 +12,20 @@ namespace CamusDB.Core;
 
 public static class CamusDBConfig
 {
+    private static readonly string DefaultDataDirectory = Path.GetFullPath("Data");
+
+    // AsyncLocal so each test's async context sees its own override without racing.
+    private static readonly AsyncLocal<string?> TestDataDirectoryOverride = new();
+
     /// <summary>
     /// The directory where the database files and directories will be stored.
+    /// Setting this in a test's SetUp affects only that test's async execution context.
     /// </summary>
-    public static string DataDirectory = Path.GetFullPath("Data");
+    public static string DataDirectory
+    {
+        get => TestDataDirectoryOverride.Value ?? DefaultDataDirectory;
+        set => TestDataDirectoryOverride.Value = value;
+    }
 
     /// <summary>
     /// Minimum interval, in milliseconds, between background flushes of advisory table
@@ -105,9 +115,9 @@ public static class CamusDBConfig
     /// explicit level. Individual transactions may override this via the begin-request field
     /// or via <c>SET TRANSACTION ISOLATION LEVEL …</c>.
     ///
-    /// Default: <see cref="CamusIsolationLevel.ReadCommitted"/> — existing behaviour unchanged.
-    /// Set to <see cref="CamusIsolationLevel.Serializable"/> to make every new transaction
-    /// serializable unless it overrides this.
+    /// Default: <see cref="CamusIsolationLevel.Serializable"/> — every new transaction is
+    /// serializable unless it overrides this. Set to <see cref="CamusIsolationLevel.ReadCommitted"/>
+    /// (via <c>default_isolation_level: read_committed</c> in <c>config.yml</c>) to opt out.
     /// </summary>
     public static CamusIsolationLevel DefaultIsolationLevel = CamusIsolationLevel.Serializable;
 

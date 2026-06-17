@@ -155,7 +155,7 @@ internal sealed class TestSchemaRestoreF1b : BaseTest
         SchemaChangeLogEntry gapEntry = new()
         {
             Ts = new HLCTimestamp(1, 0, 0),
-            Database = dbname,
+            Database = database.Id,
             FromVersion = database.Schema.SchemaVersion + 1,  // gap: skips current version
             ToVersion = database.Schema.SchemaVersion + 2,
             Op = SchemaOp.CreateTable,

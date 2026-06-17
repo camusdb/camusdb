@@ -223,7 +223,7 @@ public sealed class CatalogsManager
         return new()
         {
             Ts = tx.TransactionId,
-            Database = database.Name,
+            Database = database.Id,
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.CreateTable,
@@ -257,7 +257,7 @@ public sealed class CatalogsManager
         return new()
         {
             Ts = tx.TransactionId,
-            Database = database.Name,
+            Database = database.Id,
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = op,
@@ -274,7 +274,7 @@ public sealed class CatalogsManager
         return new()
         {
             Ts = tx.TransactionId,
-            Database = database.Name,
+            Database = database.Id,
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.DropTable,
@@ -333,7 +333,7 @@ public sealed class CatalogsManager
         {
             entry = new()
             {
-                Database = database.Name,
+                Database = database.Id,
                 FromVersion = database.Schema.SchemaVersion,
                 ToVersion = database.Schema.SchemaVersion + 1,
                 Op = SchemaOp.AddColumn,
@@ -382,7 +382,7 @@ public sealed class CatalogsManager
         {
             entry = new()
             {
-                Database = database.Name,
+                Database = database.Id,
                 FromVersion = database.Schema.SchemaVersion,
                 ToVersion = database.Schema.SchemaVersion + 1,
                 Op = SchemaOp.SetElementState,
@@ -424,7 +424,7 @@ public sealed class CatalogsManager
         {
             entry = new()
             {
-                Database = database.Name,
+                Database = database.Id,
                 FromVersion = database.Schema.SchemaVersion,
                 ToVersion = database.Schema.SchemaVersion + 1,
                 Op = SchemaOp.AddIndex,
@@ -469,7 +469,7 @@ public sealed class CatalogsManager
         {
             entry = new()
             {
-                Database = database.Name,
+                Database = database.Id,
                 FromVersion = database.Schema.SchemaVersion,
                 ToVersion = database.Schema.SchemaVersion + 1,
                 Op = SchemaOp.DropIndex,
@@ -506,7 +506,7 @@ public sealed class CatalogsManager
         return new()
         {
             Ts = tx.TransactionId,
-            Database = database.Name,
+            Database = database.Id,
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.AddIndex,
@@ -528,7 +528,7 @@ public sealed class CatalogsManager
         return new()
         {
             Ts = tx.TransactionId,
-            Database = database.Name,
+            Database = database.Id,
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.DropIndex,
@@ -567,7 +567,7 @@ public sealed class CatalogsManager
             : null;
 
         byte[] bytes = Serializator.Serialize(entry);
-        SchemaReplicationResult result = await database.Kahuna.ReplicateSchemaChangeAsync(database.Name, bytes, CancellationToken.None).ConfigureAwait(false);
+        SchemaReplicationResult result = await database.Kahuna.ReplicateSchemaChangeAsync(database.Id, bytes, CancellationToken.None).ConfigureAwait(false);
 
         if (result.Outcome != SchemaReplicationOutcome.Committed)
             throw new CamusDBException(
@@ -598,7 +598,7 @@ public sealed class CatalogsManager
         await PersistSchemaCheckpointWithRetryAsync(database, entry, droppedTableId).ConfigureAwait(false);
 
         bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
-            database.Name,
+            database.Id,
             entry.ToVersion,
             database.Kahuna.SchemaAckWaitTimeout,
             cancellationToken: CancellationToken.None
@@ -681,9 +681,10 @@ public sealed class CatalogsManager
     // H1: schema checkpoint commits must be bounded — an unbounded CommitAsync(CT.None)
     // hangs indefinitely when the schema partition Raft actor is stalled, converting a
     // transient cluster hiccup into a permanent 60s test timeout (or production DDL hang).
-    // 5 s is generous for an in-process cluster; the outer retry loop treats a timeout as
-    // a persist failure and eventually takes the F1a path, keeping DDL liveness intact.
-    private static readonly TimeSpan CheckpointCommitTimeout = TimeSpan.FromSeconds(5);
+    // 30 s gives an in-process cluster sufficient headroom on a loaded CI runner;
+    // the outer retry loop treats a timeout as a persist failure and eventually takes
+    // the F1a path, keeping DDL liveness intact.
+    private static readonly TimeSpan CheckpointCommitTimeout = TimeSpan.FromSeconds(30);
 
     private async Task PersistSchemaCheckpointAsync(
         DatabaseDescriptor database,
@@ -742,7 +743,7 @@ public sealed class CatalogsManager
         // invariant and exposing those nodes to mis-decode. enforceFullConvergence=true disables
         // the backstop for this call while keeping it active for the post-commit gate below.
         bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
-            database.Name,
+            database.Id,
             entry.FromVersion,
             database.Kahuna.SchemaAckWaitTimeout,
             enforceFullConvergence: true,
@@ -1142,18 +1143,18 @@ public sealed class CatalogsManager
     // Schema persistence
     // -----------------------------------------------------------------------
 
-    private static string LegacySchemaKey(string dbName) => $"{dbName}/meta/schema";
-    private static string SystemKey(string dbName) => $"{dbName}/meta/system";
-    private static string VersionKey(string dbName) => $"{dbName}/meta/version";
-    private static string TableBucketPrefix(string dbName) => $"{dbName}/meta/table";
-    private static string TableKeyPrefix(string dbName) => $"{TableBucketPrefix(dbName)}/";
-    private static string TableKey(string dbName, string tableId) => $"{TableKeyPrefix(dbName)}{tableId}";
-    private static string HistoryBucketPrefix(string dbName, string tableId) => $"{dbName}/meta/history/{tableId}";
-    private static string HistoryKeyPrefix(string dbName, string tableId) => $"{HistoryBucketPrefix(dbName, tableId)}/";
-    private static string HistoryKey(string dbName, string tableId, int version) => $"{HistoryKeyPrefix(dbName, tableId)}{version}";
-    private static string CoordinatorBucketPrefix(string dbName) => $"{dbName}/meta/coordinator";
-    private static string CoordinatorKeyPrefix(string dbName) => $"{CoordinatorBucketPrefix(dbName)}/";
-    private static string CoordinatorKey(string dbName, string tableName, string elementName) => $"{CoordinatorKeyPrefix(dbName)}{tableName}~{elementName}";
+    private static string LegacySchemaKey(string dbId) => $"{dbId}/meta/schema";
+    private static string SystemKey(string dbId) => $"{dbId}/meta/system";
+    private static string VersionKey(string dbId) => $"{dbId}/meta/version";
+    private static string TableBucketPrefix(string dbId) => $"{dbId}/meta/table";
+    private static string TableKeyPrefix(string dbId) => $"{TableBucketPrefix(dbId)}/";
+    private static string TableKey(string dbId, string tableId) => $"{TableKeyPrefix(dbId)}{tableId}";
+    private static string HistoryBucketPrefix(string dbId, string tableId) => $"{dbId}/meta/history/{tableId}";
+    private static string HistoryKeyPrefix(string dbId, string tableId) => $"{HistoryBucketPrefix(dbId, tableId)}/";
+    private static string HistoryKey(string dbId, string tableId, int version) => $"{HistoryKeyPrefix(dbId, tableId)}{version}";
+    private static string CoordinatorBucketPrefix(string dbId) => $"{dbId}/meta/coordinator";
+    private static string CoordinatorKeyPrefix(string dbId) => $"{CoordinatorBucketPrefix(dbId)}/";
+    private static string CoordinatorKey(string dbId, string tableName, string elementName) => $"{CoordinatorKeyPrefix(dbId)}{tableName}~{elementName}";
 
     /// <summary>
     /// Persists the system schema metadata. Schema table metadata is stored per object
@@ -1168,7 +1169,7 @@ public sealed class CatalogsManager
 
         byte[] systemBytes = MetaJsonSerializer.Serialize(database.SystemSchema, MetaJsonContext.Default.SystemSchema);
 
-        await WriteMetaKey(kahuna, tx, SystemKey(database.Name), systemBytes).ConfigureAwait(false);
+        await WriteMetaKey(kahuna, tx, SystemKey(database.Id), systemBytes).ConfigureAwait(false);
     }
 
     public async Task PersistSchemaTableAsync(DatabaseDescriptor database, TableSchema tableSchema, KvTransaction tx)
@@ -1191,8 +1192,8 @@ public sealed class CatalogsManager
         byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
         byte[] tableBytes = MetaJsonSerializer.Serialize(WithoutHistory(tableSchema), MetaJsonContext.Default.TableSchema);
 
-        await WriteMetaKey(kahuna, tx, VersionKey(database.Name), versionBytes).ConfigureAwait(false);
-        await WriteMetaKey(kahuna, tx, TableKey(database.Name, tableSchema.Id), tableBytes).ConfigureAwait(false);
+        await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
+        await WriteMetaKey(kahuna, tx, TableKey(database.Id, tableSchema.Id), tableBytes).ConfigureAwait(false);
 
         if (tableSchema.SchemaHistory is not null)
         {
@@ -1202,7 +1203,7 @@ public sealed class CatalogsManager
                 // Schema history keys are append-only: once a table version is recorded,
                 // readers may safely cache it and load it under their own read timestamp.
                 byte[] historyBytes = MetaJsonSerializer.Serialize(history, MetaJsonContext.Default.TableSchemaHistory);
-                await WriteMetaKey(kahuna, tx, HistoryKey(database.Name, tableSchema.Id, history.Version), historyBytes).ConfigureAwait(false);
+                await WriteMetaKey(kahuna, tx, HistoryKey(database.Id, tableSchema.Id, history.Version), historyBytes).ConfigureAwait(false);
             }
         }
     }
@@ -1221,8 +1222,8 @@ public sealed class CatalogsManager
 
         byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
 
-        await WriteMetaKey(kahuna, tx, VersionKey(database.Name), versionBytes).ConfigureAwait(false);
-        await DeleteMetaKey(kahuna, tx, TableKey(database.Name, tableId)).ConfigureAwait(false);
+        await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
+        await DeleteMetaKey(kahuna, tx, TableKey(database.Id, tableId)).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1252,7 +1253,7 @@ public sealed class CatalogsManager
         try
         {
             byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
-            await WriteMetaKey(kahuna, tx, VersionKey(database.Name), versionBytes).ConfigureAwait(false);
+            await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
 
             // Snapshot the table set: callers may invoke this without holding Schema.Semaphore
             // (e.g. OnSchemaRestoreFinishedAsync, which must not hold the apply lock across these KV
@@ -1265,7 +1266,7 @@ public sealed class CatalogsManager
                     continue;
 
                 byte[] tableBytes = MetaJsonSerializer.Serialize(WithoutHistory(table), MetaJsonContext.Default.TableSchema);
-                await WriteMetaKey(kahuna, tx, TableKey(database.Name, table.Id), tableBytes).ConfigureAwait(false);
+                await WriteMetaKey(kahuna, tx, TableKey(database.Id, table.Id), tableBytes).ConfigureAwait(false);
 
                 if (table.SchemaHistory is not null)
                 {
@@ -1273,7 +1274,7 @@ public sealed class CatalogsManager
                     if (current is not null)
                     {
                         byte[] historyBytes = MetaJsonSerializer.Serialize(current, MetaJsonContext.Default.TableSchemaHistory);
-                        await WriteMetaKey(kahuna, tx, HistoryKey(database.Name, table.Id, current.Version), historyBytes).ConfigureAwait(false);
+                        await WriteMetaKey(kahuna, tx, HistoryKey(database.Id, table.Id, current.Version), historyBytes).ConfigureAwait(false);
                     }
                 }
             }
@@ -1301,7 +1302,7 @@ public sealed class CatalogsManager
         ).ConfigureAwait(false);
         try
         {
-            await WriteMetaKey(kahuna, tx, CoordinatorKey(database.Name, job.TableName, job.ElementName), bytes).ConfigureAwait(false);
+            await WriteMetaKey(kahuna, tx, CoordinatorKey(database.Id, job.TableName, job.ElementName), bytes).ConfigureAwait(false);
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
         }
         finally
@@ -1319,7 +1320,7 @@ public sealed class CatalogsManager
         ).ConfigureAwait(false);
         try
         {
-            await DeleteMetaKey(kahuna, tx, CoordinatorKey(database.Name, tableName, elementName)).ConfigureAwait(false);
+            await DeleteMetaKey(kahuna, tx, CoordinatorKey(database.Id, tableName, elementName)).ConfigureAwait(false);
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
         }
         finally
@@ -1332,7 +1333,7 @@ public sealed class CatalogsManager
     {
         List<PersistedCoordinatorJob> jobs = [];
         IKahuna kahuna = database.Kahuna.Kahuna;
-        string keyPrefix = CoordinatorKeyPrefix(database.Name);
+        string keyPrefix = CoordinatorKeyPrefix(database.Id);
 
         KvTransaction tx = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
@@ -1341,7 +1342,7 @@ public sealed class CatalogsManager
         {
             await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
                 tx.TransactionId,
-                CoordinatorBucketPrefix(database.Name),
+                CoordinatorBucketPrefix(database.Id),
                 null, true,
                 null, true,
                 128,
@@ -1384,7 +1385,7 @@ public sealed class CatalogsManager
 
             (KeyValueResponseType schemaType, ReadOnlyKeyValueEntry? schemaEntry) =
                 await kahuna.LocateAndTryGetValue(
-                    tx.TransactionId, VersionKey(database.Name), -1,
+                    tx.TransactionId, VersionKey(database.Id), -1,
                     HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
@@ -1406,7 +1407,7 @@ public sealed class CatalogsManager
 
             (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
                 await kahuna.LocateAndTryGetValue(
-                    tx.TransactionId, SystemKey(database.Name), -1,
+                    tx.TransactionId, SystemKey(database.Id), -1,
                     HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
@@ -1482,11 +1483,11 @@ public sealed class CatalogsManager
     {
         Dictionary<string, TableSchema> tables = new();
         IKahuna kahuna = database.Kahuna.Kahuna;
-        string tableKeyPrefix = TableKeyPrefix(database.Name);
+        string tableKeyPrefix = TableKeyPrefix(database.Id);
 
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
             tx.TransactionId,
-            TableBucketPrefix(database.Name),
+            TableBucketPrefix(database.Id),
             null, true,
             null, true,
             512,
@@ -1521,7 +1522,7 @@ public sealed class CatalogsManager
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) =
             await kahuna.LocateAndTryGetValue(
                 txId,
-                HistoryKey(database.Name, tableId, version),
+                HistoryKey(database.Id, tableId, version),
                 -1,
                 HLCTimestamp.Zero,
                 KeyValueDurability.Persistent,
@@ -1540,7 +1541,7 @@ public sealed class CatalogsManager
 
         (KeyValueResponseType schemaType, ReadOnlyKeyValueEntry? schemaEntry) =
             await kahuna.LocateAndTryGetValue(
-                tx.TransactionId, LegacySchemaKey(database.Name), -1,
+                tx.TransactionId, LegacySchemaKey(database.Id), -1,
                 HLCTimestamp.Zero,
                 KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
@@ -1563,15 +1564,15 @@ public sealed class CatalogsManager
         IKahuna kahuna = database.Kahuna.Kahuna;
 
         byte[] versionBytes = MetaJsonSerializer.Serialize(database.Schema.SchemaVersion, MetaJsonContext.Default.Int64);
-        await WriteMetaKey(kahuna, tx, VersionKey(database.Name), versionBytes).ConfigureAwait(false);
+        await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
 
         foreach (TableSchema table in database.Schema.Tables.Values)
         {
-            ValidateLoadedTable(table, LegacySchemaKey(database.Name));
+            ValidateLoadedTable(table, LegacySchemaKey(database.Id));
             string tableId = table.Id!;
 
             byte[] tableBytes = MetaJsonSerializer.Serialize(WithoutHistory(table), MetaJsonContext.Default.TableSchema);
-            await WriteMetaKey(kahuna, tx, TableKey(database.Name, tableId), tableBytes).ConfigureAwait(false);
+            await WriteMetaKey(kahuna, tx, TableKey(database.Id, tableId), tableBytes).ConfigureAwait(false);
 
             if (table.SchemaHistory is null)
                 continue;
@@ -1580,11 +1581,11 @@ public sealed class CatalogsManager
             {
                 // Migration preserves the same append-only history invariant as new DDL writes.
                 byte[] historyBytes = MetaJsonSerializer.Serialize(history, MetaJsonContext.Default.TableSchemaHistory);
-                await WriteMetaKey(kahuna, tx, HistoryKey(database.Name, tableId, history.Version), historyBytes).ConfigureAwait(false);
+                await WriteMetaKey(kahuna, tx, HistoryKey(database.Id, tableId, history.Version), historyBytes).ConfigureAwait(false);
             }
         }
 
-        await DeleteMetaKey(kahuna, tx, LegacySchemaKey(database.Name)).ConfigureAwait(false);
+        await DeleteMetaKey(kahuna, tx, LegacySchemaKey(database.Id)).ConfigureAwait(false);
         return true;
     }
 

@@ -38,6 +38,7 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(Dictionary<string, DatabaseTableObject>))]
 [JsonSerializable(typeof(Dictionary<string, DatabaseIndexObject>))]
 [JsonSerializable(typeof(HLCTimestamp))]
+[JsonSerializable(typeof(DatabaseRegistryEntry))]
 [JsonSerializable(typeof(TableStatistics))]
 [JsonSerializable(typeof(ScalarBound))]
 [JsonSerializable(typeof(ColumnMinMax))]

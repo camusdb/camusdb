@@ -81,10 +81,11 @@ internal sealed class QueryPlannerTestContext : IAsyncDisposable
             new TableIndexSchema("name_idx", ["name"], IndexType.Multi));
 
         DatabaseDescriptor database = new(
-            DatabaseName,
-            kahuna,
-            new KvTransactionsManager(kahuna.Kahuna),
-            new ConcurrentDictionary<string, AsyncLazy<TableDescriptor>>());
+            id: "planner-test-id",
+            name: DatabaseName,
+            kahuna: kahuna,
+            transactions: new KvTransactionsManager(kahuna.Kahuna),
+            tableDescriptors: new ConcurrentDictionary<string, AsyncLazy<TableDescriptor>>());
 
         KvTransaction txn = new(HLCTimestamp.Zero, "planner-test");
 

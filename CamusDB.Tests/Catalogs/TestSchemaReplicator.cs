@@ -402,7 +402,10 @@ public sealed class TestSchemaReplicator
 
     private static DatabaseDescriptor CreateDescriptor(string db, EmbeddedKahuna kahuna)
     {
+        // Use db as both Id and Name so entry.Database == database.Id and
+        // SchemaLogPartition(id) == SchemaLogPartition(db) in all replicator tests.
         return new(
+            id: db,
             name: db,
             kahuna: kahuna,
             transactions: new KvTransactionsManager(kahuna.Kahuna),

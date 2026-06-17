@@ -16,6 +16,7 @@ using Kahuna;
 
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.Storage.Kv;
 
@@ -53,11 +54,15 @@ public abstract class SharedNodeBaseTest : BaseTest
             await sharedNode.DisposeAsync();
     }
 
+    protected override Task<DatabaseRegistry> CreateRegistryAsync()
+        => DatabaseRegistry.OpenAsync(clusterNode: sharedNode!, loggerFactory: SharedLoggerFactory);
+
     protected override CommandExecutor CreateCommandExecutor()
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
         return new(validator, catalogsManager, logger,
-            loggerFactory: SharedLoggerFactory, clusterNode: sharedNode!);
+            loggerFactory: SharedLoggerFactory, clusterNode: sharedNode!,
+            registry: sharedRegistry!);
     }
 }

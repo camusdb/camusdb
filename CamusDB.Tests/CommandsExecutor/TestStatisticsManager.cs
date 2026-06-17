@@ -225,7 +225,7 @@ public sealed class TestStatisticsManager : BaseTest
 
         await executor2.Statistics.LoadByIdAsync(db2, tableId);
 
-        long? estimate = executor2.Statistics.GetRowCountEstimate(db2.Name, tableId);
+        long? estimate = executor2.Statistics.GetRowCountEstimate(db2.Id, tableId);
         Assert.IsNotNull(estimate, "Expected persisted stats to be reloaded after database reopen");
         Assert.AreEqual(10L, estimate!.Value);
     }
@@ -259,7 +259,7 @@ public sealed class TestStatisticsManager : BaseTest
 
         await executor2.Statistics.LoadByIdAsync(db2, tableId);
 
-        long? estimate = executor2.Statistics.GetRowCountEstimate(db2.Name, tableId);
+        long? estimate = executor2.Statistics.GetRowCountEstimate(db2.Id, tableId);
         Assert.IsNotNull(estimate, "Close hook should have persisted stats so reopen finds them");
         Assert.AreEqual(8L, estimate!.Value);
     }
@@ -296,7 +296,7 @@ public sealed class TestStatisticsManager : BaseTest
         string tableId = schema!.Id!;
         await executor2.Statistics.LoadByIdAsync(db2, tableId);
 
-        long? estimate = executor2.Statistics.GetRowCountEstimate(db2.Name, tableId);
+        long? estimate = executor2.Statistics.GetRowCountEstimate(db2.Id, tableId);
         Assert.IsNotNull(estimate, "Estimate should be available after load");
         Assert.AreEqual(12L, estimate!.Value, "Base (10) + pending delta (2) should be 12, not 2");
     }
