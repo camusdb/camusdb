@@ -304,6 +304,105 @@ public class TestPredicateAnalyzer
     }
 
     [Test]
+    public void Analyze_MirroredEquality_ConstantOnLeft_producesColumnKeyedComparison()
+    {
+        NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE 2000 = year").extendedOne!;
+
+        PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
+
+        Assert.AreEqual(1, analysis.IndexableComparisons.Count);
+        Assert.AreEqual(0, analysis.ColumnComparisons.Count);
+        Assert.AreEqual(0, analysis.ResidualConjuncts.Count);
+        Assert.AreEqual("year", analysis.IndexableComparisons[0].ColumnName);
+        Assert.AreEqual("=", analysis.IndexableComparisons[0].Operator);
+        Assert.AreEqual(2000, analysis.IndexableComparisons[0].Constant.LongValue);
+    }
+
+    [Test]
+    public void Analyze_MirroredInequality_ConstantOnLeft_flipsOperator()
+    {
+        // 2001 < year  ==>  year > 2001
+        NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE 2001 < year").extendedOne!;
+
+        PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
+
+        Assert.AreEqual(1, analysis.IndexableComparisons.Count);
+        Assert.AreEqual("year", analysis.IndexableComparisons[0].ColumnName);
+        Assert.AreEqual(">", analysis.IndexableComparisons[0].Operator);
+        Assert.AreEqual(2001, analysis.IndexableComparisons[0].Constant.LongValue);
+    }
+
+    [Test]
+    public void Analyze_MirroredGreaterEquals_ConstantOnLeft_flipsToLessEquals()
+    {
+        // 2005 >= year  ==>  year <= 2005
+        NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE 2005 >= year").extendedOne!;
+
+        PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
+
+        Assert.AreEqual(1, analysis.IndexableComparisons.Count);
+        Assert.AreEqual("year", analysis.IndexableComparisons[0].ColumnName);
+        Assert.AreEqual("<=", analysis.IndexableComparisons[0].Operator);
+        Assert.AreEqual(2005, analysis.IndexableComparisons[0].Constant.LongValue);
+    }
+
+    [Test]
+    public void Analyze_MirroredObjectIdEquality_ConstantOnLeft_keyedOnColumn()
+    {
+        NodeAst where = SQLParserProcessor.Parse(
+            $"SELECT * FROM robots WHERE str_id('{QueryPlannerTestContext.SampleRowId}') = id").extendedOne!;
+
+        PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
+
+        Assert.AreEqual(1, analysis.IndexableComparisons.Count);
+        Assert.AreEqual("id", analysis.IndexableComparisons[0].ColumnName);
+        Assert.AreEqual("=", analysis.IndexableComparisons[0].Operator);
+        Assert.AreEqual(QueryPlannerTestContext.SampleRowId, analysis.IndexableComparisons[0].Constant.StrValue);
+    }
+
+    [Test]
+    public void Analyze_ColumnColumnComparison_ConstantSideAbsent_staysColumnComparison()
+    {
+        // Both sides are columns: the canonical branch must not be tricked by the mirror form
+        // into treating "enabled" as a constant. (Reversed argument order vs. the existing test.)
+        NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE enabled < year").extendedOne!;
+
+        PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
+
+        Assert.AreEqual(0, analysis.IndexableComparisons.Count);
+        Assert.AreEqual(1, analysis.ColumnComparisons.Count);
+        Assert.AreEqual("enabled", analysis.ColumnComparisons[0].LeftColumnName);
+        Assert.AreEqual("year", analysis.ColumnComparisons[0].RightColumnName);
+    }
+
+    [Test]
+    public void TrySelectScan_MirroredObjectIdEquality_selectsPrimaryKeyLookup()
+    {
+        NodeAst where = SQLParserProcessor.Parse(
+            $"SELECT * FROM robots WHERE str_id('{QueryPlannerTestContext.SampleRowId}') = id").extendedOne!;
+        PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
+
+        QueryPlanStep? step = IndexScanSelector.TrySelectScan(context!.Table, analysis);
+
+        Assert.IsNotNull(step);
+        Assert.AreEqual(QueryPlanStepType.QueryFromIndex, step!.Value.Type);
+        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, step.Value.Index!.Name);
+    }
+
+    [Test]
+    public void TrySelectScan_MirroredInequality_selectsRangeScan()
+    {
+        NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE 2001 < year").extendedOne!;
+        PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
+
+        QueryPlanStep? step = IndexScanSelector.TrySelectScan(context!.Table, analysis);
+
+        Assert.IsNotNull(step);
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, step!.Value.Type);
+        Assert.AreEqual("year_idx", step.Value.Index!.Name);
+    }
+
+    [Test]
     public void NextSortValue_Float64_usesNextRepresentableValue()
     {
         double value = 1.0;

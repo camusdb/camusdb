@@ -315,21 +315,53 @@ public static class PredicateAnalyzer
     {
         comparison = null;
 
-        if (conjunct.leftAst?.nodeType != NodeType.Identifier || conjunct.leftAst.yytext is null)
-            return false;
-
-        if (conjunct.rightAst is null)
-            return false;
-
-        if (!TryGetConstant(conjunct.rightAst, parameters, out ColumnValue? constant) || constant is null)
-            return false;
-
         string? op = TryGetComparisonOperator(conjunct.nodeType);
         if (op is null)
             return false;
 
-        comparison = new AnalyzedComparison(conjunct.leftAst.yytext, op, constant, conjunct);
-        return true;
+        // Canonical form: column OP constant. Try this first so that column-vs-column
+        // comparisons (where the right side is an identifier, not a constant) fall through
+        // to the column-column analyzer instead of being mistaken for the mirrored form.
+        if (conjunct.leftAst?.nodeType == NodeType.Identifier
+            && conjunct.leftAst.yytext is not null
+            && conjunct.rightAst is not null
+            && TryGetConstant(conjunct.rightAst, parameters, out ColumnValue? rightConstant)
+            && rightConstant is not null)
+        {
+            comparison = new AnalyzedComparison(conjunct.leftAst.yytext, op, rightConstant, conjunct);
+            return true;
+        }
+
+        // Mirrored form: constant OP column (e.g. str_id('…') = id, 5 > age). Swap the sides
+        // for index matching and flip the operator. The original conjunct is preserved so
+        // residual evaluation is unaffected when the scan does not absorb the comparison.
+        if (conjunct.rightAst?.nodeType == NodeType.Identifier
+            && conjunct.rightAst.yytext is not null
+            && conjunct.leftAst is not null
+            && TryGetConstant(conjunct.leftAst, parameters, out ColumnValue? leftConstant)
+            && leftConstant is not null)
+        {
+            comparison = new AnalyzedComparison(conjunct.rightAst.yytext, MirrorOperator(op), leftConstant, conjunct);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Flips a comparison operator when the column and constant operands are swapped, so that
+    /// <c>constant OP column</c> matches an index the same way <c>column OP' constant</c> would.
+    /// </summary>
+    private static string MirrorOperator(string op)
+    {
+        return op switch
+        {
+            ">" => "<",
+            ">=" => "<=",
+            "<" => ">",
+            "<=" => ">=",
+            _ => op, // "=" and "!=" are symmetric
+        };
     }
 
     private static bool TryAnalyzeColumnColumnComparison(
