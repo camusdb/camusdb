@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsValidator.Validators;
 
@@ -50,6 +51,16 @@ public sealed class CommandValidator
     public void Validate(AlterIndexTicket ticket)
     {
         alterIndexValidator.Validate(ticket);
+    }
+
+    public void Validate(RenameTableTicket ticket)
+    {
+        RenameValidator.Validate(new SchemaRenamePayload
+        {
+            Kind = SchemaRenameKind.Table,
+            TableName = ticket.TableName,
+            NewName = ticket.NewName,
+        });
     }
 
     public void Validate(CloseDatabaseTicket ticket)

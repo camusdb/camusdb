@@ -47,6 +47,20 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             );
         }
 
+        if (ast.nodeType == NodeType.AlterTableRenameColumn)
+        {
+            string oldColumnName = ast.rightAst!.yytext!;
+            string newColumnName = ast.extendedOne!.yytext!;
+
+            return new(
+                ticket.DatabaseName,
+                tableName,
+                AlterTableOperation.RenameColumn,
+                new ColumnInfo(oldColumnName, ColumnType.Null),
+                newName: newColumnName
+            );
+        }
+
         return new(
             ticket.DatabaseName,
             tableName,

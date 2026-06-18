@@ -32,11 +32,12 @@ internal sealed class TableColumnAlterer
     }
 
     public async Task<bool> Alter(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
-    {        
+    {
         return ticket.Operation switch
         {
             AlterTableOperation.AddColumn => await AddColumn(queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
             AlterTableOperation.DropColumn => await DropColumn(queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
+            AlterTableOperation.RenameColumn => await RenameColumn(database, table, ticket, tx).ConfigureAwait(false),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid alter table operation"),
         };
     }    
@@ -62,6 +63,21 @@ internal sealed class TableColumnAlterer
         AlterColumnTicket ticket,
         KvTransaction tx
     ) => tableColumnAdder.BackfillColumnDefaultsAsync(queryExecutor, database, table, ticket, tx);
+
+    private async Task<bool> RenameColumn(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
+    {
+        AlterColumnTicket alterColumnTicket = new(
+            databaseName: database.Name,
+            tableName: table.Name,
+            column: ticket.Column,
+            operation: AlterTableOperation.RenameColumn,
+            newName: ticket.NewName
+        );
+
+        await catalogs.AlterTable(database, alterColumnTicket, tx).ConfigureAwait(false);
+
+        return true;
+    }
 
     private async Task<bool> DropColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {

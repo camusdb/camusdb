@@ -243,6 +243,25 @@ public sealed class CatalogsManager
 
     private static SchemaChangeLogEntry AlterTableEntry(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)
     {
+        if (ticket.Operation == AlterTableOperation.RenameColumn)
+        {
+            return new()
+            {
+                Ts = tx.TransactionId,
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.RenameColumn,
+                Payload = Serializator.Serialize(new SchemaRenamePayload
+                {
+                    TableName = ticket.TableName,
+                    Kind = SchemaRenameKind.Column,
+                    ElementName = ticket.Column.Name,
+                    NewName = ticket.NewName ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "NewName is required for RenameColumn")
+                })
+            };
+        }
+
         SchemaOp op = ticket.Operation switch
         {
             AlterTableOperation.AddColumn => SchemaOp.AddColumn,
@@ -267,6 +286,127 @@ public sealed class CatalogsManager
                 Column = column
             })
         };
+    }
+
+    private static SchemaChangeLogEntry RenameTableEntry(DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx)
+    {
+        return new()
+        {
+            Ts = tx.TransactionId,
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.RenameTable,
+            Payload = Serializator.Serialize(new SchemaRenamePayload
+            {
+                TableName = ticket.TableName,
+                Kind = SchemaRenameKind.Table,
+                NewName = ticket.NewName
+            })
+        };
+    }
+
+    private async Task<bool> RenameTableReplicatedAsync(DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = RenameTableEntry(database, ticket, tx);
+            ValidateSchemaDelta(database.Schema, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        return true;
+    }
+
+    public async Task<bool> RenameTable(DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx)
+    {
+        if (!database.OwnsKahuna)
+            return await RenameTableReplicatedAsync(database, ticket, tx).ConfigureAwait(false);
+
+        TableSchema? tableSchema;
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            SchemaChangeLogEntry entry = RenameTableEntry(database, ticket, tx);
+            tableSchema = ApplySchemaDelta(database.Schema, entry);
+            Log.LogTableSchemaModified(logger, ticket.TableName);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        // Evict stale descriptor for old name; new name will be opened fresh on next access.
+        database.TableDescriptors.TryRemove(ticket.TableName, out _);
+        database.TableDescriptors.TryRemove(ticket.NewName, out _);
+
+        if (tableSchema is not null)
+            await PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
+
+        return true;
+    }
+
+    public async Task<bool> RenameIndexInTableAsync(
+        DatabaseDescriptor database,
+        AlterIndexTicket ticket,
+        KvTransaction tx
+    )
+    {
+        string newName = ticket.NewName ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "NewName is required for RenameIndex");
+        SchemaChangeLogEntry entry;
+        TableSchema? tableSchema;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Ts = tx.TransactionId,
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.RenameIndex,
+                Payload = Serializator.Serialize(new SchemaRenamePayload
+                {
+                    TableName = ticket.TableName,
+                    Kind = SchemaRenameKind.Index,
+                    ElementName = ticket.IndexName,
+                    NewName = newName
+                })
+            };
+
+            if (database.OwnsKahuna)
+                tableSchema = ApplySchemaDelta(database.Schema, entry);
+            else
+            {
+                ValidateSchemaDelta(database.Schema, entry);
+                tableSchema = null;
+            }
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        if (!database.OwnsKahuna)
+        {
+            await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+            return true;
+        }
+
+        if (tableSchema is not null)
+            await PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
+
+        database.TableDescriptors.TryRemove(ticket.TableName, out _);
+
+        return true;
     }
 
     private static SchemaChangeLogEntry DropTableEntry(DatabaseDescriptor database, string tableName, KvTransaction tx)
@@ -729,6 +869,10 @@ public sealed class CatalogsManager
         SchemaOp.SetElementState => DecodePayload<SchemaElementStatePayload>(entry).TableName,
         SchemaOp.DropTable => DecodePayload<SchemaDropTablePayload>(entry).TableName,
         SchemaOp.AddIndex or SchemaOp.DropIndex => DecodePayload<SchemaIndexPayload>(entry).TableName,
+        // For RenameColumn/RenameIndex the table name is unchanged; for RenameTable the table
+        // lives under the new name after apply, so use NewName so the persist path finds it.
+        SchemaOp.RenameTable => DecodePayload<SchemaRenamePayload>(entry).NewName,
+        SchemaOp.RenameColumn or SchemaOp.RenameIndex => DecodePayload<SchemaRenamePayload>(entry).TableName,
         _ => throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
             $"Cannot resolve table name for schema operation '{entry.Op}'"
@@ -776,7 +920,26 @@ public sealed class CatalogsManager
             SchemaOp.SetElementState => HasElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
             SchemaOp.AddIndex => HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
             SchemaOp.DropIndex => !HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
+            SchemaOp.RenameTable or SchemaOp.RenameColumn or SchemaOp.RenameIndex => WasRenamed(schema, DecodePayload<SchemaRenamePayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
+        };
+    }
+
+    private static bool WasRenamed(Schema schema, SchemaRenamePayload payload)
+    {
+        return payload.Kind switch
+        {
+            SchemaRenameKind.Table =>
+                schema.Tables.ContainsKey(payload.NewName) && !schema.Tables.ContainsKey(payload.TableName),
+            SchemaRenameKind.Column =>
+                schema.Tables.TryGetValue(payload.TableName, out TableSchema? ct) &&
+                ct.Columns is not null &&
+                ct.Columns.Any(c => c.Name == payload.NewName),
+            SchemaRenameKind.Index =>
+                schema.Tables.TryGetValue(payload.TableName, out TableSchema? it) &&
+                it.Indexes is not null &&
+                it.Indexes.Any(ix => ix.Name == payload.NewName),
+            _ => false
         };
     }
 
@@ -827,6 +990,9 @@ public sealed class CatalogsManager
             SchemaOp.SetElementState => ApplyElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
             SchemaOp.AddIndex => ApplyAddIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
             SchemaOp.DropIndex => ApplyDropIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
+            SchemaOp.RenameTable => ApplyRenameTable(schema, DecodePayload<SchemaRenamePayload>(entry)),
+            SchemaOp.RenameColumn => ApplyRenameColumn(schema, DecodePayload<SchemaRenamePayload>(entry)),
+            SchemaOp.RenameIndex => ApplyRenameIndex(schema, DecodePayload<SchemaRenamePayload>(entry)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -926,6 +1092,150 @@ public sealed class CatalogsManager
             return null;
 
         tableSchema.Indexes?.RemoveAll(ix => ix.Name == payload.IndexName);
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Re-keys <c>schema.Tables</c> and mutates <c>TableSchema.Name</c> in place. The same
+    /// <c>TableSchema</c> instance is preserved so pin/visibility closures keep tracking it.
+    /// No version bump — the re-key already invalidates pinned txns (old key gone).
+    /// </summary>
+    private static TableSchema ApplyRenameTable(Schema schema, SchemaRenamePayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        if (schema.Tables.ContainsKey(payload.NewName))
+            throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{payload.NewName}' already exists");
+
+        // G3a: coordinator jobs are keyed by table name. If any child column or index is
+        // mid-ladder (non-terminal state), renaming the table would orphan the job because
+        // ResumeJobsAsync resolves Schema.Tables[oldName] → gone after the rename.
+        if (tableSchema.Columns is not null)
+        {
+            TableColumnSchema? midLadder = tableSchema.Columns
+                .FirstOrDefault(c => c.State != SchemaElementState.Public && c.State != SchemaElementState.Absent);
+            if (midLadder is not null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    $"Cannot rename table '{payload.TableName}': column '{midLadder.Name}' has an in-flight schema change (state: {midLadder.State}). Wait for it to reach Public before renaming.");
+        }
+
+        if (tableSchema.Indexes is not null)
+        {
+            TableIndexSchema? midLadder = tableSchema.Indexes
+                .FirstOrDefault(ix => ix.State != SchemaElementState.Public && ix.State != SchemaElementState.Absent);
+            if (midLadder is not null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    $"Cannot rename table '{payload.TableName}': index '{midLadder.Name}' has an in-flight schema change (state: {midLadder.State}). Wait for it to reach Public before renaming.");
+        }
+
+        schema.Tables.Remove(payload.TableName);
+        tableSchema.Name = payload.NewName;
+        schema.Tables.Add(payload.NewName, tableSchema);
+
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Replaces a column record in the table's column list, preserving the immutable <c>Id</c>.
+    /// Bumps <c>TableSchema.Version</c> and records a history entry so pins re-validate and
+    /// the row decoder picks up the new name on next access.
+    /// </summary>
+    private static TableSchema ApplyRenameColumn(Schema schema, SchemaRenamePayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        if (string.IsNullOrEmpty(payload.ElementName))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Column name is required for RenameColumn");
+
+        if (tableSchema.Columns is null)
+            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
+
+        int idx = tableSchema.Columns.FindIndex(c => c.Name == payload.ElementName);
+        if (idx < 0)
+            throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Column '{payload.ElementName}' does not exist in table '{payload.TableName}'");
+
+        if (tableSchema.Columns.Any(c => c.Name == payload.NewName))
+            throw new CamusDBException(CamusDBErrorCodes.DuplicateColumn, $"Column '{payload.NewName}' already exists in table '{payload.TableName}'");
+
+        TableColumnSchema current = tableSchema.Columns[idx];
+
+        if (current.State != SchemaElementState.Public && current.State != SchemaElementState.Absent)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                $"Cannot rename column '{payload.ElementName}': it has an in-flight schema change (state: {current.State}). Wait for it to reach Public before renaming.");
+
+        List<TableColumnSchema> columns = [.. tableSchema.Columns];
+        columns[idx] = new TableColumnSchema(
+            id: current.Id,
+            name: payload.NewName,
+            type: current.Type,
+            notNull: current.NotNull,
+            defaultValue: current.DefaultValue,
+            state: current.State
+        );
+
+        tableSchema.Version++;
+        tableSchema.Columns = columns;
+        tableSchema.SchemaHistory ??= [];
+
+        // Rename is purely a label change: positional encoding means every historical snapshot
+        // must also reflect the new name so rows written under any previous version decode correctly.
+        foreach (TableSchemaHistory history in tableSchema.SchemaHistory)
+        {
+            if (history.Columns is null) continue;
+            int hIdx = history.Columns.FindIndex(c => c.Id == current.Id);
+            if (hIdx < 0) continue;
+            TableColumnSchema hCol = history.Columns[hIdx];
+            history.Columns[hIdx] = new TableColumnSchema(
+                id: hCol.Id, name: payload.NewName, type: hCol.Type,
+                notNull: hCol.NotNull, defaultValue: hCol.DefaultValue, state: hCol.State);
+        }
+
+        tableSchema.SchemaHistory.Add(new() { Version = tableSchema.Version, Columns = tableSchema.Columns });
+
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Replaces an index entry with a renamed copy, preserving the immutable <c>Id</c>,
+    /// <c>ColumnIds</c>, <c>Type</c>, <c>State</c>, and <c>StartOffset</c>.
+    /// Does NOT bump <c>TableSchema.Version</c> — indexes are not part of row encoding.
+    /// </summary>
+    private static TableSchema ApplyRenameIndex(Schema schema, SchemaRenamePayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        if (string.IsNullOrEmpty(payload.ElementName))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Index name is required for RenameIndex");
+
+        if (tableSchema.Indexes is null || tableSchema.Indexes.Count == 0)
+            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no indexes");
+
+        int idx = tableSchema.Indexes.FindIndex(ix => ix.Name == payload.ElementName);
+        if (idx < 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{payload.ElementName}' does not exist on table '{payload.TableName}'");
+
+        if (tableSchema.Indexes.Any(ix => ix.Name == payload.NewName))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{payload.NewName}' already exists on table '{payload.TableName}'");
+
+        TableIndexSchema current = tableSchema.Indexes[idx];
+
+        if (current.State != SchemaElementState.Public && current.State != SchemaElementState.Absent)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                $"Cannot rename index '{payload.ElementName}': it has an in-flight schema change (state: {current.State}). Wait for it to reach Public before renaming.");
+
+        tableSchema.Indexes[idx] = new TableIndexSchema(
+            id: current.Id,
+            name: payload.NewName,
+            columnIds: current.ColumnIds,
+            type: current.Type,
+            state: current.State,
+            startOffset: current.StartOffset
+        );
+
+        // TableSchema.Version is intentionally NOT bumped: indexes are not part of row encoding.
         return tableSchema;
     }
 

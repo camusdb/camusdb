@@ -18,11 +18,14 @@ public readonly struct AlterColumnTicket
 
     public AlterTableOperation Operation { get; }
 
-    public AlterColumnTicket(string databaseName, string tableName, ColumnInfo column, AlterTableOperation operation)
+    public string? NewName { get; }
+
+    public AlterColumnTicket(string databaseName, string tableName, ColumnInfo column, AlterTableOperation operation, string? newName = null)
     {
         DatabaseName = databaseName;
         TableName = tableName;
         Column = column;
         Operation = operation;
+        NewName = newName;
     }
 }

@@ -52,6 +52,7 @@ public sealed class ForwardAlterTableRequest
     public string TableName { get; set; } = "";
     public AlterTableOperation Operation { get; set; }
     public ColumnInfoRequest Column { get; set; } = new();
+    public string? NewName { get; set; }
 }
 
 public sealed class ForwardAlterIndexRequest
@@ -63,6 +64,7 @@ public sealed class ForwardAlterIndexRequest
     public ColumnIndexInfoRequest[] Columns { get; set; } = [];
     public AlterIndexOperation Operation { get; set; }
     public bool IfNotExists { get; set; }
+    public string? NewName { get; set; }
 }
 
 public sealed class ForwardDropTableRequest
@@ -71,6 +73,14 @@ public sealed class ForwardDropTableRequest
     public string DatabaseName { get; set; } = "";
     public string TableName { get; set; } = "";
     public bool IfExists { get; set; }
+}
+
+public sealed class ForwardRenameTableRequest
+{
+    public string OperationId { get; set; } = "";
+    public string DatabaseName { get; set; } = "";
+    public string TableName { get; set; } = "";
+    public string NewName { get; set; } = "";
 }
 
 public sealed class SchemaDdlForwardResponse

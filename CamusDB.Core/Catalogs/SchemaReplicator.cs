@@ -201,6 +201,17 @@ public sealed class SchemaReplicator
             if (payload.ElementKind == SchemaElementKind.Index)
                 database.TableDescriptors.TryRemove(payload.TableName, out _);
         }
+
+        // Renames: evict so the next open rebuilds the descriptor with the new name(s).
+        // For table rename, evict both old and new in case a stale entry exists under either.
+        // For column/index rename the table name is unchanged; evict by table name.
+        if (entry.Op == SchemaOp.RenameTable || entry.Op == SchemaOp.RenameColumn || entry.Op == SchemaOp.RenameIndex)
+        {
+            SchemaRenamePayload payload = DecodePayload<SchemaRenamePayload>(entry);
+            database.TableDescriptors.TryRemove(payload.TableName, out _);
+            if (entry.Op == SchemaOp.RenameTable)
+                database.TableDescriptors.TryRemove(payload.NewName, out _);
+        }
     }
 
     /// <summary>
@@ -342,7 +353,26 @@ public sealed class SchemaReplicator
             SchemaOp.SetElementState => HasElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
             SchemaOp.AddIndex => HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
             SchemaOp.DropIndex => !HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
+            SchemaOp.RenameTable or SchemaOp.RenameColumn or SchemaOp.RenameIndex => WasRenamed(schema, DecodePayload<SchemaRenamePayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
+        };
+    }
+
+    private static bool WasRenamed(Schema schema, SchemaRenamePayload payload)
+    {
+        return payload.Kind switch
+        {
+            SchemaRenameKind.Table =>
+                schema.Tables.ContainsKey(payload.NewName) && !schema.Tables.ContainsKey(payload.TableName),
+            SchemaRenameKind.Column =>
+                schema.Tables.TryGetValue(payload.TableName, out TableSchema? ct) &&
+                ct.Columns is not null &&
+                ct.Columns.Any(c => c.Name == payload.NewName),
+            SchemaRenameKind.Index =>
+                schema.Tables.TryGetValue(payload.TableName, out TableSchema? it) &&
+                it.Indexes is not null &&
+                it.Indexes.Any(ix => ix.Name == payload.NewName),
+            _ => false
         };
     }
 

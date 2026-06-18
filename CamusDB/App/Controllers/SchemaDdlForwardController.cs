@@ -149,7 +149,8 @@ public sealed class SchemaDdlForwardController : CommandsController
                 databaseName: req.DatabaseName,
                 tableName: req.TableName,
                 operation: req.Operation,
-                column: MapColumn(req.Column)
+                column: MapColumn(req.Column),
+                newName: req.NewName
             );
 
             bool result = await executor.AlterTable(ticket).ConfigureAwait(false);
@@ -208,7 +209,8 @@ public sealed class SchemaDdlForwardController : CommandsController
                 indexName: req.IndexName,
                 columns: req.Columns.Select(c => new ColumnIndexInfo(c.Name, c.Order)).ToArray(),
                 operation: req.Operation,
-                ifNotExists: req.IfNotExists
+                ifNotExists: req.IfNotExists,
+                newName: req.NewName
             );
 
             bool result = await executor.AlterIndex(ticket).ConfigureAwait(false);
@@ -260,6 +262,62 @@ public sealed class SchemaDdlForwardController : CommandsController
             clusterNode.RecordRemoteSchemaAck(req.Database, req.NodeEndpoint, req.AppliedSchemaVersion);
 
         return new JsonResult(new SchemaDdlForwardResponse { Status = "ok" });
+    }
+
+    [HttpPost]
+    [Route("/internal/schema-ddl/rename-table")]
+    public async Task<JsonResult> ForwardRenameTable()
+    {
+        ForwardRenameTableRequest? req;
+        try
+        {
+            req = await ReadJsonBodyAsync<ForwardRenameTableRequest>().ConfigureAwait(false);
+            if (req is null)
+                return BadDdlRequest("ForwardRenameTable request is null");
+
+            if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
+                return NotLeaderDdl();
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+
+        DdlOperationIdCache? opCache = GetOperationIdCache();
+        Task<SchemaDdlForwardResponse?>? pending = opCache?.TryGetOrReserve(req.OperationId);
+        if (pending is not null)
+        {
+            try { return new JsonResult(await pending.ConfigureAwait(false)); }
+            catch (CamusDBException e) { return FailedDdl(e.Code, e.Message); }
+            catch (Exception e) { return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message); }
+        }
+
+        try
+        {
+            RenameTableTicket ticket = new(
+                databaseName: req.DatabaseName,
+                tableName: req.TableName,
+                newName: req.NewName
+            );
+
+            bool result = await executor.RenameTable(ticket).ConfigureAwait(false);
+            SchemaDdlForwardResponse response = new() { Status = "ok", Applied = result };
+            opCache?.SetAndComplete(req.OperationId, response);
+            return new JsonResult(response);
+        }
+        catch (CamusDBException e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(e.Code, e.Message);
+        }
+        catch (Exception e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
     }
 
     [HttpPost]

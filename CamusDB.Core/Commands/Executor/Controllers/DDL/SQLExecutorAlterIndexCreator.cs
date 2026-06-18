@@ -92,6 +92,21 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
                 AlterIndexOperation.DropIndex
             );
 
+        if (ast.nodeType == NodeType.AlterTableRenameIndex)
+        {
+            string oldIndexName = ast.rightAst!.yytext!;
+            string newIndexName = ast.extendedOne!.yytext!;
+
+            return new(
+                ticket.DatabaseName,
+                tableName,
+                oldIndexName,
+                Array.Empty<ColumnIndexInfo>(),
+                AlterIndexOperation.RenameIndex,
+                newName: newIndexName
+            );
+        }
+
         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid alter index operation: {ast.nodeType}");
     }
 

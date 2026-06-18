@@ -76,6 +76,35 @@ public sealed class SchemaIndexPayload
     public string IndexName { get; set; } = "";
 }
 
+/// <summary>
+/// Discriminator for <see cref="SchemaRenamePayload"/>: whether the rename targets a table,
+/// a column, or an index.
+/// </summary>
+public enum SchemaRenameKind
+{
+    Table,
+    Column,
+    Index,
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.RenameTable"/>, <see cref="SchemaOp.RenameColumn"/>,
+/// and <see cref="SchemaOp.RenameIndex"/>. Rename ops are single-delta, metadata-only;
+/// no row or index bytes move.
+/// </summary>
+public sealed class SchemaRenamePayload
+{
+    /// <summary>Current (pre-rename) table name. Always the table being touched.</summary>
+    public string TableName { get; set; } = "";
+
+    public SchemaRenameKind Kind { get; set; }
+
+    /// <summary>Old column or index name. Null for <see cref="SchemaRenameKind.Table"/>.</summary>
+    public string? ElementName { get; set; }
+
+    public string NewName { get; set; } = "";
+}
+
 public sealed class SchemaElementStatePayload
 {
     public string TableName { get; set; } = "";

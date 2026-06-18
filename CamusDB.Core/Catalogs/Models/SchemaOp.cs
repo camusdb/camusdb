@@ -47,5 +47,14 @@ public enum SchemaOp
     /// (payload: <c>SchemaElementStatePayload</c>). The building block of staged
     /// add/drop sequences — see <see cref="SchemaElementState"/>.
     /// </summary>
-    SetElementState = 6
+    SetElementState = 6,
+
+    /// <summary>Rename a table (payload: <c>SchemaRenamePayload</c>). Metadata-only; no row rewrite.</summary>
+    RenameTable = 7,
+
+    /// <summary>Rename a column (payload: <c>SchemaRenamePayload</c>). Metadata-only; bumps <c>TableSchema.Version</c>.</summary>
+    RenameColumn = 8,
+
+    /// <summary>Rename an index (payload: <c>SchemaRenamePayload</c>). Metadata-only; does not bump <c>TableSchema.Version</c>.</summary>
+    RenameIndex = 9
 }

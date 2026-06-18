@@ -18,17 +18,21 @@ public readonly struct AlterTableTicket
 
     public ColumnInfo Column { get; }
 
+    public string? NewName { get; }
+
     public AlterTableTicket(
         string databaseName,
         string tableName,
         AlterTableOperation operation,
-        ColumnInfo column
+        ColumnInfo column,
+        string? newName = null
     )
     {
         DatabaseName = databaseName;
         TableName = tableName;
         Operation = operation;
         Column = column;
+        NewName = newName;
     }
 }
 

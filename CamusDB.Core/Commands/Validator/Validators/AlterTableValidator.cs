@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsValidator.Validators;
@@ -43,5 +44,29 @@ internal sealed class AlterTableValidator : ValidatorBase
                 CamusDBErrorCodes.InvalidInput,
                 "Column name has invalid characters"
             );
+
+        if (ticket.Operation == AlterTableOperation.RenameColumn)
+        {
+            if (string.IsNullOrWhiteSpace(ticket.NewName))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New column name is required");
+
+            if (ticket.NewName!.Length > 255)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New column name is too long");
+
+            if (!HasValidCharacters(ticket.NewName))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New column name has invalid characters");
+
+            if (ticket.NewName.StartsWith('~'))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    $"New name '{ticket.NewName}' is reserved for internal use");
+
+            if (IsReservedName(ticket.NewName))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    $"'{ticket.NewName}' is a reserved column name");
+
+            if (ticket.NewName == ticket.Column.Name)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    $"New column name '{ticket.NewName}' is the same as the current name");
+        }
     }
 }

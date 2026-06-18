@@ -254,6 +254,9 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TDROP TINDEX any_identifier { $$.n = new(NodeType.AlterTableDropIndex, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddPrimaryKey, $3.n, $8.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TPRIMARY TKEY { $$.n = new(NodeType.AlterTableDropPrimaryKey, $3.n, null, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TRENAME TTO any_identifier { $$.n = new(NodeType.AlterTableRenameTo, $3.n, $6.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TRENAME TCOLUMN any_identifier TTO any_identifier { $$.n = new(NodeType.AlterTableRenameColumn, $3.n, $6.n, $8.n, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TRENAME TINDEX any_identifier TTO any_identifier { $$.n = new(NodeType.AlterTableRenameIndex, $3.n, $6.n, $8.n, null, null, null, null, null); }
 				 ;
 
 create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $7.n, null, null, null, null, null); }

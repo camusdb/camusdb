@@ -73,6 +73,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             TableName = ticket.TableName,
             Operation = ticket.Operation,
             Column = MapColumn(ticket.Column),
+            NewName = ticket.NewName,
         };
 
         return await PostAsync(leader, "alter-table", request, cancellationToken).ConfigureAwait(false);
@@ -89,6 +90,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             Columns = ticket.Columns.Select(c => new ColumnIndexInfoRequest { Name = c.Name, Order = c.Order }).ToArray(),
             Operation = ticket.Operation,
             IfNotExists = ticket.IfNotExists,
+            NewName = ticket.NewName,
         };
 
         return await PostAsync(leader, "alter-index", request, cancellationToken).ConfigureAwait(false);
@@ -105,6 +107,19 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         };
 
         return await PostAsync(leader, "drop-table", request, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool?> ForwardRenameTableAsync(string leader, RenameTableTicket ticket, string operationId, CancellationToken cancellationToken)
+    {
+        ForwardRenameTableRequest request = new()
+        {
+            OperationId = operationId,
+            DatabaseName = ticket.DatabaseName,
+            TableName = ticket.TableName,
+            NewName = ticket.NewName,
+        };
+
+        return await PostAsync(leader, "rename-table", request, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

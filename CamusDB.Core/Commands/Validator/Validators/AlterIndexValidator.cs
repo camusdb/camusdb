@@ -72,5 +72,25 @@ internal sealed class AlterIndexValidator : ValidatorBase
                     "Index name has invalid characters"
                 );
         }
+
+        if (ticket.Operation == AlterIndexOperation.RenameIndex)
+        {
+            if (string.IsNullOrWhiteSpace(ticket.NewName))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New index name is required");
+
+            if (ticket.NewName!.Length > 255)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New index name is too long");
+
+            if (!HasValidCharacters(ticket.NewName))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New index name has invalid characters");
+
+            if (ticket.NewName.StartsWith('~'))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    $"New name '{ticket.NewName}' is reserved for internal use");
+
+            if (ticket.NewName == ticket.IndexName)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    $"New index name '{ticket.NewName}' is the same as the current name");
+        }
     }
 }

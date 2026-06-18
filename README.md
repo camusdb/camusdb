@@ -116,7 +116,7 @@ Architecture
 ------------
 The engine is structured as a pipeline of composable operators:
 
-- **SQL Parser** — LALR(1) parser (GPLEX/GPPG) that produces an AST. Identifiers are normalized to lowercase at parse time.
+- **SQL Parser** — LALR(1) parser (YaccLexTools) that produces an AST. Identifiers are normalized to lowercase at parse time.
 - **Query planner** — builds a physical plan tree from the bound SELECT model, choosing table scans, index scans, index lookup scans, nested-loop joins, index nested-loop joins, aggregate nodes, distinct nodes, sort nodes, and limit nodes based on query shape and available indexes.
 - **Query binder** — resolves table aliases, derived table output columns, projection aliases, ordinal GROUP BY/ORDER BY references, aggregate scope, HAVING scope, and subquery scope before execution.
 - **Query operators** — `QueryScanner`, `QueryFilterer`, `QuerySorter`, `QueryLimiter`, `QueryProjector`, `QueryAggregator`, `QueryDistincter`, `SemiJoinExecutor`, and `QueryJoinExecutor` execute the plan while keeping filtering, sorting, aggregation, projection, and limiting storage-agnostic.

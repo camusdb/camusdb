@@ -22,13 +22,16 @@ public readonly struct AlterIndexTicket
 
     public bool IfNotExists { get; }
 
+    public string? NewName { get; }
+
     public AlterIndexTicket(
         string databaseName,
         string tableName,
         string indexName,
         ColumnIndexInfo[] columns,
         AlterIndexOperation operation,
-        bool ifNotExists = false
+        bool ifNotExists = false,
+        string? newName = null
     )
     {
         DatabaseName = databaseName;
@@ -37,5 +40,6 @@ public readonly struct AlterIndexTicket
         Columns = columns;
         Operation = operation;
         IfNotExists = ifNotExists;
+        NewName = newName;
     }
 }

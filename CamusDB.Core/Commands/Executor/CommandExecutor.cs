@@ -800,6 +800,12 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
+        // RenameIndex is metadata-only (no KV data changes); use single-phase DDL on all paths.
+        if (ticket.Operation == AlterIndexOperation.RenameIndex)
+            return await ExecuteDdlInTransaction(database,
+                tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx)
+            ).ConfigureAwait(false);
+
         bool addIndexOperation = ticket.Operation is
             AlterIndexOperation.AddIndex or
             AlterIndexOperation.AddUniqueIndex or
@@ -926,6 +932,22 @@ public sealed class CommandExecutor : IAsyncDisposable
         ).ConfigureAwait(false);
     }
 
+    public async Task<bool> RenameTable(RenameTableTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
+
+        bool? forwarded = await TryForwardRenameTableAsync(database, ticket).ConfigureAwait(false);
+        if (forwarded is not null)
+            return forwarded.Value;
+
+        return await ExecuteDdlInTransaction(database, tx =>
+            catalogs.RenameTable(database, ticket, tx)
+        ).ConfigureAwait(false);
+    }
+
     public async Task<TableDescriptor> OpenTable(OpenTableTicket ticket)
     {
         DatabaseDescriptor descriptor = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
@@ -971,6 +993,15 @@ public sealed class CommandExecutor : IAsyncDisposable
             database,
             (leader, opId, ct) => schemaDdlForwarder!.ForwardDropTableAsync(leader, ticket, opId, ct),
             () => ForwardedDropTableApplied(database, ticket)
+        ).ConfigureAwait(false);
+    }
+
+    private async Task<bool?> TryForwardRenameTableAsync(DatabaseDescriptor database, RenameTableTicket ticket)
+    {
+        return await TryForwardDdlAsync(
+            database,
+            (leader, opId, ct) => schemaDdlForwarder!.ForwardRenameTableAsync(leader, ticket, opId, ct),
+            () => ForwardedRenameTableApplied(database, ticket)
         ).ConfigureAwait(false);
     }
 
@@ -1074,6 +1105,13 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private static bool ForwardedAlterTableApplied(DatabaseDescriptor database, AlterTableTicket ticket)
     {
+        if (ticket.Operation == AlterTableOperation.RenameColumn)
+        {
+            // After rename, new name present in any table (table name unchanged).
+            return database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? ts) &&
+                   ts.Columns?.Any(c => c.Name == ticket.NewName) == true;
+        }
+
         if (!database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema))
             return false;
 
@@ -1091,6 +1129,12 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private static bool ForwardedAlterIndexApplied(DatabaseDescriptor database, AlterIndexTicket ticket)
     {
+        if (ticket.Operation == AlterIndexOperation.RenameIndex)
+        {
+            return database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? ts) &&
+                   ts.Indexes?.Any(ix => string.Equals(ix.Name, ticket.NewName, StringComparison.Ordinal)) == true;
+        }
+
         // Check TableSchema.Indexes (the B1/B2 source of truth). Fall back to SystemSchema
         // for nodes that haven't yet applied the B1 migration (legacy path).
         bool existsInSchema = database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema) &&
@@ -1109,6 +1153,12 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         return !database.Schema.Tables.ContainsKey(ticket.TableName)
             && !database.TableDescriptors.ContainsKey(ticket.TableName);
+    }
+
+    private static bool ForwardedRenameTableApplied(DatabaseDescriptor database, RenameTableTicket ticket)
+    {
+        return database.Schema.Tables.ContainsKey(ticket.NewName)
+            && !database.Schema.Tables.ContainsKey(ticket.TableName);
     }
 
     public async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(ExecuteSQLTicket ticket)
@@ -1229,6 +1279,60 @@ public sealed class CommandExecutor : IAsyncDisposable
                     return await ExecuteDdlInTransaction(database, async tx =>
                     {
                         bool ok = await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx).ConfigureAwait(false);
+                        return new ExecuteDDLSQLResult(database, ok);
+                    }).ConfigureAwait(false);
+                }
+
+            case NodeType.AlterTableRenameColumn:
+                {
+                    AlterTableTicket renameColumnTicket = sqlExecutor.CreateAlterTableTicket(ticket, ast);
+                    validator.Validate(renameColumnTicket);
+
+                    bool? forwarded = await TryForwardAlterTableAsync(database, renameColumnTicket).ConfigureAwait(false);
+                    if (forwarded is not null)
+                        return new ExecuteDDLSQLResult(database, forwarded.Value);
+
+                    TableDescriptor tableForRenameCol = await tableOpener.Open(database, renameColumnTicket.TableName).ConfigureAwait(false);
+
+                    return await ExecuteDdlInTransaction(database, async tx =>
+                    {
+                        bool ok = await tableColumnAlterer.Alter(queryExecutor, database, tableForRenameCol, renameColumnTicket, tx).ConfigureAwait(false);
+                        return new ExecuteDDLSQLResult(database, ok);
+                    }).ConfigureAwait(false);
+                }
+
+            case NodeType.AlterTableRenameIndex:
+                {
+                    AlterIndexTicket renameIndexTicket = sqlExecutor.CreateAlterIndexTicket(ticket, ast);
+                    validator.Validate(renameIndexTicket);
+
+                    bool? forwarded = await TryForwardAlterIndexAsync(database, renameIndexTicket).ConfigureAwait(false);
+                    if (forwarded is not null)
+                        return new ExecuteDDLSQLResult(database, forwarded.Value);
+
+                    TableDescriptor tableForRenameIdx = await tableOpener.Open(database, renameIndexTicket.TableName).ConfigureAwait(false);
+
+                    return await ExecuteDdlInTransaction(database, async tx =>
+                    {
+                        bool ok = await tableIndexAlterer.Alter(queryExecutor, database, tableForRenameIdx, renameIndexTicket, tx).ConfigureAwait(false);
+                        return new ExecuteDDLSQLResult(database, ok);
+                    }).ConfigureAwait(false);
+                }
+
+            case NodeType.AlterTableRenameTo:
+                {
+                    string oldTableName = ast.leftAst!.yytext!;
+                    string newTableName = ast.rightAst!.yytext!;
+                    RenameTableTicket renameTableTicket = new(ticket.DatabaseName, oldTableName, newTableName);
+                    validator.Validate(renameTableTicket);
+
+                    bool? forwarded = await TryForwardRenameTableAsync(database, renameTableTicket).ConfigureAwait(false);
+                    if (forwarded is not null)
+                        return new ExecuteDDLSQLResult(database, forwarded.Value);
+
+                    return await ExecuteDdlInTransaction(database, async tx =>
+                    {
+                        bool ok = await catalogs.RenameTable(database, renameTableTicket, tx).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
                     }).ConfigureAwait(false);
                 }
