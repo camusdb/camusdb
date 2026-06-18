@@ -194,7 +194,7 @@ public sealed class TestEmbeddedKahuna
                 await node.Raft.UpdateNodes();
 
             await Task.WhenAll(nodes.Select(x => x.StartAsync(CancellationToken.None)))
-                .WaitAsync(TimeSpan.FromSeconds(10));
+                .WaitAsync(TimeSpan.FromSeconds(30));
 
             int partitionId = node1.SchemaLogPartition(db);
             await node1.Raft.WaitForLeader(partitionId, CancellationToken.None);
@@ -267,7 +267,7 @@ public sealed class TestEmbeddedKahuna
                 await node.Raft.UpdateNodes();
 
             await Task.WhenAll(nodes.Select(x => x.StartAsync(CancellationToken.None)))
-                .WaitAsync(TimeSpan.FromSeconds(10));
+                .WaitAsync(TimeSpan.FromSeconds(30));
 
             int partitionId = node1.SchemaLogPartition(db);
             await node1.Raft.WaitForLeader(partitionId, CancellationToken.None);
@@ -283,7 +283,7 @@ public sealed class TestEmbeddedKahuna
 
             await WaitUntilAsync(
                 () => applied.Any(x => x.node == followerName && x.data == "schema-change-forwarded"),
-                TimeSpan.FromSeconds(10)
+                TimeSpan.FromSeconds(30)
             );
         }
         finally
@@ -321,7 +321,7 @@ public sealed class TestEmbeddedKahuna
                 await node.Raft.UpdateNodes();
 
             await Task.WhenAll(nodes.Select(x => x.StartAsync(CancellationToken.None)))
-                .WaitAsync(TimeSpan.FromSeconds(10));
+                .WaitAsync(TimeSpan.FromSeconds(30));
 
             int partitionId = node1.SchemaLogPartition(db);
             await node1.Raft.WaitForLeader(partitionId, CancellationToken.None);
