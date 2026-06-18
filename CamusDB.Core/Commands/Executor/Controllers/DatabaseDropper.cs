@@ -232,7 +232,7 @@ internal sealed class DatabaseDropper
                 }
             }
 
-            if (keys.Count > 0)
+            if (keys.Count > 0 && logger.IsEnabled(LogLevel.Information))
                 logger.LogInformation(
                     "Purged {Count} key(s) under bucket '{Bucket}' for dropped database (id={Id})",
                     keys.Count, bucket, id);

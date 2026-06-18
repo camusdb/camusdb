@@ -243,4 +243,103 @@ internal sealed class TestDatabaseExplicitCreate : BaseTest
         Assert.IsTrue(Directory.Exists(Path.Combine(CamusConfig.DataDirectory, retry.Id, "kv")),
             "Retry must produce the id-based kv directory");
     }
+
+    // -----------------------------------------------------------------------
+    // CREATE/DROP/RENAME DATABASE via ExecuteDDLSQL (the /execute-sql-ddl path)
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task ExecuteDDLSQL_CreateDatabase_CreatesAndOpens()
+    {
+        string dbname = "db_" + Guid.NewGuid().ToString("n")[..8];
+        CommandExecutor executor = CreateCommandExecutor();
+
+        // Use any valid context database — CREATE DATABASE ignores it.
+        (string ctx, _, _) = await CreateDatabase();
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!,
+            database: ctx,
+            sql: $"CREATE DATABASE {dbname}",
+            parameters: null));
+
+        TrackDatabase(dbname, executor);
+
+        DatabaseDescriptor opened = await executor.OpenDatabase(dbname);
+        Assert.AreEqual(dbname, opened.Name);
+        Assert.IsNotEmpty(opened.Id);
+    }
+
+    [Test]
+    public async Task ExecuteDDLSQL_CreateDatabaseIfNotExists_IsIdempotent()
+    {
+        string dbname = "db_" + Guid.NewGuid().ToString("n")[..8];
+        CommandExecutor executor = CreateCommandExecutor();
+        TrackDatabase(dbname, executor);
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!,
+            database: dbname,
+            sql: $"CREATE DATABASE {dbname}",
+            parameters: null));
+
+        // Second CREATE IF NOT EXISTS must not throw.
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!,
+            database: dbname,
+            sql: $"CREATE DATABASE IF NOT EXISTS {dbname}",
+            parameters: null));
+    }
+
+    [Test]
+    public async Task ExecuteDDLSQL_DropDatabase_RemovesDatabase()
+    {
+        string dbname = "db_" + Guid.NewGuid().ToString("n")[..8];
+        CommandExecutor executor = CreateCommandExecutor();
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!,
+            database: dbname,
+            sql: $"CREATE DATABASE {dbname}",
+            parameters: null));
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!,
+            database: dbname,
+            sql: $"DROP DATABASE {dbname}",
+            parameters: null));
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await executor.OpenDatabase(dbname));
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex!.Code);
+    }
+
+    [Test]
+    public async Task ExecuteDDLSQL_RenameDatabase_NewNameOpens()
+    {
+        string oldName = "db_" + Guid.NewGuid().ToString("n")[..8];
+        string newName = "db_renamed_" + Guid.NewGuid().ToString("n")[..8];
+        CommandExecutor executor = CreateCommandExecutor();
+        TrackDatabase(newName, executor);
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!,
+            database: oldName,
+            sql: $"CREATE DATABASE {oldName}",
+            parameters: null));
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!,
+            database: oldName,
+            sql: $"RENAME DATABASE {oldName} TO {newName}",
+            parameters: null));
+
+        // Rename is display-only on the cached descriptor; verify the id resolves and old name is gone.
+        DatabaseDescriptor opened = await executor.OpenDatabase(newName);
+        Assert.IsNotEmpty(opened.Id);
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await executor.OpenDatabase(oldName));
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex!.Code);
+    }
 }

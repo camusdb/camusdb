@@ -113,8 +113,8 @@ internal sealed class TestDatabaseClusterIsolation : SharedNodeBaseTest
         await executor.CreateTable(ItemsTableTicket(nameA)).WaitAsync(TimeSpan.FromSeconds(10));
         await executor.CreateTable(ItemsTableTicket(nameB)).WaitAsync(TimeSpan.FromSeconds(10));
 
-        string tableIdA = dbA.Schema.Tables["items"].Id;
-        string tableIdB = dbB.Schema.Tables["items"].Id;
+        string tableIdA = dbA.Schema.Tables["items"].Id!;
+        string tableIdB = dbB.Schema.Tables["items"].Id!;
 
         Assert.AreNotEqual(tableIdA, tableIdB,
             "Two databases must have independent table ids for a same-named table");
@@ -205,7 +205,7 @@ internal sealed class TestDatabaseClusterIsolation : SharedNodeBaseTest
         await executor.CreateTable(ItemsTableTicket(nameA)).WaitAsync(TimeSpan.FromSeconds(10));
         await executor.CreateTable(ItemsTableTicket(nameB)).WaitAsync(TimeSpan.FromSeconds(10));
 
-        string tableIdB = dbB.Schema.Tables["items"].Id;
+        string tableIdB = dbB.Schema.Tables["items"].Id!;
 
         await InsertRow(executor, dbA, nameA, "a-row");
         await InsertRow(executor, dbB, nameB, "b-row");

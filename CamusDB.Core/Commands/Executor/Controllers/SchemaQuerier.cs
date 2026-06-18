@@ -27,12 +27,15 @@ internal sealed class SchemaQuerier
         this.catalogs = catalogsManager;
     }
 
-    internal async IAsyncEnumerable<QueryResultRow> ShowTables(DatabaseDescriptor database)
+    internal async IAsyncEnumerable<QueryResultRow> ShowTables(DatabaseDescriptor database, string? pattern = null)
     {
         await Task.CompletedTask;
 
         foreach (KeyValuePair<string, TableSchema> table in database.Schema.Tables)
         {
+            if (pattern is not null && !LikeMatch(table.Key, pattern))
+                continue;
+
             yield return new QueryResultRow(default, new()
             {
                 { "tables", new ColumnValue(ColumnType.String, table.Key) }
@@ -172,6 +175,60 @@ internal sealed class SchemaQuerier
         {
             { "database", new ColumnValue(ColumnType.String, database.Name) }
         });
+    }
+
+    internal async IAsyncEnumerable<QueryResultRow> ShowDatabases(IReadOnlyList<DatabaseRegistryEntry> entries, string? pattern = null)
+    {
+        await Task.CompletedTask;
+
+        foreach (DatabaseRegistryEntry entry in entries)
+        {
+            if (pattern is not null && !LikeMatch(entry.Name, pattern))
+                continue;
+
+            yield return new QueryResultRow(default, new()
+            {
+                { "Database", new ColumnValue(ColumnType.String, entry.Name) }
+            });
+        }
+    }
+
+    /// <summary>
+    /// SQL LIKE pattern match: '%' matches any sequence, '_' matches any single character.
+    /// Matching is case-sensitive (standard SQL semantics).
+    /// </summary>
+    private static bool LikeMatch(string value, string pattern)
+    {
+        int vi = 0, pi = 0;
+        int starPi = -1, starVi = -1;
+
+        while (vi < value.Length)
+        {
+            if (pi < pattern.Length && (pattern[pi] == '_' || pattern[pi] == value[vi]))
+            {
+                vi++;
+                pi++;
+            }
+            else if (pi < pattern.Length && pattern[pi] == '%')
+            {
+                starPi = pi++;
+                starVi = vi;
+            }
+            else if (starPi != -1)
+            {
+                pi = starPi + 1;
+                vi = ++starVi;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        while (pi < pattern.Length && pattern[pi] == '%')
+            pi++;
+
+        return pi == pattern.Length;
     }
 
     private static string GetSQLType(ColumnType type)

@@ -1117,6 +1117,31 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
+        // CREATE/DROP/RENAME DATABASE do not require an open database context.
+        if (ast.nodeType is NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists)
+        {
+            string dbName = ast.leftAst!.yytext!;
+            bool ifNotExists = ast.nodeType == NodeType.CreateDatabaseIfNotExists;
+            DatabaseDescriptor created = await CreateDatabase(new CreateDatabaseTicket(dbName, ifNotExists)).ConfigureAwait(false);
+            return new ExecuteDDLSQLResult(created, true);
+        }
+
+        if (ast.nodeType is NodeType.DropDatabase or NodeType.DropDatabaseIfExists)
+        {
+            string dbName = ast.leftAst!.yytext!;
+            bool ifExists = ast.nodeType == NodeType.DropDatabaseIfExists;
+            await DropDatabase(new DropDatabaseTicket(dbName, ifExists)).ConfigureAwait(false);
+            return default;
+        }
+
+        if (ast.nodeType is NodeType.RenameDatabase)
+        {
+            string oldName = ast.leftAst!.yytext!;
+            string newName = ast.rightAst!.yytext!;
+            await RenameDatabase(new RenameDatabaseTicket(oldName, newName)).ConfigureAwait(false);
+            return default;
+        }
+
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
@@ -1453,6 +1478,14 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
+        // SHOW DATABASES does not require a database context — resolve the registry and return.
+        if (ast.nodeType == NodeType.ShowDatabases)
+        {
+            DatabaseRegistry reg = await registryTask.ConfigureAwait(false);
+            string? dbPattern = UnquoteLikePattern(ast.leftAst?.yytext);
+            return (null!, schemaQuerier.ShowDatabases(reg.List(), dbPattern));
+        }
+
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
 
         // Mark the transaction as having executed a statement for every statement type except
@@ -1503,7 +1536,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.ShowTables:
                 {
-                    return (database, schemaQuerier.ShowTables(database));
+                    string? tablePattern = UnquoteLikePattern(ast.leftAst?.yytext);
+                    return (database, schemaQuerier.ShowTables(database, tablePattern));
                 }
 
             case NodeType.ShowColumns:
@@ -1577,6 +1611,14 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     #endregion
+
+    private static string? UnquoteLikePattern(string? raw)
+    {
+        if (raw is null) return null;
+        if (raw.Length >= 2 && raw[0] == raw[^1] && (raw[0] == '\'' || raw[0] == '"'))
+            return raw[1..^1];
+        return raw;
+    }
 
     private static void PinSchemaVersions(
         DatabaseDescriptor database,

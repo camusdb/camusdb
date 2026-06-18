@@ -1407,11 +1407,52 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseCreateDatabase()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE DATABASE mydb");
+
+        Assert.AreEqual(NodeType.CreateDatabase, ast.nodeType);
+        Assert.AreEqual("mydb", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseCreateDatabaseIfNotExists()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE DATABASE IF NOT EXISTS mydb");
+
+        Assert.AreEqual(NodeType.CreateDatabaseIfNotExists, ast.nodeType);
+        Assert.AreEqual("mydb", ast.leftAst!.yytext);
+    }
+
+    [Test]
     public void TestParseShowTables()
     {
         NodeAst ast = SQLParserProcessor.Parse("SHOW TABLES");
 
         Assert.AreEqual(NodeType.ShowTables, ast.nodeType);
+        Assert.IsNull(ast.leftAst);
+    }
+
+    [Test]
+    public void TestParseShowTablesLike()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW TABLES LIKE 'orders_%'");
+
+        Assert.AreEqual(NodeType.ShowTables, ast.nodeType);
+        Assert.IsNotNull(ast.leftAst);
+        Assert.AreEqual(NodeType.String, ast.leftAst!.nodeType);
+        Assert.AreEqual("'orders_%'", ast.leftAst.yytext);
+    }
+
+    [Test]
+    public void TestParseShowDatabasesLike()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW DATABASES LIKE 'prod_%'");
+
+        Assert.AreEqual(NodeType.ShowDatabases, ast.nodeType);
+        Assert.IsNotNull(ast.leftAst);
+        Assert.AreEqual(NodeType.String, ast.leftAst!.nodeType);
+        Assert.AreEqual("'prod_%'", ast.leftAst.yytext);
     }
 
     [Test]

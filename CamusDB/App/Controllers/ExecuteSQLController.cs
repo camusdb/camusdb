@@ -16,6 +16,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor.Models.Results;
+using CamusDB.Core.SQLParser;
 using CamusDB.App.Services;
 
 namespace CamusDB.App.Controllers;
@@ -47,6 +48,25 @@ public sealed class ExecuteSQLController : CommandsController
 
             (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode) = ParseRequestLevelMode(request);
 
+            string sql = request.Sql ?? "";
+            NodeAst ast = SQLParserProcessor.Parse(sql);
+
+            // SHOW DATABASES does not require a database context or a transaction.
+            if (ast.nodeType == NodeType.ShowDatabases)
+            {
+                ExecuteSQLTicket ticket = new(
+                    txnState: null!,
+                    database: request.DatabaseName ?? "",
+                    sql: sql,
+                    parameters: request.Parameters
+                );
+                (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false);
+                List<Dictionary<string, ColumnValue>> rows = [];
+                await foreach (QueryResultRow row in cursor)
+                    rows.Add(row.Row);
+                return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
+            }
+
             // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
             if (request.TxnIdPT > 0)
             {
@@ -57,7 +77,7 @@ public sealed class ExecuteSQLController : CommandsController
                     ExecuteSQLTicket ticket = new(
                         txnState: txnState,
                         database: request.DatabaseName ?? "",
-                        sql: request.Sql ?? "",
+                        sql: sql,
                         parameters: request.Parameters
                     );
                     List<Dictionary<string, ColumnValue>> rows = [];
@@ -88,7 +108,7 @@ public sealed class ExecuteSQLController : CommandsController
                     ExecuteSQLTicket ticket = new(
                         txnState: tx,
                         database: request.DatabaseName ?? "",
-                        sql: request.Sql ?? "",
+                        sql: sql,
                         parameters: request.Parameters
                     );
                     List<Dictionary<string, ColumnValue>> rows = [];
@@ -237,26 +257,39 @@ public sealed class ExecuteSQLController : CommandsController
 
             try
             {
-                (CamusIsolationLevel? reqLevel3, CamusTransactionMode? reqMode3) = ParseRequestLevelMode(request);
-                (newTransaction, txnState) = await BeginOrResumeAsync(
-                    request.DatabaseName,
-                    request.TxnIdPT,
-                    request.TxnIdCounter,
-                    isolationLevel: reqLevel3,
-                    transactionMode: reqMode3
-                ).ConfigureAwait(false);
+                string sql = request.Sql ?? "";
+                NodeAst ast = SQLParserProcessor.Parse(sql);
+
+                // CREATE/DROP/RENAME DATABASE do not require a database context or a transaction —
+                // they are handled in CommandExecutor before databaseOpener.Open is called.
+                bool isDbManagement = ast.nodeType is
+                    NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists or
+                    NodeType.DropDatabase or NodeType.DropDatabaseIfExists or
+                    NodeType.RenameDatabase;
+
+                if (!isDbManagement)
+                {
+                    (CamusIsolationLevel? reqLevel3, CamusTransactionMode? reqMode3) = ParseRequestLevelMode(request);
+                    (newTransaction, txnState) = await BeginOrResumeAsync(
+                        request.DatabaseName,
+                        request.TxnIdPT,
+                        request.TxnIdCounter,
+                        isolationLevel: reqLevel3,
+                        transactionMode: reqMode3
+                    ).ConfigureAwait(false);
+                }
 
                 ExecuteSQLTicket ticket = new(
-                    txnState: txnState,
+                    txnState: txnState!,
                     database: request.DatabaseName ?? "",
-                    sql: request.Sql ?? "",
+                    sql: sql,
                     parameters: request.Parameters
                 );
 
                 ExecuteDDLSQLResult result = await executor.ExecuteDDLSQL(ticket).ConfigureAwait(false);
 
                 if (newTransaction)
-                    await transactions.CommitAsync(result.Database, txnState).ConfigureAwait(false);
+                    await transactions.CommitAsync(result.Database, txnState!).ConfigureAwait(false);
 
                 return new JsonResult(new ExecuteDDLSQLResponse("ok"));
             }
