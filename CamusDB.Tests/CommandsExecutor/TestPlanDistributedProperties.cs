@@ -361,7 +361,7 @@ public class TestPlanDistributedProperties
     [Test]
     public void EstimatedCardinality_IsPopulatedByR9CostModel()
     {
-        // R9: CostEstimator.AnnotatePlan now sets EstimatedCardinality on every node.
+        // CostEstimator.AnnotatePlan now sets EstimatedCardinality on every node.
         // When no live stats are available the planner falls back to a fixed default row count,
         // so all nodes must have a non-null, positive estimate.
         QueryPlan plan = Plan("SELECT * FROM robots");
@@ -461,7 +461,7 @@ public class TestPlanDistributedProperties
 }
 
 /// <summary>
-/// Pins the R4 limitation that distributed-ready properties are not populated for join plans.
+/// Pins the limitation that distributed-ready properties are not populated for join plans.
 ///
 /// JoinQueryPlanner does not call IndexScanSelector for child scan nodes, so:
 ///   - join-side TableScanNodes have OutputOrdering = null (order is undefined)
@@ -561,7 +561,7 @@ public class TestPlanJoinDistributedPropertiesLimitation : SharedNodeBaseTest
     [NonParallelizable]
     public async Task JoinPlan_ChildTableScans_HaveNoOutputOrdering()
     {
-        // This test documents the R4 limitation: child scans inside join plans never have
+        // This test documents the limitation: child scans inside join plans never have
         // OutputOrdering populated because JoinQueryPlanner does not call IndexScanSelector
         // for ORDER BY matching. The test is written as a documentation assertion via the
         // EXPLAIN node names (table-scan appears, no order= in the verbose-rendered plan).

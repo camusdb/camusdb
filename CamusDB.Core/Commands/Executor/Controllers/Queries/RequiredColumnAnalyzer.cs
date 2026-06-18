@@ -47,7 +47,7 @@ internal static class RequiredColumnAnalyzer
     }
 
     /// <summary>
-    /// Computes the minimal column set needed by the UPDATE/DELETE locate scan (R16):
+    /// Computes the minimal column set needed by the UPDATE/DELETE locate scan:
     /// columns referenced in <paramref name="where"/>, <paramref name="filters"/>, and
     /// the RHS of any expression-based SET clauses (<paramref name="exprValues"/>).
     ///

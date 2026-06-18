@@ -13,7 +13,7 @@ namespace CamusDB.Core.Catalogs.Models;
 /// <c>Absent → DeleteOnly → WriteOnly → Public</c>; dropping rolls back the same chain.
 /// Staging an element through intermediate states (rather than flipping it instantly)
 /// is what lets concurrent DML on other nodes avoid lost writes and half-built structures.
-/// See <c>docs/distributed-schema-architecture.md</c> §8 and <see cref="SchemaElementStateRules"/>.
+/// See the architecture documentation and <see cref="SchemaElementStateRules"/>.
 ///
 /// Numeric values are persisted/serialized and must remain stable. Legacy elements with no
 /// stored state default to <see cref="Public"/>.

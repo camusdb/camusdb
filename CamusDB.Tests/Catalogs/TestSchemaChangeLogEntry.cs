@@ -218,7 +218,7 @@ public sealed class TestSchemaChangeLogEntry
         Schema schema = new();
         TableSchema table = CatalogsManager.ApplySchemaDelta(schema, Entry(SchemaOp.CreateTable, CreateTablePayload()))!;
 
-        // Seed a column already staged in DeleteOnly (as the DS7 coordinator will once it
+        // Seed a column already staged in DeleteOnly (as the coordinator will once it
         // drives staged adds); this test exercises the SetElementState advance machinery.
         table.Columns!.Add(new("enabled-col", "enabled", ColumnType.Bool, false, null, SchemaElementState.DeleteOnly));
 

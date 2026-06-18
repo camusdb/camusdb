@@ -177,7 +177,7 @@ public sealed class RowUpdater
     {
         UpdateTicket ticket = state.Ticket;
 
-        // R16: restrict scan-time decode to columns needed by the WHERE filter and any
+        // Restrict scan-time decode to columns needed by the WHERE filter and any
         // expression-based SET values (e.g. SET col = old_col + 1). Rejected candidates
         // are only partially decoded. The write phase re-reads and fully decodes each
         // matched row via LoadWritableRow before applying the change.

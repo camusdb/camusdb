@@ -9,7 +9,7 @@
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
 /// <summary>
-/// Runtime counters collected during EXPLAIN ANALYZE execution (R5).
+/// Runtime counters collected during EXPLAIN ANALYZE execution.
 /// All fields are updated by the executor while rows flow through the operator;
 /// they are read-only after the cursor has been drained.
 /// </summary>

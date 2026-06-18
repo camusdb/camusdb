@@ -493,7 +493,7 @@ public sealed class TestSchemaDdlForwardController
         Assert.AreEqual("failed", resp!.Status);
     }
 
-    // ── OperationId dedup (C3) ────────────────────────────────────────────────
+    // ── OperationId dedup ────────────────────────────────────────────────
 
     [Test]
     public async Task ForwardCreateTable_DuplicateOperationId_ReturnsCachedResponseWithoutReExecuting()

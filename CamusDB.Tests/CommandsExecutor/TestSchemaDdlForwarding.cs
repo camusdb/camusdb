@@ -246,7 +246,7 @@ public sealed class TestSchemaDdlForwarding
         }
     }
 
-    // C2 — 3-node CamusDB data-path test with key-range sharding enabled.
+    // 3-node CamusDB data-path test with key-range sharding enabled.
     //
     // Validates the full key-range data path end-to-end across a 3-node in-memory cluster:
     //   1. CREATE TABLE on the schema leader.

@@ -13,7 +13,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
 /// <summary>
-/// Semi/anti-join plan node produced by the R11 IN/NOT IN rewrite.
+/// Semi/anti-join plan node produced by the IN/NOT IN rewrite.
 ///
 /// Wraps the outer scan (<see cref="PhysicalPlanNode.Input"/>) and, for each outer row,
 /// probes <see cref="InnerTable"/> to decide whether to emit or discard the row:

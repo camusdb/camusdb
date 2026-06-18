@@ -233,7 +233,7 @@ public sealed class TestJoinQueryPlanner
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // R7 — Join-Order Heuristics
+    // Join-Order Heuristics
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]

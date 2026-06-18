@@ -22,7 +22,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// R11 — Semi/Anti-Join Rewrite.
+/// Semi/Anti-Join Rewrite.
 ///
 /// Verifies that eligible IN / NOT IN subqueries are converted to SemiJoinNode probes
 /// at the plan level and produce correct results at the execution level.

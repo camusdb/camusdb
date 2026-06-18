@@ -59,7 +59,7 @@ public sealed class QueryPlanner
         bool scanSatisfiesOrderBy = scanNode.OutputOrdering is not null;
         plan.ScanRowLimit = TryComputeScanRowLimit(ticket, plan.ExecutionFilter, scanSatisfiesOrderBy);
 
-        // R12: streaming distinct detection.
+        // Streaming distinct detection.
         // When SELECT DISTINCT projects only simple column identifiers that are covered by
         // an index prefix, use a streaming (adjacent-key) dedup instead of a hash set,
         // reducing memory from O(distinct-count) to O(1).
@@ -97,7 +97,7 @@ public sealed class QueryPlanner
         if (plan.ExecutionFilter is not null)
             root = new FilterNode(plan.ExecutionFilter, root);
 
-        // R11: wrap the scan with SemiJoinNode(s) for each IN / NOT IN rewrite spec.
+        // Wrap the scan with SemiJoinNode(s) for each IN / NOT IN rewrite spec.
         if (ticket.SemiJoinSpecs is { Count: > 0 })
         {
             foreach (SemiJoinSpec spec in ticket.SemiJoinSpecs)
@@ -155,7 +155,7 @@ public sealed class QueryPlanner
                         root = new ProjectNode(root);
                 }
 
-                // R12: streaming distinct — O(1) memory dedup when the scan guarantees ordered output.
+                // Streaming distinct — O(1) memory dedup when the scan guarantees ordered output.
                 DistinctNode distinctNode = new(root) { IsStreaming = isStreamingDistinct };
                 if (isStreamingDistinct && streamingDistinctOrdering is not null)
                     distinctNode.OutputOrdering = streamingDistinctOrdering;
@@ -215,10 +215,10 @@ public sealed class QueryPlanner
         QueryPlanStepAdapter.PopulateLinearSteps(plan);
         ProjectionPushdownPlanner.Apply(plan);
 
-        // R9: annotate every node with EstimatedCardinality and PlanCost using R8 statistics.
+        // Annotate every node with EstimatedCardinality and PlanCost using R8 statistics.
         CostEstimator.AnnotatePlan(plan.Root, database, table, _stats);
 
-        // R10: record the plan's query-shape ID and schema-version dependencies.
+        // Record the plan's query-shape ID and schema-version dependencies.
         if (ticket.SelectQuery is not null)
             plan.QueryShapeId = QueryShapeComputer.Compute(ticket.SelectQuery);
 
@@ -344,7 +344,7 @@ public sealed class QueryPlanner
         if (scanStep is not null)
             return (ToScanNode(scanStep.Value), scanStep, null);
 
-        // R15: when no regular index scan was chosen, try an index-driven IN-list scan.
+        // When no regular index scan was chosen, try an index-driven IN-list scan.
         // Only attempted when there are IN-list comparisons in the predicate analysis.
         if (analysis.InListComparisons is { Count: > 0 })
         {
@@ -386,7 +386,7 @@ public sealed class QueryPlanner
     /// Attempts to build an <see cref="IndexInListScanNode"/> for the first IN-list comparison
     /// whose column has a usable index and whose list size passes the cost gate.
     ///
-    /// Cost gate (R15):
+    /// Cost gate:
     ///   • With stats: prefer seeks when <c>2·N &lt; tableRowCount</c>
     ///     (each seek = 1 index read + 1 row fetch).
     ///   • Without stats: allow up to <c>MaxInListSizeWithoutStats</c> values (1000).

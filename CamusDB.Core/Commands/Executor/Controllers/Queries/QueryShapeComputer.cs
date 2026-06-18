@@ -15,7 +15,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Computes a stable, literal-independent query-shape identifier for plan-cache hooks (R10).
+/// Computes a stable, literal-independent query-shape identifier for plan-cache hooks.
 ///
 /// The shape ID is derived from the logical structure of a <see cref="SelectQuery"/> — column
 /// names, operators, clause presence, and join topology — with all literal and parameter

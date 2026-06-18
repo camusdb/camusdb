@@ -242,7 +242,7 @@ internal static class IndexScanSelector
     /// <summary>
     /// Finds a readable index whose first <c>distinctColumns.Count</c> columns are exactly the set of
     /// DISTINCT key columns. Such an index guarantees that equal rows are adjacent in the scan,
-    /// enabling streaming deduplication without a hash set (R12).
+    /// enabling streaming deduplication without a hash set.
     /// Returns the first matching index, or null if none qualifies.
     /// </summary>
     internal static TableIndexSchema? TryFindStreamingDistinctIndex(
@@ -276,7 +276,7 @@ internal static class IndexScanSelector
 
     /// <summary>
     /// Returns true when the scan step uses an index whose first N columns cover exactly the
-    /// DISTINCT key set, guaranteeing that equal rows are adjacent in the scan (R12).
+    /// DISTINCT key set, guaranteeing that equal rows are adjacent in the scan.
     /// </summary>
     internal static bool ScanStepCoversDistinctColumns(
         QueryPlanStep scanStep,

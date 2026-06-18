@@ -14,7 +14,7 @@ namespace CamusDB.Core.Catalogs.Models;
 /// A single schema-change <i>delta</i> — the unit of replication, ordering, and idempotency
 /// for distributed DDL. Each entry is serialized, replicated through Kommander/Raft on the
 /// database's schema-log partition, and applied in version order by every node so all nodes
-/// converge on the same schema. See <c>docs/distributed-schema-architecture.md</c> §3.
+/// converge on the same schema. See the architecture documentation.
 ///
 /// An entry is only valid to apply when the node is currently at <see cref="FromVersion"/>;
 /// applying it advances the schema to <see cref="ToVersion"/> (always <c>FromVersion + 1</c>).

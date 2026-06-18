@@ -30,7 +30,7 @@ public sealed class QueryPlan
     /// <summary>
     /// Physical plan nodes corresponding 1-to-1 with <see cref="Steps"/> (same DFS order).
     /// Populated by <see cref="Controllers.Queries.QueryPlanStepAdapter"/> alongside <see cref="Steps"/>.
-    /// Used by the executor to update per-node runtime stats during EXPLAIN ANALYZE (R5).
+    /// Used by the executor to update per-node runtime stats during EXPLAIN ANALYZE.
     /// </summary>
     public List<PhysicalPlanNode> StepNodes { get; } = new();
 
@@ -66,7 +66,7 @@ public sealed class QueryPlan
     internal Dictionary<string, int> TableSchemaVersionByAlias { get; } = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// Stable query-shape identifier (R10). Derived from the logical query structure with all
+    /// Stable query-shape identifier. Derived from the logical query structure with all
     /// literal and parameter values abstracted away. Two queries differing only in constant
     /// values share the same shape; structurally different queries differ.
     /// Null until set by <see cref="Controllers.Queries.QueryPlanner"/> /
@@ -75,7 +75,7 @@ public sealed class QueryPlan
     public string? QueryShapeId { get; internal set; }
 
     /// <summary>
-    /// Ordered schema-version dependencies for this plan (R10). Each entry names a table and
+    /// Ordered schema-version dependencies for this plan. Each entry names a table and
     /// the schema version the plan was built against. Used to detect stale cached plans.
     /// Null until set by the planner.
     /// </summary>
@@ -89,7 +89,7 @@ public sealed class QueryPlan
 
     /// <summary>
     /// When true, the executor populates <see cref="Plans.PlanNodeStats"/> on each node
-    /// reachable via <see cref="StepNodes"/> as rows flow through the pipeline (R5).
+    /// reachable via <see cref="StepNodes"/> as rows flow through the pipeline.
     /// Always false during normal execution; set by EXPLAIN ANALYZE.
     /// </summary>
     public bool CollectRuntimeStats { get; internal set; }

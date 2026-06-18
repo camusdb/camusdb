@@ -481,7 +481,7 @@ public class TestKeyEncoder
     }
 
     // Tokens deliberately span the full UTF-16 range an index key can contain, not just ASCII —
-    // this is what proves ranged TEXT index keys stay order-preserving (C3). Includes: the encoder's
+    // this is what proves ranged TEXT index keys stay order-preserving. Includes: the encoder's
     // own sentinels as CONTENT (U+0000 terminator-lead, U+0001 terminator-tail, U+FFFF escape-tail),
     // the ASCII/Latin boundary, a Latin-1 char, a BMP CJK char (3-byte UTF-8, single UTF-16 unit), and
     // a SUPPLEMENTARY-plane code point as a well-formed surrogate pair (😀 U+1F600 → U+D83D U+DE00).

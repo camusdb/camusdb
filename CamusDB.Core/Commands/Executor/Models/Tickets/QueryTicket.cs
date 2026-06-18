@@ -55,7 +55,7 @@ public sealed class QueryTicket
     internal ExistsSubqueryRegistry? ExistsSubqueries { get; }
 
     /// <summary>
-    /// The logical SELECT query this ticket was derived from (R10). Retained so that
+    /// The logical SELECT query this ticket was derived from. Retained so that
     /// <see cref="Controllers.Queries.QueryPlanner"/> can compute the query-shape ID without
     /// re-parsing. Null for tickets created via the legacy (non-SQL) execution path.
     /// </summary>
@@ -65,7 +65,7 @@ public sealed class QueryTicket
     internal IReadOnlyList<SemiJoinSpec>? SemiJoinSpecs { get; }
 
     /// <summary>
-    /// When set by the UPDATE/DELETE locate phase (R16), overrides the projection-derived
+    /// When set by the UPDATE/DELETE locate phase, overrides the projection-derived
     /// column set for scan-time partial decoding. Contains exactly the columns needed to
     /// evaluate the WHERE and SET expressions — candidates that fail the filter are decoded
     /// no further. The write phase still does a full <c>DecodeWritableAsync</c>.

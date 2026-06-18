@@ -22,7 +22,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// H5 §3.4a #3 — schema-convergence observability:
+/// Schema-convergence observability:
 ///   (a) <see cref="SchemaAckTracker.GetLaggingNodes"/> names the non-acked endpoints (so the
 ///       quorum-backstop / timeout warnings can list who lagged rather than "one or more nodes");
 ///   (b) <see cref="SchemaMetrics"/> counts <c>SchemaCatchingUp</c> fence rejections as an always-on

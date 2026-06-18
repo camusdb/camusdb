@@ -265,7 +265,7 @@ public sealed class TestHttpSchemaDdlForwarder
         Assert.That(handler.LastRequest!.RequestUri!.ToString(), Does.EndWith("/internal/schema-ddl/drop-table"));
     }
 
-    // ── Transport-failure → null (C3) ─────────────────────────────────────────
+    // ── Transport-failure → null ─────────────────────────────────────────
 
     [Test]
     public async Task ForwardCreateTable_ReturnsNullOnHttpRequestException()

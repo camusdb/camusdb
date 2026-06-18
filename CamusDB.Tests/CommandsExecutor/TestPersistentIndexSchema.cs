@@ -25,7 +25,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Proves the B1 persist → reopen → deserialize round-trip for TableSchema.Indexes.
+/// Proves the persist → reopen → deserialize round-trip for TableSchema.Indexes.
 ///
 /// Extends <see cref="BaseTest"/> directly (NOT SharedNodeBaseTest) so each test gets
 /// a per-database SQLite-backed Kahuna node. CloseDatabase flushes + disposes it;

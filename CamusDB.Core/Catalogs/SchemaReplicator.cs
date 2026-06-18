@@ -36,7 +36,7 @@ namespace CamusDB.Core.Catalogs;
 /// <c>OpenDatabase</c> subscriber exists; <see cref="EmbeddedKahuna"/> buffers those entries and
 /// replays them to the first <c>RegisterSchemaApply</c> caller for that partition, so
 /// <see cref="OnSchemaRestoreFinishedAsync"/> always fires after the schema is at the WAL head.
-/// See <c>docs/distributed-schema-architecture.md</c> §6, §F1b.
+/// See the architecture documentation
 /// </summary>
 public sealed class SchemaReplicator
 {
@@ -113,7 +113,7 @@ public sealed class SchemaReplicator
             $"APPLY node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} part={partitionId} " +
             $"entry={entry.FromVersion}->{entry.ToVersion} op={entry.Op} localVer={database.Schema.SchemaVersion}");
 
-        // §3.4 fence: record the committed head before acquiring the lock so the fence gap
+        // Fence: record the committed head before acquiring the lock so the fence gap
         // (HeadSchemaVersion − SchemaVersion) is visible to concurrent DML during apply.
         database.ObserveSchemaEntryHead(entry.ToVersion);
 

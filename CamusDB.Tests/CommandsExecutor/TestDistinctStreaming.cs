@@ -24,7 +24,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// R12 — DISTINCT-Aware Streaming Scan.
+/// DISTINCT-Aware Streaming Scan.
 ///
 /// Verifies that SELECT DISTINCT over columns covered by an ascending index prefix uses
 /// streaming (adjacent-key) deduplication instead of a hash set, and that the plan shape

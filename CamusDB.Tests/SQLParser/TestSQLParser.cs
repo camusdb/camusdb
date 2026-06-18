@@ -1945,7 +1945,7 @@ public class TestSQLParser
     [Test]
     public void TestParseExplainAnalyzeParsesAsExplainAnalyzeNode()
     {
-        // R5: ANALYZE is now a valid EXPLAIN option.
+        // ANALYZE is now a valid EXPLAIN option.
         NodeAst? ast = SQLParserProcessor.Parse("EXPLAIN (ANALYZE) SELECT * FROM users");
         Assert.That(ast, Is.Not.Null);
         Assert.That(ast!.nodeType, Is.EqualTo(NodeType.ExplainAnalyze));

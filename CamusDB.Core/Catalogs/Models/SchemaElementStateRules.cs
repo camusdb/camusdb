@@ -13,7 +13,7 @@ namespace CamusDB.Core.Catalogs.Models;
 /// the visibility/writability rules live in exactly one place. The <c>...Index</c> overloads
 /// additionally require <i>all</i> of the index's columns to satisfy the same rule, which is
 /// what callers (query planner, scanners, insert/update/delete, <c>SHOW</c>) use.
-/// See <c>docs/distributed-schema-architecture.md</c> §8.
+/// See the architecture documentation.
 /// </summary>
 public static class SchemaElementStateRules
 {

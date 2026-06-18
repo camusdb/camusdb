@@ -24,7 +24,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// R3: Acceptance tests for EXPLAIN executed as a query result set.
+/// Acceptance tests for EXPLAIN executed as a query result set.
 /// Each EXPLAIN test asserts:
 ///   - The result rows carry the correct columns (stage, node, detail, estimated_rows, estimated_cost).
 ///   - No table rows are scanned (the plan is built but the data cursor is never opened).
@@ -183,7 +183,7 @@ public class TestExplainExecutor : SharedNodeBaseTest
     [NonParallelizable]
     public async Task TestExplainEstimatedColumnsPresent()
     {
-        // R9: estimated_rows and estimated_cost are now populated by the cost model.
+        // Estimated_rows and estimated_cost are now populated by the cost model.
         // Verify the columns exist and are either Integer64/Float64 (when stats are loaded)
         // or Null (when the background load hasn't completed yet) — both are valid.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();

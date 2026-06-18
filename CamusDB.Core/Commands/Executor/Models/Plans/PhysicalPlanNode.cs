@@ -24,13 +24,13 @@ public abstract class PhysicalPlanNode
     // ── R4: Distributed-ready plan properties ──────────────────────────────
 
     /// <summary>
-    /// The ordering this node guarantees on its output rows (R4).
+    /// The ordering this node guarantees on its output rows.
     /// Set by the planner when an index scan satisfies ORDER BY (sort elision) or when a
     /// SortNode is added. Null means the output order is undefined.
     /// </summary>
     public IReadOnlyList<QueryOrderBy>? OutputOrdering { get; internal set; }
 
-    /// <summary>Estimated output row count; populated by the cost model (R9). Null until then.</summary>
+    /// <summary>Estimated output row count; populated by the cost model. Null until then.</summary>
     public long? EstimatedCardinality { get; internal set; }
 
     /// <summary>
@@ -42,20 +42,20 @@ public abstract class PhysicalPlanNode
     /// <summary>
     /// True when this node's work can be split into per-partition local execution plus a
     /// coordinator-side merge step (e.g. table scan, filter, project, decomposable aggregate).
-    /// Defaults to false; leaf and pipeline nodes that are decomposable override to true (R4).
+    /// Defaults to false; leaf and pipeline nodes that are decomposable override to true.
     /// </summary>
     public virtual bool CanDecomposeToLocalPlusMerge => false;
 
     // ── R5: EXPLAIN ANALYZE runtime counters ───────────────────────────────
 
     /// <summary>
-    /// Cost estimate assigned by the R9 cost model after plan construction.
+    /// Cost estimate assigned by the cost model after plan construction.
     /// Null during normal query execution (only populated when the planner runs with stats).
     /// </summary>
     public PlanCost? Cost { get; internal set; }
 
     /// <summary>
-    /// Runtime counters populated when the query is executed under EXPLAIN ANALYZE (R5).
+    /// Runtime counters populated when the query is executed under EXPLAIN ANALYZE.
     /// Null during normal query execution and plain EXPLAIN.
     /// </summary>
     public PlanNodeStats? Stats { get; internal set; }

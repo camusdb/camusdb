@@ -120,7 +120,7 @@ internal sealed class TestSchemaRestoreF1b : BaseTest
         Assert.Greater(versionBefore, 0, "Schema version must be > 0 after CreateTable");
         Assert.IsTrue(db1.Schema.Tables.ContainsKey(TableName), "Table must be present");
 
-        // Re-persist the full checkpoint unconditionally — the F1b recovery action.
+        // Re-persist the full checkpoint unconditionally — the recovery action.
         await executor.Catalogs.PersistFullSchemaCheckpointAsync(db1);
 
         await executor.CloseDatabase(new CloseDatabaseTicket(dbname));

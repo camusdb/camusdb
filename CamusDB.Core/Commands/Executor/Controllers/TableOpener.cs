@@ -20,7 +20,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// <summary>
 /// Opens a table, returning a <see cref="TableDescriptor"/> that contains the schema
 /// and a <see cref="KvTableStore"/> backed by the database's <see cref="EmbeddedKahuna"/> node.
-/// Index metadata is read from <see cref="TableSchema.Indexes"/> (the B1 replicated source of
+/// Index metadata is read from <see cref="TableSchema.Indexes"/> (the replicated source of
 /// truth), falling back to <see cref="SystemSchema"/> for tables not yet migrated.
 /// No B+Tree pages are loaded.
 /// </summary>
@@ -41,7 +41,7 @@ internal sealed class TableOpener
         if (string.IsNullOrEmpty(tableName))
             throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, "Invalid or empty table name");
 
-        // §3.4 fence: if HeadSchemaVersion − SchemaVersion > 1, at least two committed schema
+        // Fence: if HeadSchemaVersion − SchemaVersion > 1, at least two committed schema
         // deltas are in the apply pipeline but not yet materialised on this node. DML using a
         // schema that is more than one version behind the committed head risks mis-decoding rows
         // written under a newer schema. Reject with a retryable error so the caller can retry
@@ -83,9 +83,9 @@ internal sealed class TableOpener
         // The seed itself is a single replicated meta write that only the meta-partition leader
         // commits (a no-op on other nodes — the descriptor arrives by replication). Idempotent.
         // Never register {db}/meta (Kahuna rejects it — the schema log must stay hash-routed for
-        // total ordering). Index spaces are registered below (C3), after column types are resolved.
+        // total ordering). Index spaces are registered below, after column types are resolved.
         //
-        // DROP TABLE safety (C5): dropping a table evicts its AsyncLazy<TableDescriptor> entry from
+        // DROP TABLE safety: dropping a table evicts its AsyncLazy<TableDescriptor> entry from
         // database.TableDescriptors by name — locally via TableDropper, and on the replicated apply
         // path via SchemaReplicator.InvalidateAppliedTableDescriptor (which also evicts on
         // AddIndex/DropIndex/SetElementState(Index), so index DDL rebuilds rangedIndexIds too). A
@@ -98,7 +98,7 @@ internal sealed class TableOpener
         if (CamusDBConfig.KeyRangeShardingEnabled)
             await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.RowKeySpace);
 
-        // C3: build a column-ID→type lookup used by IsIndexRangeable to gate index registration.
+        // Build a column-ID→type lookup used by IsIndexRangeable to gate index registration.
         // Only non-String column types (Integer64/Float64/Bool/Id/Null) encode to pure ASCII, making
         // their key spaces safe to range under ordinal string comparison end-to-end. String columns
         // stay hash-routed until the persistence-comparator alignment work (C3b) lands.
@@ -114,7 +114,7 @@ internal sealed class TableOpener
             store
         );
 
-        // B1: prefer TableSchema.Indexes (replicated source of truth), fall back to the
+        // Prefer TableSchema.Indexes (replicated source of truth), fall back to the
         // legacy SystemSchema path for tables not yet migrated. LoadMetaAsync populates
         // TableSchema.Indexes in-memory via MigrateIndexesFromSystemSchema, so the
         // SystemSchema fallback is only reached for code paths that open a table descriptor
@@ -144,7 +144,7 @@ internal sealed class TableOpener
                     tableDescriptor.Indexes[entry.Name] =
                         new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State);
 
-                    // C3: register this index's key space for key-range routing if every key
+                    // Register this index's key space for key-range routing if every key
                     // column is a non-String ASCII-encoding type. String stays hash-routed (C3b).
                     if (columnTypeById is not null && IsIndexRangeable(entry, columnTypeById))
                     {

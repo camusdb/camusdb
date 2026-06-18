@@ -53,9 +53,9 @@ public sealed class CatalogsManager
         if (!database.OwnsKahuna)
             return await CreateTableReplicatedAsync(database, ticket, tx).ConfigureAwait(false);
 
-        // §3.1: apply delta under the schema lock (pure in-memory), then release before
+        // Apply delta under the schema lock (pure in-memory), then release before
         // the KV persist — the persist is a replicated 2PC write that must never run
-        // while the schema lock is held (see docs/cluster-schema-concurrency-hardening-spec.md).
+        // while the schema lock is held
         TableSchema tableSchema;
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
@@ -90,7 +90,7 @@ public sealed class CatalogsManager
         if (!database.OwnsKahuna)
             return await AlterTableReplicatedAsync(database, ticket, tx).ConfigureAwait(false);
 
-        // §3.1: apply delta under the schema lock (pure in-memory), persist outside.
+        // Apply delta under the schema lock (pure in-memory), persist outside.
         TableSchema tableSchema;
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
@@ -118,7 +118,7 @@ public sealed class CatalogsManager
         if (!database.OwnsKahuna)
             return await DropTableReplicatedAsync(database, tableName, tx).ConfigureAwait(false);
 
-        // §3.1: apply delta under the schema lock (pure in-memory), persist outside.
+        // Apply delta under the schema lock (pure in-memory), persist outside.
         TableSchema? tableSchema;
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
@@ -682,14 +682,14 @@ public sealed class CatalogsManager
 
     private async Task ReplicateAndWaitLocalApplyAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
-        // H1 §3.1: replicating the schema-log delta (and the checkpoint persist below) re-enters the
+        // Replicating the schema-log delta (and the checkpoint persist below) re-enters the
         // schema partition's serial, inline apply pipeline — which yields on the schema lock. Doing
-        // it while the lock is held deadlocks that pipeline (the §2.1 root cause). DDL proposers must
+        // it while the lock is held deadlocks that pipeline (the root cause). DDL proposers must
         // build/validate + apply the delta under the lock, then RELEASE before calling this. A
-        // non-zero depth here is a §3.1 violation. (See docs/cluster-schema-concurrency-hardening-spec.md.)
+        // non-zero depth here is a bug.
         System.Diagnostics.Debug.Assert(
             database.Schema.LockDepth == 0,
-            $"ReplicateAndWaitLocalApplyAsync called while Schema lock is held on database '{database.Name}' — violates §3.1 (no replicated write under a schema lock)"
+            $"ReplicateAndWaitLocalApplyAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
         );
 
         if (database.SchemaSubsystemDegraded)
@@ -818,7 +818,7 @@ public sealed class CatalogsManager
         }
     }
 
-    // H1: schema checkpoint commits must be bounded — an unbounded CommitAsync(CT.None)
+    // Schema checkpoint commits must be bounded — an unbounded CommitAsync(CT.None)
     // hangs indefinitely when the schema partition Raft actor is stalled, converting a
     // transient cluster hiccup into a permanent 60s test timeout (or production DDL hang).
     // 30 s gives an in-process cluster sufficient headroom on a loaded CI runner;
@@ -881,7 +881,7 @@ public sealed class CatalogsManager
 
     private static async Task WaitForPreviousVersionAcksAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
-        // §3.4 safety: this is the PRE-PROPOSAL gate that enforces the two-version invariant.
+        // Safety: this is the PRE-PROPOSAL gate that enforces the two-version invariant.
         // The quorum backstop MUST NOT fire here — allowing quorum-only convergence on this gate
         // would let the proposer advance N→N+1 while a minority sits at N−1, breaking the
         // invariant and exposing those nodes to mis-decode. enforceFullConvergence=true disables
@@ -1487,11 +1487,11 @@ public sealed class CatalogsManager
 
     public async Task PersistSchemaTableAsync(DatabaseDescriptor database, TableSchema tableSchema, long schemaVersion, KvTransaction tx)
     {
-        // H1 §3.1: replicated KV writes must never be issued while the schema lock is held.
+        // Replicated KV writes must never be issued while the schema lock is held.
         // A non-zero depth here means a caller violated the invariant (lock-order deadlock risk).
         System.Diagnostics.Debug.Assert(
             database.Schema.LockDepth == 0,
-            $"PersistSchemaTableAsync called while Schema lock is held on database '{database.Name}' — violates §3.1 (no replicated write under a schema lock)"
+            $"PersistSchemaTableAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
         );
 
         if (string.IsNullOrWhiteSpace(tableSchema.Id))
@@ -1523,10 +1523,10 @@ public sealed class CatalogsManager
 
     public async Task PersistDroppedTableAsync(DatabaseDescriptor database, string tableId, long schemaVersion, KvTransaction tx)
     {
-        // H1 §3.1: see PersistSchemaTableAsync above.
+        // See PersistSchemaTableAsync above.
         System.Diagnostics.Debug.Assert(
             database.Schema.LockDepth == 0,
-            $"PersistDroppedTableAsync called while Schema lock is held on database '{database.Name}' — violates §3.1"
+            $"PersistDroppedTableAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
         );
         IKahuna kahuna = database.Kahuna.Kahuna;
 
@@ -1548,10 +1548,10 @@ public sealed class CatalogsManager
         if (TestPersistCheckpointException is { } fault)
             throw fault;
 
-        // H1 §3.1: must not be called while Schema lock is held (deadlock risk — see class doc).
+        // Must not be called while Schema lock is held (deadlock risk — see class doc).
         System.Diagnostics.Debug.Assert(
             database.Schema.LockDepth == 0,
-            $"PersistFullSchemaCheckpointAsync called while Schema lock is held on database '{database.Name}' — violates §3.1"
+            $"PersistFullSchemaCheckpointAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
         );
 
         IKahuna kahuna = database.Kahuna.Kahuna;
@@ -1599,7 +1599,7 @@ public sealed class CatalogsManager
     }
 
     // -----------------------------------------------------------------------
-    // Coordinator job persistence (D2)
+    // Coordinator job persistence
     // -----------------------------------------------------------------------
 
     public async Task PersistCoordinatorJobAsync(DatabaseDescriptor database, PersistedCoordinatorJob job)
@@ -1733,7 +1733,7 @@ public sealed class CatalogsManager
             if (migratedLegacySchema)
                 await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
 
-            // B1: Populate TableSchema.Indexes in-memory for any table that still carries
+            // Populate TableSchema.Indexes in-memory for any table that still carries
             // its indexes only in the legacy SystemSchema blob. The migration is in-memory
             // here; the next index DDL write will persist the updated TableSchema to KV via
             // PersistSchemaTableAsync (which includes Indexes via WithoutHistory).

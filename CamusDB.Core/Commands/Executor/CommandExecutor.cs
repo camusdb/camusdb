@@ -360,7 +360,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     #region DDL
 
-    // H1: DDL transaction commits must be bounded — LocateAndCommitTransaction with
+    // DDL transaction commits must be bounded — LocateAndCommitTransaction with
     // CancellationToken.None can hang indefinitely if the schema partition Raft actor
     // is stalled. 10 s covers leader-election time in a healthy cluster while still
     // converting permanent stalls into a recoverable CamusDBException.
@@ -508,7 +508,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>
     /// Re-encodes every existing row in <paramref name="tableName"/> so that the newly added
     /// <paramref name="column"/> (in <c>WriteOnly</c> state) is stored with its default value.
-    /// Used by both the command-path coordinator and the D2 leader-change resume coordinator so
+    /// Used by both the command-path coordinator and the leader-change resume coordinator so
     /// backfill is always part of the resumable sequence.
     /// </summary>
     internal async Task BackfillColumnDefaultsAsync(DatabaseDescriptor database, string tableName, ColumnInfo column)
@@ -1135,8 +1135,8 @@ public sealed class CommandExecutor : IAsyncDisposable
                    ts.Indexes?.Any(ix => string.Equals(ix.Name, ticket.NewName, StringComparison.Ordinal)) == true;
         }
 
-        // Check TableSchema.Indexes (the B1/B2 source of truth). Fall back to SystemSchema
-        // for nodes that haven't yet applied the B1 migration (legacy path).
+        // Check TableSchema.Indexes (the source of truth). Fall back to SystemSchema
+        // for nodes that haven't yet applied the migration (legacy path).
         bool existsInSchema = database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema) &&
                               tableSchema.Indexes is not null &&
                               tableSchema.Indexes.Any(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.Ordinal));
@@ -1496,7 +1496,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Mark the transaction as having executed a statement (all DML is non-SET-TRANSACTION).
         ticket.TxnState.MarkStatementExecuted();
 
-        // §3.5 H6 retry boundary: two transient errors, two different retry owners.
+        // Retry boundary: two transient errors, two different retry owners.
         //   CADB0503 SchemaCatchingUp — retried HERE, inside ExecuteNonSQLQuery. The fence fires
         //     in TableOpener.Open before any write or schema-pin, so the in-flight transaction is
         //     unmodified and the same tx is safely reused on each attempt.
@@ -1603,7 +1603,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
 
-                    // R11: extract eligible IN / NOT IN subqueries as semi/anti-join specs
+                    // Extract eligible IN / NOT IN subqueries as semi/anti-join specs
                     // before SubqueryRewriter materialises them.
                     (selectQuery, List<SemiJoinSpec> semiJoinSpecs) = await semiJoinAnalyzer
                         .AnalyzeAsync(database, selectQuery, ticket)

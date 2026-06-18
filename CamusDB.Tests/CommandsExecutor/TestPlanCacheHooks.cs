@@ -25,7 +25,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// R10 — Plan-Cache Hooks tests.
+/// Plan-Cache Hooks tests.
 ///
 /// Validates:
 ///   1. Single-table EXPLAIN carries a non-null QueryShapeId and SchemaDeps on the plan.

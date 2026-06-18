@@ -21,7 +21,7 @@ namespace CamusDB.Core.Statistics;
 /// <summary>
 /// Manages lightweight advisory table statistics (R8 + R9b).
 ///
-/// R8: row count per table.
+/// Row count per table.
 /// R9b: per-index entry counts and per-column (indexed columns only) running min/max.
 ///
 /// All values are best-effort estimates — the planner uses them as hints and never relies

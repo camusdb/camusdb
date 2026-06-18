@@ -91,7 +91,7 @@ public sealed record DatabaseDescriptor : IDisposable
         await Kahuna.StepDownSchemaPartitionAsync(Id, CancellationToken.None).ConfigureAwait(false);
     }
 
-    // §3.4 fence: highest schema-log entry ToVersion received by this node (committed in Raft,
+    // Fence: highest schema-log entry ToVersion received by this node (committed in Raft,
     // delivered to ApplyAsync or RestoreAsync), regardless of whether it has been applied to the
     // in-memory schema yet. Monotonically increasing; updated before the schema lock is acquired.
     // The gap HeadSchemaVersion − Schema.SchemaVersion > 1 means at least two schema deltas are

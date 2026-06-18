@@ -65,7 +65,7 @@ internal sealed class JoinQueryPlanner
 
         JoinPredicatePushdown.Result pushdown = JoinPredicatePushdown.Analyze(bound, ticket.Where);
 
-        // R7: apply heuristic join-order rewriting before building the physical plan tree.
+        // Apply heuristic join-order rewriting before building the physical plan tree.
         QuerySource orderedSource = JoinOrderOptimizer.Reorder(bound.Query.Source, bound, pushdown);
 
         QueryPlan plan = new(database, ResolvePlanTable(bound), ticket)
@@ -82,12 +82,12 @@ internal sealed class JoinQueryPlanner
         QueryPlanStepAdapter.PopulateLinearSteps(plan);
         ProjectionPushdownPlanner.Apply(plan);
 
-        // R9: annotate the join plan tree with cardinality and cost estimates.
+        // Annotate the join plan tree with cardinality and cost estimates.
         // Join plans use null for the primary table (multi-source); each scan node is
         // independently costed inside CostEstimator.AnnotatePlan.
         CostEstimator.AnnotatePlan(plan.Root, database, table: null, _stats);
 
-        // R10: record the plan's query-shape ID and schema-version dependencies.
+        // Record the plan's query-shape ID and schema-version dependencies.
         // CollectSchemaDeps walks the full BoundSelectQuery tree recursively so that tables
         // referenced only inside derived-table subqueries are included — a schema change to
         // any of them must invalidate a future cached plan.

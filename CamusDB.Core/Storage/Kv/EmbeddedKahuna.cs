@@ -91,7 +91,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     public TimeSpan SchemaAckWaitTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Live-node expiry used by the schema ack gate (H5 §3.4). A peer the schema leader has not
+    /// Live-node expiry used by the schema ack gate. A peer the schema leader has not
     /// heard from (via Raft activity, <see cref="Kommander.IRaft.GetActiveNodes"/>) within this
     /// window is presumed dead and dropped from the ack gate, so a node death does not freeze
     /// subsequent DDL on the strict pre-proposal gate.
@@ -110,7 +110,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     public TimeSpan SchemaAckLiveNodeLease { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// <b>H5 §3.4 — quorum backstop.</b> How long the schema-ack gate tries to achieve
+    /// <b>Quorum backstop.</b> How long the schema-ack gate tries to achieve
     /// <em>full</em> convergence (every live node acked) before falling back to
     /// <em>quorum</em> convergence (⌊N/2⌋+1 of live nodes acked).
     ///
@@ -133,7 +133,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// <summary>
     /// Records the outcome of the most recent <see cref="WaitForSchemaAcksAsync"/> call on this
     /// node. Useful in fault-injection tests to assert whether DDL proceeded via full convergence
-    /// or via the quorum backstop (H5 §3.4). Not meaningful in production (production code checks
+    /// or via the quorum backstop. Not meaningful in production (production code checks
     /// the boolean return value, not this property).
     /// </summary>
     internal SchemaAckOutcome LastGateOutcome { get; private set; }
@@ -142,7 +142,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// The live endpoints that had not acked the target version when the most recent
     /// <see cref="WaitForSchemaAcksAsync"/> resolved via <see cref="SchemaAckOutcome.QuorumBackstop"/>
     /// or <see cref="SchemaAckOutcome.Timeout"/> — i.e. the lagging nodes. Empty on full convergence.
-    /// Lets the DDL warning name who lagged (H5 §3.4a #3) instead of "one or more live nodes".
+    /// Lets the DDL warning name who lagged instead of "one or more live nodes".
     /// </summary>
     internal IReadOnlyList<string> LastGateLaggards { get; private set; } = [];
 
@@ -245,7 +245,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// Resolves the single Raft partition that carries <i>all</i> schema-log traffic for a
     /// database. Uses <c>GetPrefixPartitionKey</c> (hashes the whole <c>{db}/meta</c> string)
     /// so every schema delta for the database lands on one partition and is therefore totally
-    /// ordered. Throws if it resolves to the reserved partition 0. See architecture doc §5.1.
+    /// ordered. Throws if it resolves to the reserved partition 0. See the architecture documentation.
     /// </summary>
     public int SchemaLogPartition(string db)
     {
@@ -395,7 +395,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// apply subscribers (<c>autoCommit: false</c> so apply runs only after the quorum commit).
     /// If it is not the leader it forwards the raw entry through the internal test-only
     /// <c>ISchemaReplicationForwarder</c> (production uses the command-layer ticket forwarder),
-    /// then applies locally on a committed result. See architecture doc §5.2 / §5.3.
+    /// then applies locally on a committed result. See the architecture documentation.
     /// </summary>
     public async Task<SchemaReplicationResult> ReplicateSchemaChangeAsync(
         string db,
@@ -578,7 +578,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// <param name="enforceFullConvergence">
     /// When <see langword="true"/> the quorum backstop is disabled — the gate waits for every
     /// live node to ack, regardless of <see cref="SchemaAckQuorumBackstopDelay"/>. Use this
-    /// for the <em>pre-proposal</em> gate (§3.4) that enforces the two-version safety invariant:
+    /// for the <em>pre-proposal</em> gate that enforces the two-version safety invariant:
     /// allowing quorum-only convergence there lets a proposer advance N→N+1 while a minority
     /// sits at N−1, breaking the invariant and risking schema mis-decode on those nodes. The
     /// quorum backstop is appropriate only for the <em>post-commit</em> ack gate (after the
@@ -615,7 +615,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             // the set via Raft activity, E2). The tracker must NOT also expire members on its
             // apply-derived LastSeen — that would false-evict a Raft-alive node that is merely slow
             // to apply a schema delta. So the tracker waits for every live member to ack, with the
-            // quorum backstop as the H5 liveness escape hatch (post-commit gate only).
+            // quorum backstop as the liveness escape hatch (post-commit gate only).
             Timeout.InfiniteTimeSpan,
             backstopDelay,
             cancellationToken
@@ -647,7 +647,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
     /// <summary>
     /// Registers a callback that fires when THIS node becomes the schema leader for
-    /// <paramref name="db"/>. Useful for coordinator resume on leader change (D2).
+    /// <paramref name="db"/>. Useful for coordinator resume on leader change.
     /// Returns an <see cref="IDisposable"/> that unhooks the handler on dispose.
     /// </summary>
     public IDisposable RegisterSchemaLeaderCallback(string db, Func<Task> onBecameLeader)

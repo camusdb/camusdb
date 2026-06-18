@@ -16,7 +16,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
 /// Assigns <see cref="PlanCost"/> and <see cref="PhysicalPlanNode.EstimatedCardinality"/> to every
-/// node in a physical plan tree (R9).
+/// node in a physical plan tree.
 ///
 /// Selectivity assumptions (fixed defaults; R9b will supply per-column stats once implemented):
 /// <list type="bullet">
@@ -41,7 +41,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///   <c>2 × estimated_index_entries</c>. A full primary table scan costs <c>tableRowCount × 1</c>.
 ///   Prefer full scan when <c>estimated_index_entries ≥ tableRowCount × BreakevenFraction</c>.
 ///
-/// Join cost accuracy (R9):
+/// Join cost accuracy:
 ///   For single-table plans, the primary table's R8 row count is resolved once and threaded
 ///   through the tree. For join plans (called with <paramref name="table"/> = null), each
 ///   <see cref="TableScanNode"/> resolves its own table's stats via

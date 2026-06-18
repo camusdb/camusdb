@@ -14,7 +14,7 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// In-memory schema of a single database: the monotonic version counter and the live table
 /// set. This is the local materialization of the replicated state machine — it is advanced
 /// by <c>CatalogsManager.ApplySchemaDelta</c> as committed <see cref="Catalogs.Models.SchemaChangeLogEntry"/>
-/// deltas are applied. See <c>docs/distributed-schema-architecture.md</c> §7.1.
+/// deltas are applied. See the architecture documentation.
 /// </summary>
 public sealed class Schema : IDisposable
 {
@@ -27,19 +27,19 @@ public sealed class Schema : IDisposable
     /// <summary>
     /// Serializes schema validation and apply so deltas are applied one at a time.
     /// Acquire via <see cref="AcquireLockAsync"/> and release via <see cref="ReleaseLock"/>
-    /// so the depth counter stays in sync for §3.1 assertions.
+    /// so the depth counter stays in sync for the lock-depth assertions.
     /// </summary>
     public SemaphoreSlim Semaphore { get; } = new(1, 1);
 
-    // H1 §3.1: tracks how many callers currently hold Schema.Semaphore.
-    // Zero means nobody holds it; non-zero flags a §3.1 invariant violation when
+    // Tracks how many callers currently hold Schema.Semaphore.
+    // Zero means nobody holds it; non-zero flags an invariant violation when
     // a replicated KV write is attempted. Interlocked for thread safety across
     // the async continuations that may resume on different threads.
     private int _lockDepth;
 
     /// <summary>
-    /// Number of callers currently holding <see cref="Semaphore"/>. Used by §3.1
-    /// assertions to detect replicated KV writes while the schema lock is held.
+    /// Number of callers currently holding <see cref="Semaphore"/>. Used by the
+    /// lock-depth assertions to detect replicated KV writes while the schema lock is held.
     /// </summary>
     public int LockDepth => Volatile.Read(ref _lockDepth);
 

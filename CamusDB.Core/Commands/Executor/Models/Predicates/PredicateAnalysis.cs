@@ -27,7 +27,7 @@ public sealed class PredicateAnalysis
 
     /// <summary>
     /// IN-list predicates of the form <c>column IN (v1, v2, …)</c> where every list item is a
-    /// constant or resolved parameter. These are candidates for index-driven multi-seek (R15).
+    /// constant or resolved parameter. These are candidates for index-driven multi-seek.
     /// When no usable index is found, <see cref="Controllers.Queries.PredicateAnalyzer.BuildExecutionFilter"/>
     /// folds them back into the per-row filter as residual conjuncts.
     /// </summary>

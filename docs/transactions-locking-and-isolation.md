@@ -429,8 +429,7 @@ else is cheaper and fully concurrent under Read Committed.
 > **deadlock-fairness** ordering (a deterministic winner instead of mutual aborts), **lock escalation**
 > for very large reads (per-row read locks collapse to one whole-table lock past a threshold), and
 > **tighter predicate-lock bounds** so a bounded scan / `UPDATE` / `DELETE` locks only its key range
-> rather than the whole table. Any further optional refinements are tracked in
-> `../specs/serializable-isolation-future-work.md`.
+> rather than the whole table.
 
 ---
 

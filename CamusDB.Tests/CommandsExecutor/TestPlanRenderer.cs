@@ -26,7 +26,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
 /// Unit tests for <see cref="PlanRenderer"/> — verifies exact plan-string output for all acceptance
-/// criteria specified in QUERY_PLANNER_REMAINING.md §R1.
+/// criteria specified for the query planner.
 ///
 /// Scope note: these tests exercise SelectQueryCreator → QueryTicketAdapter → QueryPlanner.GetPlan →
 /// PlanRenderer only. That path intentionally skips the QueryBinder's column-existence validation, so

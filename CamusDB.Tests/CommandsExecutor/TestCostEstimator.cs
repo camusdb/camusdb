@@ -27,7 +27,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// R9 — Cost Model tests.
+/// Cost Model tests.
 ///
 /// Validates:
 ///   1. EXPLAIN rows carry non-null estimated_rows and estimated_cost after R9 wiring.

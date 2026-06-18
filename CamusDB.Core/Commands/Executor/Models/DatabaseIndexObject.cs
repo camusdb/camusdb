@@ -17,7 +17,7 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// online build it carries the backfill checkpoint (<see cref="StartOffset"/>, the last
 /// completed rowId) and the element <see cref="State"/>; the index flips to
 /// <see cref="SchemaElementState.Public"/> only once the backfill completes. See
-/// <c>docs/distributed-schema-architecture.md</c> §7.3 / §8.
+/// the architecture documentation
 /// </summary>
 public sealed record DatabaseIndexObject
 {

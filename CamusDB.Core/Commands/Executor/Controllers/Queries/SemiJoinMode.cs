@@ -8,7 +8,7 @@
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
-/// <summary>Discriminates the three semi/anti-join flavours produced by the R11 rewrite.</summary>
+/// <summary>Discriminates the three semi/anti-join flavours produced by the rewrite.</summary>
 public enum SemiJoinMode
 {
     /// <summary>Emit the outer row when the inner probe finds at least one match (IN rewrite).</summary>

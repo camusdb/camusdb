@@ -141,7 +141,7 @@ public sealed class TableColumnAdder
 
     /// <summary>
     /// Re-encodes every existing row in the table so that columns added after the row was
-    /// written receive their default value.  Called by the cluster AddColumn path (D3) after
+    /// written receive their default value. Called by the cluster AddColumn path after
     /// the coordinator advances the column to <c>WriteOnly</c> state, at which point
     /// <see cref="RowEncoder.Encode"/> will include the column in the encoded bytes.
     /// </summary>

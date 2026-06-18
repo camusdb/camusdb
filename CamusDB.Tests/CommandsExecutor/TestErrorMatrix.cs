@@ -25,7 +25,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// R13 — Error &amp; Semantics Matrix.
+/// Error &amp; Semantics Matrix.
 ///
 /// Each test covers one specific error case, asserting:
 ///   (a) the engine throws <see cref="CamusDBException"/>,

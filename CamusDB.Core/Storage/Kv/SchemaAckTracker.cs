@@ -18,7 +18,7 @@ internal enum SchemaAckOutcome
     /// <summary>
     /// A quorum of live nodes acked within <c>quorumBackstopDelay</c>; one or more minority
     /// followers were still lagging but DDL is safe to proceed (the committed log is durable on
-    /// the majority). This is the H5 liveness path.
+    /// the majority). This is the liveness path.
     /// </summary>
     QuorumBackstop,
 
@@ -31,7 +31,7 @@ internal enum SchemaAckOutcome
 /// ("acked"). This is the data behind the <b>two-version invariant</b>: a DDL proposer waits
 /// via <see cref="WaitForAllLiveAsync"/> until every live node has acked the previous version
 /// before proposing the next, so the cluster never spans more than two adjacent schema versions.
-/// See <c>docs/distributed-schema-architecture.md</c> §6.2.
+/// See the architecture documentation.
 ///
 /// Live membership is sourced from Raft (<c>GetNodes()</c> + local endpoint) at query time,
 /// not from a manual register set. This closes the gap where a deregistered-but-up node still
@@ -45,7 +45,7 @@ internal enum SchemaAckOutcome
 /// This bounds DDL latency to <c>quorumBackstopDelay</c> even when minority followers are slow
 /// or unreachable — the committed Raft log already guarantees durability on the majority, so DDL
 /// is safe to proceed. See <see cref="SchemaAckOutcome"/> and
-/// <c>docs/cluster-schema-concurrency-hardening-spec.md</c> §3.4.
+///
 /// </para>
 /// </summary>
 internal sealed class SchemaAckTracker
@@ -77,7 +77,7 @@ internal sealed class SchemaAckTracker
     /// Polls until every endpoint returned by <paramref name="getLiveMembers"/> has acked
     /// <paramref name="schemaVersion"/> (full convergence), OR — when
     /// <paramref name="quorumBackstopDelay"/> is finite — until a majority (⌊N/2⌋+1) of those
-    /// members has acked and the backstop delay has elapsed (quorum backstop, H5 §3.4).
+    /// members has acked and the backstop delay has elapsed (quorum backstop).
     /// </summary>
     /// <param name="quorumBackstopDelay">
     /// How long to wait for full convergence before accepting quorum. Pass
@@ -237,8 +237,8 @@ internal sealed class SchemaAckTracker
     /// <summary>
     /// Returns the endpoints in <paramref name="liveMembers"/> that have <b>not</b> acked
     /// <paramref name="schemaVersion"/> — i.e. no ack record at all, or a recorded version still
-    /// behind the target. Used to name the laggards in the quorum-backstop / timeout warnings (H5
-    /// §3.4a #3). Lease expiry is intentionally ignored here: this answers "who is behind?", which
+    /// behind the target. Used to name the laggards in the quorum-backstop / timeout warnings.
+    /// Lease expiry is intentionally ignored here: this answers "who is behind?", which
     /// is exactly the set an operator wants named, independent of whether they are also presumed
     /// dead. A best-effort snapshot — a node may catch up between this call and the log line.
     /// </summary>

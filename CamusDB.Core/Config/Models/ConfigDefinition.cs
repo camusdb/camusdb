@@ -31,7 +31,7 @@ public class ConfigDefinition
     /// Per-peer HTTP base addresses, parallel to <see cref="Peers"/>.
     /// Entry i is the HTTP URL for the node whose Raft endpoint is Peers[i].
     /// When populated and Peers.Count == HttpPeers.Count, the endpoint map uses
-    /// these explicit addresses instead of the uniform-port fallback (C1).
+    /// these explicit addresses instead of the uniform-port fallback.
     /// Format: "host:httpPort" (e.g. "192.168.1.10:5095").
     /// </summary>
     public List<string> HttpPeers { get; set; } = [];
@@ -54,7 +54,7 @@ public class ConfigDefinition
     public int SchemaAckLiveNodeLeaseMs { get; set; } = 30_000;
 
     /// <summary>
-    /// Minimum interval between background flushes of advisory table statistics (R8) to
+    /// Minimum interval between background flushes of advisory table statistics to
     /// durable storage, in milliseconds, per table. <c>0</c> flushes after every change;
     /// <c>-1</c> disables auto-flush (persist only on explicit flush / close); a positive
     /// value caps flush frequency. Maps to <c>CamusDBConfig.StatsFlushIntervalMs</c>.

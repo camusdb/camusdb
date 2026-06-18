@@ -14,7 +14,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Deterministic, rule-based join-order heuristic (R7).
+/// Deterministic, rule-based join-order heuristic.
 ///
 /// Rules (applied in priority order, stable for ties):
 ///   0 — source has an equality predicate on a unique-indexed column (point-lookup; at most one row)

@@ -15,7 +15,7 @@ namespace CamusDB.Core.Statistics.Models;
 /// and reloaded on database open. All values are best-effort estimates — consumers must
 /// treat them as hints and never rely on them for correctness.
 ///
-/// R8: <see cref="RowCount"/> tracked and persisted.
+/// <see cref="RowCount"/> tracked and persisted.
 /// R9b: <see cref="IndexEntryCounts"/> and <see cref="ColumnStats"/> fully populated.
 /// </summary>
 public sealed class TableStatistics

@@ -996,10 +996,14 @@ on an older layout decode with their own version and read `age` with current vis
 
 ### Known limitations & future work
 
-- **Renames.** `RenameTable`/`RenameIndex`/`RenameColumn` are not yet implemented. They should
-  be metadata-only (mutate `Name`, leave the immutable `Id` so no rows/indexes move) and drain
-  old names across the two-version window. The positional/ID-keyed encoding (§7.4) already makes
-  the data side free.
+- ~~**Renames.**~~ **Implemented.** `RENAME TABLE`, `RENAME COLUMN`, and
+  `RENAME INDEX` are metadata-only operations: the immutable `Id` is preserved so no rows
+  or index entries move, and `TableSchema.Columns`/`Indexes` are updated in place. Column
+  renames propagate retroactively to all `SchemaHistory` snapshots (the rename is a label
+  change; positional/ID-keyed encoding means every row decodes correctly under the new name
+  regardless of schema version). All three syntaxes are exposed exclusively through SQL via
+  the `/execute-sql-ddl` route; no typed REST endpoints are added. Forwarding and cluster
+  convergence use the existing `ExecuteDdlInTransaction` + replication path.
 - ~~**Ack transport / per-instance tracker.**~~ **Implemented.** `SchemaAckTracker` is now
   a per-`EmbeddedKahuna` instance. `RecordAndPublishSchemaApplied` sends follower acks to the
   leader via `ISchemaAckSender` (HTTP in production, in-process relay in tests). See §6.2.

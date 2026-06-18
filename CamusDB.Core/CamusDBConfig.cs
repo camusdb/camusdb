@@ -29,7 +29,7 @@ public static class CamusDBConfig
 
     /// <summary>
     /// Minimum interval, in milliseconds, between background flushes of advisory table
-    /// statistics (R8) to durable Kahuna storage, per table. Statistics are updated in
+    /// statistics to durable Kahuna storage, per table. Statistics are updated in
     /// memory on every DML but only persisted at most once per this interval, so a write
     /// burst produces a single disk write rather than one per row.
     ///
@@ -93,12 +93,12 @@ public static class CamusDBConfig
     /// opens-and-registers independently), and the range-lock path switches from prefix locks to
     /// Kahuna range locks (prefix locks are rejected on ranged spaces).
     ///
-    /// Second slice (C3): secondary indexes whose key columns are all non-String ASCII-encoding
+    /// Second slice: secondary indexes whose key columns are all non-String ASCII-encoding
     /// types (Integer64/Float64/Bool/Id/Null) are also registered and range-locked. String-keyed
     /// indexes stay hash-routed until the persistence comparator is aligned (C3b). Kahuna
     /// auto-split/merge is not wired (logical range routing + per-range locks work without it).
     ///
-    /// <b>Operational requirement (C6):</b> key-range routing requires <c>InitialPartitions ≥ 2</c>
+    /// <b>Operational requirement:</b> key-range routing requires <c>InitialPartitions ≥ 2</c>
     /// in <c>config.yml</c>. With a single partition the Kahuna registry call is a silent no-op
     /// (stays hash-routed, range locks transparently fall back to the single-partition hash path),
     /// so enabling this flag on a single-partition node is safe but has no effect. A startup

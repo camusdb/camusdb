@@ -702,7 +702,7 @@ public class TestQueryPlanner
     [Test]
     public void PlanDistinctWithOrderByOverIndexedColumn_ElidesSortNode()
     {
-        // R12: streaming distinct on the PK index covers `id`; ORDER BY id ASC matches the
+        // Streaming distinct on the PK index covers `id`; ORDER BY id ASC matches the
         // streaming ordering → SortNode is elided. No SortBy in the plan.
         QueryTicket ticket = CreateQueryTicketFromSelectSql(
             "SELECT DISTINCT id FROM robots WHERE id = @id ORDER BY id",
@@ -747,7 +747,7 @@ public class TestQueryPlanner
     }
 
     // ────────────────────────────────────────────────────────────────────────────
-    // R16 — locate-column plumbing tests
+    // Locate-column plumbing tests
     // ────────────────────────────────────────────────────────────────────────────
 
     /// <summary>

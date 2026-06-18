@@ -24,7 +24,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// R8 — Lightweight Table Statistics tests.
+/// Lightweight Table Statistics tests.
 /// </summary>
 [TestFixture]
 public sealed class TestStatisticsManager : BaseTest

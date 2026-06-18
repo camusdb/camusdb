@@ -148,7 +148,7 @@ Key points:
 ## When retry is not enough
 
 Two transactions in a repeated mutual conflict will keep aborting each other. The bounded-wait →
-abort policy (Task 9, `LockWaitDeadlineMs = 500 ms`) prevents indefinite stall, but does not
+abort policy (`LockWaitDeadlineMs = 500 ms`) prevents indefinite stall, but does not
 guarantee fairness. If an operation consistently fails despite retrying, investigate whether the
 contention pattern can be reduced (shorter transactions, fewer rows per transaction, staggered
 access order).

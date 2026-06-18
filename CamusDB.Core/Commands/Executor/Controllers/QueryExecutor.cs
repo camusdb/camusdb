@@ -124,7 +124,7 @@ internal sealed class QueryExecutor
                     if (plan.DataCursor is null)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
-                    // R12: route to streaming (adjacent-key) or hash dedup based on plan node flag.
+                    // Route to streaming (adjacent-key) or hash dedup based on plan node flag.
                     {
                         DistinctNode distinctNode = (DistinctNode)plan.StepNodes[i];
                         plan.DataCursor = distinctNode.IsStreaming
@@ -367,7 +367,7 @@ internal sealed class QueryExecutor
     /// <summary>
     /// Executes an IN-list scan by performing one index seek per distinct value and unioning
     /// the results. Duplicate row IDs (repeated values or overlapping non-unique entries)
-    /// are suppressed so each matched row is emitted at most once (R15).
+    /// are suppressed so each matched row is emitted at most once.
     /// </summary>
     private async IAsyncEnumerable<QueryResultRow> QueryUsingInListIndexInternal(
         QueryPlan plan,

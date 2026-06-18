@@ -21,7 +21,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// R16 — Minimize Row Decoding in UPDATE/DELETE Locate Phase.
+/// Minimize Row Decoding in UPDATE/DELETE Locate Phase.
 ///
 /// The locate scan now decodes only the columns referenced by the WHERE clause
 /// and any expression-based SET values. Rejected candidates are skipped after
@@ -31,7 +31,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// </summary>
 [TestFixture]
 [NonParallelizable]
-public sealed class TestR16LocatePartialDecode : BaseTest
+public sealed class TestLocatePartialDecode : BaseTest
 {
     /// <summary>
     /// Wide table with many non-indexed columns; rows split between two regions.

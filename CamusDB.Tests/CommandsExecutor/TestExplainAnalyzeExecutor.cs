@@ -23,7 +23,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// R5: Acceptance tests for EXPLAIN (ANALYZE) — executes the query, collects runtime stats,
+/// Acceptance tests for EXPLAIN (ANALYZE) — executes the query, collects runtime stats,
 /// and returns one result row per physical plan node with actual counters.
 /// </summary>
 public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
@@ -106,7 +106,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
         return rows;
     }
 
-    // R10: the last row of EXPLAIN ANALYZE output is now a "plan-info" metadata row.
+    // The last row of EXPLAIN ANALYZE output is now a "plan-info" metadata row.
     // Use this helper to get the last *physical node* row (scan, filter, etc.) for stats checks.
     private static QueryResultRow LastDataRow(List<QueryResultRow> rows) =>
         rows.Last(r => r.Row.TryGetValue("node", out ColumnValue? n) && n!.StrValue != "plan-info");
@@ -164,7 +164,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
     [Test]
     public async Task TestExplainAnalyze_EstimatedColumnsPresent()
     {
-        // R9: estimated_rows and estimated_cost are now populated by the cost model.
+        // Estimated_rows and estimated_cost are now populated by the cost model.
         // Accept Integer64/Float64 (stats loaded) or Null (stats not yet available).
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
 

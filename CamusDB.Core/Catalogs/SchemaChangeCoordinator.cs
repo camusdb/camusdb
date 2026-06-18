@@ -19,7 +19,7 @@ namespace CamusDB.Core.Catalogs;
 /// ack the committed version before emitting the next delta.
 ///
 /// <para>
-/// This implements the <em>two-version invariant</em> (architecture doc §6.2) for
+/// This implements the <em>two-version invariant</em> (the architecture documentation) for
 /// multi-step sequences: after each step all nodes are on the same version before the
 /// coordinator advances to the next, so the cluster never has more than two adjacent
 /// schema versions in flight simultaneously.
@@ -28,7 +28,7 @@ namespace CamusDB.Core.Catalogs;
 /// <para>
 /// The coordinator is stateless beyond the job description; persistence for leader-change
 /// resume is added by D2.  It must be called on the schema leader — followers should
-/// forward DDL via the production HTTP path (Workstream C) rather than running the
+/// forward DDL via the production HTTP path rather than running the
 /// coordinator directly.
 /// </para>
 /// </summary>
@@ -249,7 +249,7 @@ public sealed class SchemaChangeCoordinator
     /// <summary>
     /// Loads all persisted coordinator jobs for <paramref name="database"/> and
     /// drives each to its target state.  Called by the schema leader callback
-    /// (D2) when this node wins a new election so interrupted sequences resume.
+    /// when this node wins a new election so interrupted sequences resume.
     /// </summary>
     public async Task ResumeJobsAsync(DatabaseDescriptor database)
     {

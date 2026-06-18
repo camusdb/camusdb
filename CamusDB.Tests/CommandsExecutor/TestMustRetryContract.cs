@@ -22,7 +22,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// H6 §3.5 — cross-subsystem MustRetry / ordering contract.
+/// Cross-subsystem MustRetry / ordering contract.
 ///
 /// Validates that a transient <c>SchemaCatchingUp</c> (CADB0503) fence error
 /// is automatically retried by <c>ExecuteNonSQLQuery</c> and resolves to success
@@ -33,7 +33,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// CADB0501 error-code distinction is maintained for the commit path.
 /// </summary>
 [TestFixture]
-public sealed class TestH6MustRetryContract : SharedNodeBaseTest
+public sealed class TestMustRetryContract : SharedNodeBaseTest
 {
     private static CreateTableTicket BasicTable(string dbname, string tableName) => new(
         databaseName: dbname,
@@ -51,7 +51,7 @@ public sealed class TestH6MustRetryContract : SharedNodeBaseTest
         ifNotExists: false
     );
 
-    // H6 §3.5 — fence retry contract: a transient SchemaCatchingUp error (CADB0503) is
+    // Fence retry contract: a transient SchemaCatchingUp error (CADB0503) is
     // retryable by the caller. After the fence clears (schema applied catches up), the
     // same DML operation succeeds with a new transaction.
     //
@@ -127,7 +127,7 @@ public sealed class TestH6MustRetryContract : SharedNodeBaseTest
             "INSERT must succeed after the caller retries once the fence has cleared");
     }
 
-    // H6 §3.5 — fence exhaustion: after MaxFenceRetries (3) the fence exception propagates
+    // Fence exhaustion: after MaxFenceRetries (3) the fence exception propagates
     // as CADB0503 (SchemaCatchingUp), NOT as CADB0501 (TransactionAlreadyCompleted).
     // This verifies the error code is correctly typed even at retry exhaustion.
     [Test]

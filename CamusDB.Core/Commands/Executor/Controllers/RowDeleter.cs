@@ -72,7 +72,7 @@ internal sealed class RowDeleter
     {
         DeleteTicket ticket = state.Ticket;
 
-        // R16: decode only the columns the WHERE/filter needs during the locate scan.
+        // Decode only the columns the WHERE/filter needs during the locate scan.
         // The write phase calls LoadWritableRow which does a full decode per matched row.
         // Returns null when the WHERE contains subquery nodes — fall back to full decode.
         IReadOnlySet<string>? locateColumns = RequiredColumnAnalyzer.ComputeForLocate(

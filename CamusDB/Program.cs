@@ -166,7 +166,7 @@ ThreadPool.SetMinThreads(1024, 512);
 
 WebApplication app = builder.Build();
 
-// C6: warn early when key-range sharding is enabled but InitialPartitions < 2.
+// Warn early when key-range sharding is enabled but InitialPartitions < 2.
 // With a single partition Kahuna treats RegisterKeyRangeAsync as a no-op, so the flag is
 // harmless but silent — operators must know they need ≥ 2 partitions to benefit.
 if (CamusDBConfig.KeyRangeShardingEnabled && config.InitialPartitions < 2)

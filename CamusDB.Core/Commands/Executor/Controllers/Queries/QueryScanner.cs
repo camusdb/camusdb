@@ -37,7 +37,7 @@ internal sealed class QueryScanner
         int visibilityVersion = plan.TableSchemaVersion;
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
-        // R1: acquire a phantom-protection range lock on the row key space before the scan.
+        // Acquire a phantom-protection range lock on the row key space before the scan.
         // Shared for SELECT; Exclusive for UPDATE/DELETE (blocks concurrent readers from
         // seeing the range while the mutation is in flight). Same-tx re-acquisition is
         // idempotent. Read-only transactions skip this.
@@ -99,7 +99,7 @@ internal sealed class QueryScanner
         bool unique = index.Type == IndexType.Unique;
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
-        // R1: phantom-protection range lock on the index key space (mirrors ScanUsingTableIndex).
+        // Phantom-protection range lock on the index key space (mirrors ScanUsingTableIndex).
         await table.Store.AcquireIndexRangeLockAsync(ticket.TxnState, index.Name,
             exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
 

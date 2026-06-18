@@ -61,7 +61,7 @@ public static class PlanRenderer
 
     /// <summary>
     /// Walks the plan tree depth-first (parent before children), yielding (name, detail) per node.
-    /// Used by both <see cref="Render"/> and the EXPLAIN result-set executor (R3).
+    /// Used by both <see cref="Render"/> and the EXPLAIN result-set executor.
     /// </summary>
     public static IEnumerable<(string Name, string Detail)> WalkNodes(PhysicalPlanNode root, QueryPlan plan)
     {

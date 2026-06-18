@@ -168,7 +168,7 @@ internal sealed class TestTableDropper : SharedNodeBaseTest
         Assert.AreEqual(ColumnType.Integer64, tableSchema.Columns![4].Type);
     }
 
-    // C5: Registration lifecycle — DROP TABLE + recreate with same name under key-range sharding.
+    // Registration lifecycle — DROP TABLE + recreate with same name under key-range sharding.
     // Verifies that (a) the old table's TableDescriptor is evicted on DROP so the new table's
     // lazy open doesn't return stale schema or stale row data, (b) the new table's RegisterKeyRangeAsync
     // call registers a distinct key space (new ObjectId), and (c) INSERT + SELECT on the recreated

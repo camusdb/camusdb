@@ -13,7 +13,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Describes a semi/anti-join extracted from an IN / NOT IN subquery predicate (R11).
+/// Describes a semi/anti-join extracted from an IN / NOT IN subquery predicate.
 /// Produced by <see cref="SemiJoinAnalyzer"/> and consumed by <see cref="QueryPlanner"/>
 /// to build a <see cref="CamusDB.Core.CommandsExecutor.Models.Plans.SemiJoinNode"/> into the plan.
 /// </summary>

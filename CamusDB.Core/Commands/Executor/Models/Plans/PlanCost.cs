@@ -9,7 +9,7 @@
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
 /// <summary>
-/// Cost estimate for a single physical plan node (R9).
+/// Cost estimate for a single physical plan node.
 ///
 /// All fields count logical I/O units. KV point lookups, range-scan entries, and primary-store
 /// row fetches each cost 1.0 unit — they are treated as equally expensive at this stage because

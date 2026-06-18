@@ -57,7 +57,7 @@ public static class CamusDBErrorCodes
     /// Unlike <see cref="TransactionAlreadyCompleted"/>, this is transient — the caller should
     /// retry the entire operation from BeginAsync.
     ///
-    /// §3.5 retry boundary: the executor auto-retries the schema-catch-up fence (<see
+    /// Retry boundary: the executor auto-retries the schema-catch-up fence (<see
     /// cref="SchemaCatchingUp"/>, CADB0503) inside ExecuteNonSQLQuery because the fence fires
     /// before any write and the same transaction is still usable. CADB0504 is intentionally NOT
     /// auto-retried at the executor level: by the time CommitAsync throws it, the operation may

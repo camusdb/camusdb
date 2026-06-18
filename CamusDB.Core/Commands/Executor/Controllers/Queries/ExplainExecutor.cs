@@ -21,7 +21,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
 /// Executes EXPLAIN statements by running parse→bind→plan (without execution) and
-/// returning one result row per physical plan node (R3).
+/// returning one result row per physical plan node.
 ///
 /// KNOWN LIMITATION — subquery materialization during EXPLAIN (R3 conscious decision):
 /// The prepare pipeline calls SubqueryRewriter.RewriteSelectQueryAsync (which executes
@@ -110,7 +110,7 @@ internal sealed class ExplainExecutor
             });
         }
 
-        // R10: emit one trailing plan-info row with shape and schema-dep metadata when available.
+        // Emit one trailing plan-info row with shape and schema-dep metadata when available.
         if (plan.QueryShapeId is not null)
         {
             string schemaDepsStr = plan.SchemaDeps is { Count: > 0 }
@@ -130,7 +130,7 @@ internal sealed class ExplainExecutor
 
     /// <summary>
     /// Executes the query for real (draining the full cursor), collects runtime counters per
-    /// physical plan node, then yields one result row per node with actual stats (R5).
+    /// physical plan node, then yields one result row per node with actual stats.
     ///
     /// The result row schema extends the plain EXPLAIN schema with four actual columns:
     /// <c>actual_rows INT64</c>, <c>actual_time_ms FLOAT64</c>, <c>kv_lookups INT64</c>,
@@ -212,7 +212,7 @@ internal sealed class ExplainExecutor
             });
         }
 
-        // R10: emit one trailing plan-info row with shape and schema-dep metadata when available.
+        // Emit one trailing plan-info row with shape and schema-dep metadata when available.
         if (plan.QueryShapeId is not null)
         {
             string schemaDepsStr = plan.SchemaDeps is { Count: > 0 }
@@ -242,7 +242,7 @@ internal sealed class ExplainExecutor
     {
         SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(selectAst);
 
-        // R11: extract semi/anti-join specs before SubqueryRewriter materialises IN/NOT IN.
+        // Extract semi/anti-join specs before SubqueryRewriter materialises IN/NOT IN.
         List<SemiJoinSpec> semiJoinSpecs = [];
         if (semiJoinAnalyzer is not null)
         {
