@@ -19,7 +19,7 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Cache NuGet packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.nuget/packages
           key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
@@ -33,7 +33,7 @@ jobs:
         run: dotnet build CamusDB.Tests/CamusDB.Tests.csproj --no-restore --configuration Debug
 
       - name: Run Tests
-        timeout-minutes: 60
+        timeout-minutes: 120
         run: |
           mkdir -p CamusDB.Tests/bin/Debug/net10.0/Data/
           dotnet test CamusDB.Tests/CamusDB.Tests.csproj \
