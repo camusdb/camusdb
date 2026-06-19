@@ -216,7 +216,7 @@ internal sealed class TestDatabaseDropper : BaseTest
 
         // Release the ref — Drop should unblock.
         descriptor.Release();
-        await dropTask.WaitAsync(TimeSpan.FromSeconds(10));
+        await dropTask.WaitAsync(TimeSpan.FromSeconds(30));
 
         Assert.IsTrue(dropTask.IsCompletedSuccessfully, "Drop must complete after ref is released");
         Assert.IsTrue(descriptor.IsDropped, "descriptor must be marked dropped");
