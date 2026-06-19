@@ -15,11 +15,18 @@ namespace CamusDB.Core.Catalogs.Models;
 /// Durable record of an in-flight coordinator job. Written to the KV store before
 /// the first step and deleted after the last. If the coordinator node crashes or
 /// loses leadership mid-sequence the new leader reads the persisted jobs and resumes
-/// from where the previous leader left off (D2 leader-change resume).
+/// from where the previous leader left off (leader-change resume).
 /// </summary>
 public sealed class PersistedCoordinatorJob
 {
     public string TableName { get; set; } = "";
+
+    /// <summary>
+    /// Immutable table id. Resume resolution matches this against the live schema to
+    /// detect drop/recreate aliasing: if the current table with <see cref="TableName"/> has a
+    /// different id, the job belongs to a stale table and must be deleted without driving.
+    /// </summary>
+    public string TableId { get; set; } = "";
 
     public string ElementName { get; set; } = "";
 

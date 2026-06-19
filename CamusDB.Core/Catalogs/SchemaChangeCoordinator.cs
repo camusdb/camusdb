@@ -26,8 +26,8 @@ namespace CamusDB.Core.Catalogs;
 /// </para>
 ///
 /// <para>
-/// The coordinator is stateless beyond the job description; persistence for leader-change
-/// resume is added by D2.  It must be called on the schema leader — followers should
+/// The coordinator is stateless beyond the job description; persistence enables leader-change
+/// resume.  It must be called on the schema leader — followers should
 /// forward DDL via the production HTTP path rather than running the
 /// coordinator directly.
 /// </para>
@@ -226,7 +226,7 @@ public sealed class SchemaChangeCoordinator
         finally
         {
             if (current == job.TargetState)
-                await catalogs.DeleteCoordinatorJobAsync(database, job.TableName, job.ElementName)
+                await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName)
                     .ConfigureAwait(false);
         }
     }
@@ -234,6 +234,7 @@ public sealed class SchemaChangeCoordinator
     private static PersistedCoordinatorJob BuildPersistedJob(SchemaChangeJob job, ColumnInfo? columnDefinition, IndexBuildInfo? indexBuildInfo, int attempts) => new()
     {
         TableName = job.TableName,
+        TableId = job.TableId,
         ElementName = job.ElementName,
         TargetState = job.TargetState,
         ElementKind = job.ElementKind,
@@ -280,7 +281,25 @@ public sealed class SchemaChangeCoordinator
 
         foreach (PersistedCoordinatorJob persisted in jobs)
         {
-            SchemaChangeJob job = new(database.Name, persisted.TableName, persisted.ElementName, persisted.TargetState, persisted.ElementKind);
+            // Anchor resolution on the immutable table id. Find the live table whose schema
+            // id matches. If no table matches, or the table named in the record now has a different
+            // id (drop + recreate under the same name), the job is stale — delete it and skip.
+            TableSchema? liveTable = database.Schema.Tables.Values
+                .FirstOrDefault(t => t.Id == persisted.TableId);
+
+            if (liveTable is null)
+            {
+                logger?.LogWarning(
+                    "Deleting stale coordinator job {TableName}.{ElementName}: table id '{TableId}' no longer exists in the schema (table was dropped)",
+                    persisted.TableName, persisted.ElementName, persisted.TableId);
+                try { await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, persisted.ElementName).ConfigureAwait(false); }
+                catch (Exception ex) { logger?.LogWarning(ex, "Failed to delete stale coordinator job for database {DbName}", database.Name); }
+                continue;
+            }
+
+            // Use the live table's current name for all schema operations (name-based API).
+            string liveTableName = liveTable.Name ?? persisted.TableName;
+            SchemaChangeJob job = new(database.Name, liveTableName, persisted.TableId, persisted.ElementName, persisted.TargetState, persisted.ElementKind);
 
             // Abandon a job that keeps failing across leader changes rather than retry it on
             // every election forever. A terminal failure (unreachable invariant, persistent
@@ -290,8 +309,8 @@ public sealed class SchemaChangeCoordinator
             {
                 logger?.LogError(
                     "Abandoning coordinator job {TableName}.{ElementName} → {TargetState} on database {DbName} after {Attempts} resume attempts",
-                    persisted.TableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
-                try { await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableName, persisted.ElementName).ConfigureAwait(false); }
+                    liveTableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
+                try { await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, persisted.ElementName).ConfigureAwait(false); }
                 catch (Exception ex) { logger?.LogWarning(ex, "Failed to delete abandoned coordinator job for database {DbName}", database.Name); }
                 continue;
             }
@@ -306,23 +325,20 @@ public sealed class SchemaChangeCoordinator
                 persisted.IndexColumnIds is not null &&
                 persisted.IndexType.HasValue)
             {
-                if (database.Schema.Tables.TryGetValue(persisted.TableName, out TableSchema? tableSchema))
-                {
-                    string[] columnNames = ResolveColumnNames(tableSchema, persisted.IndexColumnIds);
-                    indexBuildInfo = new(persisted.IndexId, persisted.ElementName, persisted.IndexColumnIds, columnNames, persisted.IndexType.Value);
-                }
+                string[] columnNames = ResolveColumnNames(liveTable, persisted.IndexColumnIds);
+                indexBuildInfo = new(persisted.IndexId, persisted.ElementName, persisted.IndexColumnIds, columnNames, persisted.IndexType.Value);
             }
 
             try
             {
-                SchemaElementState current = GetCurrentElementState(database.Schema, job.TableName, job.ElementName, job.ElementKind);
+                SchemaElementState current = GetCurrentElementState(database.Schema, liveTableName, job.ElementName, job.ElementKind);
                 SchemaElementState[] path = ComputeTransitionPath(current, job.TargetState);
 
                 if (path.Length == 0)
                 {
                     // Already at target — e.g. the previous leader completed the last step but
                     // crashed before deleting the record. Clean it up rather than leave it.
-                    await catalogs.DeleteCoordinatorJobAsync(database, job.TableName, job.ElementName).ConfigureAwait(false);
+                    await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, job.ElementName).ConfigureAwait(false);
                     continue;
                 }
 
@@ -332,7 +348,7 @@ public sealed class SchemaChangeCoordinator
                 await catalogs.PersistCoordinatorJobAsync(database, persisted).ConfigureAwait(false);
 
                 if (logger is not null)
-                    Log.LogResumingCoordinatorJob(logger, persisted.TableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
+                    Log.LogResumingCoordinatorJob(logger, liveTableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
 
                 await DriveToTargetAsync(database, job, columnDefinition, indexBuildInfo, persisted.StartOffset, current, path, persisted.Attempts, CancellationToken.None)
                     .ConfigureAwait(false);
@@ -341,7 +357,7 @@ public sealed class SchemaChangeCoordinator
             {
                 logger?.LogError(ex,
                     "Coordinator resume failed for {TableName}.{ElementName} → {TargetState} on database {DbName}",
-                    persisted.TableName, persisted.ElementName, persisted.TargetState, database.Name);
+                    liveTableName, persisted.ElementName, persisted.TargetState, database.Name);
             }
         }
     }
@@ -423,6 +439,7 @@ public sealed class SchemaChangeCoordinator
 public sealed record SchemaChangeJob(
     string DatabaseName,
     string TableName,
+    string TableId,
     string ElementName,
     SchemaElementState TargetState,
     SchemaElementKind ElementKind = SchemaElementKind.Column

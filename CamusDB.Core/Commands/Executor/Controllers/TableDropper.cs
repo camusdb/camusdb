@@ -66,6 +66,31 @@ internal sealed class TableDropper
         if (droppedSchema is not null || !database.OwnsKahuna)
             Log.LogTableRemovedFromDatabaseSchema(logger, ticket.TableName);
 
+        // In cluster mode delete all persisted coordinator job records for this table so a
+        // subsequent leader-change resume cannot replay them against a new table that happens
+        // to share the same name.
+        //
+        // Ordering: DROP TABLE is a replicated schema op serialized through the schema lock and
+        // the single-schema-leader invariant. Any in-progress coordinator step for this table is
+        // also serialized through that path, so the coordinator cannot be mid-step when we reach
+        // here. We rely on that serialization rather than explicitly cancelling the in-memory job.
+        //
+        // Best-effort: a transient KV failure is logged and swallowed — a failed delete leaves an
+        // orphan that will fail harmlessly on its first resume step because the table schema is
+        // already gone. The resume-time table-id mismatch check is the structural backstop for
+        // the aliasing hazard.
+        if (!database.OwnsKahuna)
+        {
+            try
+            {
+                await catalogs.DeleteCoordinatorJobsForTableAsync(database, tableId).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to clean up coordinator jobs for dropped table '{TableName}'", ticket.TableName);
+            }
+        }
+
         try
         {
             await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);

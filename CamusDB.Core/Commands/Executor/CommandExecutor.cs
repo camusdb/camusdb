@@ -492,7 +492,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             await coordinator.RunJobAsync(
                 database,
-                new SchemaChangeJob(database.Name, ticket.TableName, columnInfo.Name, SchemaElementState.Public),
+                new SchemaChangeJob(database.Name, ticket.TableName, table.Id, columnInfo.Name, SchemaElementState.Public),
                 columnDefinition: columnInfo
             ).ConfigureAwait(false);
 
@@ -683,7 +683,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             {
                 await coordinator.RunJobAsync(
                     database,
-                    new SchemaChangeJob(database.Name, ticket.TableName, ticket.IndexName, SchemaElementState.Public, SchemaElementKind.Index),
+                    new SchemaChangeJob(database.Name, ticket.TableName, table.Id, ticket.IndexName, SchemaElementState.Public, SchemaElementKind.Index),
                     indexBuildInfo: indexInfo
                 ).ConfigureAwait(false);
 
@@ -697,7 +697,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 // Note: if this node is now degraded (F1a), compensation may be skipped by the
                 // degraded gate in ReplicateDropIndexAsync; a healthy peer's ResumeJobsAsync
                 // will reconcile the state after the step-down below.
-                await CompensateClusterAddIndexAsync(database, ticket.TableName, ticket.IndexName).ConfigureAwait(false);
+                await CompensateClusterAddIndexAsync(database, table.Id, ticket.TableName, ticket.IndexName).ConfigureAwait(false);
                 throw;
             }
         }
@@ -728,7 +728,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
     }
 
-    private async Task CompensateClusterAddIndexAsync(DatabaseDescriptor database, string tableName, string indexName)
+    private async Task CompensateClusterAddIndexAsync(DatabaseDescriptor database, string tableId, string tableName, string indexName)
     {
         try
         {
@@ -745,7 +745,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         try
         {
-            await catalogs.DeleteCoordinatorJobAsync(database, tableName, indexName).ConfigureAwait(false);
+            await catalogs.DeleteCoordinatorJobAsync(database, tableId, indexName).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

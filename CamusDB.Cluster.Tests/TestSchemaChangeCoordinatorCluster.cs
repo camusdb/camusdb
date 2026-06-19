@@ -120,9 +120,10 @@ public sealed class TestSchemaChangeCoordinatorCluster
                 }
             };
 
+            string robotsId = leader.Database!.Schema.Tables["robots"].Id ?? "";
             await coordinator.RunJobAsync(
                 leader.Database!,
-                new SchemaChangeJob(db, "robots", "year", SchemaElementState.Public),
+                new SchemaChangeJob(db, "robots", robotsId, "year", SchemaElementState.Public),
                 columnDefinition: new ColumnInfo("year", ColumnType.Integer64)
             );
 
@@ -194,9 +195,10 @@ public sealed class TestSchemaChangeCoordinatorCluster
                 await cluster.WaitForSchemaConvergenceAsync(db, schemaVersion, timeout: TimeSpan.FromSeconds(10));
             };
 
+            string robotsId = leader.Database!.Schema.Tables["robots"].Id ?? "";
             await coordinator.RunJobAsync(
                 leader.Database!,
-                new SchemaChangeJob(db, "robots", "year", SchemaElementState.Absent)
+                new SchemaChangeJob(db, "robots", robotsId, "year", SchemaElementState.Absent)
             );
 
             version = leader.Database!.Schema.SchemaVersion;
@@ -246,9 +248,10 @@ public sealed class TestSchemaChangeCoordinatorCluster
         {
             CatalogsManager catalogs = new(NullLogger<ICamusDB>.Instance);
             SchemaChangeCoordinator coordinator = new(catalogs);
+            string robotsId = leader.Database!.Schema.Tables["robots"].Id ?? "";
             await coordinator.RunJobAsync(
                 leader.Database!,
-                new SchemaChangeJob(db, "robots", "year", SchemaElementState.WriteOnly),
+                new SchemaChangeJob(db, "robots", robotsId, "year", SchemaElementState.WriteOnly),
                 columnDefinition: new ColumnInfo("year", ColumnType.Integer64)
             );
             version = leader.Database!.Schema.SchemaVersion;
@@ -271,9 +274,10 @@ public sealed class TestSchemaChangeCoordinatorCluster
             SchemaChangeCoordinator coordinator = new(catalogs);
             coordinator.OnStepCompleted = (state, _) => { resumeSteps.Add(state); return Task.CompletedTask; };
 
+            string robotsId = leader.Database!.Schema.Tables["robots"].Id ?? "";
             await coordinator.RunJobAsync(
                 leader.Database!,
-                new SchemaChangeJob(db, "robots", "year", SchemaElementState.Public)
+                new SchemaChangeJob(db, "robots", robotsId, "year", SchemaElementState.Public)
             );
             version = leader.Database!.Schema.SchemaVersion;
         });
@@ -323,16 +327,17 @@ public sealed class TestSchemaChangeCoordinatorCluster
             SchemaChangeCoordinator coordinator = new(catalogs);
             coordinator.OnStepCompleted = (_, _) => { stepCount++; return Task.CompletedTask; };
 
+            string robotsId = leader.Database!.Schema.Tables["robots"].Id ?? "";
             await coordinator.RunJobAsync(
                 leader.Database!,
-                new SchemaChangeJob(db, "robots", "year", SchemaElementState.Public)
+                new SchemaChangeJob(db, "robots", robotsId, "year", SchemaElementState.Public)
             );
         });
 
         Assert.AreEqual(0, stepCount, "no steps must be emitted when already at target state");
     }
 
-    // ── D2: leader-change resume ──────────────────────────────────────────────
+    // ── leader-change resume ──────────────────────────────────────────────────
 
     /// <summary>
     /// Simulates a coordinator interrupted after its first step: the column is at
@@ -379,6 +384,7 @@ public sealed class TestSchemaChangeCoordinatorCluster
             await catalogs.PersistCoordinatorJobAsync(leader.Database!, new PersistedCoordinatorJob
             {
                 TableName = "robots",
+                TableId = leader.Database!.Schema.Tables["robots"].Id ?? "",
                 ElementName = "year",
                 TargetState = SchemaElementState.Public,
                 ColumnType = ColumnType.Integer64,
@@ -448,9 +454,10 @@ public sealed class TestSchemaChangeCoordinatorCluster
             CatalogsManager catalogs = new(NullLogger<ICamusDB>.Instance);
             SchemaChangeCoordinator coordinator = new(catalogs);
 
+            string robotsId = leader.Database!.Schema.Tables["robots"].Id ?? "";
             await coordinator.RunJobAsync(
                 leader.Database!,
-                new SchemaChangeJob(db, "robots", "year", SchemaElementState.Public),
+                new SchemaChangeJob(db, "robots", robotsId, "year", SchemaElementState.Public),
                 columnDefinition: new ColumnInfo("year", ColumnType.Integer64)
             );
 
@@ -495,6 +502,7 @@ public sealed class TestSchemaChangeCoordinatorCluster
             await catalogs.PersistCoordinatorJobAsync(leader.Database!, new PersistedCoordinatorJob
             {
                 TableName = "robots",
+                TableId = leader.Database!.Schema.Tables["robots"].Id ?? "",
                 ElementName = "year",
                 TargetState = SchemaElementState.Public,
                 ColumnType = ColumnType.Integer64,
@@ -543,6 +551,7 @@ public sealed class TestSchemaChangeCoordinatorCluster
             await catalogs.PersistCoordinatorJobAsync(leader.Database!, new PersistedCoordinatorJob
             {
                 TableName = "robots",
+                TableId = leader.Database!.Schema.Tables["robots"].Id ?? "",
                 ElementName = "year",
                 TargetState = SchemaElementState.Public,
             });
@@ -557,8 +566,238 @@ public sealed class TestSchemaChangeCoordinatorCluster
         });
     }
 
+    // ── DROP TABLE cleans up coordinator job records ─────────────────────────
+
     /// <summary>
-    /// Full D2 scenario: a coordinator runs the first step on node A, persists its job,
+    /// After <c>DROP TABLE T</c>, no coordinator job record keyed on <c>T</c> should remain
+    /// in the KV store, even when a job was persisted mid-sequence before the drop.
+    /// </summary>
+    [Test]
+    public async Task DropTable_DeletesPersistedCoordinatorJobsForTable()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        long version = 0;
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns: [new ColumnInfo("id", ColumnType.Id)],
+                constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
+                ifNotExists: false
+            ));
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        // Persist a coordinator job simulating an interrupted add-column sequence.
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            CatalogsManager catalogs = new(NullLogger<ICamusDB>.Instance);
+
+            await catalogs.ReplicateAddColumnInStateAsync(
+                leader.Database!, "robots",
+                new ColumnInfo("year", ColumnType.Integer64),
+                SchemaElementState.DeleteOnly
+            );
+
+            await catalogs.PersistCoordinatorJobAsync(leader.Database!, new PersistedCoordinatorJob
+            {
+                TableName = "robots",
+                TableId = leader.Database!.Schema.Tables["robots"].Id ?? "",
+                ElementName = "year",
+                TargetState = SchemaElementState.Public,
+                ColumnType = ColumnType.Integer64,
+            });
+
+            List<PersistedCoordinatorJob> before = await catalogs.LoadCoordinatorJobsAsync(leader.Database!);
+            Assert.AreEqual(1, before.Count, "job must be present before drop");
+
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        // Drop the table — this should also clean up the coordinator job record.
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.DropTable(new DropTableTicket(db, "robots", ifExists: false));
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        // No coordinator job record for the dropped table should remain.
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            CatalogsManager catalogs = new(NullLogger<ICamusDB>.Instance);
+            List<PersistedCoordinatorJob> remaining = await catalogs.LoadCoordinatorJobsAsync(leader.Database!);
+            Assert.AreEqual(0, remaining.Count,
+                "DROP TABLE must delete all coordinator job records for the table");
+        });
+    }
+
+    /// <summary>
+    /// Drop/recreate-same-name aliasing guard: a coordinator job persisted for the old table T
+    /// must not be resumed against the new T after DROP + CREATE TABLE with the same name.
+    /// After the drop-time cleanup, <c>ResumeJobsAsync</c> must find no jobs, leaving the new
+    /// table completely untouched.
+    /// </summary>
+    [Test]
+    public async Task DropTable_ThenRecreateWithSameName_ResumeDoesNotTouchNewTable()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        long version = 0;
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns: [new ColumnInfo("id", ColumnType.Id)],
+                constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
+                ifNotExists: false
+            ));
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        // Simulate an interrupted add-column on the old table.
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            CatalogsManager catalogs = new(NullLogger<ICamusDB>.Instance);
+
+            await catalogs.ReplicateAddColumnInStateAsync(
+                leader.Database!, "robots",
+                new ColumnInfo("year", ColumnType.Integer64),
+                SchemaElementState.DeleteOnly
+            );
+
+            await catalogs.PersistCoordinatorJobAsync(leader.Database!, new PersistedCoordinatorJob
+            {
+                TableName = "robots",
+                TableId = leader.Database!.Schema.Tables["robots"].Id ?? "",
+                ElementName = "year",
+                TargetState = SchemaElementState.Public,
+                ColumnType = ColumnType.Integer64,
+            });
+
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        // Drop the old table (this deletes the coordinator job record).
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.DropTable(new DropTableTicket(db, "robots", ifExists: false));
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        // Create a brand-new table with the same name (different internal id).
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns: [new ColumnInfo("id", ColumnType.Id)],
+                constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
+                ifNotExists: false
+            ));
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        // Force a coordinator resume — must find no jobs (cleaned up at drop time).
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            CatalogsManager catalogs = new(NullLogger<ICamusDB>.Instance);
+            SchemaChangeCoordinator coordinator = new(catalogs);
+
+            long versionBefore = leader.Database!.Schema.SchemaVersion;
+            await coordinator.ResumeJobsAsync(leader.Database!);
+
+            // Schema version must not advance — no job was resumed.
+            Assert.AreEqual(versionBefore, leader.Database!.Schema.SchemaVersion,
+                "ResumeJobsAsync must not drive any transitions when no jobs remain after DROP TABLE");
+
+            // The new 'robots' table must have only the original 'id' column, no 'year'.
+            TableSchema? newTable = leader.Database!.Schema.Tables.GetValueOrDefault("robots");
+            Assert.IsNotNull(newTable, "recreated 'robots' table must exist");
+            bool hasYear = newTable!.Columns?.Any(c => c.Name == "year") ?? false;
+            Assert.IsFalse(hasYear, "new 'robots' table must not have 'year' column added by stale coordinator job");
+        });
+    }
+
+    // ── table-id anchor prevents aliasing even without drop-time cleanup ────────
+
+    /// <summary>
+    /// Id-mismatch guard: a persisted coordinator job whose <c>TableId</c> does not
+    /// correspond to any live table is deleted and skipped on resume — no schema transition
+    /// fires. This is the structural backstop that prevents aliasing even if the drop-time
+    /// cleanup ever misses a record.
+    /// </summary>
+    [Test]
+    public async Task ResumeJobsAsync_DeletesJobWhoseTableIdNoLongerExists()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        long version = 0;
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            await leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "robots",
+                columns: [new ColumnInfo("id", ColumnType.Id)],
+                constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
+                ifNotExists: false
+            ));
+            version = leader.Database!.Schema.SchemaVersion;
+        });
+        await cluster.WaitForSchemaConvergenceAsync(db, version);
+
+        // Persist a job with a TableId that doesn't match the live robots table (simulates
+        // a stale job left over after a DROP + CREATE cycle where drop-time cleanup was skipped).
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            CatalogsManager catalogs = new(NullLogger<ICamusDB>.Instance);
+            SchemaChangeCoordinator coordinator = new(catalogs);
+
+            await catalogs.PersistCoordinatorJobAsync(leader.Database!, new PersistedCoordinatorJob
+            {
+                TableName = "robots",
+                TableId = "stale_table_id_that_does_not_exist",
+                ElementName = "year",
+                TargetState = SchemaElementState.Public,
+                ColumnType = ColumnType.Integer64,
+            });
+
+            long versionBefore = leader.Database!.Schema.SchemaVersion;
+            await coordinator.ResumeJobsAsync(leader.Database!);
+
+            // No transition must fire — the stale job must be deleted, not driven.
+            Assert.AreEqual(versionBefore, leader.Database!.Schema.SchemaVersion,
+                "ResumeJobsAsync must not drive any transitions for a job with a stale TableId");
+
+            // The stale job record must have been deleted.
+            List<PersistedCoordinatorJob> remaining = await catalogs.LoadCoordinatorJobsAsync(leader.Database!);
+            Assert.AreEqual(0, remaining.Count,
+                "Stale job (unknown TableId) must be deleted by ResumeJobsAsync, not retried");
+
+            // The live 'robots' table must be untouched — no 'year' column.
+            bool hasYear = leader.Database!.Schema.Tables["robots"].Columns?.Any(c => c.Name == "year") ?? false;
+            Assert.IsFalse(hasYear,
+                "ResumeJobsAsync must not add 'year' to the live table when the job's TableId is stale");
+        });
+    }
+
+    /// <summary>
+    /// Full leader-change scenario: a coordinator runs the first step on node A, persists its job,
     /// then node B wins a new election (<c>ForceLeaderForTestingAsync</c>).  A fresh
     /// coordinator on node B calls <c>ResumeJobsAsync</c>, reads the persisted job, and
     /// drives the column to <c>Public</c>.  All nodes converge.
@@ -601,6 +840,7 @@ public sealed class TestSchemaChangeCoordinatorCluster
             await catalogs.PersistCoordinatorJobAsync(leader.Database!, new PersistedCoordinatorJob
             {
                 TableName = "robots",
+                TableId = leader.Database!.Schema.Tables["robots"].Id ?? "",
                 ElementName = "year",
                 TargetState = SchemaElementState.Public,
                 ColumnType = ColumnType.Integer64,

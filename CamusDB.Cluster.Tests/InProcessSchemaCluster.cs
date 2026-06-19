@@ -242,6 +242,14 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
     public async Task OpenDatabaseOnAllNodesAsync(string databaseName)
     {
+        // Every Open requires the database to exist in the registry. Schema-log test names
+        // (NextSchemaLogDatabaseName) are never registered via CREATE
+        // DATABASE, so we register them here via CreateDatabase(ifNotExists: true) on node 0;
+        // the registry entry is replicated through the shared Kahuna KV, so the subsequent
+        // Open on every node resolves it via TryResolveIdAsync.
+        await Nodes[0].Executor.CreateDatabase(new CreateDatabaseTicket(databaseName, ifNotExists: true))
+            .ConfigureAwait(false);
+
         foreach (Node node in Nodes)
         {
             node.Database = await node.Executor.OpenDatabase(databaseName).ConfigureAwait(false);
@@ -291,9 +299,14 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         TimeSpan? timeout = null
     )
     {
+        // Acks are keyed by database.Id (the opaque UUID), not the user-facing name.
+        // Use the Id when available so WaitForSchemaAcksAsync matches the
+        // tokens that SchemaReplicator publishes via RecordAndPublishSchemaApplied.
+        string dbKey = Nodes[0].Database?.Id ?? databaseName;
+
         TimeSpan waitTimeout = timeout ?? TimeSpan.FromSeconds(10);
         bool acked = await Nodes[0].Kahuna.WaitForSchemaAcksAsync(
-            databaseName,
+            dbKey,
             version,
             waitTimeout,
             liveNodeLease: Timeout.InfiniteTimeSpan,

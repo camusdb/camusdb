@@ -801,13 +801,13 @@ public sealed class CatalogsManager
             }
             catch (Exception ex)
             {
-                // F1a: persist exhausted — the Raft commit already succeeded and the change is
+                // Persist exhausted — the Raft commit already succeeded and the change is
                 // live cluster-wide, so do NOT surface this to the client. Mark this node's
                 // schema subsystem degraded and request a deferred schema-partition step-down.
                 // The step-down is deferred (fired after the in-flight DDL CommitAsync) because
                 // in single-partition clusters the schema and KV partitions are the same: stepping
                 // down before CommitAsync would invalidate the in-flight KV transaction.
-                // F1b restart replay will recover the checkpoint on the next open.
+                // Restart replay will recover the checkpoint on the next open.
                 Log.LogSchemaCheckpointExhausted(logger, ex, maxAttempts, database.Name, entry.ToVersion);
 
                 database.MarkSchemaSubsystemDegraded();
@@ -823,7 +823,7 @@ public sealed class CatalogsManager
     // transient cluster hiccup into a permanent 60s test timeout (or production DDL hang).
     // 30 s gives an in-process cluster sufficient headroom on a loaded CI runner;
     // the outer retry loop treats a timeout as a persist failure and eventually takes
-    // the F1a path, keeping DDL liveness intact.
+    // the persist-exhausted path, keeping DDL liveness intact.
     private static readonly TimeSpan CheckpointCommitTimeout = TimeSpan.FromSeconds(30);
 
     private async Task PersistSchemaCheckpointAsync(
@@ -1464,7 +1464,8 @@ public sealed class CatalogsManager
     private static string HistoryKey(string dbId, string tableId, int version) => $"{HistoryKeyPrefix(dbId, tableId)}{version}";
     private static string CoordinatorBucketPrefix(string dbId) => $"{dbId}/meta/coordinator";
     private static string CoordinatorKeyPrefix(string dbId) => $"{CoordinatorBucketPrefix(dbId)}/";
-    private static string CoordinatorKey(string dbId, string tableName, string elementName) => $"{CoordinatorKeyPrefix(dbId)}{tableName}~{elementName}";
+    // Key embeds the immutable table id, not the mutable table name.
+    private static string CoordinatorKey(string dbId, string tableId, string elementName) => $"{CoordinatorKeyPrefix(dbId)}{tableId}~{elementName}";
 
     /// <summary>
     /// Persists the system schema metadata. Schema table metadata is stored per object
@@ -1538,9 +1539,9 @@ public sealed class CatalogsManager
 
     /// <summary>
     /// Re-persists the complete in-memory schema (all live tables + current version) in a
-    /// single KV transaction. Called by F1b after log replay completes (<c>OnRestoreFinished</c>)
+    /// single KV transaction. Called after log replay completes (<c>OnRestoreFinished</c>)
     /// to bring the on-disk checkpoint up to the committed head. Respects
-    /// <see cref="TestPersistCheckpointException"/> so F1a fault-injection tests are not
+    /// <see cref="TestPersistCheckpointException"/> so checkpoint fault-injection tests are not
     /// accidentally fired here.
     /// </summary>
     public async Task PersistFullSchemaCheckpointAsync(DatabaseDescriptor database)
@@ -1612,7 +1613,7 @@ public sealed class CatalogsManager
         ).ConfigureAwait(false);
         try
         {
-            await WriteMetaKey(kahuna, tx, CoordinatorKey(database.Id, job.TableName, job.ElementName), bytes).ConfigureAwait(false);
+            await WriteMetaKey(kahuna, tx, CoordinatorKey(database.Id, job.TableId, job.ElementName), bytes).ConfigureAwait(false);
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
         }
         finally
@@ -1621,7 +1622,7 @@ public sealed class CatalogsManager
         }
     }
 
-    public async Task DeleteCoordinatorJobAsync(DatabaseDescriptor database, string tableName, string elementName)
+    public async Task DeleteCoordinatorJobAsync(DatabaseDescriptor database, string tableId, string elementName)
     {
         IKahuna kahuna = database.Kahuna.Kahuna;
 
@@ -1630,12 +1631,69 @@ public sealed class CatalogsManager
         ).ConfigureAwait(false);
         try
         {
-            await DeleteMetaKey(kahuna, tx, CoordinatorKey(database.Id, tableName, elementName)).ConfigureAwait(false);
+            await DeleteMetaKey(kahuna, tx, CoordinatorKey(database.Id, tableId, elementName)).ConfigureAwait(false);
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
         }
         finally
         {
             await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Deletes all persisted coordinator jobs belonging to <paramref name="tableId"/>. Called
+    /// by the DROP TABLE path so orphaned job records do not survive the table they were created
+    /// for, preventing stale jobs from being resumed against a new table with the same name.
+    /// Because keys are anchored on the immutable table id, this prefix matches all and only
+    /// the dropped table's jobs regardless of whether the table name is reused.
+    /// </summary>
+    public async Task DeleteCoordinatorJobsForTableAsync(DatabaseDescriptor database, string tableId)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string keyPrefix = CoordinatorKeyPrefix(database.Id);
+        string tableJobPrefix = $"{keyPrefix}{tableId}~";
+
+        List<string> keysToDelete = [];
+
+        KvTransaction scanTx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+                scanTx.TransactionId,
+                CoordinatorBucketPrefix(database.Id),
+                null, true,
+                null, true,
+                128,
+                HLCTimestamp.Zero,
+                KeyValueDurability.Persistent,
+                CancellationToken.None).ConfigureAwait(false))
+            {
+                if (key.StartsWith(tableJobPrefix, StringComparison.Ordinal) && entry.Value is not null)
+                    keysToDelete.Add(key);
+            }
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(scanTx).ConfigureAwait(false);
+        }
+
+        if (keysToDelete.Count == 0)
+            return;
+
+        KvTransaction deleteTx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            foreach (string key in keysToDelete)
+                await DeleteMetaKey(kahuna, deleteTx, key).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(deleteTx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(deleteTx).ConfigureAwait(false);
         }
     }
 
