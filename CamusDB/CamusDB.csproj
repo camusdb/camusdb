@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ServerGarbageCollection>false</ServerGarbageCollection>
-    <Version>0.1.2</Version>
+    <Version>0.3.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
@@ -16,7 +16,6 @@
     <None Remove="Library\CommandParser\" />
     <None Remove="Data\" />
     <None Remove="CSharpTest.Net.Collections" />
-    <None Remove="CodeExMachina.BTree" />
     <None Remove="App\Models\" />
     <None Remove="Config\" />
   </ItemGroup>
