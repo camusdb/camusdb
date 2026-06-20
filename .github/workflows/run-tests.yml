@@ -43,4 +43,4 @@ jobs:
             --blame-hang \
             --blame-hang-timeout 60s \
             --blame-crash \
-            -- NUnit.MaxParallelWorkers=8
+            -- NUnit.MaxParallelWorkers=4
