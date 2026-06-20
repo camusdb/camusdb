@@ -24,6 +24,7 @@ using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
 using Kommander.Data;
 using Kommander.Time;
+using Kommander.WAL;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
@@ -657,5 +658,28 @@ public sealed class TestKvTransactionsManager
 
         public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default)
             => inner.TriggerAutoMergeAsync(ct);
+
+        public bool IsBackupConfigured => inner.IsBackupConfigured;
+
+        public Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval)
+            => inner.BootstrapFromPitrBackupAsync(backupDir, leafBackupId, targetTime, walAdapter, pitrWindow, baseSnapshotInterval);
+
+        public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default)
+            => inner.TakeFullBackupAsync(ct);
+
+        public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default)
+            => inner.TakeIncrementalBackupAsync(parentBackupId, ct);
+
+        public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default)
+            => inner.TakeCoordinatedBackupAsync(ct);
+
+        public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default)
+            => inner.ListBackupsAsync(ct);
+
+        public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default)
+            => inner.GetBackupChainAsync(leafBackupId, ct);
+
+        public Task<KahunaRestoreResponse> RestoreToAsync(Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken ct = default)
+            => inner.RestoreToAsync(leafBackupId, targetDir, targetTimeMs, ct);
     }
 }

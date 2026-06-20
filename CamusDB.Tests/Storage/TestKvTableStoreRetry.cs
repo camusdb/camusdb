@@ -19,11 +19,13 @@ using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.Locks.Data;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Locks;
 using Kahuna.Shared.Sequences;
 using Kommander.Data;
 using Kommander.Time;
+using Kommander.WAL;
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -267,6 +269,18 @@ public sealed class TestKvTableStoreRetry
         public Task FlushPersistenceAsync() => throw new NotSupportedException();
         public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => throw new NotSupportedException();
         public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => throw new NotSupportedException();
+
+        public bool IsBackupConfigured => inner.IsBackupConfigured;
+
+        public Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval)
+            => inner.BootstrapFromPitrBackupAsync(backupDir, leafBackupId, targetTime, walAdapter, pitrWindow, baseSnapshotInterval);
+
+        public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<KahunaRestoreResponse> RestoreToAsync(Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken ct = default) => throw new NotSupportedException();
     }
 
     // -----------------------------------------------------------------------
