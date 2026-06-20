@@ -75,6 +75,10 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     private readonly HashSet<int> _walRestoreCompletedPartitions = new();
     private readonly HashSet<int> _walRestoreDrainedPartitions = new();
 
+    // Stored so DisposeAsync can unregister them from Raft's event chains.
+    private Func<int, RaftLog, Task<bool>>? _walRestoreLogHandler;
+    private Action<int>? _walRestoreFinishedHandler;
+
     /// <summary>
     /// The Kahuna KV API. Used by KvTableStore and the transaction layer.
     /// </summary>
@@ -824,7 +828,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// </summary>
     private void WireWalRestoreBuffer()
     {
-        Raft.OnLogRestored += (partitionId, log) =>
+        _walRestoreLogHandler = (partitionId, log) =>
         {
             if (log.LogType != SchemaChangeLogType || log.LogData is null)
                 return Task.FromResult(true);
@@ -845,14 +849,56 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             return Task.FromResult(true);
         };
 
-        Raft.OnRestoreFinished += (partitionId) =>
+        _walRestoreFinishedHandler = (partitionId) =>
         {
             lock (_walRestoreBufferLock)
                 _walRestoreCompletedPartitions.Add(partitionId);
         };
+
+        Raft.OnLogRestored += _walRestoreLogHandler;
+        Raft.OnRestoreFinished += _walRestoreFinishedHandler;
     }
 
-    public ValueTask DisposeAsync() => node.DisposeAsync();
+    public async ValueTask DisposeAsync()
+    {
+        // Unregister all event handlers before stopping the node so Raft's delegate chains
+        // release references to this EmbeddedKahuna instance and its captured state. Without
+        // this, the Raft object (inside EmbeddedKahunaNode) holds the handler delegates alive
+        // via its event fields, keeping EmbeddedKahuna (and its _walRestoreBuffer / schema
+        // subscriptions) reachable — and any SQLite connections they reference uncloseable.
+        if (_walRestoreLogHandler is not null)
+        {
+            Raft.OnLogRestored -= _walRestoreLogHandler;
+            _walRestoreLogHandler = null;
+        }
+
+        if (_walRestoreFinishedHandler is not null)
+        {
+            Raft.OnRestoreFinished -= _walRestoreFinishedHandler;
+            _walRestoreFinishedHandler = null;
+        }
+
+        // Dispose all schema-apply subscriptions (unregisters OnReplicationReceived /
+        // OnLogRestored / OnRestoreFinished handlers that capture DatabaseDescriptor objects).
+        List<SchemaApplySubscription> subs;
+        lock (schemaSubscriptionsSync)
+        {
+            subs = [.. schemaSubscriptions];
+            schemaSubscriptions.Clear();
+        }
+        foreach (SchemaApplySubscription sub in subs)
+            sub.Dispose();
+
+        // Release WAL restore buffer memory.
+        lock (_walRestoreBufferLock)
+        {
+            _walRestoreBuffer.Clear();
+            _walRestoreCompletedPartitions.Clear();
+            _walRestoreDrainedPartitions.Clear();
+        }
+
+        await node.DisposeAsync().ConfigureAwait(false);
+    }
 
     // -----------------------------------------------------------------------
 
