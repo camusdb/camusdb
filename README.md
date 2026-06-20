@@ -114,16 +114,9 @@ dotnet run --project CamusDB -- \
 
 Architecture
 ------------
-The engine is structured as a pipeline of composable operators:
+A SQL statement enters over the HTTP API, is parsed into an AST, bound against the catalog, and turned into a physical plan by a cost-based query planner. The plan executes as a tree of storage-agnostic operators (scan, filter, join, aggregate, sort, project, limit) that read and write rows through a transactional key-value layer. That KV layer is an embedded [Kahuna](https://github.com/kahunakv/kahuna) node: table rows and index entries are mapped onto Kahuna keys with a prefix layout, transactions are coordinated via Kahuna's transaction API, and durability and replication are provided by Raft (Kommander). In a cluster, data is partitioned across nodes — each partition elects its own leader, statements are routed to the owning partition, and cross-partition writes use two-phase commit. Standalone mode runs the same stack against a per-process embedded node with no cluster configuration.
 
-- **SQL Parser** — LALR(1) parser (YaccLexTools) that produces an AST. Identifiers are normalized to lowercase at parse time.
-- **Query planner** — builds a physical plan tree from the bound SELECT model, choosing table scans, index scans, index lookup scans, nested-loop joins, index nested-loop joins, aggregate nodes, distinct nodes, sort nodes, and limit nodes based on query shape and available indexes.
-- **Query binder** — resolves table aliases, derived table output columns, projection aliases, ordinal GROUP BY/ORDER BY references, aggregate scope, HAVING scope, and subquery scope before execution.
-- **Query operators** — `QueryScanner`, `QueryFilterer`, `QuerySorter`, `QueryLimiter`, `QueryProjector`, `QueryAggregator`, `QueryDistincter`, `SemiJoinExecutor`, and `QueryJoinExecutor` execute the plan while keeping filtering, sorting, aggregation, projection, and limiting storage-agnostic.
-- **Storage layer** — row data and index entries are stored in an embedded Kahuna KV node. `KvTableStore` maps table rows and index entries onto Kahuna keys using a prefix layout that keeps all rows of a table on the same Raft partition.
-- **Transaction layer** — `KvTransactionsManager` coordinates BEGIN/COMMIT/ROLLBACK via Kahuna's transaction API; cross-partition writes go through Kahuna's 2PC protocol.
-- **Catalog** — table and index descriptors are kept in memory and persisted through the KV layer.
-- **Cluster mode** — a process-level Kahuna node is shared across all databases, wired with real gRPC inter-node and Raft transports (`GrpcCommunication` + `StaticDiscovery`). Standalone mode creates a per-database node with the embedded in-process transport.
+See [docs/architecture.md](docs/architecture.md) for a full developer reference: the request lifecycle, each layer (parser, binder, planner, operators, catalog, KV storage, transactions, cluster transport), the key layout and partitioning model, and how standalone and cluster modes differ.
 
 Query Planner
 -------------
