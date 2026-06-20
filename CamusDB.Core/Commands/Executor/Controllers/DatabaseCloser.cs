@@ -34,6 +34,18 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 
         DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
 
+        // Roll back transactions still active at close time while the node is alive, so their
+        // range locks are released cleanly (rather than lingering until TTL expiry) and their
+        // heartbeat loops are stopped. Best-effort: a failure here must not block the close.
+        try
+        {
+            await databaseDescriptor.Transactions.RollbackAllActiveAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // descriptor.Dispose() below still cancels any remaining heartbeat loops
+        }
+
         // Only stop the Kahuna node when this descriptor owns it (standalone per-database instance).
         // The process-level cluster node is disposed by DI at shutdown, not per-database close.
         if (databaseDescriptor.OwnsKahuna)

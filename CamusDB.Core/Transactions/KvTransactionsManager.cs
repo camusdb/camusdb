@@ -38,7 +38,7 @@ namespace CamusDB.Core.Transactions;
 ///   }
 /// </code>
 /// </summary>
-public sealed class KvTransactionsManager
+public sealed class KvTransactionsManager : IDisposable
 {
     private readonly IKahuna kahuna;
 
@@ -544,6 +544,44 @@ public sealed class KvTransactionsManager
         }
         cts.Cancel();
         cts.Dispose();
+    }
+
+    /// <summary>
+    /// Cancels every outstanding range-lock heartbeat loop and releases its cancellation source.
+    /// Called when the owning database is closed/disposed: an unstopped loop keeps awaiting
+    /// <see cref="Task.Delay(int, CancellationToken)"/> forever, which roots this manager (and
+    /// therefore the entire Kahuna node it references) and prevents it from being collected.
+    /// Safe to call multiple times.
+    /// </summary>
+    public void StopAllHeartbeats()
+    {
+        List<CancellationTokenSource> sources;
+        lock (heartbeatSync)
+        {
+            sources = [.. heartbeats.Values];
+            heartbeats.Clear();
+        }
+
+        foreach (CancellationTokenSource cts in sources)
+        {
+            try
+            {
+                cts.Cancel();
+                cts.Dispose();
+            }
+            catch
+            {
+                // best-effort: a source already disposed by a racing StopHeartbeat is fine
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        StopAllHeartbeats();
+
+        lock (activeSync)
+            activeTransactions.Clear();
     }
 
     private async Task RangeLockHeartbeatLoopAsync(KvTransaction tx, CancellationToken ct)

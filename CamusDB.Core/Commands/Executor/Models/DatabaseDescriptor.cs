@@ -237,6 +237,10 @@ public sealed record DatabaseDescriptor : IDisposable
         IDisposable? subscription = Interlocked.Exchange(ref schemaReplicationSubscription, null);
         subscription?.Dispose();
 
+        // Cancel any outstanding range-lock heartbeat loops. Left running, each loop roots the
+        // transactions manager and the Kahuna node it references, leaking the whole node.
+        Transactions?.Dispose();
+
         Schema?.Dispose();
         SchemaDdlSemaphore?.Dispose();
         SystemSchemaSemaphore?.Dispose();
