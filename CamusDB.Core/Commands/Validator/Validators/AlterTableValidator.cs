@@ -16,47 +16,18 @@ internal sealed class AlterTableValidator : ValidatorBase
     public void Validate(AlterTableTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Database name is required"
-            );
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Database name is required");
 
         if (string.IsNullOrWhiteSpace(ticket.TableName))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Table name is required"
-            );
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Table name is required");
 
-        if (string.IsNullOrWhiteSpace(ticket.Column.Name))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Column name is required"
-            );
-
-        if (ticket.Column.Name.Length > 255)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Column name is too long"
-            );
-
-        if (!HasValidCharacters(ticket.Column.Name))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Column name has invalid characters"
-            );
+        ValidateIdentifier(ticket.Column.Name, "Column");
 
         if (ticket.Operation == AlterTableOperation.RenameColumn)
         {
-            if (string.IsNullOrWhiteSpace(ticket.NewName))
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New column name is required");
+            ValidateIdentifier(ticket.NewName ?? "", "New column");
 
-            if (ticket.NewName!.Length > 255)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New column name is too long");
-
-            if (!HasValidCharacters(ticket.NewName))
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New column name has invalid characters");
-
-            if (ticket.NewName.StartsWith('~'))
+            if (ticket.NewName!.StartsWith('~'))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                     $"New name '{ticket.NewName}' is reserved for internal use");
 

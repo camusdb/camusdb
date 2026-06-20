@@ -48,43 +48,14 @@ internal sealed class AlterIndexValidator : ValidatorBase
 
         if (ticket.Operation == AlterIndexOperation.AddIndex || ticket.Operation == AlterIndexOperation.AddUniqueIndex)
         {
-            if (string.IsNullOrWhiteSpace(ticket.IndexName))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Index name is required"
-                );
-
-            if (string.IsNullOrWhiteSpace(ticket.IndexName))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Index name is required"
-                );
-
-            if (ticket.IndexName.Length > 255)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Index name is too long"
-                );
-
-            if (!HasValidCharacters(ticket.IndexName))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Index name has invalid characters"
-                );
+            ValidateIdentifier(ticket.IndexName ?? "", "Index");
         }
 
         if (ticket.Operation == AlterIndexOperation.RenameIndex)
         {
-            if (string.IsNullOrWhiteSpace(ticket.NewName))
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New index name is required");
+            ValidateIdentifier(ticket.NewName ?? "", "New index");
 
-            if (ticket.NewName!.Length > 255)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New index name is too long");
-
-            if (!HasValidCharacters(ticket.NewName))
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New index name has invalid characters");
-
-            if (ticket.NewName.StartsWith('~'))
+            if (ticket.NewName!.StartsWith('~'))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                     $"New name '{ticket.NewName}' is reserved for internal use");
 

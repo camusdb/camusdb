@@ -25,23 +25,8 @@ internal sealed class RenameValidator : ValidatorBase
 
     private void ValidateInternal(SchemaRenamePayload payload)
     {
-        if (string.IsNullOrWhiteSpace(payload.TableName))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Table name is required");
-
-        if (payload.TableName.Length > 255)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Table name is too long");
-
-        if (!HasValidCharacters(payload.TableName))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Table name has invalid characters");
-
-        if (string.IsNullOrWhiteSpace(payload.NewName))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New table name is required");
-
-        if (payload.NewName.Length > 255)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New table name is too long");
-
-        if (!HasValidCharacters(payload.NewName))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "New table name has invalid characters");
+        ValidateIdentifier(payload.TableName, "Table");
+        ValidateIdentifier(payload.NewName, "New table");
 
         if (payload.NewName == payload.TableName)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput,

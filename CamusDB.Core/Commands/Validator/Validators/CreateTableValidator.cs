@@ -17,34 +17,18 @@ internal sealed class CreateTableValidator : ValidatorBase
     public void Validate(CreateTableTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Database name is required"
-            );
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Database name is required");
 
-        if (string.IsNullOrWhiteSpace(ticket.TableName))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Table name is required"
-            );
-
-        if (ticket.TableName.Length > 255)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Table name is too long"
-            );
-
-        if (!HasValidCharacters(ticket.TableName))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Table name has invalid characters"
-            );
+        ValidateIdentifier(ticket.TableName, "Table");
 
         if (ticket.Columns.Length == 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Table requires at least one column");
+
+        int maxCols = CamusDB.Core.CamusDBConfig.MaxColumnsPerTable;
+        if (maxCols > 0 && ticket.Columns.Length > maxCols)
             throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Table requires at least one column"
-            );
+                CamusDBErrorCodes.SchemaLimitExceeded,
+                $"Table '{ticket.TableName}' declares {ticket.Columns.Length} columns, which exceeds the maximum of {maxCols}");
 
         HashSet<string> existingColumns = new();
 
@@ -52,29 +36,16 @@ internal sealed class CreateTableValidator : ValidatorBase
         {
             ColumnInfo columnInfo = ticket.Columns[i];
 
-            if (!HasValidCharacters(columnInfo.Name))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Column name has invalid characters"
-                );
+            ValidateIdentifier(columnInfo.Name, "Column");
 
             if (IsReservedName(columnInfo.Name))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Reserved column name: " + columnInfo.Name
-                );
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Reserved column name: " + columnInfo.Name);
 
             if (!existingColumns.Add(columnInfo.Name.ToLowerInvariant()))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.DuplicateColumn,
-                    "Duplicate column name: " + columnInfo.Name
-                );
+                throw new CamusDBException(CamusDBErrorCodes.DuplicateColumn, "Duplicate column name: " + columnInfo.Name);
 
             if (columnInfo.Type == ColumnType.Null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Column type cannot be null"
-                );
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Column type cannot be null");
         }
 
         bool havePrimaryKey = false;

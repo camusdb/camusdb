@@ -101,6 +101,12 @@ public static class ConfigResolver
         }
 
         CamusDBConfig.KeyRangeShardingEnabled = keyRangeSharding;
+
+        CamusDBConfig.MaxIdentifierLength = config.MaxIdentifierLength;
+        CamusDBConfig.MaxColumnsPerTable = config.MaxColumnsPerTable;
+        CamusDBConfig.MaxIndexesPerTable = config.MaxIndexesPerTable;
+        CamusDBConfig.MaxTablesPerDatabase = config.MaxTablesPerDatabase;
+
         CamusDBConfig.Kahuna = config.Kahuna;
     }
 }

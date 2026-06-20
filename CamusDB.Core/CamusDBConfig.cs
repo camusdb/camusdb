@@ -180,6 +180,46 @@ public static class CamusDBConfig
     public static int LockWaitDeadlineMs = 500;
 
     /// <summary>
+    /// Maximum length (in UTF-16 <c>string.Length</c> units) for any user-facing identifier:
+    /// database names, table names, column names, and index names (including rename targets).
+    /// <para>
+    /// Replaces the former hard-coded 255-character limit with a tighter, configurable cap.
+    /// Pre-existing names that exceed this value continue to load — the limit gates only new
+    /// creation and rename operations, not existing schema reads.
+    /// </para>
+    /// <para><c>&lt;= 0</c> — limit is disabled (no length enforcement).</para>
+    /// Default: <c>64</c> (matches MySQL / PostgreSQL identifier limits).
+    /// </summary>
+    public static int MaxIdentifierLength = 64;
+
+    /// <summary>
+    /// Maximum number of user-declared columns allowed per table. Counts the columns visible in
+    /// <c>CREATE TABLE</c> and after each <c>ALTER TABLE ADD COLUMN</c>. Internal reserved columns
+    /// (e.g. <c>_id</c>) are not user-declarable and do not count toward the cap.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>512</c>.
+    /// </summary>
+    public static int MaxColumnsPerTable = 512;
+
+    /// <summary>
+    /// Maximum number of user-visible secondary indexes allowed per table. The implicit primary-key
+    /// index (<c>~pk</c>) and any internal <c>~</c>-prefixed indexes are exempt and do not count.
+    /// Checked on each <c>ALTER INDEX ADD INDEX / ADD UNIQUE</c> operation.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>64</c> (matches MySQL's per-table secondary-index cap).
+    /// </summary>
+    public static int MaxIndexesPerTable = 64;
+
+    /// <summary>
+    /// Maximum number of tables allowed in a single database. Checked at <c>CREATE TABLE</c>
+    /// time against the database's current persisted table set. <c>CREATE TABLE IF NOT EXISTS</c>
+    /// that resolves to an already-existing table is exempt — the table already counts.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>10000</c>.
+    /// </summary>
+    public static int MaxTablesPerDatabase = 10_000;
+
+    /// <summary>
     /// Resolved Kahuna engine overrides from <c>config.yml</c>. Applied when constructing embedded
     /// nodes in cluster and standalone modes.
     /// </summary>

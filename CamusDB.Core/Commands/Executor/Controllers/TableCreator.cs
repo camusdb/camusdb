@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -38,6 +39,12 @@ internal sealed class TableCreator
     {
         if (ticket.IfNotExists && catalogs.TableExists(database, ticket.TableName))
             return false;
+
+        int maxTables = CamusDBConfig.MaxTablesPerDatabase;
+        if (maxTables > 0 && database.Schema.Tables.Count >= maxTables)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SchemaLimitExceeded,
+                $"Database '{database.Name}' would exceed the maximum of {maxTables} tables per database");
 
         TableSchema tableSchema = await catalogs.CreateTable(database, ticket, tx).ConfigureAwait(false);
 

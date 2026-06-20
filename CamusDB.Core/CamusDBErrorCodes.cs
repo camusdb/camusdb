@@ -44,6 +44,14 @@ public static class CamusDBErrorCodes
     public const string SqlSyntaxError = "CADB0406";
     public const string InvalidAstStmt = "CADB0407";
 
+    /// <summary>
+    /// A schema operation would exceed a configured limit (identifier length, columns per table,
+    /// indexes per table, or tables per database). The limit and offending value are named in the
+    /// exception message. <c>&lt;= 0</c> values in <see cref="CamusDBConfig"/> disable the
+    /// corresponding check.
+    /// </summary>
+    public const string SchemaLimitExceeded = "CADB0408";
+
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
     

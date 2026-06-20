@@ -44,10 +44,17 @@ public sealed class TableColumnAdder
         }
 
         if (hasColumn)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                $"Duplicate column '{ticket.Column.Name}'"
-            );
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate column '{ticket.Column.Name}'");
+
+        int maxCols = CamusDBConfig.MaxColumnsPerTable;
+        if (maxCols > 0)
+        {
+            int currentCount = table.Schema.Columns!.Count;
+            if (currentCount + 1 > maxCols)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.SchemaLimitExceeded,
+                    $"Table '{table.Name}' would exceed the maximum of {maxCols} columns per table");
+        }
     }
 
     internal async Task<int> AddColumn(

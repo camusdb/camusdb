@@ -127,6 +127,18 @@ public class ConfigDefinition
     /// </summary>
     public bool KeyRangeSharding { get; set; }
 
+    /// <summary>Max UTF-16 length for any identifier (db, table, column, index). &lt;= 0 disables. Default 64.</summary>
+    public int MaxIdentifierLength { get; set; } = 64;
+
+    /// <summary>Max user-declared columns per table. &lt;= 0 disables. Default 512.</summary>
+    public int MaxColumnsPerTable { get; set; } = 512;
+
+    /// <summary>Max user-visible secondary indexes per table (PK exempt). &lt;= 0 disables. Default 64.</summary>
+    public int MaxIndexesPerTable { get; set; } = 64;
+
+    /// <summary>Max tables per database. &lt;= 0 disables. Default 10 000.</summary>
+    public int MaxTablesPerDatabase { get; set; } = 10_000;
+
     /// <summary>Allow-listed Kahuna engine tunables for cluster and standalone nodes.</summary>
     public KahunaOptionsConfig Kahuna { get; set; } = new();
 

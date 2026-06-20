@@ -7,6 +7,7 @@
  */
 
 using System.Diagnostics;
+using CamusDB.Core;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
@@ -44,6 +45,25 @@ internal sealed class TableIndexAdder
                 CamusDBErrorCodes.InvalidInput,
                 $"Index '{ticket.IndexName}' already exists on table '{table.Name}'"
             );
+
+        // Index count cap — only for user-visible secondary indexes (not PK or ~-prefixed internals).
+        if (ticket.Operation == AlterIndexOperation.AddIndex || ticket.Operation == AlterIndexOperation.AddUniqueIndex)
+        {
+            int maxIdx = CamusDBConfig.MaxIndexesPerTable;
+            if (maxIdx > 0)
+            {
+                int userIndexCount = 0;
+                foreach (string key in table.Indexes.Keys)
+                {
+                    if (!key.StartsWith('~'))
+                        userIndexCount++;
+                }
+                if (userIndexCount + 1 > maxIdx)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.SchemaLimitExceeded,
+                        $"Table '{table.Name}' would exceed the maximum of {maxIdx} indexes per table");
+            }
+        }
 
         foreach (ColumnIndexInfo indexColumn in ticket.Columns)
         {

@@ -47,6 +47,10 @@ public class ConfigReader
         "lock_escalation_threshold",
         "lock_wait_deadline_ms",
         "key_range_sharding",
+        "max_identifier_length",
+        "max_columns_per_table",
+        "max_indexes_per_table",
+        "max_tables_per_database",
         "kahuna",
     };
 
