@@ -61,8 +61,8 @@ builder.Logging.AddSimpleConsole(options =>
     options.SingleLine = true;
     options.TimestampFormat = "yyyy-MM-dd HH:mm:ss ";
 });
-builder.Logging.AddFilter("Kahuna", LogLevel.Debug);
-builder.Logging.AddFilter("Kommander", LogLevel.Information);
+builder.Logging.AddFilter("Kahuna", LogLevel.Warning);
+builder.Logging.AddFilter("Kommander", LogLevel.Warning);
 
 // Add services to the container.
 builder.Services.AddRazorPages();

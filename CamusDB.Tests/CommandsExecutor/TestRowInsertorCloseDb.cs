@@ -262,7 +262,11 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
 
             await database.Transactions.CommitAsync(txnState);
 
-            if ((i + 1) % 5 == 0)
+            // Close and reopen periodically to exercise the close/reopen path. Every 25
+            // (rather than every 5) keeps the coverage while avoiding ~10 close/reopen
+            // cycles — each embedded-node teardown costs seconds, which otherwise pushes
+            // this single test method past the CI blame-hang inactivity window.
+            if ((i + 1) % 25 == 0)
             {
                 CloseDatabaseTicket closeTicket = new(dbname);
                 await executor.CloseDatabase(closeTicket);
