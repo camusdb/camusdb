@@ -32,6 +32,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// the subsequent OpenDatabase recreates the node from the same on-disk files, exercising
 /// the full LoadMetaAsync → TableSchema.Indexes deserialization path.
 /// </summary>
+[NonParallelizable]
 internal sealed class TestPersistentIndexSchema : BaseTest
 {
     private const string TableName = "robots";

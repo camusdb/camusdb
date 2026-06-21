@@ -41,6 +41,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   - Commit and rollback both finalize cleanly.
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestSerializableReadOnlyExplicit : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)>

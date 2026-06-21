@@ -33,6 +33,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// contending in reverse order can never both abort — the older one wins deterministically.
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestSerializableWaitDie : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)>

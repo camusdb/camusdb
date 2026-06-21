@@ -33,6 +33,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// CADB0501 error-code distinction is maintained for the commit path.
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestMustRetryContract : SharedNodeBaseTest
 {
     private static CreateTableTicket BasicTable(string dbname, string tableName) => new(

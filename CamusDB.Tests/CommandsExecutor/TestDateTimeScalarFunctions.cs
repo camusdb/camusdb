@@ -24,6 +24,7 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
+[NonParallelizable]
 public class TestDateTimeScalarFunctions : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupBasicTable()

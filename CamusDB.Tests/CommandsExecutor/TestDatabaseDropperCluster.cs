@@ -34,6 +34,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Verifies PurgeClusterKeyspaceAsync actually removes keys from the shared KV store.
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 internal sealed class TestDatabaseDropperCluster : SharedNodeBaseTest
 {
     /// <summary>

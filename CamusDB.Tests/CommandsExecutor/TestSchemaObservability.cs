@@ -29,6 +29,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///       metric, not just a log line.
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestSchemaObservability : SharedNodeBaseTest
 {
     // (a) GetLaggingNodes returns exactly the live members that have not acked the target version:

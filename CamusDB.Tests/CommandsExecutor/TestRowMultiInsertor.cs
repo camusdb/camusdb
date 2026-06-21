@@ -17,6 +17,7 @@ using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
+[NonParallelizable]
 internal sealed class TestRowMultiInsertor : SharedNodeBaseTest
 {
     private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()

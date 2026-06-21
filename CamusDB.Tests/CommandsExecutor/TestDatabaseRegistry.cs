@@ -27,6 +27,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// Unit tests for <see cref="DatabaseRegistry"/>.
 /// </summary>
+[NonParallelizable]
 internal sealed class TestDatabaseRegistry
 {
     // Each test gets a unique temp directory so SQLite files never collide.

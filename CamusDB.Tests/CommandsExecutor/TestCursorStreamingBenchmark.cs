@@ -34,6 +34,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Timings are emitted to the test console so they can be captured in the PR description.
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestCursorStreamingBenchmark : SharedNodeBaseTest
 {
     // --- schema helpers ---

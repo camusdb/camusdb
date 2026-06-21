@@ -29,6 +29,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Acceptance tests for G4: RENAME TABLE, RENAME COLUMN, RENAME INDEX executor entry-points,
 /// SQL grammar, and data-layer invariants.
 /// </summary>
+[NonParallelizable]
 internal sealed class TestTableRename : SharedNodeBaseTest
 {
     // ── helpers ──────────────────────────────────────────────────────────────

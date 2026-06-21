@@ -30,6 +30,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   - No table rows are scanned (the plan is built but the data cursor is never opened).
 ///   - The node sequence matches the expected physical plan shape.
 /// </summary>
+[NonParallelizable]
 public class TestExplainExecutor : SharedNodeBaseTest
 {
     // ── Fixture helpers ───────────────────────────────────────────────────────

@@ -45,6 +45,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Together they satisfy the single-node ≡ cluster invariant.
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestSerializableAnomalies : SharedNodeBaseTest
 {
     // accounts(id Id PK, name String NOT NULL, balance Integer64)

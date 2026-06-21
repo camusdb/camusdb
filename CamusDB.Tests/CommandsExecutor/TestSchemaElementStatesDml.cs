@@ -21,6 +21,7 @@ using NUnit.Framework;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
+[NonParallelizable]
 internal sealed class TestSchemaElementStatesDml : SharedNodeBaseTest
 {
     [Test]

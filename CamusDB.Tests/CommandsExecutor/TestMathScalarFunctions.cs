@@ -23,6 +23,7 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
+[NonParallelizable]
 public class TestMathScalarFunctions : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupBasicTable()

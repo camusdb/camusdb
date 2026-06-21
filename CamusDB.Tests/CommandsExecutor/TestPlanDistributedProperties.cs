@@ -471,6 +471,7 @@ public class TestPlanDistributedProperties
 /// future distributed sharding pass begins populating these properties for join plans, these
 /// tests must be updated to reflect the new contract.
 /// </summary>
+[NonParallelizable]
 public class TestPlanJoinDistributedPropertiesLimitation : SharedNodeBaseTest
 {
     // ── fixture ───────────────────────────────────────────────────────────────

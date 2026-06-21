@@ -35,6 +35,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// through the query executor.
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestSerializableScanIntegration : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)>
