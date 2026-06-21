@@ -542,9 +542,25 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     // -----------------------------------------------------------------------
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
+        // Roll back any transaction still active on the system store while the node is alive,
+        // then dispose the transactions manager so its range-lock heartbeat loops are cancelled.
+        // An undisposed manager keeps a heartbeat loop awaiting forever, which roots the manager
+        // and the system Kahuna node it references — leaking a whole node per registry instance.
+        try
+        {
+            await transactions.RollbackAllActiveAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // best-effort: transactions.Dispose() below still cancels any remaining loops
+        }
+
+        transactions.Dispose();
         writeSem.Dispose();
-        return ownedNode?.DisposeAsync() ?? ValueTask.CompletedTask;
+
+        if (ownedNode is not null)
+            await ownedNode.DisposeAsync().ConfigureAwait(false);
     }
 }
