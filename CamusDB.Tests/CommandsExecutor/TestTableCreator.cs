@@ -228,7 +228,7 @@ internal sealed class TestTableCreator : SharedNodeBaseTest
         );
 
         CamusDBException? e = Assert.ThrowsAsync<CamusDBException>(async () => await executor.CreateTable(ticket));
-        Assert.AreEqual("Table name is too long", e!.Message);
+        Assert.That(e!.Message, Does.StartWith("Table name '") & Does.Contain("is too long"));
     }
 
     [Test]

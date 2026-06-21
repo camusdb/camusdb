@@ -360,6 +360,6 @@ internal sealed class TestRenameSQL : SharedNodeBaseTest
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await executor.ExecuteDDLSQL(
                 Sql(tx, dbname, $"ALTER TABLE tilde_tbl RENAME COLUMN score TO {longName}")));
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
     }
 }
