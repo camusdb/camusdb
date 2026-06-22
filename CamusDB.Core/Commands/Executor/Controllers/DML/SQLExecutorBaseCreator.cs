@@ -289,13 +289,13 @@ internal abstract class SQLExecutorBaseCreator
 
                     return new ColumnValue(
                         ColumnType.Bool,
-                        SubqueryValueListAst.ContainsValue(leftValue, expr.rightAst));
+                        SubqueryValueListAst.ContainsValue(leftValue, expr.rightAst, parameters));
                 }
 
             case NodeType.ExprNotInMembership:
                 {
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    bool? result = SubqueryValueListAst.EvaluateNotInMembership(leftValue, expr);
+                    bool? result = SubqueryValueListAst.EvaluateNotInMembership(leftValue, expr, parameters);
 
                     return new ColumnValue(ColumnType.Bool, result ?? false);
                 }

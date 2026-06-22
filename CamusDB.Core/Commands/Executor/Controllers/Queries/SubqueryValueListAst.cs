@@ -63,12 +63,12 @@ internal static class SubqueryValueListAst
         return current;
     }
 
-    public static bool ContainsValue(ColumnValue lhs, NodeAst? valueListAst)
+    public static bool ContainsValue(ColumnValue lhs, NodeAst? valueListAst, Dictionary<string, ColumnValue>? parameters = null)
     {
         if (valueListAst is null || lhs.Type == ColumnType.Null)
             return false;
 
-        foreach (ColumnValue candidate in Enumerate(valueListAst))
+        foreach (ColumnValue candidate in Enumerate(valueListAst, parameters))
         {
             if (candidate.Type == ColumnType.Null)
                 continue;
@@ -83,7 +83,7 @@ internal static class SubqueryValueListAst
     /// <summary>
     /// Evaluates SQL <c>NOT IN</c> with three-valued semantics. Returns null for unknown.
     /// </summary>
-    public static bool? EvaluateNotInMembership(ColumnValue lhs, NodeAst expr)
+    public static bool? EvaluateNotInMembership(ColumnValue lhs, NodeAst expr, Dictionary<string, ColumnValue>? parameters = null)
     {
         bool containsNull = ReadBool(expr.extendedOne);
         bool isEmpty = ReadBool(expr.extendedTwo);
@@ -92,7 +92,7 @@ internal static class SubqueryValueListAst
             return true;
 
         bool sawNull = false;
-        foreach (ColumnValue candidate in Enumerate(expr.rightAst))
+        foreach (ColumnValue candidate in Enumerate(expr.rightAst, parameters))
         {
             if (candidate.Type == ColumnType.Null)
             {
@@ -133,7 +133,7 @@ internal static class SubqueryValueListAst
             extendedFive: null,
             yytext: value ? "true" : "false");
 
-    private static IEnumerable<ColumnValue> Enumerate(NodeAst? ast)
+    private static IEnumerable<ColumnValue> Enumerate(NodeAst? ast, Dictionary<string, ColumnValue>? parameters = null)
     {
         if (ast is null)
             yield break;
@@ -142,19 +142,19 @@ internal static class SubqueryValueListAst
         {
             if (ast.leftAst is not null)
             {
-                foreach (ColumnValue value in Enumerate(ast.leftAst))
+                foreach (ColumnValue value in Enumerate(ast.leftAst, parameters))
                     yield return value;
             }
 
             if (ast.rightAst is not null)
             {
-                foreach (ColumnValue value in Enumerate(ast.rightAst))
+                foreach (ColumnValue value in Enumerate(ast.rightAst, parameters))
                     yield return value;
             }
 
             yield break;
         }
 
-        yield return SQLExecutorBaseCreator.EvalExpr(ast, new(), parameters: null);
+        yield return SQLExecutorBaseCreator.EvalExpr(ast, new(), parameters);
     }
 }

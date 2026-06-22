@@ -592,6 +592,105 @@ public class TestIndexInListScan : BaseTest
         Assert.AreEqual("Alice", rows[0].Row["name"].StrValue);
     }
 
+    private static async Task<List<QueryResultRow>> RunSqlWithParams(
+        CommandExecutor executor,
+        KvTransaction txn,
+        string dbname,
+        string sql,
+        Dictionary<string, ColumnValue> parameters)
+    {
+        ExecuteSQLTicket ticket = new(
+            txnState: txn,
+            database: dbname,
+            sql: sql,
+            parameters: parameters);
+
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        return await cursor.ToListAsync();
+    }
+
+    [Test]
+    public async Task ExecInListWithPlaceholders_ReturnsCorrectRows()
+    {
+        // Regression test: IN (@p1, @p2, @p3) with parameterised placeholders must not throw
+        // "Missing placeholders to replace: @p1" — SubqueryValueListAst.Enumerate was calling
+        // EvalExpr with parameters: null.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsWithNameIndex();
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        List<QueryResultRow> rows = await RunSqlWithParams(executor, txn, dbname,
+            "SELECT name FROM robots WHERE name IN (@p1, @p2, @p3)",
+            new()
+            {
+                { "@p1", new ColumnValue(ColumnType.String, "Alice") },
+                { "@p2", new ColumnValue(ColumnType.String, "Carol") },
+                { "@p3", new ColumnValue(ColumnType.String, "Eve") },
+            });
+
+        await database.Transactions.CommitAsync(txn);
+
+        Assert.AreEqual(3, rows.Count, "Expected 3 rows matching IN placeholder list");
+        HashSet<string> names = rows.Select(r => r.Row["name"].StrValue!).ToHashSet();
+        Assert.That(names, Does.Contain("Alice"));
+        Assert.That(names, Does.Contain("Carol"));
+        Assert.That(names, Does.Contain("Eve"));
+    }
+
+    [Test]
+    public async Task ExecNotInListWithPlaceholders_ExcludesCorrectRows()
+    {
+        // Regression: NOT IN (@p1, @p2) with placeholders must also resolve parameters
+        // through EvaluateNotInMembership → Enumerate → EvalExpr.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsWithNameIndex();
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        List<QueryResultRow> rows = await RunSqlWithParams(executor, txn, dbname,
+            "SELECT name FROM robots WHERE name NOT IN (@p1, @p2)",
+            new()
+            {
+                { "@p1", new ColumnValue(ColumnType.String, "Alice") },
+                { "@p2", new ColumnValue(ColumnType.String, "Bob") },
+            });
+
+        await database.Transactions.CommitAsync(txn);
+
+        // Alice and Bob excluded; Carol, Dave, Eve remain.
+        Assert.AreEqual(3, rows.Count, "Expected 3 rows after NOT IN exclusion");
+        HashSet<string> names = rows.Select(r => r.Row["name"].StrValue!).ToHashSet();
+        Assert.That(names, Does.Not.Contain("Alice"));
+        Assert.That(names, Does.Not.Contain("Bob"));
+        Assert.That(names, Does.Contain("Carol"));
+        Assert.That(names, Does.Contain("Dave"));
+        Assert.That(names, Does.Contain("Eve"));
+    }
+
+    [Test]
+    public async Task ExecInListWithPlaceholders_TableScanPath_ReturnsCorrectRows()
+    {
+        // Same regression but on a non-indexed column (enabled), which takes the full-scan
+        // + residual-filter path rather than IndexInListScanNode.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupRobotsTable();
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        List<QueryResultRow> rows = await RunSqlWithParams(executor, txn, dbname,
+            "SELECT year FROM robots WHERE year IN (@y1, @y2)",
+            new()
+            {
+                { "@y1", new ColumnValue(ColumnType.Integer64, 2021L) },
+                { "@y2", new ColumnValue(ColumnType.Integer64, 2023L) },
+            });
+
+        await database.Transactions.CommitAsync(txn);
+
+        Assert.AreEqual(2, rows.Count, "Expected 2 rows for years 2021 and 2023");
+        HashSet<long> years = rows.Select(r => r.Row["year"].LongValue).ToHashSet();
+        Assert.That(years, Does.Contain(2021L));
+        Assert.That(years, Does.Contain(2023L));
+    }
+
     [Test]
     public async Task ExecPKInListWithAndPredicate_CompetesAndFilters()
     {
