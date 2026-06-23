@@ -162,8 +162,7 @@ internal static class CommaJoinNormalizer
                 $"Unsupported comma join source: {source.GetType().Name}"),
         };
 
-    internal static NodeAst CreateCrossJoinOnPredicate() =>
-        ColumnValueAstBuilder.FromColumnValue(new ColumnValue(ColumnType.Bool, true));
+    internal static NodeAst CreateCrossJoinOnPredicate() => NodeAst.True;
 
     private static bool TrySplitQualified(string identifier, out string alias, out string columnName)
     {

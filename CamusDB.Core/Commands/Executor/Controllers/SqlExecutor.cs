@@ -17,10 +17,10 @@ using Microsoft.Extensions.Logging;
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
-/// The methods in this class receive AST (Abstract Syntax Tree) from the SQL parser and transform them into tickets, 
+/// The methods in this class receive AST (Abstract Syntax Tree) from the SQL parser and transform them into tickets,
 /// which are the representations and attributes of the different types of requests accepted by the command executor.
 /// </summary>
-internal sealed class SqlExecutor
+internal sealed class SqlExecutor(ILogger<ICamusDB> logger)
 {
     private readonly SQLExecutorQueryCreator sqlExecutorQueryCreator = new();
 
@@ -37,11 +37,6 @@ internal sealed class SqlExecutor
     private readonly SQLExecutorAlterTableCreator sqlExecutorAlterTableCreator = new();
 
     private readonly SQLExecutorAlterIndexCreator sqlExecutorAlterIndexCreator = new();
-
-    public SqlExecutor(ILogger<ICamusDB> logger)
-    {
-
-    }
 
     public QueryTicket CreateQueryTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
@@ -65,7 +60,7 @@ internal sealed class SqlExecutor
 
     /// <summary>
     /// Creates a ticket to create a table from the AST representation of a SQL statement.
-    /// </summary>    
+    /// </summary>
     /// <param name="ticket"></param>
     /// <param name="ast"></param>
     /// <returns></returns>

@@ -168,10 +168,12 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket = state.Ticket;
         TableDescriptor table = state.Table;
         KvTransaction tx = state.Tx;
+
         bool unique = ticket.Operation is AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddUniqueIndex;
         string indexId = state.IndexId
             ?? table.Schema.Indexes?.FirstOrDefault(ix => ix.Name == ticket.IndexName)?.Id
             ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{ticket.IndexName}' was not found in schema");
+
         TableIndexSchema? schemaIndex = table.Schema.Indexes?.FirstOrDefault(ix => ix.Id == indexId);
         ObjectIdValue? afterRowId = string.IsNullOrWhiteSpace(schemaIndex?.StartOffset)
             ? null

@@ -76,7 +76,7 @@ public sealed class SqlParserCache : IAsyncDisposable
     // Background sweeper state — one per instance, started lazily on first Store() call.
     private CancellationTokenSource? _sweepCts;
     private Task? _sweepTask;
-    private readonly object _sweepLock = new();
+    private readonly Lock _sweepLock = new();
 
     // ── Observable counters ────────────────────────────────────────────────────
 

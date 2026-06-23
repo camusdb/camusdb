@@ -87,7 +87,7 @@ internal sealed class ExistsSubqueryPreparer
                     ticket.TxnState,
                     ticket.Parameters).ConfigureAwait(false);
 
-                return ColumnValueAstBuilder.FromColumnValue(new ColumnValue(ColumnType.Bool, exists));
+                return ColumnValueAstBuilder.FromColumnValue(ColumnValue.FromBool(exists));
             }
 
             PreparedExistsSubquery prepared = await PrepareCorrelatedAsync(

@@ -125,10 +125,13 @@ else
 {
     builder.Services.AddSingleton<CommandExecutor>();
 }
+
 builder.Services.AddSingleton<CommandValidator>();
 builder.Services.AddSingleton<CatalogsManager>();
+
 if (config.IsClusterMode)
     builder.Services.AddSingleton<DdlOperationIdCache>();
+
 builder.Services.AddSingleton<HttpTransactionCoordinator>();
 
 if (config.IsClusterMode)

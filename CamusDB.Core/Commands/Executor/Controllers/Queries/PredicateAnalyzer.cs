@@ -502,16 +502,7 @@ public static class PredicateAnalyzer
                 extendedFour: null,
                 extendedFive: null,
                 yytext: value.FloatValue.ToString()),
-            ColumnType.Bool => new NodeAst(
-                NodeType.Bool,
-                leftAst: null,
-                rightAst: null,
-                extendedOne: null,
-                extendedTwo: null,
-                extendedThree: null,
-                extendedFour: null,
-                extendedFive: null,
-                yytext: value.BoolValue.ToString()),
+            ColumnType.Bool => value.BoolValue ? NodeAst.True : NodeAst.False,
             ColumnType.String => new NodeAst(
                 NodeType.String,
                 leftAst: null,
@@ -532,16 +523,7 @@ public static class PredicateAnalyzer
                 extendedFour: null,
                 extendedFive: null,
                 yytext: value.StrValue),
-            ColumnType.Null => new NodeAst(
-                NodeType.Null,
-                leftAst: null,
-                rightAst: null,
-                extendedOne: null,
-                extendedTwo: null,
-                extendedThree: null,
-                extendedFour: null,
-                extendedFive: null,
-                yytext: null),
+            ColumnType.Null => NodeAst.Null,
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unsupported filter constant type: " + value.Type),
         };
     }

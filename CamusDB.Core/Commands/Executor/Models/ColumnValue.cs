@@ -16,6 +16,12 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// </summary>
 public sealed class ColumnValue : IComparable<ColumnValue>
 {
+    public static readonly ColumnValue Null = new(ColumnType.Null, false);
+    public static readonly ColumnValue True = new(ColumnType.Bool, true);
+    public static readonly ColumnValue False = new(ColumnType.Bool, false);
+
+    public static ColumnValue FromBool(bool value) => value ? True : False;
+
     public ColumnType Type { get; }
 
     public long LongValue { get; }

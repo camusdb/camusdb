@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Diagnostics;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;

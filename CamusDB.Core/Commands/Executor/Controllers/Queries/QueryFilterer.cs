@@ -101,7 +101,7 @@ internal sealed class QueryFilterer
         ColumnValue leftValue = QueryHavingEvaluator.Evaluate(expr.leftAst!, row, ticket, ticket.Parameters);
 
         if (!ToPredicateResult(leftValue))
-            return new ColumnValue(ColumnType.Bool, false);
+            return ColumnValue.False;
 
         return await EvaluateHavingAsync(expr.rightAst!, row, ticket).ConfigureAwait(false);
     }
@@ -114,7 +114,7 @@ internal sealed class QueryFilterer
         ColumnValue leftValue = QueryHavingEvaluator.Evaluate(expr.leftAst!, row, ticket, ticket.Parameters);
 
         if (ToPredicateResult(leftValue))
-            return new ColumnValue(ColumnType.Bool, true);
+            return ColumnValue.True;
 
         return await EvaluateHavingAsync(expr.rightAst!, row, ticket).ConfigureAwait(false);
     }
@@ -143,7 +143,7 @@ internal sealed class QueryFilterer
                     ticket.TxnState,
                     ticket.Parameters).ConfigureAwait(false);
 
-                return new ColumnValue(ColumnType.Bool, exists);
+                return ColumnValue.FromBool(exists);
             }
 
             case NodeType.ExprAnd:
@@ -151,7 +151,7 @@ internal sealed class QueryFilterer
                 ColumnValue leftValue = await EvaluatePredicateAsync(expr.leftAst!, row, ticket, database).ConfigureAwait(false);
 
                 if (!ToPredicateResult(leftValue))
-                    return new ColumnValue(ColumnType.Bool, false);
+                    return ColumnValue.False;
 
                 return await EvaluatePredicateAsync(expr.rightAst!, row, ticket, database).ConfigureAwait(false);
             }
@@ -161,7 +161,7 @@ internal sealed class QueryFilterer
                 ColumnValue leftValue = await EvaluatePredicateAsync(expr.leftAst!, row, ticket, database).ConfigureAwait(false);
 
                 if (ToPredicateResult(leftValue))
-                    return new ColumnValue(ColumnType.Bool, true);
+                    return ColumnValue.True;
 
                 return await EvaluatePredicateAsync(expr.rightAst!, row, ticket, database).ConfigureAwait(false);
             }

@@ -29,8 +29,8 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         if (ast.rightAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing create table fields list");
 
-        List<ColumnInfo> columnInfos = new();
-        List<ConstraintInfo> constraintInfos = new();
+        List<ColumnInfo> columnInfos = [];
+        List<ConstraintInfo> constraintInfos = [];
 
         GetCreateTableFieldList(ast.rightAst, columnInfos);
 
@@ -41,8 +41,8 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         return new(
             databaseName: ticket.DatabaseName,
             tableName: tableName,
-            columns: columnInfos.ToArray(),
-            constraints: constraintInfos.ToArray(),
+            columns: [.. columnInfos],
+            constraints: [.. constraintInfos],
             ifNotExists: ast.nodeType == NodeType.CreateTableIfNotExists
         );
     }
@@ -74,9 +74,9 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         {
             string indexName = constraintList.leftAst?.yytext
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
-            List<ColumnIndexInfo> columnIndexInfos = new();
+            List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(constraintList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, columnIndexInfos.ToArray()));
+            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos]));
             return;
         }
 
@@ -84,9 +84,9 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         {
             string indexName = constraintList.leftAst?.yytext
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
-            List<ColumnIndexInfo> columnIndexInfos = new();
+            List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(constraintList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, columnIndexInfos.ToArray()));
+            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, [.. columnIndexInfos]));
             return;
         }
 
@@ -105,7 +105,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
     }
 
     /// <summary>
-    /// Returns the list of 
+    /// Returns the list of
     /// </summary>
     /// <param name="ast"></param>
     /// <returns></returns>
@@ -228,8 +228,6 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown field type: " + nodeAst.nodeType);
     }
 
-
-
     private static void GetCreateTableConstraintFromFieldList(NodeAst fieldList, List<ConstraintInfo> constraintInfos)
     {
         if (fieldList.nodeType == NodeType.CreateTableItem)
@@ -253,7 +251,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                         ConstraintInfo constraintInfo = new(
                             ConstraintType.PrimaryKey,
                             CamusDBConfig.PrimaryKeyInternalName,
-                            new ColumnIndexInfo[] { new(name: fieldList.leftAst.yytext! ?? "", OrderType.Ascending) }
+                            [new(name: fieldList.leftAst.yytext! ?? "", OrderType.Ascending)]
                         );
 
                         constraintInfos.Add(constraintInfo);
@@ -264,7 +262,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                         ConstraintInfo constraintInfo = new(
                             ConstraintType.IndexUnique,
                             fieldList.leftAst.yytext! ?? "",
-                            new ColumnIndexInfo[] { new(name: fieldList.leftAst.yytext! ?? "", OrderType.Ascending) }
+                            [new(name: fieldList.leftAst.yytext! ?? "", OrderType.Ascending)]
                         );
 
                         constraintInfos.Add(constraintInfo);
@@ -298,9 +296,9 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         {
             string indexName = fieldList.leftAst?.yytext
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
-            List<ColumnIndexInfo> columnIndexInfos = new();
+            List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(fieldList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, columnIndexInfos.ToArray()));
+            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos]));
             return;
         }
 
@@ -308,9 +306,9 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         {
             string indexName = fieldList.leftAst?.yytext
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
-            List<ColumnIndexInfo> columnIndexInfos = new();
+            List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(fieldList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, columnIndexInfos.ToArray()));
+            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, [.. columnIndexInfos]));
             return;
         }
 

@@ -64,7 +64,7 @@ internal static class CastScalarFunctions
     internal static ColumnValue CastValue(string castName, ColumnValue value, ColumnType targetType)
     {
         if (value.Type == ColumnType.Null)
-            return new ColumnValue(ColumnType.Null, 0);
+            return ColumnValue.Null;
 
         return targetType switch
         {
@@ -178,10 +178,10 @@ internal static class CastScalarFunctions
     private static ColumnValue FromStringToBool(string castName, string text)
     {
         if (string.Equals(text, "true", StringComparison.OrdinalIgnoreCase))
-            return new ColumnValue(ColumnType.Bool, true);
+            return ColumnValue.True;
 
         if (string.Equals(text, "false", StringComparison.OrdinalIgnoreCase))
-            return new ColumnValue(ColumnType.Bool, false);
+            return ColumnValue.False;
 
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInput,

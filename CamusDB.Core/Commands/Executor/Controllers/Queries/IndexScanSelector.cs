@@ -517,7 +517,7 @@ internal static class IndexScanSelector
             ColumnType.Float64 when TryNextFloat64(value.FloatValue, out ColumnValue? nextFloat)
                 => nextFloat,
             ColumnType.Bool when !value.BoolValue
-                => new ColumnValue(ColumnType.Bool, true),
+                => ColumnValue.True,
             _ => null,
         };
     }

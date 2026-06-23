@@ -19,6 +19,10 @@ namespace CamusDB.Core.SQLParser;
 /// (<c>SubqueryRewriter</c>, binders, planners) must <b>construct new nodes</b> rather than
 /// modifying fields of an existing node. This invariant is what makes sharing a single cached
 /// <see cref="NodeAst"/> across concurrent executions of the same SQL text safe.
+/// <para>
+/// <see cref="Null"/>, <see cref="True"/>, <see cref="TypeInteger64"/>, and other static leaf
+/// sentinels are shared across all parsed trees; they must never be mutated in place.
+/// </para>
 /// </remarks>
 public sealed class NodeAst
 {
@@ -65,17 +69,55 @@ public sealed class NodeAst
         this.extendedFive = extendedFive;
         this.extendedSix = extendedSix;
         this.yytext = yytext;
-
-        //if (leftAst is not null)
-        //	Console.WriteLine("left={0}/{1}", leftAst.nodeType, leftAst.yytext);
-
-        //if (rightAst is not null)
-        //Console.WriteLine("right={0}/{1}", rightAst.nodeType, rightAst.yytext);
-
-        //if (!string.IsNullOrEmpty(yytext))
-		//	Console.WriteLine("{0}: {1}", nodeType, yytext);
 	}
 
     public static NodeAst FromLong(long value) =>
         new(NodeType.Integer, null, null, null, null, null, null, null, value.ToString());
+
+    // ── Literal sentinels ────────────────────────────────────────────────────
+
+    public static readonly NodeAst Null = Leaf(NodeType.Null, "null");
+    public static readonly NodeAst True = Leaf(NodeType.Bool, "true");
+    public static readonly NodeAst False = Leaf(NodeType.Bool, "false");
+
+    // ── Expression sentinels ───────────────────────────────────────────────────
+
+    public static readonly NodeAst ExprAllFields = Leaf(NodeType.ExprAllFields);
+    public static readonly NodeAst ExprDefault = Leaf(NodeType.ExprDefault);
+
+    // ── DDL type sentinels ───────────────────────────────────────────────────
+
+    public static readonly NodeAst TypeObjectId = Leaf(NodeType.TypeObjectId);
+    public static readonly NodeAst TypeString = Leaf(NodeType.TypeString);
+    public static readonly NodeAst TypeInteger64 = Leaf(NodeType.TypeInteger64);
+    public static readonly NodeAst TypeFloat64 = Leaf(NodeType.TypeFloat64);
+    public static readonly NodeAst TypeBool = Leaf(NodeType.TypeBool);
+
+    // ── DDL constraint sentinels ───────────────────────────────────────────────
+
+    public static readonly NodeAst ConstraintNull = Leaf(NodeType.ConstraintNull);
+    public static readonly NodeAst ConstraintNotNull = Leaf(NodeType.ConstraintNotNull);
+    public static readonly NodeAst ConstraintPrimaryKey = Leaf(NodeType.ConstraintPrimaryKey);
+    public static readonly NodeAst ConstraintUnique = Leaf(NodeType.ConstraintUnique);
+
+    // ── Transaction statement sentinels ──────────────────────────────────────
+
+    public static readonly NodeAst Begin = Leaf(NodeType.Begin);
+    public static readonly NodeAst Commit = Leaf(NodeType.Commit);
+    public static readonly NodeAst Rollback = Leaf(NodeType.Rollback);
+
+    /// <summary>SET TRANSACTION mode: <c>ReadWrite</c> (stored in <see cref="leftAst"/>).</summary>
+    public static readonly NodeAst TransactionModeReadWrite = Leaf(NodeType.String, "ReadWrite");
+
+    /// <summary>SET TRANSACTION mode: <c>ReadOnly</c> (stored in <see cref="leftAst"/>).</summary>
+    public static readonly NodeAst TransactionModeReadOnly = Leaf(NodeType.String, "ReadOnly");
+
+    // ── SHOW statement sentinels (no filter argument) ──────────────────────────
+
+    public static readonly NodeAst ShowTables = Leaf(NodeType.ShowTables);
+    public static readonly NodeAst ShowDatabase = Leaf(NodeType.ShowDatabase);
+    public static readonly NodeAst ShowDatabases = Leaf(NodeType.ShowDatabases);
+
+    private static NodeAst Leaf(NodeType nodeType, string? yytext = null) =>
+        new(nodeType, null, null, null, null, null, null, null, yytext);
 }

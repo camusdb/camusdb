@@ -107,7 +107,7 @@ internal sealed class SubqueryQueryExecutor
     internal static ColumnValue ExtractSingleColumnValue(QueryResultRow row)
     {
         if (row.Row.Count == 0)
-            return new ColumnValue(ColumnType.Null, 0);
+            return ColumnValue.Null;
 
         if (row.Row.Count > 1)
         {

@@ -56,7 +56,7 @@ internal static class ScalarFunctionArguments
         foreach (ColumnValue argument in arguments)
         {
             if (argument.Type == ColumnType.Null)
-                return new ColumnValue(ColumnType.Null, 0);
+                return ColumnValue.Null;
         }
 
         return null;

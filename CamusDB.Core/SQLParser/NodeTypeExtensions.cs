@@ -12,22 +12,20 @@ public static class NodeTypeExtensions
 {
     public static bool IsBinary(this NodeType nodeType)
     {
-        switch (nodeType)
+        return nodeType switch
         {
-            case NodeType.ExprEquals:
-            case NodeType.ExprNotEquals:
-            case NodeType.ExprGreaterThan:
-            case NodeType.ExprGreaterEqualsThan:
-            case NodeType.ExprLessThan:
-            case NodeType.ExprLessEqualsThan:
-            case NodeType.ExprAdd:
-            case NodeType.ExprSub:
-            case NodeType.ExprMult:
-            case NodeType.ExprOr:
-            case NodeType.ExprAnd:
-                return true;
-        }
-
-        return false;
+            NodeType.ExprEquals or
+            NodeType.ExprNotEquals or
+            NodeType.ExprGreaterThan or
+            NodeType.ExprGreaterEqualsThan or
+            NodeType.ExprLessThan or
+            NodeType.ExprLessEqualsThan or
+            NodeType.ExprAdd or
+            NodeType.ExprSub or
+            NodeType.ExprMult or
+            NodeType.ExprOr or
+            NodeType.ExprAnd => true,
+            _ => false,
+        };
     }
 }

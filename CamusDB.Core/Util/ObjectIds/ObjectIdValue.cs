@@ -10,6 +10,8 @@ namespace CamusDB.Core.Util.ObjectIds;
 
 public record struct ObjectIdValue : IComparable<ObjectIdValue>
 {
+    public static readonly ObjectIdValue Empty = new(0, 0, 0);
+
     public int a;
 
     public int b;

@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.3
-// DateTime: 17/06/2026 11:17:52 PM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 17/06/2026 11:10:49 PM>
+// DateTime: 22/06/2026 9:55:20 PM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 22/06/2026 9:54:29 PM>
 
 // options: no-lines gplex
 
@@ -1036,16 +1036,16 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.Delete, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }
         break;
       case 47: // begin_stmt -> TBEGIN
-{ CurrentSemanticValue.n = new(NodeType.Begin, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.Begin; }
         break;
       case 48: // begin_stmt -> TSTART, TTRANSACTION
-{ CurrentSemanticValue.n = new(NodeType.Begin, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.Begin; }
         break;
       case 49: // commit_stmt -> TCOMMIT
-{ CurrentSemanticValue.n = new(NodeType.Commit, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.Commit; }
         break;
       case 50: // rollback_stmt -> TROLLBACK
-{ CurrentSemanticValue.n = new(NodeType.Rollback, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.Rollback; }
         break;
       case 51: // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER, 
                //                         TIDENTIFIER
@@ -1062,7 +1062,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                       "Unknown isolation level '" + ValueStack[ValueStack.Depth-1].s + "'. Expected: SERIALIZABLE or READ COMMITTED")
           };
           CurrentSemanticValue.n = new(NodeType.SetTransaction,
-                     new(NodeType.String, null, null, null, null, null, null, null, "ReadWrite"),
+                     NodeAst.TransactionModeReadWrite,
                      null, null, null, null, null, null, level);
       }
         break;
@@ -1079,7 +1079,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                   CamusDBErrorCodes.InvalidInput,
                   "Expected: SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
           CurrentSemanticValue.n = new(NodeType.SetTransaction,
-                     new(NodeType.String, null, null, null, null, null, null, null, "ReadWrite"),
+                     NodeAst.TransactionModeReadWrite,
                      null, null, null, null, null, null, "ReadCommitted");
       }
         break;
@@ -1103,8 +1103,11 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                       CamusDBErrorCodes.InvalidInput,
                       "Expected ONLY or WRITE after READ, got '" + ValueStack[ValueStack.Depth-1].s + "'")
           };
+          NodeAst modeAst = mode == "ReadOnly"
+              ? NodeAst.TransactionModeReadOnly
+              : NodeAst.TransactionModeReadWrite;
           CurrentSemanticValue.n = new(NodeType.SetTransaction,
-                     new(NodeType.String, null, null, null, null, null, null, null, mode),
+                     modeAst,
                      null, null, null, null, null, null, "Serializable");
       }
         break;
@@ -1239,7 +1242,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.ShowColumns, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
         break;
       case 88: // show_stmt -> TSHOW, TTABLES
-{ CurrentSemanticValue.n = new(NodeType.ShowTables, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.ShowTables; }
         break;
       case 89: // show_stmt -> TSHOW, TTABLES, TLIKE, string
 { CurrentSemanticValue.n = new(NodeType.ShowTables, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
@@ -1254,10 +1257,10 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.ShowCreateTable, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
         break;
       case 93: // show_stmt -> TSHOW, TDATABASE
-{ CurrentSemanticValue.n = new(NodeType.ShowDatabase, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.ShowDatabase; }
         break;
       case 94: // show_stmt -> TSHOW, TDATABASES
-{ CurrentSemanticValue.n = new(NodeType.ShowDatabases, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.ShowDatabases; }
         break;
       case 95: // show_stmt -> TSHOW, TDATABASES, TLIKE, string
 { CurrentSemanticValue.n = new(NodeType.ShowDatabases, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
@@ -1384,16 +1387,16 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
         break;
       case 138: // create_table_field_constraint -> TNULL
-{ CurrentSemanticValue.n = new(NodeType.ConstraintNull, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.ConstraintNull; }
         break;
       case 139: // create_table_field_constraint -> TNOT, TNULL
-{ CurrentSemanticValue.n = new(NodeType.ConstraintNotNull, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.ConstraintNotNull; }
         break;
       case 140: // create_table_field_constraint -> TPRIMARY, TKEY
-{ CurrentSemanticValue.n = new(NodeType.ConstraintPrimaryKey, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.ConstraintPrimaryKey; }
         break;
       case 141: // create_table_field_constraint -> TUNIQUE
-{ CurrentSemanticValue.n = new(NodeType.ConstraintUnique, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.ConstraintUnique; }
         break;
       case 142: // create_table_field_constraint -> TDEFAULT, LPAREN, default_expr, RPAREN
 { CurrentSemanticValue.n = new(NodeType.ConstraintDefault, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
@@ -1414,28 +1417,28 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
         break;
       case 148: // field_type -> TTYPE_OBJECT_ID
-{ CurrentSemanticValue.n = new(NodeType.TypeObjectId, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.TypeObjectId; }
         break;
       case 149: // field_type -> TTYPE_STRING
-{ CurrentSemanticValue.n = new(NodeType.TypeString, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.TypeString; }
         break;
       case 150: // field_type -> TTYPE_INT64
-{ CurrentSemanticValue.n = new(NodeType.TypeInteger64, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.TypeInteger64; }
         break;
       case 151: // field_type -> TTYPE_FLOAT64
-{ CurrentSemanticValue.n = new(NodeType.TypeFloat64, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.TypeFloat64; }
         break;
       case 152: // field_type -> TTYPE_BOOL
-{ CurrentSemanticValue.n = new(NodeType.TypeBool, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.TypeBool; }
         break;
       case 153: // cast_target_type -> field_type
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
         break;
       case 154: // cast_target_type -> TINTEGER
-{ CurrentSemanticValue.n = new(NodeType.TypeInteger64, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.TypeInteger64; }
         break;
       case 155: // cast_target_type -> TDOUBLE
-{ CurrentSemanticValue.n = new(NodeType.TypeFloat64, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.TypeFloat64; }
         break;
       case 156: // cast_target_type -> TIDENTIFIER
 { CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, CurrentSemanticValue.s.ToLowerInvariant()); }
@@ -1624,7 +1627,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.ExprILike, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
         break;
       case 218: // is_null_expr -> condition, TIS, TNULL
-{ CurrentSemanticValue.n = new(NodeType.ExprIsNull, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = new(NodeType.ExprIsNull, ValueStack[ValueStack.Depth-3].n, NodeAst.Null, null, null, null, null, null, null); }
         break;
       case 219: // is_not_null_expr -> condition, TIS, TNOT, TNULL
 { CurrentSemanticValue.n = new(NodeType.ExprIsNotNull, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
@@ -1699,10 +1702,10 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
         break;
       case 243: // use_default_expr -> TDEFAULT
-{ CurrentSemanticValue.n = new(NodeType.ExprDefault, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.ExprDefault; }
         break;
       case 244: // projection_all -> TMULT
-{ CurrentSemanticValue.n = new(NodeType.ExprAllFields, null, null, null, null, null, null, null, null); }
+{ CurrentSemanticValue.n = NodeAst.ExprAllFields; }
         break;
       case 245: // any_identifier -> qualified_identifier
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
@@ -1732,13 +1735,13 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = new(NodeType.String, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
         break;
       case 254: // bool -> TTRUE
-{ CurrentSemanticValue.n = new(NodeType.Bool, null, null, null, null, null, null, null, "true"); }
+{ CurrentSemanticValue.n = NodeAst.True; }
         break;
       case 255: // bool -> TFALSE
-{ CurrentSemanticValue.n = new(NodeType.Bool, null, null, null, null, null, null, null, "false"); }
+{ CurrentSemanticValue.n = NodeAst.False; }
         break;
       case 256: // null -> TNULL
-{ CurrentSemanticValue.n = new(NodeType.Null, null, null, null, null, null, null, null, "null"); }
+{ CurrentSemanticValue.n = NodeAst.Null; }
         break;
       case 257: // placeholder -> TPLACEHOLDER
 { CurrentSemanticValue.n = new(NodeType.Placeholder, null, null, null, null, null, null, null, CurrentSemanticValue.s); }

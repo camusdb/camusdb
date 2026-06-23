@@ -46,7 +46,7 @@ internal sealed class ScalarSubqueryExecutor
             parameters).ConfigureAwait(false);
 
         if (rows.Count == 0)
-            return new ColumnValue(ColumnType.Null, 0);
+            return ColumnValue.Null;
 
         if (rows.Count > 1 && !HasLimitOne(subquery, parameters))
         {

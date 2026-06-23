@@ -77,22 +77,13 @@ internal static class QueryTicketAdapter
     /// </summary>
     private static TableSource GetPrimaryTableSource(QuerySource source)
     {
-        switch (source)
+        return source switch
         {
-            case TableSource tableSource:
-                return tableSource;
-
-            case DerivedTableSource derivedSource:
-                return GetPrimaryTableSourceFromDerived(derivedSource);
-
-            case JoinSource joinSource:
-                return GetPrimaryTableSource(joinSource.Left);
-
-            default:
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"Unsupported query source: {source.GetType().Name}");
-        }
+            TableSource tableSource => tableSource,
+            DerivedTableSource derivedSource => GetPrimaryTableSourceFromDerived(derivedSource),
+            JoinSource joinSource => GetPrimaryTableSource(joinSource.Left),
+            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput,$"Unsupported query source: {source.GetType().Name}"),
+        };
     }
 
     private static TableSource GetPrimaryTableSourceFromDerived(DerivedTableSource derived)

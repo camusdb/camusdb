@@ -103,10 +103,10 @@ internal sealed class ExplainExecutor
                 { "detail",         new ColumnValue(ColumnType.String, detail) },
                 { "estimated_rows", estRows is not null
                     ? new ColumnValue(ColumnType.Integer64, estRows.Value)
-                    : new ColumnValue(ColumnType.Null, 0L) },
+                    : ColumnValue.Null },
                 { "estimated_cost", estCost is not null
                     ? new ColumnValue(ColumnType.Float64, estCost.Value)
-                    : new ColumnValue(ColumnType.Null, 0.0) },
+                    : ColumnValue.Null },
             });
         }
 
@@ -122,8 +122,8 @@ internal sealed class ExplainExecutor
                 { "stage",          new ColumnValue(ColumnType.String, stage) },
                 { "node",           new ColumnValue(ColumnType.String, "plan-info") },
                 { "detail",         new ColumnValue(ColumnType.String, $"shape={plan.QueryShapeId}, schema-deps={schemaDepsStr}") },
-                { "estimated_rows", new ColumnValue(ColumnType.Null, 0L) },
-                { "estimated_cost", new ColumnValue(ColumnType.Null, 0.0) },
+                { "estimated_rows", ColumnValue.Null },
+                { "estimated_cost", ColumnValue.Null },
             });
         }
     }
@@ -200,15 +200,15 @@ internal sealed class ExplainExecutor
                 { "detail",            new ColumnValue(ColumnType.String, detail) },
                 { "estimated_rows",    physNode?.EstimatedCardinality is { } er
                     ? new ColumnValue(ColumnType.Integer64, er)
-                    : new ColumnValue(ColumnType.Null, 0L) },
+                    : ColumnValue.Null },
                 { "estimated_cost",    physNode?.Cost?.Total is { } ec
                     ? new ColumnValue(ColumnType.Float64, ec)
-                    : new ColumnValue(ColumnType.Null, 0.0) },
-                { "actual_rows",       stats is not null ? new ColumnValue(ColumnType.Integer64, stats.RowsEmitted) : new ColumnValue(ColumnType.Null, 0L) },
-                { "rows_read",         stats is not null ? new ColumnValue(ColumnType.Integer64, stats.RowsRead) : new ColumnValue(ColumnType.Null, 0L) },
-                { "actual_time_ms",    stats?.ElapsedMs is { } ms ? new ColumnValue(ColumnType.Float64, ms) : new ColumnValue(ColumnType.Null, 0.0) },
-                { "kv_lookups",        stats is not null ? new ColumnValue(ColumnType.Integer64, stats.KvPointLookups) : new ColumnValue(ColumnType.Null, 0L) },
-                { "kv_scan_entries",   stats is not null ? new ColumnValue(ColumnType.Integer64, stats.KvScanEntries) : new ColumnValue(ColumnType.Null, 0L) },
+                    : ColumnValue.Null },
+                { "actual_rows",       stats is not null ? new ColumnValue(ColumnType.Integer64, stats.RowsEmitted) : ColumnValue.Null },
+                { "rows_read",         stats is not null ? new ColumnValue(ColumnType.Integer64, stats.RowsRead) : ColumnValue.Null },
+                { "actual_time_ms",    stats?.ElapsedMs is { } ms ? new ColumnValue(ColumnType.Float64, ms) : ColumnValue.Null },
+                { "kv_lookups",        stats is not null ? new ColumnValue(ColumnType.Integer64, stats.KvPointLookups) : ColumnValue.Null },
+                { "kv_scan_entries",   stats is not null ? new ColumnValue(ColumnType.Integer64, stats.KvScanEntries) : ColumnValue.Null },
             });
         }
 
@@ -224,13 +224,13 @@ internal sealed class ExplainExecutor
                 { "stage",           new ColumnValue(ColumnType.String, "analyze") },
                 { "node",            new ColumnValue(ColumnType.String, "plan-info") },
                 { "detail",          new ColumnValue(ColumnType.String, $"shape={plan.QueryShapeId}, schema-deps={schemaDepsStr}") },
-                { "estimated_rows",  new ColumnValue(ColumnType.Null, 0L) },
-                { "estimated_cost",  new ColumnValue(ColumnType.Null, 0.0) },
-                { "actual_rows",     new ColumnValue(ColumnType.Null, 0L) },
-                { "rows_read",       new ColumnValue(ColumnType.Null, 0L) },
-                { "actual_time_ms",  new ColumnValue(ColumnType.Null, 0.0) },
-                { "kv_lookups",      new ColumnValue(ColumnType.Null, 0L) },
-                { "kv_scan_entries", new ColumnValue(ColumnType.Null, 0L) },
+                { "estimated_rows",  ColumnValue.Null },
+                { "estimated_cost",  ColumnValue.Null },
+                { "actual_rows",     ColumnValue.Null },
+                { "rows_read",       ColumnValue.Null },
+                { "actual_time_ms",  ColumnValue.Null },
+                { "kv_lookups",      ColumnValue.Null },
+                { "kv_scan_entries", ColumnValue.Null },
             });
         }
     }

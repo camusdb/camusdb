@@ -68,11 +68,11 @@ internal static class JsonScalarFunctions
     private static ColumnValue EvaluateJsonValid(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
         if (arguments[0].Type == ColumnType.Null)
-            return new ColumnValue(ColumnType.Bool, false);
+            return ColumnValue.False;
 
         RequireString(calledName, 0, arguments[0]);
 
-        return new ColumnValue(ColumnType.Bool, TryParseJson(arguments[0].StrValue!, out _, out _));
+        return ColumnValue.FromBool(TryParseJson(arguments[0].StrValue!, out _, out _));
     }
 
     private static ColumnValue EvaluateJsonType(string calledName, IReadOnlyList<ColumnValue> arguments)
@@ -83,7 +83,7 @@ internal static class JsonScalarFunctions
         RequireString(calledName, 0, arguments[0]);
 
         if (!TryParseJson(arguments[0].StrValue!, out JsonDocument? document, out JsonElement root))
-            return new ColumnValue(ColumnType.Null, 0);
+            return ColumnValue.Null;
 
         using (document)
         {
@@ -99,7 +99,7 @@ internal static class JsonScalarFunctions
             };
 
             if (typeName is null)
-                return new ColumnValue(ColumnType.Null, 0);
+                return ColumnValue.Null;
 
             return new ColumnValue(ColumnType.String, typeName);
         }
@@ -114,15 +114,15 @@ internal static class JsonScalarFunctions
         RequireString(calledName, 1, arguments[1]);
 
         if (!TryParseJson(arguments[0].StrValue!, out JsonDocument? document, out JsonElement root))
-            return new ColumnValue(ColumnType.Null, 0);
+            return ColumnValue.Null;
 
         using (document)
         {
             if (!TryResolvePath(calledName, arguments[1].StrValue!, root, out JsonElement element, out bool found))
-                return new ColumnValue(ColumnType.Null, 0);
+                return ColumnValue.Null;
 
             if (!found)
-                return new ColumnValue(ColumnType.Null, 0);
+                return ColumnValue.Null;
 
             return new ColumnValue(ColumnType.String, element.GetRawText());
         }
@@ -137,15 +137,15 @@ internal static class JsonScalarFunctions
         RequireString(calledName, 1, arguments[1]);
 
         if (!TryParseJson(arguments[0].StrValue!, out JsonDocument? document, out JsonElement root))
-            return new ColumnValue(ColumnType.Null, 0);
+            return ColumnValue.Null;
 
         using (document)
         {
             if (!TryResolvePath(calledName, arguments[1].StrValue!, root, out JsonElement element, out bool found))
-                return new ColumnValue(ColumnType.Null, 0);
+                return ColumnValue.Null;
 
             if (!found)
-                return new ColumnValue(ColumnType.Null, 0);
+                return ColumnValue.Null;
 
             return JsonElementToScalarColumnValue(element);
         }
@@ -162,7 +162,7 @@ internal static class JsonScalarFunctions
             RequireString(calledName, 1, arguments[1]);
 
         if (!TryParseJson(arguments[0].StrValue!, out JsonDocument? document, out JsonElement root))
-            return new ColumnValue(ColumnType.Null, 0);
+            return ColumnValue.Null;
 
         using (document)
         {
@@ -171,14 +171,14 @@ internal static class JsonScalarFunctions
             if (arguments.Count == 2)
             {
                 if (!TryResolvePath(calledName, arguments[1].StrValue!, root, out target, out bool found))
-                    return new ColumnValue(ColumnType.Null, 0);
+                    return ColumnValue.Null;
 
                 if (!found)
-                    return new ColumnValue(ColumnType.Null, 0);
+                    return ColumnValue.Null;
             }
 
             if (target.ValueKind != JsonValueKind.Array)
-                return new ColumnValue(ColumnType.Null, 0);
+                return ColumnValue.Null;
 
             return new ColumnValue(ColumnType.Integer64, target.GetArrayLength());
         }
@@ -193,16 +193,16 @@ internal static class JsonScalarFunctions
         RequireString(calledName, 1, arguments[1]);
 
         if (!TryParseJson(arguments[0].StrValue!, out JsonDocument? valueDocument, out JsonElement valueRoot))
-            return new ColumnValue(ColumnType.Null, 0);
+            return ColumnValue.Null;
 
         if (!TryParseJson(arguments[1].StrValue!, out JsonDocument? candidateDocument, out JsonElement candidateRoot))
-            return new ColumnValue(ColumnType.Null, 0);
+            return ColumnValue.Null;
 
         using (valueDocument)
         using (candidateDocument)
         {
             bool contains = JsonContains(valueRoot, candidateRoot);
-            return new ColumnValue(ColumnType.Bool, contains);
+            return ColumnValue.FromBool(contains);
         }
     }
 
@@ -330,11 +330,11 @@ internal static class JsonScalarFunctions
         return element.ValueKind switch
         {
             JsonValueKind.String => new ColumnValue(ColumnType.String, element.GetString()!),
-            JsonValueKind.True => new ColumnValue(ColumnType.Bool, true),
-            JsonValueKind.False => new ColumnValue(ColumnType.Bool, false),
-            JsonValueKind.Null => new ColumnValue(ColumnType.Null, 0),
+            JsonValueKind.True => ColumnValue.True,
+            JsonValueKind.False => ColumnValue.False,
+            JsonValueKind.Null => ColumnValue.Null,
             JsonValueKind.Number => ToNumericColumnValue(element),
-            _ => new ColumnValue(ColumnType.Null, 0),
+            _ => ColumnValue.Null,
         };
     }
 
@@ -344,7 +344,7 @@ internal static class JsonScalarFunctions
             return new ColumnValue(ColumnType.Integer64, longValue);
 
         if (!element.TryGetDouble(out double doubleValue) || !IsFinite(doubleValue))
-            return new ColumnValue(ColumnType.Null, 0);
+            return ColumnValue.Null;
 
         return new ColumnValue(ColumnType.Float64, doubleValue);
     }

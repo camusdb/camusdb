@@ -74,10 +74,10 @@ internal abstract class SQLExecutorBaseCreator
                 if (!bool.TryParse(expr.yytext!, out bool boolValue))
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Bool: " + expr.yytext!);
 
-                return new ColumnValue(ColumnType.Bool, boolValue);
+                return ColumnValue.FromBool(boolValue);
 
             case NodeType.Null:
-                return new ColumnValue(ColumnType.Null, 0);
+                return ColumnValue.Null;
 
             case NodeType.ObjectIdLiteral:
                 if (string.IsNullOrEmpty(expr.yytext))
@@ -111,7 +111,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
-                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) == 0);
+                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) == 0);
                 }
 
             case NodeType.ExprNotEquals:
@@ -119,7 +119,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
-                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) != 0);
+                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) != 0);
                 }
 
             case NodeType.ExprLessThan:
@@ -127,7 +127,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
-                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) < 0);
+                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) < 0);
                 }
 
             case NodeType.ExprGreaterThan:
@@ -135,7 +135,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
-                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) > 0);
+                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) > 0);
                 }
 
             case NodeType.ExprLessEqualsThan:
@@ -143,7 +143,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
-                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) <= 0);
+                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) <= 0);
                 }
 
             case NodeType.ExprGreaterEqualsThan:
@@ -151,7 +151,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
 
-                    return new ColumnValue(ColumnType.Bool, leftValue.CompareTo(rightValue) >= 0);
+                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) >= 0);
                 }
 
             case NodeType.ExprBetween:
@@ -161,10 +161,9 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue high = EvalExpr(expr.extendedTwo!, row, parameters, rowNameResolver);
 
                     if (subject.Type == ColumnType.Null || low.Type == ColumnType.Null || high.Type == ColumnType.Null)
-                        return new ColumnValue(ColumnType.Bool, false);
+                        return ColumnValue.False;
 
-                    return new ColumnValue(
-                        ColumnType.Bool,
+                    return ColumnValue.FromBool(
                         subject.CompareTo(low) >= 0 && subject.CompareTo(high) <= 0);
                 }
 
@@ -176,7 +175,7 @@ internal abstract class SQLExecutorBaseCreator
                     if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator OR for argument types: {leftValue.Type}, {rightValue.Type}");
 
-                    return new ColumnValue(ColumnType.Bool, leftValue.BoolValue || rightValue.BoolValue);
+                    return ColumnValue.FromBool(leftValue.BoolValue || rightValue.BoolValue);
                 }
 
             case NodeType.ExprAnd:
@@ -187,7 +186,7 @@ internal abstract class SQLExecutorBaseCreator
                     if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator AND for argument types: {leftValue.Type}, {rightValue.Type}");
 
-                    return new ColumnValue(ColumnType.Bool, leftValue.BoolValue && rightValue.BoolValue);
+                    return ColumnValue.FromBool(leftValue.BoolValue && rightValue.BoolValue);
                 }
 
             case NodeType.ExprAdd:
@@ -236,14 +235,14 @@ internal abstract class SQLExecutorBaseCreator
                 {
                     ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
 
-                    return new ColumnValue(ColumnType.Bool, columnValue.Type == ColumnType.Null);
+                    return ColumnValue.FromBool(columnValue.Type == ColumnType.Null);
                 }
 
             case NodeType.ExprIsNotNull:
                 {
                     ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
 
-                    return new ColumnValue(ColumnType.Bool, columnValue.Type != ColumnType.Null);
+                    return ColumnValue.FromBool(columnValue.Type != ColumnType.Null);
                 }
 
             case NodeType.ExprLike:
@@ -254,7 +253,7 @@ internal abstract class SQLExecutorBaseCreator
                     if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator LIKE for argument types: {leftValue.Type}, {rightValue.Type}");
 
-                    return new ColumnValue(ColumnType.Bool, Like(leftValue.StrValue!, rightValue.StrValue!));
+                    return ColumnValue.FromBool(Like(leftValue.StrValue!, rightValue.StrValue!));
                 }
 
             case NodeType.ExprILike:
@@ -265,7 +264,7 @@ internal abstract class SQLExecutorBaseCreator
                     if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator ILIKE for argument types: {leftValue.Type}, {rightValue.Type}");
 
-                    return new ColumnValue(ColumnType.Bool, ILike(leftValue.StrValue!, rightValue.StrValue!));
+                    return ColumnValue.FromBool(ILike(leftValue.StrValue!, rightValue.StrValue!));
                 }
 
             case NodeType.ExprScalarSubquery:
@@ -287,8 +286,7 @@ internal abstract class SQLExecutorBaseCreator
                 {
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
 
-                    return new ColumnValue(
-                        ColumnType.Bool,
+                    return ColumnValue.FromBool(
                         SubqueryValueListAst.ContainsValue(leftValue, expr.rightAst, parameters));
                 }
 
@@ -297,7 +295,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
                     bool? result = SubqueryValueListAst.EvaluateNotInMembership(leftValue, expr, parameters);
 
-                    return new ColumnValue(ColumnType.Bool, result ?? false);
+                    return ColumnValue.FromBool(result ?? false);
                 }
 
             case NodeType.ExprExistsSubquery:

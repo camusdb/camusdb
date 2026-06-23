@@ -184,7 +184,7 @@ internal static class StringScalarFunctions
     private static ColumnValue EvaluateConcat(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
         if (arguments.All(argument => argument.Type == ColumnType.Null))
-            return new ColumnValue(ColumnType.Null, 0);
+            return ColumnValue.Null;
 
         System.Text.StringBuilder builder = new();
 
@@ -223,7 +223,7 @@ internal static class StringScalarFunctions
         RequireString(calledName, 1, arguments[1]);
 
         bool result = predicate(arguments[0].StrValue!, arguments[1].StrValue!);
-        return new ColumnValue(ColumnType.Bool, result);
+        return ColumnValue.FromBool(result);
     }
 
     private static string ExtractSubstring(string input, long start, long? length)

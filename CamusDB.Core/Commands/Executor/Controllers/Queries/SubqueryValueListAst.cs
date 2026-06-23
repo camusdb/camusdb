@@ -121,17 +121,7 @@ internal static class SubqueryValueListAst
         return bool.Parse(ast.yytext);
     }
 
-    private static NodeAst BoolAst(bool value) =>
-        new(
-            NodeType.Bool,
-            leftAst: null,
-            rightAst: null,
-            extendedOne: null,
-            extendedTwo: null,
-            extendedThree: null,
-            extendedFour: null,
-            extendedFive: null,
-            yytext: value ? "true" : "false");
+    private static NodeAst BoolAst(bool value) => value ? NodeAst.True : NodeAst.False;
 
     private static IEnumerable<ColumnValue> Enumerate(NodeAst? ast, Dictionary<string, ColumnValue>? parameters = null)
     {

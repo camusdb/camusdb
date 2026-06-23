@@ -75,7 +75,7 @@ internal static class QueryHavingEvaluator
                         $"No matching signature for operator OR for argument types: {leftValue.Type}, {rightValue.Type}");
                 }
 
-                return new ColumnValue(ColumnType.Bool, leftValue.BoolValue || rightValue.BoolValue);
+                return ColumnValue.FromBool(leftValue.BoolValue || rightValue.BoolValue);
             }
 
             case NodeType.ExprAnd:
@@ -90,17 +90,15 @@ internal static class QueryHavingEvaluator
                         $"No matching signature for operator AND for argument types: {leftValue.Type}, {rightValue.Type}");
                 }
 
-                return new ColumnValue(ColumnType.Bool, leftValue.BoolValue && rightValue.BoolValue);
+                return ColumnValue.FromBool(leftValue.BoolValue && rightValue.BoolValue);
             }
 
             case NodeType.ExprIsNull:
-                return new ColumnValue(
-                    ColumnType.Bool,
+                return ColumnValue.FromBool(
                     Evaluate(expression.leftAst!, row, ticket, parameters).Type == ColumnType.Null);
 
             case NodeType.ExprIsNotNull:
-                return new ColumnValue(
-                    ColumnType.Bool,
+                return ColumnValue.FromBool(
                     Evaluate(expression.leftAst!, row, ticket, parameters).Type != ColumnType.Null);
 
             default:
@@ -117,7 +115,7 @@ internal static class QueryHavingEvaluator
     {
         ColumnValue leftValue = Evaluate(expression.leftAst!, row, ticket, parameters);
         ColumnValue rightValue = Evaluate(expression.rightAst!, row, ticket, parameters);
-        return new ColumnValue(ColumnType.Bool, compare(leftValue, rightValue));
+        return ColumnValue.FromBool(compare(leftValue, rightValue));
     }
 
     private static ColumnValue LookupRowValue(Dictionary<string, ColumnValue> row, string key)

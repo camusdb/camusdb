@@ -103,7 +103,7 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
             }
         }
 
-        return new ColumnValue(ColumnType.Null, "");
+        return ColumnValue.Null;
     }
 
     private static void GetBatchValuesList(

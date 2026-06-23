@@ -308,7 +308,7 @@ internal sealed class QueryAggregator
         }
 
         ColumnValue result = !hasValue
-            ? new ColumnValue(ColumnType.Null, 0)
+            ? ColumnValue.Null
             : allInteger
                 ? new ColumnValue(ColumnType.Integer64, intSum)
                 : new ColumnValue(ColumnType.Float64, sum);
@@ -349,7 +349,7 @@ internal sealed class QueryAggregator
         }
 
         ColumnValue result = count == 0
-            ? new ColumnValue(ColumnType.Null, 0)
+            ? ColumnValue.Null
             : new ColumnValue(ColumnType.Float64, sum / count);
 
         yield return new QueryResultRow(
@@ -374,7 +374,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new() { { GetGlobalAggregateOutputName(ticket, 0), min ?? new ColumnValue(ColumnType.Null, 0) } });
+            new() { { GetGlobalAggregateOutputName(ticket, 0), min ?? ColumnValue.Null } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalMax(
@@ -394,7 +394,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new() { { GetGlobalAggregateOutputName(ticket, 0), max ?? new ColumnValue(ColumnType.Null, 0) } });
+            new() { { GetGlobalAggregateOutputName(ticket, 0), max ?? ColumnValue.Null } });
     }
 
     private static string GetGlobalAggregateOutputName(QueryTicket ticket, int index)
@@ -590,15 +590,15 @@ internal sealed class QueryAggregator
                     ColumnType.Integer64,
                     IsCountAll(funcCall) ? countAll : countNonNull),
                 QueryAggregationType.Sum => !hasSum
-                    ? new ColumnValue(ColumnType.Null, 0)
+                    ? ColumnValue.Null
                     : allInteger
                         ? new ColumnValue(ColumnType.Integer64, intSum)
                         : new ColumnValue(ColumnType.Float64, floatSum),
                 QueryAggregationType.Average => avgCount == 0
-                    ? new ColumnValue(ColumnType.Null, 0)
+                    ? ColumnValue.Null
                     : new ColumnValue(ColumnType.Float64, avgSum / avgCount),
-                QueryAggregationType.Min => min ?? new ColumnValue(ColumnType.Null, 0),
-                QueryAggregationType.Max => max ?? new ColumnValue(ColumnType.Null, 0),
+                QueryAggregationType.Min => min ?? ColumnValue.Null,
+                QueryAggregationType.Max => max ?? ColumnValue.Null,
                 _ => throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     "Unsupported grouped aggregation type"),

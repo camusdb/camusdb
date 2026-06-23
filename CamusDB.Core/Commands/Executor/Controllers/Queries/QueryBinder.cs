@@ -28,8 +28,8 @@ internal sealed class QueryBinder
 
     public async Task<BoundSelectQuery> BindAsync(DatabaseDescriptor database, SelectQuery query)
     {
-        List<BoundTableSource> sources = new();
-        List<BoundDerivedTableSource> derivedSources = new();
+        List<BoundTableSource> sources = [];
+        List<BoundDerivedTableSource> derivedSources = [];
         HashSet<string> aliases = new(StringComparer.Ordinal);
 
         await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases).ConfigureAwait(false);
@@ -47,8 +47,8 @@ internal sealed class QueryBinder
     /// </summary>
     internal async Task<BoundSelectQuery> BindSubqueryAsync(DatabaseDescriptor database, SelectQuery query)
     {
-        List<BoundTableSource> sources = new();
-        List<BoundDerivedTableSource> derivedSources = new();
+        List<BoundTableSource> sources = [];
+        List<BoundDerivedTableSource> derivedSources = [];
         HashSet<string> aliases = new(StringComparer.Ordinal);
 
         await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases).ConfigureAwait(false);

@@ -134,14 +134,14 @@ delete_stmt : TDELETE TFROM any_identifier TWHERE condition opt_limit
             { $$.n = new(NodeType.Delete, $3.n, $5.n, $6.n, null, null, null, null, null); }
 			;
 
-begin_stmt : TBEGIN { $$.n = new(NodeType.Begin, null, null, null, null, null, null, null, null); }
-           | TSTART TTRANSACTION { $$.n = new(NodeType.Begin, null, null, null, null, null, null, null, null); }
+begin_stmt : TBEGIN { $$.n = NodeAst.Begin; }
+           | TSTART TTRANSACTION { $$.n = NodeAst.Begin; }
            ;
 
-commit_stmt : TCOMMIT { $$.n = new(NodeType.Commit, null, null, null, null, null, null, null, null); }             
+commit_stmt : TCOMMIT { $$.n = NodeAst.Commit; }             
             ;
 
-rollback_stmt : TROLLBACK { $$.n = new(NodeType.Rollback, null, null, null, null, null, null, null, null); }
+rollback_stmt : TROLLBACK { $$.n = NodeAst.Rollback; }
               ;
 
 /* SET TRANSACTION ISOLATION LEVEL SERIALIZABLE [READ ONLY | READ WRITE]
@@ -175,7 +175,7 @@ set_transaction_stmt
                       "Unknown isolation level '" + $5.s + "'. Expected: SERIALIZABLE or READ COMMITTED")
           };
           $$.n = new(NodeType.SetTransaction,
-                     new(NodeType.String, null, null, null, null, null, null, null, "ReadWrite"),
+                     NodeAst.TransactionModeReadWrite,
                      null, null, null, null, null, null, level);
       }
     | TSET TTRANSACTION TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER
@@ -190,7 +190,7 @@ set_transaction_stmt
                   CamusDBErrorCodes.InvalidInput,
                   "Expected: SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
           $$.n = new(NodeType.SetTransaction,
-                     new(NodeType.String, null, null, null, null, null, null, null, "ReadWrite"),
+                     NodeAst.TransactionModeReadWrite,
                      null, null, null, null, null, null, "ReadCommitted");
       }
     | TSET TTRANSACTION TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER
@@ -212,8 +212,11 @@ set_transaction_stmt
                       CamusDBErrorCodes.InvalidInput,
                       "Expected ONLY or WRITE after READ, got '" + $7.s + "'")
           };
+          NodeAst modeAst = mode == "ReadOnly"
+              ? NodeAst.TransactionModeReadOnly
+              : NodeAst.TransactionModeReadWrite;
           $$.n = new(NodeType.SetTransaction,
-                     new(NodeType.String, null, null, null, null, null, null, null, mode),
+                     modeAst,
                      null, null, null, null, null, null, "Serializable");
       }
     ;
@@ -266,13 +269,13 @@ create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN iden
                   ;
 
 show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null, null); }
-          | TSHOW TTABLES { $$.n = new(NodeType.ShowTables, null, null, null, null, null, null, null, null); }
+          | TSHOW TTABLES { $$.n = NodeAst.ShowTables; }
           | TSHOW TTABLES TLIKE string { $$.n = new(NodeType.ShowTables, $4.n, null, null, null, null, null, null, null); }
           | TDESCRIBE any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null, null); }
           | TDESC any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null, null); }
           | TSHOW TCREATE TTABLE any_identifier { $$.n = new(NodeType.ShowCreateTable, $4.n, null, null, null, null, null, null, null); }
-          | TSHOW TDATABASE { $$.n = new(NodeType.ShowDatabase, null, null, null, null, null, null, null, null); }
-          | TSHOW TDATABASES { $$.n = new(NodeType.ShowDatabases, null, null, null, null, null, null, null, null); }
+          | TSHOW TDATABASE { $$.n = NodeAst.ShowDatabase; }
+          | TSHOW TDATABASES { $$.n = NodeAst.ShowDatabases; }
           | TSHOW TDATABASES TLIKE string { $$.n = new(NodeType.ShowDatabases, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TINDEXES TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TINDEX TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null, null); }
@@ -363,10 +366,10 @@ create_table_field_constraint_list : create_table_field_constraint_list create_t
                                    | create_table_field_constraint { $$.n = $1.n; $$.s = $1.s; }
                                    ;
 
-create_table_field_constraint : TNULL { $$.n = new(NodeType.ConstraintNull, null, null, null, null, null, null, null, null); }
-                        | TNOT TNULL { $$.n = new(NodeType.ConstraintNotNull, null, null, null, null, null, null, null, null); }
-						| TPRIMARY TKEY { $$.n = new(NodeType.ConstraintPrimaryKey, null, null, null, null, null, null, null, null); }
-                        | TUNIQUE { $$.n = new(NodeType.ConstraintUnique, null, null, null, null, null, null, null, null); }
+create_table_field_constraint : TNULL { $$.n = NodeAst.ConstraintNull; }
+                        | TNOT TNULL { $$.n = NodeAst.ConstraintNotNull; }
+						| TPRIMARY TKEY { $$.n = NodeAst.ConstraintPrimaryKey; }
+                        | TUNIQUE { $$.n = NodeAst.ConstraintUnique; }
                         | TDEFAULT LPAREN default_expr RPAREN { $$.n = new(NodeType.ConstraintDefault, $3.n, null, null, null, null, null, null, null); }
                         ;
 
@@ -377,16 +380,16 @@ default_expr : int { $$.n = $1.n; $$.s = $1.s; }
              | null { $$.n = $1.n; $$.s = $1.s; }             
 			 ;
 
-field_type : TTYPE_OBJECT_ID { $$.n = new(NodeType.TypeObjectId, null, null, null, null, null, null, null, null); }
-           | TTYPE_STRING { $$.n = new(NodeType.TypeString, null, null, null, null, null, null, null, null); }
-           | TTYPE_INT64 { $$.n = new(NodeType.TypeInteger64, null, null, null, null, null, null, null, null); }
-           | TTYPE_FLOAT64 { $$.n = new(NodeType.TypeFloat64, null, null, null, null, null, null, null, null); }
-           | TTYPE_BOOL { $$.n = new(NodeType.TypeBool, null, null, null, null, null, null, null, null); } 
+field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }
+           | TTYPE_STRING { $$.n = NodeAst.TypeString; }
+           | TTYPE_INT64 { $$.n = NodeAst.TypeInteger64; }
+           | TTYPE_FLOAT64 { $$.n = NodeAst.TypeFloat64; }
+           | TTYPE_BOOL { $$.n = NodeAst.TypeBool; } 
            ;
 
 cast_target_type : field_type { $$.n = $1.n; $$.s = $1.s; }
-                 | TINTEGER { $$.n = new(NodeType.TypeInteger64, null, null, null, null, null, null, null, null); }
-                 | TDOUBLE { $$.n = new(NodeType.TypeFloat64, null, null, null, null, null, null, null, null); }
+                 | TINTEGER { $$.n = NodeAst.TypeInteger64; }
+                 | TDOUBLE { $$.n = NodeAst.TypeFloat64; }
                  | TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $$.s.ToLowerInvariant()); }
                  ;
 
@@ -505,7 +508,7 @@ like_expr : condition TLIKE condition { $$.n = new(NodeType.ExprLike, $1.n, $3.n
 ilike_expr : condition TILIKE condition { $$.n = new(NodeType.ExprILike, $1.n, $3.n, null, null, null, null, null, null); }
            ;
 
-is_null_expr : condition TIS TNULL { $$.n = new(NodeType.ExprIsNull, $1.n, $3.n, null, null, null, null, null, null); }
+is_null_expr : condition TIS TNULL { $$.n = new(NodeType.ExprIsNull, $1.n, NodeAst.Null, null, null, null, null, null, null); }
              ;
 
 is_not_null_expr : condition TIS TNOT TNULL { $$.n = new(NodeType.ExprIsNotNull, $1.n, $3.n, null, null, null, null, null, null); }
@@ -558,10 +561,10 @@ simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
             | placeholder { $$.n = $1.n; $$.s = $1.s; }
 			;
 
-use_default_expr : TDEFAULT { $$.n = new(NodeType.ExprDefault, null, null, null, null, null, null, null, null); }
+use_default_expr : TDEFAULT { $$.n = NodeAst.ExprDefault; }
                  ;
 
-projection_all : TMULT { $$.n = new(NodeType.ExprAllFields, null, null, null, null, null, null, null, null); }
+projection_all : TMULT { $$.n = NodeAst.ExprAllFields; }
                ;
 
 any_identifier : qualified_identifier { $$.n = $1.n; $$.s = $1.s; }
@@ -588,11 +591,11 @@ float    : TFLOAT { $$.n = new(NodeType.Float, null, null, null, null, null, nul
 string  : TSTRING { $$.n = new(NodeType.String, null, null, null, null, null, null, null, $$.s); }
         ;
 
-bool    : TTRUE { $$.n = new(NodeType.Bool, null, null, null, null, null, null, null, "true"); }
-        | TFALSE { $$.n = new(NodeType.Bool, null, null, null, null, null, null, null, "false"); }
+bool    : TTRUE { $$.n = NodeAst.True; }
+        | TFALSE { $$.n = NodeAst.False; }
         ;
 
-null    : TNULL { $$.n = new(NodeType.Null, null, null, null, null, null, null, null, "null"); }
+null    : TNULL { $$.n = NodeAst.Null; }
         ;
 
 placeholder : TPLACEHOLDER { $$.n = new(NodeType.Placeholder, null, null, null, null, null, null, null, $$.s); }
