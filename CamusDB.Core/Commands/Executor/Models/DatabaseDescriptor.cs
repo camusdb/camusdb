@@ -40,12 +40,6 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public EmbeddedKahuna Kahuna { get; }
 
-    /// <summary>
-    /// True when this descriptor created and owns its Kahuna node (standalone mode).
-    /// False when using a process-level cluster node shared across databases.
-    /// </summary>
-    public bool OwnsKahuna { get; }
-
     public KvTransactionsManager Transactions { get; }
 
     public SemaphoreSlim SchemaDdlSemaphore { get; } = new(1, 1);
@@ -212,14 +206,12 @@ public sealed record DatabaseDescriptor : IDisposable
         string name,
         EmbeddedKahuna kahuna,
         KvTransactionsManager transactions,
-        ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors,
-        bool ownsKahuna = true
+        ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors
     )
     {
         Id = id;
         Name = name;
         Kahuna = kahuna;
-        OwnsKahuna = ownsKahuna;
         Transactions = transactions;
         TableDescriptors = tableDescriptors;
     }

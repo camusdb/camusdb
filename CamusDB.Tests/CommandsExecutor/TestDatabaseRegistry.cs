@@ -377,6 +377,91 @@ internal sealed class TestDatabaseRegistry
     }
 
     // -----------------------------------------------------------------------
+    // Compact base-62 id allocation
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task AllocateId_IsBase62AndMonotonic()
+    {
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+
+        List<string> ids = [];
+        for (int i = 0; i < 5; i++)
+            ids.Add(await registry.AllocateIdAsync());
+
+        // All ids must be non-empty and consist only of base-62 characters
+        const string Base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        foreach (string id in ids)
+        {
+            Assert.IsNotEmpty(id);
+            Assert.IsTrue(id.All(c => Base62Chars.Contains(c)), $"id '{id}' contains non-base62 chars");
+        }
+
+        // Must be strictly increasing (ids encode a monotonic counter)
+        for (int i = 1; i < ids.Count; i++)
+        {
+            // Shorter strings encode smaller numbers; same length is lexicographic for 0-padded
+            // representation, but we rely on the numeric ordering by decoding via string length first
+            bool aLess = ids[i - 1].Length < ids[i].Length ||
+                         (ids[i - 1].Length == ids[i].Length && string.CompareOrdinal(ids[i - 1], ids[i]) < 0);
+            Assert.IsTrue(aLess, $"ids[{i - 1}]='{ids[i - 1]}' must be < ids[{i}]='{ids[i]}'");
+        }
+    }
+
+    [Test]
+    public async Task AllocateId_SurvivesReopen_CounterContinues()
+    {
+        string id1;
+        DatabaseRegistry first = await DatabaseRegistry.OpenAsync();
+        id1 = await first.AllocateIdAsync();
+        await first.DisposeAsync();
+
+        // After reopen the sequence counter must resume above the previously issued id
+        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync();
+        string id2 = await second.AllocateIdAsync();
+
+        // id2 must encode a strictly higher counter value than id1
+        Assert.IsTrue(
+            id2.Length > id1.Length || (id2.Length == id1.Length && string.CompareOrdinal(id2, id1) > 0),
+            $"After reopen id2='{id2}' must be > id1='{id1}'");
+    }
+
+    [Test]
+    public async Task AllocateId_NeverReuseAfterUnregister()
+    {
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+
+        string name = NewName();
+        string idBefore = await registry.AllocateIdAsync();
+        await registry.RegisterAsync(name, idBefore);
+        await registry.UnregisterAsync(name);
+
+        // Even though the name was unregistered (DROP scenario), the next allocation
+        // must yield a strictly higher id — never the same one
+        string idAfter = await registry.AllocateIdAsync();
+        Assert.AreNotEqual(idBefore, idAfter, "id must not be reused after unregister");
+        bool afterIsHigher = idAfter.Length > idBefore.Length ||
+                             (idAfter.Length == idBefore.Length && string.CompareOrdinal(idAfter, idBefore) > 0);
+        Assert.IsTrue(afterIsHigher, $"idAfter='{idAfter}' must be > idBefore='{idBefore}'");
+    }
+
+    [Test]
+    public static void ToBase62_KnownValues()
+    {
+        // Alphabet: 0-9=0..9, A-Z=10..35, a-z=36..61
+        Assert.AreEqual("0",  DatabaseRegistry.ToBase62(0));
+        Assert.AreEqual("1",  DatabaseRegistry.ToBase62(1));
+        Assert.AreEqual("9",  DatabaseRegistry.ToBase62(9));
+        Assert.AreEqual("A",  DatabaseRegistry.ToBase62(10));
+        Assert.AreEqual("Z",  DatabaseRegistry.ToBase62(35));
+        Assert.AreEqual("a",  DatabaseRegistry.ToBase62(36));
+        Assert.AreEqual("z",  DatabaseRegistry.ToBase62(61));
+        Assert.AreEqual("10", DatabaseRegistry.ToBase62(62));      // 1×62 + 0
+        Assert.AreEqual("A0", DatabaseRegistry.ToBase62(620));     // 10×62 + 0
+        Assert.AreEqual("100", DatabaseRegistry.ToBase62(62 * 62)); // 1×62² + 0×62 + 0
+    }
+
+    // -----------------------------------------------------------------------
     // Cluster mode: shared node + _system/ prefix
     // -----------------------------------------------------------------------
 

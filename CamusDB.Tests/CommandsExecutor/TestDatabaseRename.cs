@@ -8,7 +8,6 @@
 
 using NUnit.Framework;
 using System;
-using System.IO;
 using System.Threading.Tasks;
 
 using CamusDB.Core;
@@ -19,7 +18,6 @@ using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
-using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -60,42 +58,16 @@ internal sealed class TestDatabaseRename : BaseTest
     }
 
     [Test]
-    public async Task Rename_IdDirectoryUnchanged()
+    public async Task Rename_IdUnchanged()
     {
         (string oldName, DatabaseDescriptor descriptor, CommandExecutor executor) = await CreateDatabase();
         string id = descriptor.Id;
-        string dataPath = Path.Combine(CamusConfig.DataDirectory, id);
         string newName = "db_" + Guid.NewGuid().ToString("n");
-
-        Assert.IsTrue(Directory.Exists(Path.Combine(dataPath, "kv")),
-            "kv directory must exist before rename");
 
         await executor.RenameDatabase(new RenameDatabaseTicket(oldName, newName));
         TrackDatabase(newName, executor);
 
-        // Same id-based directory must still exist — no files were moved.
-        Assert.IsTrue(Directory.Exists(Path.Combine(dataPath, "kv")),
-            "kv directory must be unchanged after rename");
         Assert.AreEqual(id, descriptor.Id, "Id must be unchanged after rename");
-    }
-
-    [Test]
-    public async Task Rename_ManifestUpdated()
-    {
-        (string oldName, DatabaseDescriptor descriptor, CommandExecutor executor) = await CreateDatabase();
-        string id = descriptor.Id;
-        string manifestPath = Path.Combine(CamusConfig.DataDirectory, id, "name.txt");
-        string newName = "db_" + Guid.NewGuid().ToString("n");
-
-        // Verify manifest was written at create time.
-        Assert.IsTrue(File.Exists(manifestPath), "name.txt must exist after create");
-        Assert.AreEqual(oldName, await File.ReadAllTextAsync(manifestPath));
-
-        await executor.RenameDatabase(new RenameDatabaseTicket(oldName, newName));
-        TrackDatabase(newName, executor);
-
-        string manifestContent = await File.ReadAllTextAsync(manifestPath);
-        Assert.AreEqual(newName, manifestContent, "name.txt must reflect the new name after rename");
     }
 
     /// <summary>

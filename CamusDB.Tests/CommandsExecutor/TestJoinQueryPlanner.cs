@@ -30,9 +30,8 @@ using NUnit.Framework;
 namespace CamusDB.Tests.CommandsExecutor;
 
 [TestFixture]
-public sealed class TestJoinQueryPlanner
+public sealed class TestJoinQueryPlanner : BaseTest
 {
-    private static readonly ILogger<ICamusDB> logger = new LoggerFactory().CreateLogger<ICamusDB>();
 
     [Test]
     public async Task Plan_PushesSingleTableWherePredicateToUsersScan()
@@ -165,15 +164,15 @@ public sealed class TestJoinQueryPlanner
         CollectionAssert.AreEquivalent(new[] { "email", "id" }, plan.RequiredColumnsByAlias["u"]);
     }
 
-    private static async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket)> BindJoinQuery(
+    private async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket)> BindJoinQuery(
         string sql,
         bool indexPostsUserId = false)
     {
-        CommandValidator validator = new();
-        CatalogsManager catalogs = new(logger);
-        CommandExecutor executor = new(validator, catalogs, logger);
+        CommandExecutor executor = CreateCommandExecutor();
+        CatalogsManager catalogs = executor.Catalogs;
 
         string dbname = $"joinplanner_{Guid.NewGuid():n}";
+        TrackDatabase(dbname, executor);
         DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
 
         KvTransaction txn = await database.Transactions.BeginAsync();
@@ -327,11 +326,10 @@ public sealed class TestJoinQueryPlanner
     public async Task R7_Exec_ThreeTableJoin_ReturnsCorrectRows()
     {
         // End-to-end: insert data into all three tables, then run the join query and verify rows.
-        CommandValidator validator = new();
-        CatalogsManager catalogs = new(logger);
-        CommandExecutor executor = new(validator, catalogs, logger);
+        CommandExecutor executor = CreateCommandExecutor();
 
         string dbname = $"r7exec_{Guid.NewGuid():n}";
+        TrackDatabase(dbname, executor);
         DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
 
         KvTransaction txn = await database.Transactions.BeginAsync();
@@ -461,16 +459,16 @@ public sealed class TestJoinQueryPlanner
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    private static async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket)> BindThreeTableJoinQuery(
+    private async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket)> BindThreeTableJoinQuery(
         string sql,
         bool indexPostsUserId = false,
         bool indexCommentsPostId = false)
     {
-        CommandValidator validator = new();
-        CatalogsManager catalogs = new(logger);
-        CommandExecutor executor = new(validator, catalogs, logger);
+        CommandExecutor executor = CreateCommandExecutor();
+        CatalogsManager catalogs = executor.Catalogs;
 
         string dbname = $"joinplanner3_{Guid.NewGuid():n}";
+        TrackDatabase(dbname, executor);
         DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
 
         KvTransaction txn = await database.Transactions.BeginAsync();

@@ -9,7 +9,6 @@
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,7 +18,6 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
-using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -41,24 +39,18 @@ internal sealed class TestDatabaseDropper : BaseTest
     }
 
     /// <summary>
-    /// Drop must remove the on-disk data directory in standalone mode.
-    /// After DropDatabase the id-based directory must no longer exist.
+    /// Drop removes the registry entry so the database is no longer resolvable.
     /// </summary>
     [Test]
-    public async Task DropDatabase_StandaloneMode_DataDirectoryDeleted()
+    public async Task DropDatabase_RegistryEntryRemoved()
     {
-        (string dbname, DatabaseDescriptor descriptor, CommandExecutor executor) = await CreateDatabase();
-
-        string id = descriptor.Id;
-        string dataPath = Path.Combine(CamusConfig.DataDirectory, id);
-
-        Assert.IsTrue(Directory.Exists(Path.Combine(dataPath, "kv")),
-            "kv directory must exist before drop");
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
 
         await executor.DropDatabase(new DropDatabaseTicket(dbname));
 
-        Assert.IsFalse(Directory.Exists(dataPath),
-            "data directory must be deleted after drop");
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await executor.OpenDatabase(dbname));
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex!.Code);
     }
 
     /// <summary>
@@ -73,16 +65,10 @@ internal sealed class TestDatabaseDropper : BaseTest
 
         await executor.DropDatabase(new DropDatabaseTicket(dbname));
 
-        // Recreate — must succeed and produce a distinct id.
+        // Recreate — must succeed and produce a strictly higher id (never reused).
         DatabaseDescriptor second = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
         Assert.AreNotEqual(firstId, second.Id, "Recreated database must have a fresh id");
         Assert.AreEqual(dbname, second.Name);
-
-        // Old id-based directory is gone; new one exists.
-        Assert.IsFalse(Directory.Exists(Path.Combine(CamusConfig.DataDirectory, firstId)),
-            "Old id directory must be deleted");
-        Assert.IsTrue(Directory.Exists(Path.Combine(CamusConfig.DataDirectory, second.Id, "kv")),
-            "New id directory must exist");
     }
 
     [Test]
@@ -112,22 +98,16 @@ internal sealed class TestDatabaseDropper : BaseTest
     /// Uses letter-prefixed names so the SQL parser treats them as identifiers.
     /// </summary>
     [Test]
-    public async Task DropDatabase_ViaSql_RemovesRegistryAndDirectory()
+    public async Task DropDatabase_ViaSql_RemovesRegistry()
     {
         // Use a letter-prefixed name so the SQL parser tokenises it as TIDENTIFIER.
         string dbname = "db_" + Guid.NewGuid().ToString("n");
         CommandExecutor executor = CreateCommandExecutor();
         TrackDatabase(dbname, executor);
         DatabaseDescriptor descriptor = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
-        string dataPath = Path.Combine(CamusConfig.DataDirectory, descriptor.Id);
-
-        Assert.IsTrue(Directory.Exists(dataPath));
 
         KvTransaction tx = await descriptor.Transactions.BeginAsync();
         await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx, dbname, $"DROP DATABASE {dbname}", null));
-
-        Assert.IsFalse(Directory.Exists(dataPath),
-            "Data directory must be removed after DROP DATABASE via SQL");
 
         CommandExecutor executor2 = CreateCommandExecutor();
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(

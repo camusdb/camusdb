@@ -712,9 +712,7 @@ public class TestQueryBinder : BaseTest
 
     private async Task<(string dbname, DatabaseDescriptor database, CatalogsManager catalogs, CommandExecutor executor)> SetupExecutorWithRobotsTable()
     {
-        CommandValidator validator = new();
-        CatalogsManager catalogs = new(logger);
-        CommandExecutor executor = new(validator, catalogs, logger);
+        CommandExecutor executor = CreateCommandExecutor();
 
         string dbname = Guid.NewGuid().ToString("n");
         TrackDatabase(dbname, executor);
@@ -742,7 +740,7 @@ public class TestQueryBinder : BaseTest
         await executor.CreateTable(tableTicket);
         await database.Transactions.CommitAsync(txn);
 
-        return (dbname, database, catalogs, executor);
+        return (dbname, database, executor.Catalogs, executor);
     }
 
     private async Task<(DatabaseDescriptor database, CatalogsManager catalogs)> SetupUsersAndPostsTables()

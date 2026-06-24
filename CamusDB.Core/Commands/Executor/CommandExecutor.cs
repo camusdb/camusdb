@@ -105,22 +105,25 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <param name="catalogs"></param>
     /// <param name="logger"></param>
     /// <param name="loggerFactory">Optional factory forwarded to the embedded Kahuna node so its internal logs are visible.</param>
-    /// <param name="clusterNode">Process-level Kahuna node shared across all databases in cluster mode; null in standalone mode.</param>
+    /// <param name="sharedNode">Process-level Kahuna node shared across all databases; non-null in both standalone and cluster modes.</param>
+    /// <param name="schemaDdlForwarder">DDL forwarder for cluster mode; null in standalone.</param>
     /// <param name="registry">Optional pre-created registry; if supplied the executor does not own it and will not dispose it.</param>
+    /// <param name="isClusterMode">True when this process is a Raft cluster node; false for standalone.</param>
     public CommandExecutor(
         CommandValidator validator,
         CatalogsManager catalogs,
         ILogger<ICamusDB> logger,
         ILoggerFactory? loggerFactory = null,
-        EmbeddedKahuna? clusterNode = null,
+        EmbeddedKahuna? sharedNode = null,
         ISchemaDdlForwarder? schemaDdlForwarder = null,
-        DatabaseRegistry? registry = null)
+        DatabaseRegistry? registry = null,
+        bool isClusterMode = false)
     {
         this.validator = validator;
         this.catalogs = catalogs;
         this.logger = logger;
         this.schemaDdlForwarder = schemaDdlForwarder;
-        this.isClusterMode = clusterNode is not null;
+        this.isClusterMode = isClusterMode;
 
         if (registry is not null)
         {
@@ -129,12 +132,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
         else
         {
-            registryTask = DatabaseRegistry.OpenAsync(clusterNode, loggerFactory);
+            registryTask = DatabaseRegistry.OpenAsync(sharedNode, loggerFactory);
             ownsRegistry = true;
         }
 
         databaseDescriptors = new();
-        databaseOpener = new(this, databaseDescriptors, catalogs, logger, clusterNode, loggerFactory, registryTask);
+        databaseOpener = new(this, databaseDescriptors, catalogs, logger, sharedNode, loggerFactory, registryTask, isClusterMode);
         databaseCloser = new(databaseDescriptors, logger);
         databaseDroper = new(databaseDescriptors, logger);
         databaseCreator = new(logger);
@@ -187,82 +190,18 @@ public sealed class CommandExecutor : IAsyncDisposable
                 $"Database '{name}' already exists");
         }
 
-        string id = ObjectIdGenerator.Generate().ToString();
-
-        // Standalone mode: write a creating.lock sentinel before registering the name.
-        // If the process crashes between RegisterAsync and Create/Open completing, the sentinel
-        // makes the failure detectable on the next Open as DatabaseCreationIncomplete (actionable)
-        // rather than SystemSpaceCorrupt (misleading).  Cluster mode uses no per-db directories.
-        if (!isClusterMode)
-        {
-            string idDir = Path.Combine(CamusDBConfig.DataDirectory, id);
-            try
-            {
-                Directory.CreateDirectory(idDir);
-                await File.WriteAllTextAsync(
-                    Path.Combine(idDir, "creating.lock"), name).ConfigureAwait(false);
-            }
-            catch (Exception sentinelEx)
-            {
-                // Clean up the dangling directory; no registry entry was written yet.
-                try { Directory.Delete(Path.Combine(CamusDBConfig.DataDirectory, id), recursive: true); } catch { }
-                throw new CamusDBException(
-                    CamusDBErrorCodes.SystemSpaceCorrupt,
-                    $"Failed to initialise data directory for database '{name}' (id={id}): {sentinelEx.Message}");
-            }
-        }
+        string id = await registry.AllocateIdAsync().ConfigureAwait(false);
 
         await registry.RegisterAsync(name, id).ConfigureAwait(false);
 
         try
         {
-            // Cluster mode: data lives in the shared Kahuna node — no per-database directories.
-            if (!isClusterMode)
-                await databaseCreator.Create(name, id).ConfigureAwait(false);
-
-            DatabaseDescriptor descriptor = await databaseOpener.Open(name).ConfigureAwait(false);
-
-            // Remove the sentinel now that the database is fully initialised.
-            if (!isClusterMode)
-            {
-                try
-                {
-                    File.Delete(Path.Combine(CamusDBConfig.DataDirectory, id, "creating.lock"));
-                }
-                catch (Exception delEx)
-                {
-                    logger.LogWarning(delEx,
-                        "Could not remove creating.lock for database '{Name}' (id={Id}); " +
-                        "the stale sentinel will be auto-healed on the next Open", name, id);
-                }
-            }
-
-            return descriptor;
+            await databaseCreator.Create(name, id).ConfigureAwait(false);
+            return await databaseOpener.Open(name).ConfigureAwait(false);
         }
         catch (Exception openEx)
         {
-            // Best-effort rollback — two independent cleanup steps so that failure of one
-            // does not skip the other.  Both are swallowed (the original exception is rethrown).
-
-            // 1. Remove the on-disk directory (also deletes the sentinel and any partial kv/).
-            if (!isClusterMode)
-            {
-                try
-                {
-                    string dbPath = Path.Combine(CamusDBConfig.DataDirectory, id);
-                    if (Directory.Exists(dbPath))
-                        Directory.Delete(dbPath, recursive: true);
-                }
-                catch (Exception delEx)
-                {
-                    logger.LogWarning(delEx,
-                        "Failed to delete orphaned directory for database '{Name}' (id={Id}) during rollback",
-                        name, id);
-                }
-            }
-
-            // 2. Remove the registry entry so the name can be recreated.
-            //    If this also fails, log it — the name is now wedged (AlreadyExists but un-openable).
+            // Roll back the registry entry so the name can be retried.
             try
             {
                 await registry.UnregisterAsync(name).ConfigureAwait(false);
@@ -276,7 +215,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             }
 
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(openEx).Throw();
-            throw; // unreachable — keeps the compiler happy
+            throw; // unreachable
         }
     }
 
@@ -336,24 +275,6 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Name is display-only after DB5 (logs, error messages) and never a storage or routing key,
         // so a stale Name on the cached descriptor is functionally harmless.
 
-        // Update the human-readable manifest in standalone mode (diagnostics only).
-        // The registry is the source of truth; name.txt is never read by the engine.
-        if (!isClusterMode && registry.TryResolveId(ticket.NewName, out string id))
-        {
-            string manifestPath = Path.Combine(CamusDBConfig.DataDirectory, id, "name.txt");
-            try
-            {
-                await File.WriteAllTextAsync(manifestPath, ticket.NewName.ToLowerInvariant())
-                    .ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex,
-                    "Could not update name.txt for database (id={Id}) after rename to '{NewName}'; " +
-                    "the manifest is stale but the registry is the source of truth",
-                    id, ticket.NewName);
-            }
-        }
     }
 
     #endregion
@@ -377,7 +298,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         Func<Task>? onAbort = null
     )
     {
-        if (!database.OwnsKahuna)
+        if (isClusterMode)
             await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
 
         KvTransaction tx = await database.Transactions.BeginAsync(
@@ -415,7 +336,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
         finally
         {
-            if (!database.OwnsKahuna)
+            if (isClusterMode)
                 database.SchemaDdlSemaphore.Release();
             // F1a: fire after CommitAsync (or RollbackIfNotCompletedAsync on error) so the
             // KV transaction is settled before schema-partition leadership changes.
@@ -454,7 +375,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        if (!database.OwnsKahuna && ticket.Operation == AlterTableOperation.AddColumn)
+        if (isClusterMode && ticket.Operation == AlterTableOperation.AddColumn)
             return await ExecuteClusterAddColumnAsync(database, table, ticket).ConfigureAwait(false);
 
         return await ExecuteDdlInTransaction(database, tx =>
@@ -648,7 +569,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>
     /// Drives the add-index sequence through the coordinator-owned staged path
     /// (<c>Absent → DeleteOnly → WriteOnly → [backfill] → Public</c>).
-    /// Only called when <c>!database.OwnsKahuna</c>.
+    /// Only called in cluster mode.
     /// </summary>
     private async Task<bool> ExecuteClusterAddIndexAsync(
         DatabaseDescriptor database,
@@ -811,13 +732,13 @@ public sealed class CommandExecutor : IAsyncDisposable
             AlterIndexOperation.AddUniqueIndex or
             AlterIndexOperation.AddPrimaryKey;
 
-        if (!database.OwnsKahuna && addIndexOperation)
+        if (isClusterMode && addIndexOperation)
             return await ExecuteClusterAddIndexAsync(database, table, ticket).ConfigureAwait(false);
 
         bool indexExistedBefore = table.Indexes.ContainsKey(ticket.IndexName);
         bool compensateOnAbort = addIndexOperation && !indexExistedBefore;
 
-        if (!database.OwnsKahuna)
+        if (isClusterMode)
             return await ExecuteClusteredIndexDdlAsync(
                 database, table, ticket, compensateOnAbort,
                 tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx)
@@ -851,7 +772,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// Two-phase execution for cluster index DDL. Phase 1 commits the backfill data
     /// (tx1) so the index KV entries are visible before Phase 2 replicates the schema
     /// delta. Both phases run under <c>SchemaDdlSemaphore</c> so <c>SchemaVersion</c>
-    /// stays stable across the pair. Must only be called when <c>!database.OwnsKahuna</c>.
+    /// stays stable across the pair. Only called in cluster mode.
     /// </summary>
     private async Task<bool> ExecuteClusteredIndexDdlAsync(
         DatabaseDescriptor database,
@@ -1011,7 +932,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         Func<bool> wasApplied
     )
     {
-        if (database.OwnsKahuna)
+        if (!isClusterMode)
             return null;
 
         // F1a: degraded nodes must not propose or forward DDL — reject immediately so the
@@ -1226,7 +1147,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     TableDescriptor table = await tableOpener.Open(database, alterTableTicket.TableName).ConfigureAwait(false);
 
-                    if (!database.OwnsKahuna && alterTableTicket.Operation == AlterTableOperation.AddColumn)
+                    if (isClusterMode && alterTableTicket.Operation == AlterTableOperation.AddColumn)
                     {
                         bool ok = await ExecuteClusterAddColumnAsync(database, table, alterTableTicket).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
@@ -1261,13 +1182,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                         AlterIndexOperation.AddUniqueIndex or
                         AlterIndexOperation.AddPrimaryKey;
 
-                    if (!database.OwnsKahuna && sqlAddIndex)
+                    if (isClusterMode && sqlAddIndex)
                     {
                         bool ok = await ExecuteClusterAddIndexAsync(database, table, alterIndexTicket).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
                     }
 
-                    if (!database.OwnsKahuna)
+                    if (isClusterMode)
                     {
                         bool ok = await ExecuteClusteredIndexDdlAsync(
                             database, table, alterIndexTicket, compensateOnAbort: false,

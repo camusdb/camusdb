@@ -138,11 +138,7 @@ internal sealed class TableCreator
 
             await tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket, tx).ConfigureAwait(false);
 
-            // On cluster nodes, replicate the index change via the schema log so that all
-            // nodes apply it and the index survives restarts. For standalone nodes,
-            // PublishIndex already calls PersistSchemaTableAsync directly.
-            if (!database.OwnsKahuna)
-                await catalogs.ReplicateIndexChangeAsync(database, indexTicket, table, tx).ConfigureAwait(false);
+            await catalogs.ReplicateIndexChangeAsync(database, indexTicket, table, tx).ConfigureAwait(false);
         }
     }
 }

@@ -104,7 +104,7 @@ public sealed class TestSerializableRWMultiPartitionCluster
 
         CommandValidator validator = new();
         CatalogsManager catalogs = new(logger);
-        CommandExecutor executor = new(validator, catalogs, logger, loggerFactory: sharedLoggerFactory, clusterNode: node);
+        CommandExecutor executor = new(validator, catalogs, logger, loggerFactory: sharedLoggerFactory, sharedNode: node, isClusterMode: true);
 
         string dbname = Guid.NewGuid().ToString("n");
         DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));

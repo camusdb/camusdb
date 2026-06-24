@@ -15,7 +15,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
 using Microsoft.Extensions.Logging;
-using CamusConfig = CamusDB.Core.CamusDBConfig;
+
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -34,28 +34,7 @@ internal sealed class DatabaseDropper
     public async Task Drop(string id)
     {
         if (!databaseDescriptors.Descriptors.TryRemove(id, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
-        {
-            // No cached descriptor — the database was never opened in this process (e.g. crash
-            // during CREATE before Open returned, or the process was restarted between Unregister
-            // and Drop).  In standalone mode the id-directory may still exist (sentinel + partial
-            // contents); delete it so the "drop and recreate" recovery path actually reclaims it.
-            // In cluster mode there is no per-database directory, so this is a no-op.
-            string orphanPath = Path.Combine(CamusConfig.DataDirectory, id);
-            if (Directory.Exists(orphanPath))
-            {
-                try
-                {
-                    Directory.Delete(orphanPath, recursive: true);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex,
-                        "Failed to delete orphaned data directory for uncached database (id={Id}); " +
-                        "the directory may need to be removed manually", id);
-                }
-            }
             return;
-        }
 
         DatabaseDescriptor databaseDescriptor;
         try
@@ -64,22 +43,8 @@ internal sealed class DatabaseDropper
         }
         catch
         {
-            // The cached lazy is faulted (e.g. LoadDatabase threw DatabaseCreationIncomplete
-            // during a prior Open attempt). The name is already unregistered by the caller
-            // before Drop is invoked, so clean up the id-directory and return.
-            string orphanPath = Path.Combine(CamusConfig.DataDirectory, id);
-            if (Directory.Exists(orphanPath))
-            {
-                try
-                {
-                    Directory.Delete(orphanPath, recursive: true);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex,
-                        "Failed to delete orphaned data directory after faulted lazy (id={Id})", id);
-                }
-            }
+            // The cached lazy is faulted (e.g. LoadDatabase threw during a prior Open attempt).
+            // The name is already unregistered by the caller before Drop is invoked — nothing more to do.
             return;
         }
 
@@ -101,47 +66,20 @@ internal sealed class DatabaseDropper
                 id);
         }
 
-        if (databaseDescriptor.OwnsKahuna)
-        {
-            // Standalone mode: dispose the per-database Kahuna node and delete its directory.
-            await databaseDescriptor.Kahuna.DisposeAsync().ConfigureAwait(false);
-        }
-        else
-        {
-            // Cluster mode: the shared Kahuna node is NOT disposed (it's owned by the process,
-            // not this database). Purge all key-value entries that belong to this database.
-            //
-            // Purged namespaces (scan bucket → stored key prefix):
-            //   {id}/meta → {id}/   — all meta keys (system, version, table schemas, history, coordinator jobs)
-            //   {id}:     → {id}:   — all statistics keys ({id}:stats:{tableId})
-            //   {tableId}:r → {tableId}:r/   — row data for every table
-            //   {tableId}:i:{indexId} → {tableId}:i:{indexId}/  — index data for every index
-            //
-            //   Schema-log entries in the Raft WAL are append-only and cannot be removed.
-            await PurgeClusterKeyspaceAsync(databaseDescriptor, id).ConfigureAwait(false);
-        }
+        // Purge all key-value entries that belong to this database from the shared node.
+        // The shared node is NOT disposed here — it's owned by the process, not this database.
+        //
+        // Purged namespaces (scan bucket → stored key prefix):
+        //   {id}/meta → {id}/   — all meta keys (system, version, table schemas, history, coordinator jobs)
+        //   {id}:     → {id}:   — all statistics keys ({id}:stats:{tableId})
+        //   {tableId}:r → {tableId}:r/   — row data for every table
+        //   {tableId}:i:{indexId} → {tableId}:i:{indexId}/  — index data for every index
+        //
+        //   Schema-log entries in the Raft WAL are append-only and cannot be removed.
+        await PurgeClusterKeyspaceAsync(databaseDescriptor, id).ConfigureAwait(false);
 
         databaseDescriptor.Dispose();
         Log.LogDatabaseDropped(logger, databaseDescriptor.Name);
-
-        // Remove the on-disk directory (standalone mode only).
-        if (databaseDescriptor.OwnsKahuna)
-        {
-            string dataPath = Path.Combine(CamusConfig.DataDirectory, id);
-            if (Directory.Exists(dataPath))
-            {
-                try
-                {
-                    Directory.Delete(dataPath, recursive: true);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex,
-                        "Failed to delete data directory for dropped database '{Name}' (id={Id})",
-                        databaseDescriptor.Name, id);
-                }
-            }
-        }
     }
 
     /// <summary>

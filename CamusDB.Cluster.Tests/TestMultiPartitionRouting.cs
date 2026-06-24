@@ -122,7 +122,7 @@ public sealed class TestMultiPartitionRouting
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
         CommandExecutor executor = new(validator, catalogsManager, logger,
-            loggerFactory: sharedLoggerFactory, clusterNode: sharedNode!);
+            loggerFactory: sharedLoggerFactory, sharedNode: sharedNode!, isClusterMode: true);
         return executor;
     }
 

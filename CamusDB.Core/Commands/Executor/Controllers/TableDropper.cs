@@ -63,8 +63,7 @@ internal sealed class TableDropper
         string tableId = table.Id;
 
         TableSchema? droppedSchema = await catalogs.DropTableSchema(database, ticket.TableName, tableId, tx).ConfigureAwait(false);
-        if (droppedSchema is not null || !database.OwnsKahuna)
-            Log.LogTableRemovedFromDatabaseSchema(logger, ticket.TableName);
+        Log.LogTableRemovedFromDatabaseSchema(logger, ticket.TableName);
 
         // In cluster mode delete all persisted coordinator job records for this table so a
         // subsequent leader-change resume cannot replay them against a new table that happens
@@ -79,16 +78,13 @@ internal sealed class TableDropper
         // orphan that will fail harmlessly on its first resume step because the table schema is
         // already gone. The resume-time table-id mismatch check is the structural backstop for
         // the aliasing hazard.
-        if (!database.OwnsKahuna)
+        try
         {
-            try
-            {
-                await catalogs.DeleteCoordinatorJobsForTableAsync(database, tableId).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to clean up coordinator jobs for dropped table '{TableName}'", ticket.TableName);
-            }
+            await catalogs.DeleteCoordinatorJobsForTableAsync(database, tableId).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to clean up coordinator jobs for dropped table '{TableName}'", ticket.TableName);
         }
 
         try

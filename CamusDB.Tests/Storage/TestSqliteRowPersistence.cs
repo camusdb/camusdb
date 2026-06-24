@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 using CamusDB.Core;
@@ -19,6 +20,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsValidator;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 
@@ -46,10 +48,20 @@ public sealed class TestSqliteRowPersistence
 
         try
         {
+            Directory.CreateDirectory(Path.Combine(dataPath, "kv"));
+            Directory.CreateDirectory(Path.Combine(dataPath, "wal"));
+
             ILogger<ICamusDB> logger = LoggerFactory.CreateLogger<ICamusDB>();
+
+            EmbeddedKahuna node = EmbeddedKahuna.CreateSqlite(dataPath, LoggerFactory);
+            await node.StartAsync(CancellationToken.None);
+            await node.WaitForLeaderAsync("warmup", CancellationToken.None);
+            await node.FlushAsync();
+
             CommandValidator validator = new();
             CatalogsManager catalogs = new(logger);
-            CommandExecutor executor = new(validator, catalogs, logger);
+            CommandExecutor executor = new(validator, catalogs, logger,
+                loggerFactory: LoggerFactory, sharedNode: node, isClusterMode: true);
 
             DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
 

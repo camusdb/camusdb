@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -7,13 +7,12 @@
  */
 
 using Microsoft.Extensions.Logging;
-using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
-/// Creates a new database. At this moment, it only creates the data directory where
-/// the storage engine will store the objects and records of the database.
+/// Creates a new database. Both standalone and cluster modes store all data in the single
+/// shared Kahuna node — no per-database directories are created.
 /// </summary>
 internal sealed class DatabaseCreator
 {
@@ -24,20 +23,9 @@ internal sealed class DatabaseCreator
         this.logger = logger;
     }
 
-    // Called only after the registry has been checked and the id allocated.
-    // Creates the physical data directories for a new database (standalone mode only).
-    // In cluster mode, data lives in the shared Kahuna node — no directories needed.
-    public async Task Create(string name, string id)
+    public Task Create(string name, string id)
     {
-        string dbPath = Path.Combine(CamusConfig.DataDirectory, id);
-        Directory.CreateDirectory(Path.Combine(dbPath, "kv"));
-        Directory.CreateDirectory(Path.Combine(dbPath, "wal"));
-
-        // Human-readable manifest for diagnostics: operators browsing DataDirectory can
-        // identify which folder belongs to which database without querying the registry.
-        // The registry is the source of truth; this file is never read by the engine.
-        await File.WriteAllTextAsync(Path.Combine(dbPath, "name.txt"), name).ConfigureAwait(false);
-
-        Log.LogDatabaseCreated(logger, name, dbPath);
+        Log.LogDatabaseCreated(logger, name, id);
+        return Task.CompletedTask;
     }
 }

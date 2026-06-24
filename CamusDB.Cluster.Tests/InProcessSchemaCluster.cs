@@ -154,8 +154,9 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                         catalogs,
                         logger,
                         loggerFactory: loggerFactory,
-                        clusterNode: kahuna,
-                        schemaDdlForwarder: forwarder
+                        sharedNode: kahuna,
+                        schemaDdlForwarder: forwarder,
+                        isClusterMode: true
                     );
 
                     return new Node(index, kahuna, executor);
@@ -253,7 +254,6 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         foreach (Node node in Nodes)
         {
             node.Database = await node.Executor.OpenDatabase(databaseName).ConfigureAwait(false);
-            Assert.False(node.Database.OwnsKahuna, "Cluster fixture descriptors must use their process-level Kahuna node");
         }
     }
 
@@ -375,7 +375,6 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         await node.Executor.CloseDatabase(new CloseDatabaseTicket(databaseName)).ConfigureAwait(false);
 
         node.Database = await node.Executor.OpenDatabase(databaseName).ConfigureAwait(false);
-        Assert.False(node.Database.OwnsKahuna, "Reopened cluster descriptor must still use the process-level Kahuna node");
     }
 
     // ── A3: Fault-injection transport hooks ──────────────────────────────────

@@ -54,11 +54,6 @@ internal sealed class TableIndexDropper
             await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
 
             table.Schema.Indexes?.RemoveAll(ix => ix.Name == ticket.IndexName);
-
-            // table.Schema.Version is not bumped: indexes are not part of the row encoding.
-            // On the cluster path, PersistSchemaCheckpointAsync is the authoritative write.
-            if (database.OwnsKahuna)
-                await state.Catalogs.PersistSchemaTableAsync(database, table.Schema, state.Tx).ConfigureAwait(false);
         }
         finally
         {

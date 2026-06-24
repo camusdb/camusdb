@@ -54,6 +54,8 @@ public abstract class SharedNodeBaseTest : BaseTest
             await sharedNode.DisposeAsync();
     }
 
+    protected override bool NeedsPerTestNode => false;
+
     /// <summary>Exposes the shared node's IKahuna so tests can inspect raw KV state.</summary>
     protected IKahuna SharedKahuna => sharedNode!.Kahuna;
 
@@ -65,7 +67,7 @@ public abstract class SharedNodeBaseTest : BaseTest
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
         return new(validator, catalogsManager, logger,
-            loggerFactory: SharedLoggerFactory, clusterNode: sharedNode!,
-            registry: sharedRegistry!);
+            loggerFactory: SharedLoggerFactory, sharedNode: sharedNode!,
+            registry: sharedRegistry!, isClusterMode: true);
     }
 }

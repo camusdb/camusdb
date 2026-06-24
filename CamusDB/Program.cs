@@ -118,12 +118,28 @@ if (config.IsClusterMode)
             services.GetRequiredService<ILogger<ICamusDB>>(),
             services.GetRequiredService<ILoggerFactory>(),
             services.GetRequiredService<EmbeddedKahuna>(),
-            services.GetRequiredService<ISchemaDdlForwarder>()
+            services.GetRequiredService<ISchemaDdlForwarder>(),
+            isClusterMode: true
         ));
 }
 else
 {
-    builder.Services.AddSingleton<CommandExecutor>();
+    builder.Services.AddSingleton<EmbeddedKahuna>(services =>
+    {
+        string dataPath = CamusDBConfig.DataDirectory;
+        ILoggerFactory loggerFactory = services.GetRequiredService<ILoggerFactory>();
+        return EmbeddedKahuna.CreateSqlite(dataPath, loggerFactory);
+    });
+
+    builder.Services.AddSingleton<CommandExecutor>(services =>
+        new CommandExecutor(
+            services.GetRequiredService<CommandValidator>(),
+            services.GetRequiredService<CatalogsManager>(),
+            services.GetRequiredService<ILogger<ICamusDB>>(),
+            services.GetRequiredService<ILoggerFactory>(),
+            services.GetRequiredService<EmbeddedKahuna>(),
+            isClusterMode: false
+        ));
 }
 
 builder.Services.AddSingleton<CommandValidator>();
@@ -208,16 +224,16 @@ app.MapRazorPages();
 // begins leader election and tries to reach peers.
 await app.StartAsync();
 
+EmbeddedKahuna sharedNode = app.Services.GetRequiredService<EmbeddedKahuna>();
+
 if (config.IsClusterMode)
 {
-    EmbeddedKahuna clusterNode = app.Services.GetRequiredService<EmbeddedKahuna>();
-
     // Wire the ack transport so follower applies are delivered to the leader's tracker.
     ISchemaDdlForwarder ddlForwarder = app.Services.GetRequiredService<ISchemaDdlForwarder>();
-    clusterNode.SetSchemaAckForwarder(ddlForwarder);
-
-    await clusterNode.StartAsync();
+    sharedNode.SetSchemaAckForwarder(ddlForwarder);
 }
+
+await sharedNode.StartAsync();
 
 // Initialize DB system
 CamusStartup camus = new(
@@ -240,11 +256,8 @@ finally
     await commandExecutor.DisposeAsync();
     shutdownLogger.LogInformation("Databases closed");
 
-    if (config.IsClusterMode)
-    {
-        await app.Services.GetRequiredService<EmbeddedKahuna>().DisposeAsync();
-        shutdownLogger.LogInformation("Cluster node stopped");
-    }
+    await app.Services.GetRequiredService<EmbeddedKahuna>().DisposeAsync();
+    shutdownLogger.LogInformation("Node stopped");
 
     shutdownLogger.LogInformation("Graceful shutdown complete");
 }

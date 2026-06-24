@@ -15,7 +15,10 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 using Microsoft.Extensions.Logging;
 
+using Kahuna;
+
 using CamusDB.Core;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers;
@@ -35,8 +38,9 @@ public abstract class BaseTest
 
     protected readonly ILogger<ICamusDB> logger;
 
-    // Per-test isolated directory and registry.
+    // Per-test isolated directory, shared Kahuna node, and registry.
     private string? tempDir;
+    private EmbeddedKahuna? testNode;
     protected DatabaseRegistry? sharedRegistry;
 
     // Databases opened in the current test method — closed in TearDown.
@@ -51,33 +55,60 @@ public abstract class BaseTest
     /// Creates a fresh per-test temp directory and a <see cref="DatabaseRegistry"/> for it.
     /// Each test gets an isolated DataDirectory so concurrent SQLite nodes never collide.
     /// </summary>
+    /// <summary>
+    /// When true (the default), <see cref="SetUpTestEnvironment"/> starts a per-test
+    /// in-memory Kahuna node and makes it available via <see cref="TestNode"/>.
+    /// Subclasses that manage their own class-level node should override this to false
+    /// to avoid spinning up a second, unused node per test method.
+    /// </summary>
+    protected virtual bool NeedsPerTestNode => true;
+
+    /// <summary>The per-test in-memory node, available after <see cref="SetUpTestEnvironment"/>.</summary>
+    protected EmbeddedKahuna? TestNode => testNode;
+
     [SetUp]
     public async Task SetUpTestEnvironment()
     {
         tempDir = Path.Combine(Path.GetTempPath(), "camusdb-test-" + Guid.NewGuid().ToString("n"));
         Directory.CreateDirectory(tempDir);
         CamusConfig.DataDirectory = tempDir;
+
+        if (NeedsPerTestNode)
+        {
+            testNode = new EmbeddedKahuna(new EmbeddedKahunaOptions
+            {
+                NodeName = $"test-{Guid.NewGuid():N}",
+                Storage = "memory",
+                WalStorage = "memory",
+                InitialPartitions = 1
+            });
+            await testNode.StartAsync(CancellationToken.None).ConfigureAwait(false);
+            await testNode.WaitForLeaderAsync("warmup", CancellationToken.None).ConfigureAwait(false);
+            await testNode.FlushAsync().ConfigureAwait(false);
+        }
+
         sharedRegistry = await CreateRegistryAsync().ConfigureAwait(false);
     }
 
     /// <summary>
     /// Creates the <see cref="DatabaseRegistry"/> for the current test.
-    /// Override in shared-node fixtures to use the cluster node instead of standalone SQLite.
+    /// Override in shared-node fixtures to use a different node.
     /// </summary>
     protected virtual Task<DatabaseRegistry> CreateRegistryAsync()
-        => DatabaseRegistry.OpenAsync(clusterNode: null, loggerFactory: SharedLoggerFactory);
+        => DatabaseRegistry.OpenAsync(testNode!);
 
     /// <summary>
     /// Builds a <see cref="CommandExecutor"/> for the current test. All executors within
-    /// one test share the same <see cref="DatabaseRegistry"/> so they can resolve each
-    /// other's databases without opening a second SQLite system store.
-    /// Override in shared-node fixtures to pass a process-level cluster node.
+    /// one test share the same <see cref="DatabaseRegistry"/> and Kahuna node so they can
+    /// resolve each other's databases.
+    /// Override in shared-node fixtures to pass a different cluster node.
     /// </summary>
     protected virtual CommandExecutor CreateCommandExecutor()
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger, registry: sharedRegistry!);
+        return new(validator, catalogsManager, logger,
+                   sharedNode: testNode!, registry: sharedRegistry!, isClusterMode: false);
     }
 
     /// <summary>
@@ -150,7 +181,14 @@ public abstract class BaseTest
             sharedRegistry = null;
         }
 
-        // Delete the entire per-test temp directory (all database dirs + _system registry).
+        // Dispose the per-test Kahuna node after the registry (which holds transactions on it).
+        if (testNode is not null)
+        {
+            try { await testNode.DisposeAsync(); } catch { }
+            testNode = null;
+        }
+
+        // Delete the per-test temp directory.
         if (tempDir is not null && Directory.Exists(tempDir))
         {
             try { Directory.Delete(tempDir, recursive: true); } catch { }

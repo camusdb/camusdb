@@ -262,11 +262,6 @@ internal sealed class TableIndexAdder
                 }
             }
 
-            // table.Schema.Version is not bumped: indexes are not part of the row encoding.
-            // On the cluster path, PersistSchemaCheckpointAsync (called by
-            // ReplicateAndWaitLocalApplyAsync after Raft commits) is the authoritative write.
-            if (database.OwnsKahuna)
-                await state.Catalogs.PersistSchemaTableAsync(database, table.Schema, state.Tx).ConfigureAwait(false);
         }
         finally
         {

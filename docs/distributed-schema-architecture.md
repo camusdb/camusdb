@@ -106,15 +106,16 @@ crash-safe online schema change.
 | Transactions | `KvTransaction`, `KvTransactionsManager` | Carry schema-version *pins* and validate them at commit; lock/modified tracking is lock-guarded for concurrent use. |
 | Test harness | `InProcessSchemaCluster`, `FaultInjectingCommunication` | N distinct in-process nodes with real Raft, ack-based convergence await, and pause/kill/force-leader fault injection. |
 
-### Single-node vs cluster: the `OwnsKahuna` switch
+### Single-node vs cluster: the `isClusterMode` flag
 
-Every catalog mutation has two code paths, selected by `database.OwnsKahuna`:
+Every catalog mutation uses the replicated path. `isClusterMode` on `CommandExecutor` (and
+threaded into `DatabaseOpener`) controls whether schema replication and coordinator
+registration are active:
 
-- **`OwnsKahuna == true`** (embedded/single-process owner of the Kahuna instance): the
-  *local* path. `CatalogsManager.CreateTable/AlterTable/DropTableSchema` apply the delta
-  directly under `Schema.Semaphore` and persist, all inside the caller's DDL transaction.
-  No Raft round-trip.
-- **`OwnsKahuna == false`** (cluster member): the *replicated* path
+- **`isClusterMode == false`** (standalone): `CatalogsManager.CreateTable/AlterTable/DropTableSchema`
+  apply the delta directly under `Schema.Semaphore` and persist, all inside the caller's DDL
+  transaction. No Raft round-trip. `schemaReplicator.Register` is skipped.
+- **`isClusterMode == true`** (cluster member): the *replicated* path
   (`*ReplicatedAsync`). The delta is validated locally, then proposed through Raft, and
   the in-memory mutation happens later, in the **apply callback**, on every node.
 
@@ -163,7 +164,7 @@ the discriminator (`ApplyElementState` vs `ApplyIndexElementState`).
 
 ## 4. The write path (proposing a DDL change)
 
-This is the cluster path (`OwnsKahuna == false`). Entry point:
+This is the cluster path (`isClusterMode == true`). Entry point:
 `CommandExecutor.AlterTable / CreateTable / DropTable / AlterIndex`.
 
 ```
@@ -739,7 +740,7 @@ either node neither loses a write nor reads a half-built element.
 `SchemaChangeCoordinator` is the component that **drives** the staged sequence — it turns a
 high-level intent ("add column X", "build index Y") into the successive `SetElementState`
 deltas, waiting for the cluster ack gate between each one. It runs **on the schema leader**
-(followers forward DDL via §5.3) and only in cluster mode (`!OwnsKahuna`).
+(followers forward DDL via §5.3) and only in cluster mode (`isClusterMode == true`).
 
 **Job model & drive loop.** `RunJobAsync(database, SchemaChangeJob{ table, element, kind,
 targetState }, columnDefinition?, indexBuildInfo?)`:

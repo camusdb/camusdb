@@ -14,16 +14,14 @@ using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor.Models;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
-using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
 /// Opens a database and wires the <see cref="KvTransactionsManager"/> into the returned
-/// <see cref="DatabaseDescriptor"/>.
-/// In standalone mode, creates a per-database SQLite-backed <see cref="EmbeddedKahuna"/> node.
-/// In cluster mode, reuses the process-level <see cref="EmbeddedKahuna"/> injected at construction.
-/// Schema and row data are persisted to the Kahuna KV store and restored on reopen via WAL replay.
+/// <see cref="DatabaseDescriptor"/>. Both standalone and cluster modes use the single
+/// process-level shared <see cref="EmbeddedKahuna"/> node; opening a database is a pure
+/// metadata load — no per-database node is constructed or started.
 /// </summary>
 internal sealed class DatabaseOpener
 {
@@ -39,9 +37,9 @@ internal sealed class DatabaseOpener
 
     private readonly ILogger<ICamusDB> logger;
 
-    private readonly ILoggerFactory? loggerFactory;
+    private readonly EmbeddedKahuna sharedNode;
 
-    private readonly EmbeddedKahuna? clusterNode;
+    private readonly bool isClusterMode;
 
     private readonly Task<DatabaseRegistry> registryTask;
 
@@ -50,9 +48,10 @@ internal sealed class DatabaseOpener
         DatabaseDescriptors databaseDescriptors,
         CatalogsManager catalogs,
         ILogger<ICamusDB> logger,
-        EmbeddedKahuna? clusterNode,
+        EmbeddedKahuna? sharedNode,
         ILoggerFactory? loggerFactory,
-        Task<DatabaseRegistry> registryTask)
+        Task<DatabaseRegistry> registryTask,
+        bool isClusterMode = false)
     {
         this.commandExecutor = commandExecutor;
         this.databaseDescriptors = databaseDescriptors;
@@ -72,8 +71,8 @@ internal sealed class DatabaseOpener
                 commandExecutor.BackfillIndexEntriesAsync(db, tableName, indexInfo, startOffset, onCheckpoint),
         };
         this.logger = logger;
-        this.clusterNode = clusterNode;
-        this.loggerFactory = loggerFactory;
+        this.sharedNode = sharedNode ?? throw new ArgumentNullException(nameof(sharedNode), "A shared Kahuna node is required");
+        this.isClusterMode = isClusterMode;
         this.registryTask = registryTask;
     }
 
@@ -115,85 +114,32 @@ internal sealed class DatabaseOpener
 
     private async Task<DatabaseDescriptor> LoadDatabase(string id, string name)
     {
-        EmbeddedKahuna node;
-
-        if (clusterNode is not null)
-        {
-            // Cluster mode: data lives in the shared node; no per-database directory.
-            node = clusterNode;
-        }
-        else
-        {
-            // Standalone mode: data directory must already exist (created by CreateDatabase).
-            string dataPath = Path.Combine(CamusConfig.DataDirectory, id);
-            string sentinelPath = Path.Combine(dataPath, "creating.lock");
-
-            if (File.Exists(sentinelPath))
-            {
-                if (Directory.Exists(Path.Combine(dataPath, "kv")))
-                {
-                    // kv/ exists: creation completed but File.Delete(sentinel) was interrupted
-                    // (e.g. the process was killed between Open returning and the sentinel
-                    // cleanup in CreateDatabase).  Auto-heal: remove the stale sentinel.
-                    try { File.Delete(sentinelPath); } catch { /* non-fatal */ }
-                }
-                else
-                {
-                    // kv/ absent: the process crashed between RegisterAsync and Create/Open
-                    // finishing.  Surface a distinct, actionable error.
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.DatabaseCreationIncomplete,
-                        $"Database '{name}' (id={id}) was not fully initialised — the process " +
-                        $"may have crashed during setup. Drop the database and recreate it to recover.");
-                }
-            }
-
-            if (!Directory.Exists(Path.Combine(dataPath, "kv")))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.SystemSpaceCorrupt,
-                    $"Data directory for database '{name}' (id={id}) is missing or incomplete. " +
-                    $"The database may not have finished creating (possible crash during setup), " +
-                    $"or its data directory may have been deleted or corrupted. " +
-                    $"Drop the database and recreate it to recover.");
-
-            node = EmbeddedKahuna.CreateSqlite(dataPath, loggerFactory);
-        }
-
-        // Only start/wait if we own the node (standalone per-database instance).
-        // The cluster node is started once at process startup in Program.cs.
-        if (clusterNode is null)
-        {
-            await node.StartAsync(CancellationToken.None).ConfigureAwait(false);
-            await node.WaitForLeaderAsync($"{id}/warmup", CancellationToken.None).ConfigureAwait(false);
-
-            // WAL replay queues dirty writes to the background writer. Flush them now so
-            // SQLite is fully populated before LoadMetaAsync reads schema keys from storage.
-            await node.FlushAsync().ConfigureAwait(false);
-        }
-
+        // Both modes use the single shared node. Opening a database is a pure metadata
+        // load — no per-database node is constructed, started, or flushed here.
         Func<HLCTimestamp?, HLCTimestamp> mintLocalT = (floor) =>
         {
             if (floor.HasValue && !floor.Value.IsNull())
-                return node.Raft.HybridLogicalClock.ReceiveEvent(node.Raft.GetLocalNodeId(), floor.Value);
-            return node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
+                return sharedNode.Raft.HybridLogicalClock.ReceiveEvent(sharedNode.Raft.GetLocalNodeId(), floor.Value);
+            return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
         };
 
-        KvTransactionsManager transactions = new(node.Kahuna, mintLocalT);
+        KvTransactionsManager transactions = new(sharedNode.Kahuna, mintLocalT);
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new();
 
         DatabaseDescriptor databaseDescriptor = new(
             id: id,
             name: name,
-            kahuna: node,
+            kahuna: sharedNode,
             transactions: transactions,
-            tableDescriptors: tableDescriptors,
-            ownsKahuna: clusterNode is null
+            tableDescriptors: tableDescriptors
         );
 
         await catalogs.LoadMetaAsync(databaseDescriptor).ConfigureAwait(false);
 
-        if (!databaseDescriptor.OwnsKahuna)
-            schemaReplicator.Register(databaseDescriptor, coordinator);
+        // All DDL goes through ReplicateAndWaitLocalApplyAsync (Raft commit + local apply callback).
+        // The SchemaReplicator must be registered in both standalone and cluster modes so that
+        // ApplyAsync fires after the Raft commit and updates database.Schema.SchemaVersion.
+        schemaReplicator.Register(databaseDescriptor, coordinator);
 
         Log.LogDatabaseOpened(logger, name);
 

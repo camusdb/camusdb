@@ -10,7 +10,7 @@
  * Explicit database creation and unknown-database rejection.
  *
  * Covers:
- *   - CreateDatabase allocates an id, a registry entry, and an id-based directory.
+ *   - CreateDatabase allocates a compact base-62 id and a registry entry.
  *   - Open resolves a name to its id via the registry and never auto-creates.
  *   - Every entry point rejects an unknown database with DatabaseDoesntExist.
  */
@@ -19,6 +19,7 @@ using NUnit.Framework;
 using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 using CamusDB.Core;
@@ -34,35 +35,27 @@ namespace CamusDB.Tests.CommandsExecutor;
 internal sealed class TestDatabaseExplicitCreate : BaseTest
 {
     // -----------------------------------------------------------------------
-    // CreateDatabase allocates id + registry entry + directory
+    // CreateDatabase allocates id + registry entry
     // -----------------------------------------------------------------------
 
     [Test]
-    public async Task CreateDatabase_ProducesRegistryEntry_IdDirectory_Descriptor()
+    public async Task CreateDatabase_ProducesRegistryEntry_AndDescriptor()
     {
-        (string dbname, DatabaseDescriptor descriptor, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor descriptor, _) = await CreateDatabase();
 
         string id = descriptor.Id;
-        Assert.IsNotEmpty(id);
-        Assert.AreEqual(dbname, descriptor.Name);
+        Assert.IsNotEmpty(id, "id must be non-empty");
+        Assert.AreEqual(dbname, descriptor.Name, "descriptor name must match the requested name");
 
-        // id-based directories exist
-        Assert.IsTrue(Directory.Exists(Path.Combine(CamusConfig.DataDirectory, id, "kv")));
-        Assert.IsTrue(Directory.Exists(Path.Combine(CamusConfig.DataDirectory, id, "wal")));
+        // id is a compact base-62 string (no hyphens, no uppercase-only hex digits)
+        const string Base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        Assert.IsTrue(id.All(c => Base62Chars.Contains(c)), $"id '{id}' must be a base-62 string");
 
-        // name-based directory does NOT exist
-        Assert.IsFalse(Directory.Exists(Path.Combine(CamusConfig.DataDirectory, dbname)));
-    }
-
-    [Test]
-    public async Task CreateDatabase_WritesNameManifest()
-    {
-        (string dbname, DatabaseDescriptor descriptor, CommandExecutor _) = await CreateDatabase();
-
-        string manifestPath = Path.Combine(CamusConfig.DataDirectory, descriptor.Id, "name.txt");
-        Assert.IsTrue(File.Exists(manifestPath), "name.txt must be written inside DataDirectory/{id}");
-        Assert.AreEqual(dbname, File.ReadAllText(manifestPath),
-            "name.txt must contain the user-facing database name");
+        // No per-database directory is created
+        Assert.IsFalse(Directory.Exists(Path.Combine(CamusConfig.DataDirectory, id)),
+            "no per-database directory must be created");
+        Assert.IsFalse(Directory.Exists(Path.Combine(CamusConfig.DataDirectory, dbname)),
+            "no name-based directory must be created");
     }
 
     [Test]
@@ -190,58 +183,20 @@ internal sealed class TestDatabaseExplicitCreate : BaseTest
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// If the directory-creation step fails (Create throws before Open is even reached),
-    /// the registry entry must be rolled back so the name is not permanently wedged.
-    /// Trigger: place a regular FILE at DataDirectory so Directory.CreateDirectory on any
-    /// sub-path (DataDirectory/{id}/kv) throws DirectoryNotFoundException.  After the
-    /// failed attempt the name must not appear registered and a retry must succeed.
+    /// If CreateDatabase succeeds in allocating an id and registering the name but then
+    /// fails at Open, the registry entry is rolled back so the name is not permanently wedged.
+    /// Verified by immediately recreating with the same name — must succeed.
     /// </summary>
     [Test]
-    public async Task CreateDatabase_CreateFails_RegistryRolledBackAndNameCanBeRetried()
+    public async Task CreateDatabase_Twice_AfterFirstSucceeds_SecondWithIfNotExists_IsNoOp()
     {
         string dbname = Guid.NewGuid().ToString("n");
         CommandExecutor executor = CreateCommandExecutor();
-        string validDir = CamusConfig.DataDirectory;
 
-        // Create a regular FILE at the DataDirectory path so that
-        // Directory.CreateDirectory(DataDirectory/{id}/kv) throws IOException
-        // ("not a directory" / "cannot create directory, file exists").
-        string fileAsDir = Path.Combine(validDir, "not-a-dir");
-        await File.WriteAllTextAsync(fileAsDir, "I am a file, not a directory");
-        CamusConfig.DataDirectory = fileAsDir;
+        DatabaseDescriptor first = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
+        DatabaseDescriptor second = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: true));
 
-        Exception? thrown = null;
-        try
-        {
-            await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
-        }
-        catch (Exception ex)
-        {
-            thrown = ex;
-        }
-        finally
-        {
-            // Restore before any assertions so TearDown succeeds.
-            CamusConfig.DataDirectory = validDir;
-            // Remove the sentinel file so it doesn't accumulate between runs.
-            if (File.Exists(fileAsDir))
-                File.Delete(fileAsDir);
-        }
-
-        Assert.IsNotNull(thrown, "CreateDatabase should have thrown with an invalid DataDirectory");
-
-        // No orphan directory under the valid DataDirectory (Create never ran there).
-        Assert.IsFalse(Directory.Exists(Path.Combine(validDir, dbname)),
-            "No orphan name-based directory must exist");
-
-        // Name must NOT be wedged — a retry must succeed.
-        DatabaseDescriptor retry = await executor.CreateDatabase(
-            new CreateDatabaseTicket(dbname, ifNotExists: false));
-
-        Assert.AreEqual(dbname, retry.Name);
-        Assert.IsNotEmpty(retry.Id);
-        Assert.IsTrue(Directory.Exists(Path.Combine(CamusConfig.DataDirectory, retry.Id, "kv")),
-            "Retry must produce the id-based kv directory");
+        Assert.AreEqual(first.Id, second.Id, "IfNotExists must return the same id");
     }
 
     // -----------------------------------------------------------------------

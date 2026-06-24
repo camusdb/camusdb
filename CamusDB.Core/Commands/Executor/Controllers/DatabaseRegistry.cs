@@ -14,6 +14,7 @@ using CamusDB.Core.Transactions;
 using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Shared.Sequences;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
@@ -64,6 +65,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     private string RegistryBucket => $"{keyPrefix}dbregistry";
     private string NameKeyPrefix => $"{keyPrefix}dbregistry/db:";
     private string NameKey(string name) => $"{keyPrefix}dbregistry/db:{name}";
+    private string SequenceKey => $"{keyPrefix}dbregistry/seq";
 
     private DatabaseRegistry(
         IKahuna kahuna,
@@ -75,6 +77,76 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         this.transactions = transactions;
         this.ownedNode = ownedNode;
         this.keyPrefix = keyPrefix;
+    }
+
+    // -----------------------------------------------------------------------
+    // Id allocation — compact base62 from a persistent monotonic sequence
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Allocates the next database id from the persistent monotonic counter stored in the
+    /// shared node's sequence (<c>dbregistry/seq</c> or <c>_system/dbregistry/seq</c> in
+    /// cluster mode). The counter only ever moves forward — ids are never reused even after
+    /// a DROP, so a recycled name gets a strictly higher id than the dropped database.
+    /// The id is returned as a short base-62 string.
+    /// </summary>
+    public async Task<string> AllocateIdAsync()
+    {
+        string seqName = SequenceKey;
+
+        // Ensure the sequence exists (idempotent — AlreadyExists is fine)
+        (SequenceResponseType createType, _) = await kahuna.LocateAndCreateSequence(
+            seqName, initialValue: 0, increment: 1, maxValue: null,
+            SequenceDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+
+        if (createType is not (SequenceResponseType.Success or SequenceResponseType.AlreadyExists))
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Failed to ensure database id sequence: {createType}");
+
+        // Advance the counter atomically — cluster-safe across all nodes
+        SequenceResponseType nextType;
+        SequenceAllocation allocation;
+        int retries = 0;
+        do
+        {
+            if (retries > 0)
+                await Task.Delay(retries * 10).ConfigureAwait(false);
+
+            (nextType, allocation) = await kahuna.LocateAndNextSequenceValue(
+                seqName, null, SequenceDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        while (nextType == SequenceResponseType.MustRetry && ++retries < MaxRetries);
+
+        if (nextType != SequenceResponseType.Success)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Failed to allocate database id: {nextType}");
+
+        return ToBase62(allocation.Start);
+    }
+
+    /// <summary>
+    /// Encodes <paramref name="value"/> as a base-62 string using the alphabet
+    /// <c>0–9 A–Z a–z</c>. The output is the shortest representation with no leading zeros
+    /// (value 1 → "1", value 62 → "A0"). Always at least one character.
+    /// </summary>
+    internal static string ToBase62(long value)
+    {
+        const string Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        if (value <= 0)
+            return "0";
+
+        Span<char> buf = stackalloc char[11]; // ceil(log₆₂(long.MaxValue)) ≤ 11
+        int pos = 11;
+        while (value > 0)
+        {
+            buf[--pos] = Alphabet[(int)(value % 62)];
+            value /= 62;
+        }
+        return new string(buf[pos..]);
     }
 
     // -----------------------------------------------------------------------

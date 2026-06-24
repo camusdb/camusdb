@@ -48,35 +48,8 @@ public sealed class CatalogsManager
     /// <param name="ticket"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
-    public async Task<TableSchema> CreateTable(DatabaseDescriptor database, CreateTableTicket ticket, KvTransaction tx)
-    {
-        if (!database.OwnsKahuna)
-            return await CreateTableReplicatedAsync(database, ticket, tx).ConfigureAwait(false);
-
-        // Apply delta under the schema lock (pure in-memory), then release before
-        // the KV persist — the persist is a replicated 2PC write that must never run
-        // while the schema lock is held
-        TableSchema tableSchema;
-        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-        try
-        {
-            SchemaChangeLogEntry entry = CreateTableEntry(database, ticket, tx);
-
-            tableSchema = ApplySchemaDelta(database.Schema, entry) ?? throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Schema change '{entry.Op}' did not create table '{ticket.TableName}'"
-            );
-
-            Log.LogTableAddedToSchema(logger, ticket.TableName);
-        }
-        finally
-        {
-            database.Schema.ReleaseLock();
-        }
-
-        await PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
-        return tableSchema;
-    }
+    public Task<TableSchema> CreateTable(DatabaseDescriptor database, CreateTableTicket ticket, KvTransaction tx)
+        => CreateTableReplicatedAsync(database, ticket, tx);
 
     /// <summary>
     /// Modifies an existing table object allowing to add or remove columns.
@@ -85,55 +58,11 @@ public sealed class CatalogsManager
     /// <param name="ticket"></param>
     /// <returns></returns>
     /// <exception cref="CamusDBException"></exception>
-    public async Task<TableSchema> AlterTable(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)
-    {
-        if (!database.OwnsKahuna)
-            return await AlterTableReplicatedAsync(database, ticket, tx).ConfigureAwait(false);
+    public Task<TableSchema> AlterTable(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)
+        => AlterTableReplicatedAsync(database, ticket, tx);
 
-        // Apply delta under the schema lock (pure in-memory), persist outside.
-        TableSchema tableSchema;
-        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-        try
-        {
-            SchemaChangeLogEntry entry = AlterTableEntry(database, ticket, tx);
-
-            tableSchema = ApplySchemaDelta(database.Schema, entry) ?? throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Schema change '{entry.Op}' did not alter table '{ticket.TableName}'"
-            );
-
-            Log.LogTableSchemaModified(logger, ticket.TableName);
-        }
-        finally
-        {
-            database.Schema.ReleaseLock();
-        }
-
-        await PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
-        return tableSchema;
-    }
-
-    public async Task<TableSchema?> DropTableSchema(DatabaseDescriptor database, string tableName, string tableId, KvTransaction tx)
-    {
-        if (!database.OwnsKahuna)
-            return await DropTableReplicatedAsync(database, tableName, tx).ConfigureAwait(false);
-
-        // Apply delta under the schema lock (pure in-memory), persist outside.
-        TableSchema? tableSchema;
-        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-        try
-        {
-            SchemaChangeLogEntry entry = DropTableEntry(database, tableName, tx);
-            tableSchema = ApplySchemaDelta(database.Schema, entry);
-        }
-        finally
-        {
-            database.Schema.ReleaseLock();
-        }
-
-        await PersistDroppedTableAsync(database, tableId, tx).ConfigureAwait(false);
-        return tableSchema;
-    }
+    public Task<TableSchema?> DropTableSchema(DatabaseDescriptor database, string tableName, string tableId, KvTransaction tx)
+        => DropTableReplicatedAsync(database, tableName, tx);
 
     /// <summary>
     /// Allows querying the current schema of a table object.
@@ -325,33 +254,8 @@ public sealed class CatalogsManager
         return true;
     }
 
-    public async Task<bool> RenameTable(DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx)
-    {
-        if (!database.OwnsKahuna)
-            return await RenameTableReplicatedAsync(database, ticket, tx).ConfigureAwait(false);
-
-        TableSchema? tableSchema;
-        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-        try
-        {
-            SchemaChangeLogEntry entry = RenameTableEntry(database, ticket, tx);
-            tableSchema = ApplySchemaDelta(database.Schema, entry);
-            Log.LogTableSchemaModified(logger, ticket.TableName);
-        }
-        finally
-        {
-            database.Schema.ReleaseLock();
-        }
-
-        // Evict stale descriptor for old name; new name will be opened fresh on next access.
-        database.TableDescriptors.TryRemove(ticket.TableName, out _);
-        database.TableDescriptors.TryRemove(ticket.NewName, out _);
-
-        if (tableSchema is not null)
-            await PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
-
-        return true;
-    }
+    public Task<bool> RenameTable(DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx)
+        => RenameTableReplicatedAsync(database, ticket, tx);
 
     public async Task<bool> RenameIndexInTableAsync(
         DatabaseDescriptor database,
@@ -382,30 +286,14 @@ public sealed class CatalogsManager
                 })
             };
 
-            if (database.OwnsKahuna)
-                tableSchema = ApplySchemaDelta(database.Schema, entry);
-            else
-            {
-                ValidateSchemaDelta(database.Schema, entry);
-                tableSchema = null;
-            }
+            ValidateSchemaDelta(database.Schema, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        if (!database.OwnsKahuna)
-        {
-            await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
-            return true;
-        }
-
-        if (tableSchema is not null)
-            await PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
-
-        database.TableDescriptors.TryRemove(ticket.TableName, out _);
-
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
         return true;
     }
 
@@ -426,7 +314,7 @@ public sealed class CatalogsManager
     /// Replicates a completed AddIndex or DropIndex change to all cluster nodes via the
     /// schema log. Must be called AFTER the local work (backfill etc.) is done and
     /// <c>table.Schema.Indexes</c> reflects the final state. Only called when
-    /// <c>!database.OwnsKahuna</c>; standalone nodes need no replication.
+    /// <c>isClusterMode</c>; standalone nodes need no replication.
     /// </summary>
     public async Task ReplicateIndexChangeAsync(
         DatabaseDescriptor database,
@@ -457,7 +345,7 @@ public sealed class CatalogsManager
     /// it to all cluster nodes via the schema log.  Used by
     /// <see cref="SchemaChangeCoordinator"/> to begin a staged add sequence in
     /// <c>DeleteOnly</c> rather than jumping straight to <c>Public</c>.
-    /// Only valid on cluster nodes (<c>!OwnsKahuna</c>).
+    /// Only valid on cluster nodes (<c>isClusterMode</c>).
     /// </summary>
     public async Task ReplicateAddColumnInStateAsync(
         DatabaseDescriptor database,
@@ -505,7 +393,7 @@ public sealed class CatalogsManager
     /// Proposes a single <c>SetElementState</c> delta and replicates it to all cluster nodes
     /// via the schema log, then waits for every live node to ack the resulting version.
     /// Validates the state transition before proposing.
-    /// Only valid on cluster nodes (<c>!OwnsKahuna</c>).
+    /// Only valid on cluster nodes (<c>isClusterMode</c>).
     /// </summary>
     public async Task ReplicateElementStateAsync(
         DatabaseDescriptor database,
@@ -548,7 +436,7 @@ public sealed class CatalogsManager
     /// Proposes an <c>AddIndex</c> delta with <paramref name="initialState"/> and replicates
     /// it to all cluster nodes via the schema log. Used by <see cref="SchemaChangeCoordinator"/>
     /// to begin the staged add sequence in <c>DeleteOnly</c> rather than jumping straight to
-    /// <c>Public</c>. Only valid on cluster nodes (<c>!OwnsKahuna</c>).
+    /// <c>Public</c>. Only valid on cluster nodes (<c>isClusterMode</c>).
     /// </summary>
     public async Task ReplicateAddIndexInStateAsync(
         DatabaseDescriptor database,
@@ -597,7 +485,7 @@ public sealed class CatalogsManager
     /// Used to compensate a failed coordinator-driven add-index sequence: if the
     /// index was added in <c>DeleteOnly</c> or <c>WriteOnly</c> state but the sequence
     /// did not reach <c>Public</c>, this removes it cleanly on every node.
-    /// Only valid on cluster nodes (<c>!OwnsKahuna</c>). No-op if the index is
+    /// Only valid on cluster nodes (<c>isClusterMode</c>). No-op if the index is
     /// already absent (idempotent).
     /// </summary>
     public async Task ReplicateDropIndexAsync(DatabaseDescriptor database, string tableName, string indexName)
@@ -1767,10 +1655,7 @@ public sealed class CatalogsManager
             }
             else
             {
-                if (database.OwnsKahuna)
-                    migratedLegacySchema = await LoadAndMigrateLegacySchemaAsync(database, tx).ConfigureAwait(false);
-                else
-                    await LoadLegacySchemaAsync(database, tx).ConfigureAwait(false);
+                await LoadLegacySchemaAsync(database, tx).ConfigureAwait(false);
             }
 
             (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =

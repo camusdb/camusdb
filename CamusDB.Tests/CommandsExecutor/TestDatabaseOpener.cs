@@ -59,7 +59,7 @@ public sealed class TestDatabaseOpener : BaseTest
 
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(validator, catalogsManager, logger, clusterNode: clusterNode);
+        CommandExecutor executor = new(validator, catalogsManager, logger, sharedNode: clusterNode, isClusterMode: true);
 
         string db1 = System.Guid.NewGuid().ToString("n");
         string db2 = System.Guid.NewGuid().ToString("n");
@@ -70,7 +70,6 @@ public sealed class TestDatabaseOpener : BaseTest
             DatabaseDescriptor second = await executor.CreateDatabase(new CreateDatabaseTicket(db2, ifNotExists: false));
 
             Assert.AreSame(clusterNode, second.Kahuna);
-            Assert.IsFalse(second.OwnsKahuna);
 
             await executor.CloseDatabase(new CloseDatabaseTicket(db1));
 

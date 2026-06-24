@@ -74,7 +74,8 @@ public sealed class TestSchemaDdlForwardController
             new CatalogsManager(NullLogger<ICamusDB>.Instance),
             NullLogger<ICamusDB>.Instance,
             loggerFactory: Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance,
-            clusterNode: node
+            sharedNode: node,
+            isClusterMode: true
         );
     }
 

@@ -561,9 +561,10 @@ public sealed class TestSchemaDdlForwarding
             CatalogsManager catalogs = new(Logger);
             return new(validator, catalogs, Logger,
                 loggerFactory: LoggerFactory,
-                clusterNode: node,
+                sharedNode: node,
                 schemaDdlForwarder: forwarder,
-                registry: SharedRegistry);
+                registry: SharedRegistry,
+                isClusterMode: true);
         }
 
         public string NextSchemaLogDatabaseName()

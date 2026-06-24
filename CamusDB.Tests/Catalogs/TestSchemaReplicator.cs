@@ -409,8 +409,7 @@ public sealed class TestSchemaReplicator
             name: db,
             kahuna: kahuna,
             transactions: new KvTransactionsManager(kahuna.Kahuna),
-            tableDescriptors: new ConcurrentDictionary<string, AsyncLazy<TableDescriptor>>(),
-            ownsKahuna: false
+            tableDescriptors: new ConcurrentDictionary<string, AsyncLazy<TableDescriptor>>()
         );
     }
 

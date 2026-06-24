@@ -92,10 +92,6 @@ public sealed class SchemaChangeCoordinator
     /// exists (state transitions only).
     /// </para>
     ///
-    /// <para>
-    /// Requires <c>!database.OwnsKahuna</c>: the coordinator only makes sense in
-    /// a cluster where schema changes must be replicated.
-    /// </para>
     /// </summary>
     public async Task RunJobAsync(
         DatabaseDescriptor database,
@@ -105,12 +101,6 @@ public sealed class SchemaChangeCoordinator
         CancellationToken cancellationToken = default
     )
     {
-        if (database.OwnsKahuna)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "SchemaChangeCoordinator requires a cluster database (OwnsKahuna must be false)"
-            );
-
         SchemaElementState current = GetCurrentElementState(database.Schema, job.TableName, job.ElementName, job.ElementKind);
         SchemaElementState[] path = ComputeTransitionPath(current, job.TargetState);
 

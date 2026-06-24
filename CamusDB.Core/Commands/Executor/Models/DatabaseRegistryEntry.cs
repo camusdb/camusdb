@@ -14,7 +14,7 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// </summary>
 public sealed class DatabaseRegistryEntry
 {
-    /// <summary>24-hex opaque id generated at database creation (ObjectIdGenerator).</summary>
+    /// <summary>Short base-62 opaque id allocated from a per-store monotonic counter at database creation. Never reused.</summary>
     public string Id { get; set; } = "";
 
     /// <summary>User-visible database name. Mutable (rename changes this; id stays).</summary>

@@ -79,7 +79,7 @@ internal sealed class TestMultiPartitionUniqueIndex : BaseTest
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger, loggerFactory: SharedLoggerFactory, clusterNode: node!);
+        return new(validator, catalogsManager, logger, loggerFactory: SharedLoggerFactory, sharedNode: node!, isClusterMode: true);
     }
 
     private static async Task CreateTeams(string dbname, DatabaseDescriptor database, CommandExecutor executor)

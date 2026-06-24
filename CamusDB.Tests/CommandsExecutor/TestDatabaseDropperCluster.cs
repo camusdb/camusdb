@@ -30,7 +30,7 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// DROP DATABASE tests in cluster mode (shared Kahuna node, OwnsKahuna=false).
+/// DROP DATABASE tests in cluster mode (shared Kahuna node, isClusterMode=true).
 /// Verifies PurgeClusterKeyspaceAsync actually removes keys from the shared KV store.
 /// </summary>
 [TestFixture]
