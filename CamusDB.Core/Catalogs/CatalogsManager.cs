@@ -200,9 +200,12 @@ public sealed class CatalogsManager
         foreach (ConstraintInfo constraint in ticket.Constraints)
         {
             if (!seenNames.Add(constraint.Name))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"Index '{constraint.Name}' already exists on table '{ticket.TableName}'");
+            {
+                string msg = constraint.Type == ConstraintType.PrimaryKey
+                    ? $"Primary key already exists on table '{ticket.TableName}'"
+                    : $"Index '{constraint.Name}' already exists on table '{ticket.TableName}'";
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, msg);
+            }
 
             IndexType indexType = constraint.Type switch
             {

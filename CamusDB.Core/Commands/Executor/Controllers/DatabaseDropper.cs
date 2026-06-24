@@ -21,6 +21,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 internal sealed class DatabaseDropper
 {
+    // Max rounds a single keyspace bucket is re-scanned during purge to absorb a transient
+    // scan miss of a just-committed entry (delete is idempotent, so re-scanning is safe).
+    private const int MaxPurgeScanRounds = 3;
+
     private readonly DatabaseDescriptors databaseDescriptors;
 
     private readonly ILogger<ICamusDB> logger;
@@ -109,8 +113,12 @@ internal sealed class DatabaseDropper
         List<(string bucket, string keyPrefix)> prefixes =
         [
             ($"{id}/meta", $"{id}/meta"),    // all schema meta: version, system, schema, table, history, coordinator
-            ($"{id}:",     $"{id}:stats:"),  // statistics: {id}:stats:{tableId}
         ];
+
+        // Statistics keys ("{id}:stats:{tableId}") contain no '/', so their Kahuna routing bucket is
+        // the whole key — a "{id}:" bucket scan does not reliably match them (in-memory bucket equality
+        // vs on-disk prefix). Delete each by exact key instead.
+        List<string> exactKeys = [];
 
         foreach (TableSchema table in descriptor.Schema.Tables.Values)
         {
@@ -118,65 +126,94 @@ internal sealed class DatabaseDropper
                 continue;
 
             prefixes.Add(($"{id}:{table.Id}:r", $"{id}:{table.Id}:r/"));
+            exactKeys.Add($"{id}:stats:{table.Id}");
 
             if (table.Indexes is not null)
             {
                 foreach (TableIndexSchema index in table.Indexes)
                 {
-                    if (index.Id is not null)
-                        prefixes.Add(($"{id}:{table.Id}:i:{index.Id}", $"{id}:{table.Id}:i:{index.Id}/"));
+                    // Index entries are keyed by the index NAME (see RowInserter / KvTableStore) —
+                    // e.g. "{id}:{tableId}:i:~pk/{key}" — not the index id.
+                    if (!string.IsNullOrEmpty(index.Name))
+                        prefixes.Add(($"{id}:{table.Id}:i:{index.Name}", $"{id}:{table.Id}:i:{index.Name}/"));
                 }
             }
         }
 
         foreach ((string bucket, string keyPrefix) in prefixes)
         {
-            List<string> keys = [];
+            // A bucket scan run immediately after recent commits can occasionally miss a just-settled
+            // entry, leaving it behind. Re-scan until a pass returns nothing (bounded), so the purge
+            // is complete. Delete is idempotent, so repeated rounds are safe.
+            for (int round = 0; round < MaxPurgeScanRounds; round++)
+            {
+                List<string> keys = [];
 
-            try
-            {
-                await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
-                    HLCTimestamp.Zero,
-                    bucket,
-                    null, true,
-                    null, true,
-                    512,
-                    HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent,
-                    CancellationToken.None).ConfigureAwait(false))
-                {
-                    if (key.StartsWith(keyPrefix, StringComparison.Ordinal))
-                        keys.Add(key);
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex,
-                    "Failed to scan bucket '{Bucket}' while purging cluster keyspace for dropped database (id={Id}); some keys may be orphaned",
-                    bucket, id);
-                continue;
-            }
-
-            foreach (string key in keys)
-            {
                 try
                 {
-                    await kahuna.LocateAndTryDeleteKeyValue(
-                        HLCTimestamp.Zero, key, KeyValueDurability.Persistent, CancellationToken.None)
-                        .ConfigureAwait(false);
+                    await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
+                        HLCTimestamp.Zero,
+                        bucket,
+                        null, true,
+                        null, true,
+                        512,
+                        HLCTimestamp.Zero,
+                        KeyValueDurability.Persistent,
+                        CancellationToken.None).ConfigureAwait(false))
+                    {
+                        if (key.StartsWith(keyPrefix, StringComparison.Ordinal))
+                            keys.Add(key);
+                    }
                 }
                 catch (Exception ex)
                 {
                     logger.LogWarning(ex,
-                        "Failed to delete key '{Key}' while purging cluster keyspace for dropped database (id={Id})",
-                        key, id);
+                        "Failed to scan bucket '{Bucket}' while purging cluster keyspace for dropped database (id={Id}); some keys may be orphaned",
+                        bucket, id);
+                    break;
                 }
-            }
 
-            if (keys.Count > 0 && logger.IsEnabled(LogLevel.Information))
-                logger.LogInformation(
-                    "Purged {Count} key(s) under bucket '{Bucket}' for dropped database (id={Id})",
-                    keys.Count, bucket, id);
+                if (keys.Count == 0)
+                    break;
+
+                foreach (string key in keys)
+                {
+                    try
+                    {
+                        await kahuna.LocateAndTryDeleteKeyValue(
+                            HLCTimestamp.Zero, key, KeyValueDurability.Persistent, CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex,
+                            "Failed to delete key '{Key}' while purging cluster keyspace for dropped database (id={Id})",
+                            key, id);
+                    }
+                }
+
+                if (logger.IsEnabled(LogLevel.Information))
+                    logger.LogInformation(
+                        "Purged {Count} key(s) under bucket '{Bucket}' for dropped database (id={Id})",
+                        keys.Count, bucket, id);
+            }
+        }
+
+        // Delete the known no-'/' keys (statistics) by exact key — they can't be reached by a bucket scan.
+        foreach (string key in exactKeys)
+        {
+            try
+            {
+                await kahuna.LocateAndTryDeleteKeyValue(
+                    HLCTimestamp.Zero, key, KeyValueDurability.Persistent, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Failed to delete key '{Key}' while purging cluster keyspace for dropped database (id={Id})",
+                    key, id);
+            }
         }
     }
 }

@@ -196,7 +196,7 @@ internal sealed class TestStorageUnification : BaseTest
         // After drop, no keys should remain under "{dbId}:" in Kahuna.
         IKahuna kahuna = TestNode!.Kahuna;
         string rowBucket = $"{dbId}:";
-        int remaining = 0;
+        List<string> remainingKeys = [];
 
         await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
             HLCTimestamp.Zero,
@@ -209,11 +209,11 @@ internal sealed class TestStorageUnification : BaseTest
             CancellationToken.None))
         {
             if (key.StartsWith(rowBucket, StringComparison.Ordinal))
-                remaining++;
+                remainingKeys.Add(key);
         }
 
-        Assert.AreEqual(0, remaining,
-            $"After DROP DATABASE, no keys should remain under bucket '{rowBucket}'");
+        Assert.AreEqual(0, remainingKeys.Count,
+            $"After DROP DATABASE, no keys should remain under bucket '{rowBucket}'; found: {string.Join(", ", remainingKeys)}");
     }
 
     // -----------------------------------------------------------------------
