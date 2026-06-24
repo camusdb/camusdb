@@ -153,7 +153,6 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                         validator,
                         catalogs,
                         logger,
-                        loggerFactory: loggerFactory,
                         sharedNode: kahuna,
                         schemaDdlForwarder: forwarder,
                         isClusterMode: true

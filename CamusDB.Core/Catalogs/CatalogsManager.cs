@@ -149,6 +149,19 @@ public sealed class CatalogsManager
 
     private static SchemaChangeLogEntry CreateTableEntry(DatabaseDescriptor database, CreateTableTicket ticket, KvTransaction tx)
     {
+        SchemaColumnPayload[] columns = [.. ticket.Columns.Select(column =>
+        {
+            SchemaColumnPayload payload = SchemaColumnPayload.FromColumnInfo(column);
+            payload.Id = ObjectIdGenerator.Generate().ToString();
+            return payload;
+        })];
+
+        // Fold inline PRIMARY KEY / UNIQUE / INDEX constraints into this single CreateTable delta so
+        // creating a table is exactly one schema version. The table is empty, so each index is born
+        // at Public with nothing to backfill. Index ids and column ids are generated here and carried
+        // in the payload so every node applies identical definitions.
+        TableIndexSchema[]? indexes = BuildInlineIndexes(ticket, columns);
+
         return new()
         {
             Ts = tx.TransactionId,
@@ -160,14 +173,67 @@ public sealed class CatalogsManager
             {
                 TableId = ObjectIdGenerator.Generate().ToString(),
                 TableName = ticket.TableName,
-                Columns = [.. ticket.Columns.Select(column =>
-                {
-                    SchemaColumnPayload payload = SchemaColumnPayload.FromColumnInfo(column);
-                    payload.Id = ObjectIdGenerator.Generate().ToString();
-                    return payload;
-                })]
+                Columns = columns,
+                Indexes = indexes
             })
         };
+    }
+
+    /// <summary>
+    /// Translates a CREATE TABLE ticket's inline constraints into fully-resolved index definitions
+    /// (Public state, generated index id, column ids resolved against <paramref name="columns"/>).
+    /// Mirrors the validation the standalone AddIndex path performs (column existence, duplicate
+    /// index name) since those constraints no longer flow through it.
+    /// </summary>
+    private static TableIndexSchema[]? BuildInlineIndexes(CreateTableTicket ticket, SchemaColumnPayload[] columns)
+    {
+        if (ticket.Constraints.Length == 0)
+            return null;
+
+        Dictionary<string, string> columnIdByName = new(columns.Length, StringComparer.Ordinal);
+        foreach (SchemaColumnPayload column in columns)
+            columnIdByName[column.Name] = column.Id!;
+
+        List<TableIndexSchema> indexes = new(ticket.Constraints.Length);
+        HashSet<string> seenNames = new(StringComparer.Ordinal);
+
+        foreach (ConstraintInfo constraint in ticket.Constraints)
+        {
+            if (!seenNames.Add(constraint.Name))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Index '{constraint.Name}' already exists on table '{ticket.TableName}'");
+
+            IndexType indexType = constraint.Type switch
+            {
+                ConstraintType.PrimaryKey => IndexType.Unique,
+                ConstraintType.IndexUnique => IndexType.Unique,
+                ConstraintType.IndexMulti => IndexType.Multi,
+                _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown constraint: " + constraint.Type)
+            };
+
+            string[] columnIds = new string[constraint.Columns.Length];
+            for (int i = 0; i < constraint.Columns.Length; i++)
+            {
+                string columnName = constraint.Columns[i].Name;
+                if (!columnIdByName.TryGetValue(columnName, out string? columnId))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        $"Column '{columnName}' does not exist on table '{ticket.TableName}'");
+                columnIds[i] = columnId;
+            }
+
+            indexes.Add(new TableIndexSchema(
+                ObjectIdGenerator.Generate().ToString(),
+                constraint.Name,
+                columnIds,
+                indexType,
+                SchemaElementState.Public,
+                startOffset: null
+            ));
+        }
+
+        return [.. indexes];
     }
 
     private static SchemaChangeLogEntry AlterTableEntry(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)
@@ -935,6 +1001,12 @@ public sealed class CatalogsManager
         };
 
         tableSchema.SchemaHistory.Add(schemaHistory);
+
+        // Inline constraints folded into the CreateTable delta (see BuildInlineIndexes). The table
+        // is empty so the indexes are already Public — no backfill, no separate AddIndex delta.
+        if (payload.Indexes is { Length: > 0 })
+            tableSchema.Indexes = [.. payload.Indexes];
+
         schema.Tables.Add(payload.TableName, tableSchema);
 
         return tableSchema;
@@ -1340,17 +1412,21 @@ public sealed class CatalogsManager
     // Schema persistence
     // -----------------------------------------------------------------------
 
-    private static string LegacySchemaKey(string dbId) => $"{dbId}/meta/schema";
+    // ALL meta keys share a single Kahuna routing bucket: "{dbId}/meta" — the string before the
+    // last '/'. Kahuna partitions by that bucket (InversePrefixedStaticHash on the last '/'), and
+    // GetByBucket matches it exactly, so every meta key must keep "{dbId}/meta" as its last-'/'
+    // prefix. That is why table/history/coordinator use ':' (not '/') to separate their sub-fields:
+    // it keeps them in the one bucket, so a single scan/purge of "{dbId}/meta" reaches them all.
+    // (A '/' in the sub-fields would split them into per-table/per-version buckets scattered across
+    // partitions, which a single "{dbId}/meta" scan cannot reach — see DatabaseDropper.)
+    private static string MetaBucketPrefix(string dbId) => $"{dbId}/meta";
     private static string SystemKey(string dbId) => $"{dbId}/meta/system";
     private static string VersionKey(string dbId) => $"{dbId}/meta/version";
-    private static string TableBucketPrefix(string dbId) => $"{dbId}/meta/table";
-    private static string TableKeyPrefix(string dbId) => $"{TableBucketPrefix(dbId)}/";
+    private static string TableKeyPrefix(string dbId) => $"{dbId}/meta/table:";
     private static string TableKey(string dbId, string tableId) => $"{TableKeyPrefix(dbId)}{tableId}";
-    private static string HistoryBucketPrefix(string dbId, string tableId) => $"{dbId}/meta/history/{tableId}";
-    private static string HistoryKeyPrefix(string dbId, string tableId) => $"{HistoryBucketPrefix(dbId, tableId)}/";
+    private static string HistoryKeyPrefix(string dbId, string tableId) => $"{dbId}/meta/history:{tableId}:";
     private static string HistoryKey(string dbId, string tableId, int version) => $"{HistoryKeyPrefix(dbId, tableId)}{version}";
-    private static string CoordinatorBucketPrefix(string dbId) => $"{dbId}/meta/coordinator";
-    private static string CoordinatorKeyPrefix(string dbId) => $"{CoordinatorBucketPrefix(dbId)}/";
+    private static string CoordinatorKeyPrefix(string dbId) => $"{dbId}/meta/coordinator:";
     // Key embeds the immutable table id, not the mutable table name.
     private static string CoordinatorKey(string dbId, string tableId, string elementName) => $"{CoordinatorKeyPrefix(dbId)}{tableId}~{elementName}";
 
@@ -1549,7 +1625,7 @@ public sealed class CatalogsManager
         {
             await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
                 scanTx.TransactionId,
-                CoordinatorBucketPrefix(database.Id),
+                MetaBucketPrefix(database.Id),
                 null, true,
                 null, true,
                 128,
@@ -1597,7 +1673,7 @@ public sealed class CatalogsManager
         {
             await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
                 tx.TransactionId,
-                CoordinatorBucketPrefix(database.Id),
+                MetaBucketPrefix(database.Id),
                 null, true,
                 null, true,
                 128,
@@ -1645,16 +1721,13 @@ public sealed class CatalogsManager
                     KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
 
-            bool migratedLegacySchema = false;
-
+            // A database with persisted schema has a version key. Absent ⟹ a fresh database with an
+            // empty schema (version 0, no tables) — there is no legacy single-blob fallback to read
+            // (backwards compatibility is intentionally not supported).
             if (schemaType == KeyValueResponseType.Get && schemaEntry?.Value is not null)
             {
                 database.Schema.SchemaVersion = MetaJsonSerializer.DeserializeCompat(schemaEntry.Value, MetaJsonContext.Default.Int64);
                 database.Schema.Tables = await LoadTablesAsync(database, tx).ConfigureAwait(false);
-            }
-            else
-            {
-                await LoadLegacySchemaAsync(database, tx).ConfigureAwait(false);
             }
 
             (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
@@ -1671,9 +1744,6 @@ public sealed class CatalogsManager
                 if (system is not null)
                     database.SystemSchema = system;
             }
-
-            if (migratedLegacySchema)
-                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
 
             // Populate TableSchema.Indexes in-memory for any table that still carries
             // its indexes only in the legacy SystemSchema blob. The migration is in-memory
@@ -1739,7 +1809,7 @@ public sealed class CatalogsManager
 
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
             tx.TransactionId,
-            TableBucketPrefix(database.Id),
+            MetaBucketPrefix(database.Id),
             null, true,
             null, true,
             512,
@@ -1785,60 +1855,6 @@ public sealed class CatalogsManager
             return null;
 
         return MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.TableSchemaHistory);
-    }
-
-    private async Task<bool> LoadLegacySchemaAsync(DatabaseDescriptor database, KvTransaction tx)
-    {
-        IKahuna kahuna = database.Kahuna.Kahuna;
-
-        (KeyValueResponseType schemaType, ReadOnlyKeyValueEntry? schemaEntry) =
-            await kahuna.LocateAndTryGetValue(
-                tx.TransactionId, LegacySchemaKey(database.Id), -1,
-                HLCTimestamp.Zero,
-                KeyValueDurability.Persistent, CancellationToken.None
-            ).ConfigureAwait(false);
-
-        if (schemaType != KeyValueResponseType.Get || schemaEntry?.Value is null)
-            return false;
-
-        SchemaCheckpoint checkpoint = LoadSchemaCheckpoint(schemaEntry.Value);
-        database.Schema.Tables = checkpoint.Tables;
-        database.Schema.SchemaVersion = checkpoint.SchemaVersion;
-
-        return true;
-    }
-
-    private async Task<bool> LoadAndMigrateLegacySchemaAsync(DatabaseDescriptor database, KvTransaction tx)
-    {
-        if (!await LoadLegacySchemaAsync(database, tx).ConfigureAwait(false))
-            return false;
-
-        IKahuna kahuna = database.Kahuna.Kahuna;
-
-        byte[] versionBytes = MetaJsonSerializer.Serialize(database.Schema.SchemaVersion, MetaJsonContext.Default.Int64);
-        await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
-
-        foreach (TableSchema table in database.Schema.Tables.Values)
-        {
-            ValidateLoadedTable(table, LegacySchemaKey(database.Id));
-            string tableId = table.Id!;
-
-            byte[] tableBytes = MetaJsonSerializer.Serialize(WithoutHistory(table), MetaJsonContext.Default.TableSchema);
-            await WriteMetaKey(kahuna, tx, TableKey(database.Id, tableId), tableBytes).ConfigureAwait(false);
-
-            if (table.SchemaHistory is null)
-                continue;
-
-            foreach (TableSchemaHistory history in table.SchemaHistory)
-            {
-                // Migration preserves the same append-only history invariant as new DDL writes.
-                byte[] historyBytes = MetaJsonSerializer.Serialize(history, MetaJsonContext.Default.TableSchemaHistory);
-                await WriteMetaKey(kahuna, tx, HistoryKey(database.Id, tableId, history.Version), historyBytes).ConfigureAwait(false);
-            }
-        }
-
-        await DeleteMetaKey(kahuna, tx, LegacySchemaKey(database.Id)).ConfigureAwait(false);
-        return true;
     }
 
     internal static SchemaCheckpoint LoadSchemaCheckpoint(ReadOnlySpan<byte> buffer)

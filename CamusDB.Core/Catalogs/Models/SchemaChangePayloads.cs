@@ -27,6 +27,12 @@ public sealed class SchemaCreateTablePayload
     public string TableName { get; set; } = "";
 
     public SchemaColumnPayload[] Columns { get; set; } = [];
+
+    // Inline constraints (PRIMARY KEY / UNIQUE / INDEX declared in CREATE TABLE) are folded into
+    // this single CreateTable delta so creating a table is exactly one schema version. A new table
+    // is empty, so its indexes are born at Public with nothing to backfill. Null/empty on tables
+    // declared without inline constraints, and on log entries written before this field existed.
+    public TableIndexSchema[]? Indexes { get; set; }
 }
 
 public sealed class SchemaAlterColumnPayload

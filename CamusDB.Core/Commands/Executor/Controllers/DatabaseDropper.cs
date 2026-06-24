@@ -101,10 +101,15 @@ internal sealed class DatabaseDropper
         // Bucket prefix = the string before the last '/' of the stored keys — e.g. "{id}:{tableId}:r"
         // not "{id}:{tableId}:r/".  After Task 4, rows live under "{id}:{tableId}:r/{rowId}" so the
         // bucket is "{id}:{tableId}:r" (no trailing slash). Same convention for index buckets.
+        //
+        // All meta keys share the single bucket "{id}/meta" (see CatalogsManager: table/history/
+        // coordinator use ':' sub-separators so their last-'/' prefix stays "{id}/meta"). So one
+        // scan of "{id}/meta" reaches version/system/schema/table/history/coordinator together —
+        // no per-sub-bucket enumeration needed, and scan+delete agree on the partition.
         List<(string bucket, string keyPrefix)> prefixes =
         [
-            ($"{id}/meta", $"{id}/"),   // schema meta: version, system, table schemas, history
-            ($"{id}:",      $"{id}:"),  // statistics: {id}:stats:{tableId}
+            ($"{id}/meta", $"{id}/meta"),    // all schema meta: version, system, schema, table, history, coordinator
+            ($"{id}:",     $"{id}:stats:"),  // statistics: {id}:stats:{tableId}
         ];
 
         foreach (TableSchema table in descriptor.Schema.Tables.Values)

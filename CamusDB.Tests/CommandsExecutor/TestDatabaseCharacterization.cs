@@ -19,9 +19,9 @@
  * │   Descriptor cache     DatabaseRegistry.GetOrAdd(id, …)                 │
  * │   CatalogsManager      all key builders receive dbId (database.Id)      │
  * │     "{dbId}/meta/system", "{dbId}/meta/version"                         │
- * │     "{dbId}/meta/table/{tableId}"                                        │
- * │     "{dbId}/meta/history/{tableId}/{version}"                           │
- * │     "{dbId}/meta/coordinator/{table}~{element}"                          │
+ * │     "{dbId}/meta/table:{tableId}"        (one bucket: {dbId}/meta)       │
+ * │     "{dbId}/meta/history:{tableId}:{version}"                            │
+ * │     "{dbId}/meta/coordinator:{table}~{element}"                          │
  * │   SchemaChangeLogEntry .Database = database.Id                           │
  * │   Schema-partition routing                                               │
  * │     SchemaLogPartition("{id}/meta"), AmISchemaLeaderAsync(id, …)        │
