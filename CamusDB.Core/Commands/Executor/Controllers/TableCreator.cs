@@ -53,6 +53,12 @@ internal sealed class TableCreator
 
         await AddConstraints(queryExecutor, tableOpener, tableIndexAlterer, database, ticket, tx).ConfigureAwait(false);
 
+        // Re-open the table to restore it in the descriptor cache: AddIndex replication entries
+        // evict the table descriptor via SchemaReplicator.InvalidateAppliedTableDescriptor, so the
+        // entry is gone after constraint additions. Re-opening here ensures callers that rely on
+        // TableDescriptors (e.g. statistics, query planners) find it immediately after CreateTable.
+        await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+
         return true;
     }
 

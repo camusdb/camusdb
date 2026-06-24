@@ -101,10 +101,6 @@ public sealed class CommandExecutor : IAsyncDisposable
     private readonly bool ownsRegistry;
     private readonly bool isClusterMode;
 
-    /// <param name="validator"></param>
-    /// <param name="catalogs"></param>
-    /// <param name="logger"></param>
-    /// <param name="loggerFactory">Optional factory forwarded to the embedded Kahuna node so its internal logs are visible.</param>
     /// <param name="sharedNode">Process-level Kahuna node shared across all databases; non-null in both standalone and cluster modes.</param>
     /// <param name="schemaDdlForwarder">DDL forwarder for cluster mode; null in standalone.</param>
     /// <param name="registry">Optional pre-created registry; if supplied the executor does not own it and will not dispose it.</param>
@@ -113,7 +109,6 @@ public sealed class CommandExecutor : IAsyncDisposable
         CommandValidator validator,
         CatalogsManager catalogs,
         ILogger<ICamusDB> logger,
-        ILoggerFactory? loggerFactory = null,
         EmbeddedKahuna? sharedNode = null,
         ISchemaDdlForwarder? schemaDdlForwarder = null,
         DatabaseRegistry? registry = null,
@@ -132,12 +127,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
         else
         {
-            registryTask = DatabaseRegistry.OpenAsync(sharedNode, loggerFactory);
+            registryTask = DatabaseRegistry.OpenAsync(sharedNode!);
             ownsRegistry = true;
         }
 
         databaseDescriptors = new();
-        databaseOpener = new(this, databaseDescriptors, catalogs, logger, sharedNode, loggerFactory, registryTask, isClusterMode);
+        databaseOpener = new(this, databaseDescriptors, catalogs, logger, sharedNode, registryTask, isClusterMode);
         databaseCloser = new(databaseDescriptors, logger);
         databaseDroper = new(databaseDescriptors, logger);
         databaseCreator = new(logger);
@@ -738,18 +733,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         bool indexExistedBefore = table.Indexes.ContainsKey(ticket.IndexName);
         bool compensateOnAbort = addIndexOperation && !indexExistedBefore;
 
-        if (isClusterMode)
-            return await ExecuteClusteredIndexDdlAsync(
-                database, table, ticket, compensateOnAbort,
-                tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx)
-            ).ConfigureAwait(false);
-
-        return await ExecuteDdlInTransaction(
-            database,
-            tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx),
-            onAbort: compensateOnAbort
-                ? () => CompensateAbortedAddIndexAsync(database, table, ticket.IndexName)
-                : null
+        // Both cluster (non-add) and standalone paths use two-phase DDL: local work + schema
+        // replication. The old standalone-only ExecuteDdlInTransaction path omitted Phase 2
+        // (ReplicateIndexChangeAsync), leaving the schema unpersisted across close/reopen.
+        return await ExecuteClusteredIndexDdlAsync(
+            database, table, ticket, compensateOnAbort,
+            tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx)
         ).ConfigureAwait(false);
     }
 
@@ -822,6 +811,11 @@ public sealed class CommandExecutor : IAsyncDisposable
             {
                 await database.Transactions.RollbackIfNotCompletedAsync(tx2).ConfigureAwait(false);
             }
+
+            // Re-populate the descriptor cache: ReplicateIndexChangeAsync fires
+            // InvalidateAppliedTableDescriptor which evicts the table. Re-opening here
+            // ensures callers that rely on TableDescriptors find it immediately after DDL.
+            await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
             return result;
         }

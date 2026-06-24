@@ -23,21 +23,21 @@ namespace CamusDB.Core.Storage.Kv;
 /// <summary>
 /// Per-table data access layer built on top of <see cref="IKahuna"/>.
 ///
-/// Key layout (all keys share the leading <c>{tableId}</c> segment so Kommander routes
-/// the whole table to one partition):
+/// Key layout (all keys share the leading <c>{dbId}:{tableId}</c> segment so databases are
+/// isolated in the shared keyspace and Kommander routes the whole table to one partition):
 ///
-///   Primary rows:      {tableId}:r/{rowIdHex24}                         → serialized row bytes
-///   Unique index:      {tableId}:i:{indexId}/{encodedKey}               → rowIdHex24 (UTF-8)
-///   Non-unique index:  {tableId}:i:{indexId}/{encodedKey}{rowIdHex24}   → rowIdHex24 (UTF-8)
+///   Primary rows:      {dbId}:{tableId}:r/{rowIdHex24}                         → serialized row bytes
+///   Unique index:      {dbId}:{tableId}:i:{indexId}/{encodedKey}               → rowIdHex24 (UTF-8)
+///   Non-unique index:  {dbId}:{tableId}:i:{indexId}/{encodedKey}{rowIdHex24}   → rowIdHex24 (UTF-8)
 ///     (rowId appended without separator; it is always exactly 24 lowercase hex chars)
 ///
 /// Routing constraint:
 ///   LocateAndScanRange routes via SimpleHash(prefix) while individual TrySet/Delete
 ///   route via InversePrefixedStaticHash(key, '/') = SimpleHash(key[..lastSlash]).
-///   For rows: bucket prefix "{tableId}:r" → SimpleHash("{tableId}:r") matches writes.
-///   For indexes: bucket prefix "{tableId}:i:{indexId}" → SimpleHash("{tableId}:i:{indexId}")
-///   matches writes whose key is "{tableId}:i:{indexId}/{...}" (last slash before the suffix).
-///   Note: non-unique keys are "{tableId}:i:{indexId}/{encodedKey}{rowId}" with no extra slash,
+///   For rows: bucket prefix "{dbId}:{tableId}:r" → SimpleHash("{dbId}:{tableId}:r") matches writes.
+///   For indexes: bucket prefix "{dbId}:{tableId}:i:{indexId}" → SimpleHash("{dbId}:{tableId}:i:{indexId}")
+///   matches writes whose key is "{dbId}:{tableId}:i:{indexId}/{...}" (last slash before the suffix).
+///   Note: non-unique keys are "{dbId}:{tableId}:i:{indexId}/{encodedKey}{rowId}" with no extra slash,
 ///   so the routing invariant holds for both unique and non-unique on a single partition.
 ///   With multiple partitions (Phase 6) this requires review.
 ///
@@ -49,9 +49,10 @@ public sealed class KvTableStore
     private readonly IKahuna kahuna;
     private readonly string tableId;
     private readonly string tableName;
+    private readonly string tableKeyPrefix;        // "{dbId}:{tableId}" — shared prefix for row and index keys
 
-    private readonly string rowBucketPrefix;       // "{tableId}:r"  — bucket prefix for LocateAndScanRange
-    private readonly string rowKeyPrefix;          // "{tableId}:r/" — prepended to rowIdHex
+    private readonly string rowBucketPrefix;       // "{dbId}:{tableId}:r"  — bucket prefix for LocateAndScanRange
+    private readonly string rowKeyPrefix;          // "{dbId}:{tableId}:r/" — prepended to rowIdHex
 
     // Index IDs (names) registered as key-range routed by TableOpener.
     // Written once during table open (inside AsyncLazy, single-threaded), then only read.
@@ -92,27 +93,29 @@ public sealed class KvTableStore
     // Guard against int overflow: `1 << attempt` becomes negative for attempt >= 31.
     private static int RetryDelayMs(int attempt) => attempt < 6 ? 1 << attempt : MaxRetryDelayMs;
 
-    public KvTableStore(IKahuna kahuna, string tableId, string tableName = "")
+    public KvTableStore(IKahuna kahuna, string dbId, string tableId, string tableName = "")
     {
         ArgumentNullException.ThrowIfNull(kahuna);
+        ArgumentException.ThrowIfNullOrEmpty(dbId);
         ArgumentException.ThrowIfNullOrEmpty(tableId);
 
         this.kahuna = kahuna;
         this.tableId = tableId;
         this.tableName = tableName;
-        rowBucketPrefix = $"{tableId}:r";
-        rowKeyPrefix    = $"{tableId}:r/";
+        tableKeyPrefix  = $"{dbId}:{tableId}";
+        rowBucketPrefix = $"{dbId}:{tableId}:r";
+        rowKeyPrefix    = $"{dbId}:{tableId}:r/";
     }
 
     /// <summary>
-    /// The Kahuna key space for this table's rows (<c>{tableId}:r</c>) — the prefix before the last
+    /// The Kahuna key space for this table's rows (<c>{dbId}:{tableId}:r</c>) — the prefix before the last
     /// <c>'/'</c> of every row key. This is the exact string to pass to
     /// <see cref="IKahuna.RegisterKeyRange"/> when opting the row space into key-range routing.
     /// </summary>
     public string RowKeySpace => rowBucketPrefix;
 
     /// <summary>
-    /// The Kahuna key space for a secondary index (<c>{tableId}:i:{indexId}</c>). Pass to
+    /// The Kahuna key space for a secondary index (<c>{dbId}:{tableId}:i:{indexId}</c>). Pass to
     /// <see cref="IKahuna.RegisterKeyRange"/> when opting an index into key-range routing. All
     /// column types are order-safe for range routing (String included, via its hex encoding).
     /// </summary>
@@ -487,7 +490,7 @@ public sealed class KvTableStore
             if (entry.Value is null)
                 continue;
 
-            // Key format: "{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
+            // Key format: "{dbId}:{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
             ReadOnlySpan<char> hex = key.AsSpan(prefixLen);
             ObjectIdValue rowId = ObjectId.ToValue(hex.ToString());
 
@@ -1036,7 +1039,7 @@ public sealed class KvTableStore
 
     /// <summary>
     /// Deletes every KV entry belonging to the named index. Used by DROP INDEX to reclaim
-    /// the <c>{tableId}:i:{indexName}/…</c> space. All deletes run under <paramref name="tx"/>
+    /// the <c>{dbId}:{tableId}:i:{indexName}/…</c> space. All deletes run under <paramref name="tx"/>
     /// so they are atomic with the schema-removal that follows in the same transaction.
     /// Returns the number of entries deleted.
     /// </summary>
@@ -1356,31 +1359,31 @@ public sealed class KvTableStore
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildRowKey(ObjectIdValue rowId) => rowKeyPrefix + rowId.ToString();
 
-    // Returns "{tableId}:i:{indexId}" — the bucket prefix (no trailing slash) used for
-    // LocateAndScanRange so that SimpleHash("{tableId}:i:{indexId}") matches the routing
-    // hash of keys "{tableId}:i:{indexId}/{...}".
+    // Returns "{dbId}:{tableId}:i:{indexId}" — the bucket prefix (no trailing slash) used for
+    // LocateAndScanRange so that SimpleHash("{dbId}:{tableId}:i:{indexId}") matches the routing
+    // hash of keys "{dbId}:{tableId}:i:{indexId}/{...}".
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private string BuildIndexBucketPrefix(string indexId) => $"{tableId}:i:{indexId}";
+    private string BuildIndexBucketPrefix(string indexId) => $"{tableKeyPrefix}:i:{indexId}";
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildUniqueIndexKey(string indexId, CompositeColumnValue key)
-        => $"{tableId}:i:{indexId}/{KeyEncoder.Encode(key)}";
+        => $"{tableKeyPrefix}:i:{indexId}/{KeyEncoder.Encode(key)}";
 
     // Non-unique: rowIdHex appended directly (no separator) so the last slash in the full
     // key is always the one after {indexId}, keeping the routing hash stable.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildNonUniqueIndexKey(string indexId, CompositeColumnValue key, ObjectIdValue rowId)
-        => $"{tableId}:i:{indexId}/{KeyEncoder.Encode(key)}{rowId}";
+        => $"{tableKeyPrefix}:i:{indexId}/{KeyEncoder.Encode(key)}{rowId}";
 
     // Formats a human-readable "table.index" key name for duplicate-key errors.
     private string DuplicateKeyLabel(string indexId)
         => string.IsNullOrEmpty(tableName) ? indexId : $"{tableName}.{indexId}";
 
-    // Extracts the index name from a full KV key ("{tableId}:i:{indexId}/{...}").
+    // Extracts the index name from a full KV key ("{dbId}:{tableId}:i:{indexId}/{...}").
     // Falls back to the raw key on unexpected formats.
     private string IndexNameFromKvKey(string kvKey)
     {
-        string prefix = $"{tableId}:i:";
+        string prefix = $"{tableKeyPrefix}:i:";
         if (!kvKey.StartsWith(prefix, StringComparison.Ordinal))
             return kvKey;
         string tail = kvKey[prefix.Length..];

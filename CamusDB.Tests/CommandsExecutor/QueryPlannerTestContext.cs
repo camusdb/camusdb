@@ -64,7 +64,7 @@ internal sealed class QueryPlannerTestContext : IAsyncDisposable
         });
 
         TableSchema schema = BuildRobotsSchema();
-        KvTableStore store = new(kahuna.Kahuna, schema.Id!);
+        KvTableStore store = new(kahuna.Kahuna, "testdb", schema.Id!);
 
         TableDescriptor table = new(schema.Id!, schema.Name!, schema, store);
         table.Indexes.Add(

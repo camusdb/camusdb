@@ -70,10 +70,10 @@ internal sealed class DatabaseDropper
         // The shared node is NOT disposed here — it's owned by the process, not this database.
         //
         // Purged namespaces (scan bucket → stored key prefix):
-        //   {id}/meta → {id}/   — all meta keys (system, version, table schemas, history, coordinator jobs)
-        //   {id}:     → {id}:   — all statistics keys ({id}:stats:{tableId})
-        //   {tableId}:r → {tableId}:r/   — row data for every table
-        //   {tableId}:i:{indexId} → {tableId}:i:{indexId}/  — index data for every index
+        //   {id}/meta                    → {id}/                           — meta keys (system, version, schemas, history, coordinator jobs)
+        //   {id}:                        → {id}:                           — statistics keys ({id}:stats:{tableId})
+        //   {id}:{tableId}:r             → {id}:{tableId}:r/               — row data for every table (Task 4 prefix)
+        //   {id}:{tableId}:i:{indexId}   → {id}:{tableId}:i:{indexId}/     — index data for every index (Task 4 prefix)
         //
         //   Schema-log entries in the Raft WAL are append-only and cannot be removed.
         await PurgeClusterKeyspaceAsync(databaseDescriptor, id).ConfigureAwait(false);
@@ -83,12 +83,12 @@ internal sealed class DatabaseDropper
     }
 
     /// <summary>
-    /// Deletes all KV entries belonging to the database from the shared cluster node.
+    /// Deletes all KV entries belonging to the database from the shared node.
     /// Covers four key namespaces (scan bucket → matching key prefix):
-    ///   <c>{id}/meta</c> → <c>{id}/</c>           — all meta keys (system, version, table schemas, history, coordinator jobs)
-    ///   <c>{id}:</c>     → <c>{id}:</c>           — all statistics keys (<c>{id}:stats:{tableId}</c>)
-    ///   <c>{tableId}:r</c> → <c>{tableId}:r/</c>  — row data for every table in the database's schema
-    ///   <c>{tableId}:i:{indexId}</c> → <c>{tableId}:i:{indexId}/</c> — index data for every index
+    ///   <c>{id}/meta</c>               → <c>{id}/</c>           — all meta keys (system, version, table schemas, history, coordinator jobs)
+    ///   <c>{id}:</c>                   → <c>{id}:</c>           — all statistics keys (<c>{id}:stats:{tableId}</c>)
+    ///   <c>{id}:{tableId}:r</c>        → <c>{id}:{tableId}:r/</c>  — row data for every table (Task 4 prefix)
+    ///   <c>{id}:{tableId}:i:{indexId}</c> → <c>{id}:{tableId}:i:{indexId}/</c> — index data for every index (Task 4 prefix)
     /// Scan bucket = the string before the last '/' of stored keys, matching KvTableStore convention.
     /// Each key is deleted as a standalone autocommit operation (HLCTimestamp.Zero).
     /// Errors are logged and skipped so a partial failure never wedges the drop.
@@ -98,11 +98,9 @@ internal sealed class DatabaseDropper
         IKahuna kahuna = descriptor.Kahuna.Kahuna;
 
         // Build the full set of prefixes to scan: db-level meta/stats + per-table row+index.
-        // Bucket prefix = the string before the last '/' of the stored keys — e.g. "{tableId}:r"
-        // not "{tableId}:r/".  This matches how KvTableStore.ScanRows uses rowBucketPrefix and how
-        // CatalogsManager.LoadCoordinatorJobsAsync uses CoordinatorBucketPrefix. All stored keys
-        // begin with the bucket prefix + "/" so both RoutePrefixKey routing and BTree range bounds
-        // cover the full key space.
+        // Bucket prefix = the string before the last '/' of the stored keys — e.g. "{id}:{tableId}:r"
+        // not "{id}:{tableId}:r/".  After Task 4, rows live under "{id}:{tableId}:r/{rowId}" so the
+        // bucket is "{id}:{tableId}:r" (no trailing slash). Same convention for index buckets.
         List<(string bucket, string keyPrefix)> prefixes =
         [
             ($"{id}/meta", $"{id}/"),   // schema meta: version, system, table schemas, history
@@ -114,14 +112,14 @@ internal sealed class DatabaseDropper
             if (table.Id is null)
                 continue;
 
-            prefixes.Add(($"{table.Id}:r", $"{table.Id}:r/"));
+            prefixes.Add(($"{id}:{table.Id}:r", $"{id}:{table.Id}:r/"));
 
             if (table.Indexes is not null)
             {
                 foreach (TableIndexSchema index in table.Indexes)
                 {
                     if (index.Id is not null)
-                        prefixes.Add(($"{table.Id}:i:{index.Id}", $"{table.Id}:i:{index.Id}/"));
+                        prefixes.Add(($"{id}:{table.Id}:i:{index.Id}", $"{id}:{table.Id}:i:{index.Id}/"));
                 }
             }
         }

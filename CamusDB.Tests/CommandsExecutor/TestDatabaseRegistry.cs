@@ -30,20 +30,34 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 internal sealed class TestDatabaseRegistry
 {
-    // Each test gets a unique temp directory so SQLite files never collide.
+    // Each test gets a unique temp directory and a fresh in-memory node.
     private string? tempDir;
+    private EmbeddedKahuna? sharedNode;
 
     [SetUp]
-    public void Setup()
+    public async Task Setup()
     {
         tempDir = Path.Combine(Path.GetTempPath(), "camusdb-registry-test-" + Guid.NewGuid().ToString("n"));
         Directory.CreateDirectory(tempDir);
         CamusConfig.DataDirectory = tempDir;
+
+        sharedNode = new EmbeddedKahuna(new EmbeddedKahunaOptions
+        {
+            NodeName = "registry-test",
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 1
+        });
+        await sharedNode.StartAsync(CancellationToken.None);
+        await sharedNode.WaitForLeaderAsync("warmup", CancellationToken.None);
     }
 
     [TearDown]
-    public void Teardown()
+    public async Task Teardown()
     {
+        if (sharedNode is not null)
+            await sharedNode.DisposeAsync();
+
         if (tempDir is not null && Directory.Exists(tempDir))
             Directory.Delete(tempDir, recursive: true);
     }
@@ -62,7 +76,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task Register_ThenResolveByNameAndById()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         string name = NewName();
         string id = NewId();
@@ -90,7 +104,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task TryResolveId_UnknownName_ReturnsFalse()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         bool found = registry.TryResolveId("nonexistent-db", out string id);
 
@@ -105,7 +119,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task Register_DuplicateName_ThrowsDatabaseAlreadyExists()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         string name = NewName();
         await registry.RegisterAsync(name, NewId());
@@ -126,7 +140,7 @@ internal sealed class TestDatabaseRegistry
     [TestCase("INFORMATION_SCHEMA")]
     public async Task Register_ReservedName_ThrowsDatabaseNameReserved(string reservedName)
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             async () => await registry.RegisterAsync(reservedName, NewId()));
@@ -145,12 +159,12 @@ internal sealed class TestDatabaseRegistry
         string id = NewId();
 
         // Open, register, then dispose (closes SQLite).
-        DatabaseRegistry first = await DatabaseRegistry.OpenAsync();
+        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!);
         await first.RegisterAsync(name, id);
         await first.DisposeAsync();
 
         // Reopen from the same DataDirectory — must load persisted entries.
-        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         Assert.IsTrue(second.TryResolveId(name, out string resolvedId));
         Assert.AreEqual(id, resolvedId);
@@ -166,7 +180,7 @@ internal sealed class TestDatabaseRegistry
         const int count = 5;
         List<(string name, string id)> registered = [];
 
-        DatabaseRegistry first = await DatabaseRegistry.OpenAsync();
+        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!);
         for (int i = 0; i < count; i++)
         {
             string name = NewName();
@@ -176,7 +190,7 @@ internal sealed class TestDatabaseRegistry
         }
         await first.DisposeAsync();
 
-        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!);
         foreach ((string name, string id) in registered)
         {
             Assert.IsTrue(second.TryResolveId(name, out string resolvedId), $"Name {name} not found");
@@ -193,7 +207,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task Unregister_RemovesEntry()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         string name = NewName();
         string id = NewId();
@@ -209,7 +223,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task Unregister_UnknownName_IsNoOp()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         // Must not throw.
         Assert.DoesNotThrowAsync(async () => await registry.UnregisterAsync("never-registered"));
@@ -221,12 +235,12 @@ internal sealed class TestDatabaseRegistry
         string name = NewName();
         string id = NewId();
 
-        DatabaseRegistry first = await DatabaseRegistry.OpenAsync();
+        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!);
         await first.RegisterAsync(name, id);
         await first.UnregisterAsync(name);
         await first.DisposeAsync();
 
-        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!);
         Assert.IsFalse(second.TryResolveId(name, out _));
     }
 
@@ -237,7 +251,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task Rename_OldNameGone_NewNameResolves_IdUnchanged()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         string oldName = NewName();
         string newName = NewName();
@@ -258,7 +272,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task Rename_UnknownSource_ThrowsDatabaseDoesntExist()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             async () => await registry.RenameAsync("ghost", NewName()));
@@ -269,7 +283,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task Rename_TargetAlreadyExists_ThrowsDatabaseAlreadyExists()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         string a = NewName();
         string b = NewName();
@@ -291,12 +305,12 @@ internal sealed class TestDatabaseRegistry
         string newName = NewName();
         string id = NewId();
 
-        DatabaseRegistry first = await DatabaseRegistry.OpenAsync();
+        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!);
         await first.RegisterAsync(oldName, id);
         await first.RenameAsync(oldName, newName);
         await first.DisposeAsync();
 
-        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         DatabaseRegistryEntry? entry = second.GetById(id);
         Assert.IsNotNull(entry, "entry must survive reopen");
@@ -307,7 +321,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task Rename_ToReservedName_ThrowsDatabaseNameReserved()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         string name = NewName();
         await registry.RegisterAsync(name, NewId());
@@ -325,7 +339,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task Register_MixedCase_NormalizedToLowercase()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         string id = NewId();
         DatabaseRegistryEntry entry = await registry.RegisterAsync("MyDatabase", id);
@@ -340,7 +354,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task Register_SameNameDifferentCase_ThrowsDuplicate()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         await registry.RegisterAsync("mydb", NewId());
 
@@ -357,7 +371,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task List_ReturnsAllRegistered()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         string a = NewName();
         string b = NewName();
@@ -383,7 +397,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task AllocateId_IsBase62AndMonotonic()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         List<string> ids = [];
         for (int i = 0; i < 5; i++)
@@ -412,12 +426,12 @@ internal sealed class TestDatabaseRegistry
     public async Task AllocateId_SurvivesReopen_CounterContinues()
     {
         string id1;
-        DatabaseRegistry first = await DatabaseRegistry.OpenAsync();
+        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!);
         id1 = await first.AllocateIdAsync();
         await first.DisposeAsync();
 
         // After reopen the sequence counter must resume above the previously issued id
-        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!);
         string id2 = await second.AllocateIdAsync();
 
         // id2 must encode a strictly higher counter value than id1
@@ -429,7 +443,7 @@ internal sealed class TestDatabaseRegistry
     [Test]
     public async Task AllocateId_NeverReuseAfterUnregister()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync();
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         string name = NewName();
         string idBefore = await registry.AllocateIdAsync();

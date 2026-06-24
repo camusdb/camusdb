@@ -49,7 +49,6 @@ internal sealed class DatabaseOpener
         CatalogsManager catalogs,
         ILogger<ICamusDB> logger,
         EmbeddedKahuna? sharedNode,
-        ILoggerFactory? loggerFactory,
         Task<DatabaseRegistry> registryTask,
         bool isClusterMode = false)
     {

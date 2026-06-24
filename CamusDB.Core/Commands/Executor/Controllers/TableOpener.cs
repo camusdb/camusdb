@@ -73,7 +73,7 @@ internal sealed class TableOpener
 
     private async Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
     {
-        KvTableStore store = new(database.Kahuna.Kahuna, tableSchema.Id!, tableSchema.Name ?? "");
+        KvTableStore store = new(database.Kahuna.Kahuna, database.Id, tableSchema.Id!, tableSchema.Name ?? "");
 
         // Key-range sharding (opt-in): mark this table's row and eligible index key spaces as
         // key-range routed on the local node and auto-seed their initial whole-space descriptors.

@@ -73,7 +73,6 @@ public sealed class TestSchemaDdlForwardController
             new CommandValidator(),
             new CatalogsManager(NullLogger<ICamusDB>.Instance),
             NullLogger<ICamusDB>.Instance,
-            loggerFactory: Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance,
             sharedNode: node,
             isClusterMode: true
         );

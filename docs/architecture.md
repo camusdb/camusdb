@@ -75,11 +75,25 @@ encoding (which is why renames move no data) — is documented in
 
 ### Storage layer
 
-Row data and index entries live in an embedded Kahuna transactional KV node. `KvTableStore`
-maps each table row and index entry onto a Kahuna key using a prefix layout. The prefix is
-chosen so that all rows of a table hash to the same Raft partition, keeping single-table
-reads and writes within one partition's leader. Eligible secondary indexes can use
-key-range routing with an order-safe encoding so that range scans stay ordered.
+Row data and index entries live in the process-level Kahuna transactional KV node. `KvTableStore`
+maps each table row and index entry onto a Kahuna key using a `{dbId}:{tableId}:…` prefix
+layout so that rows from different databases never collide even inside the same node. Within
+one database the prefix is chosen so that all rows of a table hash to the same Raft partition,
+keeping single-table reads and writes within one partition's leader. Eligible secondary indexes
+can use key-range routing with an order-safe encoding so that range scans stay ordered.
+
+#### Keyspace map
+
+| Key prefix                           | Contents                                                        |
+|--------------------------------------|-----------------------------------------------------------------|
+| `_system/dbregistry/…`               | Database name → id registry                                     |
+| `{dbId}/meta/…`                      | Per-database schema: version, table definitions, coordinator jobs |
+| `{dbId}:stats:{tableId}`             | Row-count statistics for one table                              |
+| `{dbId}:{tableId}:r/{rowId}`         | Row data                                                        |
+| `{dbId}:{tableId}:i:{indexId}/{key}` | Secondary index entries                                         |
+
+`dbId` is a compact opaque identifier allocated at CREATE DATABASE time and never reused
+(rename-safe: the key prefix is stable across renames). `tableId` follows the same scheme.
 
 ### Transaction layer
 
@@ -93,12 +107,15 @@ and [serializable-retry-contract.md](serializable-retry-contract.md).
 
 ### Cluster transport
 
-Durability and replication come from Raft, via Kommander. In **cluster mode** a single
-process-level Kahuna node is shared across all databases and wired with real gRPC
-inter-node and Raft transports (`GrpcCommunication` + `StaticDiscovery`); nodes join with
-`--mode=cluster` and a static peer list. In **standalone mode** each process creates a node
-with the embedded in-process transport, so the entire stack above is unchanged — only the
-transport and discovery differ.
+Durability and replication come from Raft, via Kommander. Both standalone and cluster share
+the same unified storage model: **one Kahuna node per process** holds every database in the
+`{dbId}:{tableId}:…` keyspace. The only difference between the two modes is the transport:
+
+- **Cluster mode** — the node uses gRPC inter-node and Raft transports
+  (`GrpcCommunication` + `StaticDiscovery`); nodes join with `--mode=cluster` and a static
+  peer list. Data is partitioned across nodes; each partition has its own Raft leader.
+- **Standalone mode** — the same node uses the embedded in-process transport. Single
+  partition, no peer list required.
 
 ## Partitioning model
 
@@ -113,7 +130,7 @@ protocol respectively.
 
 | Aspect            | Standalone                          | Cluster                                            |
 |-------------------|-------------------------------------|----------------------------------------------------|
-| Kahuna node       | per-process, embedded               | one process-level node shared across databases     |
+| Kahuna node       | one process-level node (embedded)   | one process-level node shared across databases     |
 | Transport         | in-process                          | gRPC inter-node + Raft                              |
 | Discovery         | none                                | `StaticDiscovery` with a static peer list          |
 | Partitioning      | single partition                    | data partitioned across nodes, per-partition leader|

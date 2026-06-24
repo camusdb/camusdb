@@ -246,7 +246,7 @@ public sealed class TestSchemaReplicator
 
         TableSchema tableSchema = database.Schema.Tables["robots"];
         database.TableDescriptors["robots"] = new AsyncLazy<TableDescriptor>(() => Task.FromResult(
-            new TableDescriptor(tableSchema.Id!, tableSchema.Name!, tableSchema, new KvTableStore(kahuna.Kahuna, tableSchema.Id!))
+            new TableDescriptor(tableSchema.Id!, tableSchema.Name!, tableSchema, new KvTableStore(kahuna.Kahuna, database.Id, tableSchema.Id!))
         ));
 
         Assert.AreEqual(1, database.TableDescriptors.Count);

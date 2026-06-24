@@ -127,8 +127,10 @@ internal sealed class TestDatabaseDropperCluster : SharedNodeBaseTest
         List<string> metaBefore = await ScanKeysAsync(sharedKahuna, $"{firstId}/meta", $"{firstId}/");
         Assert.IsNotEmpty(metaBefore, $"Expected {firstId}/ meta keys before drop");
 
-        List<string> rowsBefore = await ScanKeysAsync(sharedKahuna, $"{tableId}:r", $"{tableId}:r/");
-        Assert.IsNotEmpty(rowsBefore, $"Expected {tableId}:r/ row keys before drop");
+        // After Task 4 row keys are "{dbId}:{tableId}:r/{rowId}".
+        string rowBucket = $"{firstId}:{tableId}:r";
+        List<string> rowsBefore = await ScanKeysAsync(sharedKahuna, rowBucket, $"{rowBucket}/");
+        Assert.IsNotEmpty(rowsBefore, $"Expected {rowBucket}/ row keys before drop");
 
         await executor.DropDatabase(new DropDatabaseTicket(dbname));
 
@@ -144,14 +146,15 @@ internal sealed class TestDatabaseDropperCluster : SharedNodeBaseTest
         Assert.IsEmpty(statsAfter, $"Expected all {firstId}: stats keys to be purged after drop; found: {string.Join(", ", statsAfter)}");
 
         // ---- assert row keys gone ----
-        List<string> rowsAfter = await ScanKeysAsync(sharedKahuna, $"{tableId}:r", $"{tableId}:r/");
-        Assert.IsEmpty(rowsAfter, $"Expected all {tableId}:r/ row keys to be purged after drop; found: {string.Join(", ", rowsAfter)}");
+        List<string> rowsAfter = await ScanKeysAsync(sharedKahuna, rowBucket, $"{rowBucket}/");
+        Assert.IsEmpty(rowsAfter, $"Expected all {rowBucket}/ row keys to be purged after drop; found: {string.Join(", ", rowsAfter)}");
 
         // ---- assert index keys gone (if an index id was found) ----
         if (indexId is not null)
         {
-            List<string> indexAfter = await ScanKeysAsync(sharedKahuna, $"{tableId}:i:{indexId}", $"{tableId}:i:{indexId}/");
-            Assert.IsEmpty(indexAfter, $"Expected all {tableId}:i:{indexId}/ index keys to be purged after drop; found: {string.Join(", ", indexAfter)}");
+            string indexBucket = $"{firstId}:{tableId}:i:{indexId}";
+            List<string> indexAfter = await ScanKeysAsync(sharedKahuna, indexBucket, $"{indexBucket}/");
+            Assert.IsEmpty(indexAfter, $"Expected all {indexBucket}/ index keys to be purged after drop; found: {string.Join(", ", indexAfter)}");
         }
 
         // ---- no on-disk directory in cluster mode ----

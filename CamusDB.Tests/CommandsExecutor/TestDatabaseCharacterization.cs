@@ -15,7 +15,7 @@
  * │ ID-vs-NAME AUDIT (post-DB3, 2026-06-17)                                 │
  * │                                                                          │
  * │ USES Id  (storage / routing — rename-safe)                               │
- * │   Filesystem path      DataDirectory/{id}/kv, /wal                      │
+ * │   No per-database directory: shared store at DataDirectory/kv, /wal     │
  * │   Descriptor cache     DatabaseRegistry.GetOrAdd(id, …)                 │
  * │   CatalogsManager      all key builders receive dbId (database.Id)      │
  * │     "{dbId}/meta/system", "{dbId}/meta/version"                         │
@@ -128,8 +128,9 @@ internal sealed class TestDatabaseCharacterization : BaseTest
     }
 
     /// <summary>
-    /// The on-disk layout is DataDirectory/{id}/kv and /wal, where the id is an opaque
-    /// 24-hex string that does NOT equal the database name.
+    /// The unified model uses one shared Kahuna node for all databases (Task 1/SU1).
+    /// CREATE DATABASE must NOT create a per-database directory — all data lives in the
+    /// shared store. The database id is an opaque value distinct from the name.
     /// </summary>
     [Test]
     [NonParallelizable]
@@ -141,15 +142,13 @@ internal sealed class TestDatabaseCharacterization : BaseTest
         Assert.IsNotEmpty(id, "Descriptor must carry a non-empty id after creation");
         Assert.AreNotEqual(dbname, id, "Id must be an opaque value distinct from the name");
 
-        string expectedKv = Path.Combine(CamusConfig.DataDirectory, id, "kv");
-        string expectedWal = Path.Combine(CamusConfig.DataDirectory, id, "wal");
+        // No per-database directory: the unified model stores all databases in the
+        // single shared store (DataDirectory/kv, /wal), not in DataDirectory/{id}/.
+        string idPath = Path.Combine(CamusConfig.DataDirectory, id);
+        Assert.IsFalse(Directory.Exists(idPath),
+            "No directory must exist for the database id — unified model uses shared store");
 
-        Assert.IsTrue(Directory.Exists(expectedKv),
-            "kv sub-directory must exist under DataDirectory/{id}/kv");
-        Assert.IsTrue(Directory.Exists(expectedWal),
-            "wal sub-directory must exist under DataDirectory/{id}/wal");
-
-        // No directory for the name — name is NOT the identity anymore.
+        // No directory for the name either.
         string namePath = Path.Combine(CamusConfig.DataDirectory, dbname);
         Assert.IsFalse(Directory.Exists(namePath),
             "No directory must exist with the database name as its path component");

@@ -125,16 +125,20 @@ internal sealed class TestDatabaseClusterIsolation : SharedNodeBaseTest
 
         IKahuna kahuna = SharedKahuna;
 
+        // After Task 4 row keys are "{dbId}:{tableId}:r/{rowId}".
         // Each database's bucket must contain exactly the one row inserted above.
         // A count of 2 would mean a duplicate bleed (one insert wrote into both prefixes);
         // a count of 0 would mean the insert never landed.
-        List<string> rowsA = await ScanKeysAsync(kahuna, $"{tableIdA}:r", $"{tableIdA}:r/");
-        Assert.AreEqual(1, rowsA.Count,
-            $"db A's bucket must contain exactly 1 row key under {tableIdA}:r/; got {rowsA.Count}");
+        string bucketA = $"{dbA.Id}:{tableIdA}:r";
+        string bucketB = $"{dbB.Id}:{tableIdB}:r";
 
-        List<string> rowsB = await ScanKeysAsync(kahuna, $"{tableIdB}:r", $"{tableIdB}:r/");
+        List<string> rowsA = await ScanKeysAsync(kahuna, bucketA, $"{bucketA}/");
+        Assert.AreEqual(1, rowsA.Count,
+            $"db A's bucket must contain exactly 1 row key under {bucketA}/; got {rowsA.Count}");
+
+        List<string> rowsB = await ScanKeysAsync(kahuna, bucketB, $"{bucketB}/");
         Assert.AreEqual(1, rowsB.Count,
-            $"db B's bucket must contain exactly 1 row key under {tableIdB}:r/; got {rowsB.Count}");
+            $"db B's bucket must contain exactly 1 row key under {bucketB}/; got {rowsB.Count}");
     }
 
     /// <summary>
@@ -211,8 +215,9 @@ internal sealed class TestDatabaseClusterIsolation : SharedNodeBaseTest
         await InsertRow(executor, dbA, nameA, "a-row");
         await InsertRow(executor, dbB, nameB, "b-row");
 
-        // Verify B's rows exist before rename.
-        List<string> bRowsBefore = await ScanKeysAsync(SharedKahuna, $"{tableIdB}:r", $"{tableIdB}:r/");
+        // Verify B's rows exist before rename (after Task 4: "{dbId}:{tableId}:r/{rowId}").
+        string bucketB = $"{dbB.Id}:{tableIdB}:r";
+        List<string> bRowsBefore = await ScanKeysAsync(SharedKahuna, bucketB, $"{bucketB}/");
         Assert.IsNotEmpty(bRowsBefore, "B must have row keys before rename of A");
 
         string newNameA = "db_" + Guid.NewGuid().ToString("n");
@@ -239,7 +244,7 @@ internal sealed class TestDatabaseClusterIsolation : SharedNodeBaseTest
         Assert.AreEqual(dbB.Id, reopenedB.Id, "B's id must be unchanged after A's rename");
 
         // B's row keys must be intact in the KV store.
-        List<string> bRowsAfter = await ScanKeysAsync(SharedKahuna, $"{tableIdB}:r", $"{tableIdB}:r/");
+        List<string> bRowsAfter = await ScanKeysAsync(SharedKahuna, bucketB, $"{bucketB}/");
         Assert.AreEqual(bRowsBefore.Count, bRowsAfter.Count,
             "B's row key count must be unchanged after A was renamed");
 

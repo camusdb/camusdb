@@ -804,7 +804,7 @@ public sealed class TestSchemaRename
         database.TableDescriptors["robots"] = new AsyncLazy<TableDescriptor>(() =>
             Task.FromResult(new TableDescriptor(
                 tableSchema.Id!, tableSchema.Name!, tableSchema,
-                new KvTableStore(kahuna.Kahuna, tableSchema.Id!))));
+                new KvTableStore(kahuna.Kahuna, database.Id, tableSchema.Id!))));
 
         Assert.AreEqual(1, database.TableDescriptors.Count);
         Assert.True(database.TableDescriptors.ContainsKey("robots"));
@@ -868,7 +868,7 @@ public sealed class TestSchemaRename
         database.TableDescriptors["robots"] = new AsyncLazy<TableDescriptor>(() =>
             Task.FromResult(new TableDescriptor(
                 tableSchema.Id!, tableSchema.Name!, tableSchema,
-                new KvTableStore(kahuna.Kahuna, tableSchema.Id!))));
+                new KvTableStore(kahuna.Kahuna, database.Id, tableSchema.Id!))));
 
         byte[] rename = Serializator.Serialize(new SchemaChangeLogEntry
         {
@@ -940,7 +940,7 @@ public sealed class TestSchemaRename
         database.TableDescriptors["robots"] = new AsyncLazy<TableDescriptor>(() =>
             Task.FromResult(new TableDescriptor(
                 tableSchema.Id!, tableSchema.Name!, tableSchema,
-                new KvTableStore(kahuna.Kahuna, tableSchema.Id!))));
+                new KvTableStore(kahuna.Kahuna, database.Id, tableSchema.Id!))));
 
         byte[] rename = Serializator.Serialize(new SchemaChangeLogEntry
         {

@@ -60,14 +60,14 @@ public abstract class SharedNodeBaseTest : BaseTest
     protected IKahuna SharedKahuna => sharedNode!.Kahuna;
 
     protected override Task<DatabaseRegistry> CreateRegistryAsync()
-        => DatabaseRegistry.OpenAsync(clusterNode: sharedNode!, loggerFactory: SharedLoggerFactory);
+        => DatabaseRegistry.OpenAsync(sharedNode!);
 
     protected override CommandExecutor CreateCommandExecutor()
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
         return new(validator, catalogsManager, logger,
-            loggerFactory: SharedLoggerFactory, sharedNode: sharedNode!,
+            sharedNode: sharedNode!,
             registry: sharedRegistry!, isClusterMode: true);
     }
 }

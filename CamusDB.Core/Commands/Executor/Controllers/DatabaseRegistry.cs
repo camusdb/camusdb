@@ -24,8 +24,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// <summary>
 /// Persistent registry that maps database names to stable opaque ids.
 ///
-/// Backed by a dedicated SQLite-based EmbeddedKahuna system store (standalone mode) or
-/// by a reserved <c>_system/</c> key prefix in the process-level shared node (cluster mode).
+/// Backed by a reserved <c>_system/</c> key prefix in the single process-level shared
+/// Kahuna node. Both standalone and cluster modes use the same shared node.
 ///
 /// <para>Every database gets one <see cref="DatabaseRegistryEntry"/> persisted under a
 /// name key (<c>dbregistry/db:{name}</c>) holding the full entry. The id→name direction
@@ -40,7 +40,6 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 {
     private readonly IKahuna kahuna;
     private readonly KvTransactionsManager transactions;
-    private readonly EmbeddedKahuna? ownedNode;
     private readonly string keyPrefix;
 
     private readonly SemaphoreSlim writeSem = new(1, 1);
@@ -70,12 +69,10 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     private DatabaseRegistry(
         IKahuna kahuna,
         KvTransactionsManager transactions,
-        EmbeddedKahuna? ownedNode,
         string keyPrefix)
     {
         this.kahuna = kahuna;
         this.transactions = transactions;
-        this.ownedNode = ownedNode;
         this.keyPrefix = keyPrefix;
     }
 
@@ -154,51 +151,22 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Opens (or creates) the database registry.
-    /// <list type="bullet">
-    ///   <item>Standalone: creates and owns a dedicated EmbeddedKahuna at
-    ///     <c>DataDirectory/_system</c>.</item>
-    ///   <item>Cluster: borrows the process-level shared node; registry keys are
-    ///     namespaced under <c>_system/</c>.</item>
-    /// </list>
+    /// Opens (or creates) the database registry against the process-level shared Kahuna node.
+    /// Registry keys are namespaced under <c>_system/</c> in the shared keyspace.
     /// </summary>
-    public static async Task<DatabaseRegistry> OpenAsync(
-        EmbeddedKahuna? clusterNode = null,
-        ILoggerFactory? loggerFactory = null)
+    public static async Task<DatabaseRegistry> OpenAsync(EmbeddedKahuna sharedNode)
     {
-        EmbeddedKahuna? ownedNode;
-        EmbeddedKahuna node;
-        string prefix;
-
-        if (clusterNode is null)
-        {
-            string systemPath = Path.Combine(CamusConfig.DataDirectory, "_system");
-            Directory.CreateDirectory(Path.Combine(systemPath, "kv"));
-            Directory.CreateDirectory(Path.Combine(systemPath, "wal"));
-
-            ownedNode = EmbeddedKahuna.CreateSqlite(systemPath, loggerFactory);
-            await ownedNode.StartAsync(CancellationToken.None).ConfigureAwait(false);
-            await ownedNode.WaitForLeaderAsync("_system/warmup", CancellationToken.None).ConfigureAwait(false);
-            await ownedNode.FlushAsync().ConfigureAwait(false);
-            node = ownedNode;
-            prefix = "";
-        }
-        else
-        {
-            ownedNode = null;
-            node = clusterNode;
-            prefix = "_system/";
-        }
+        ArgumentNullException.ThrowIfNull(sharedNode);
 
         Func<HLCTimestamp?, HLCTimestamp> mintLocalT = (floor) =>
         {
             if (floor.HasValue && !floor.Value.IsNull())
-                return node.Raft.HybridLogicalClock.ReceiveEvent(node.Raft.GetLocalNodeId(), floor.Value);
-            return node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
+                return sharedNode.Raft.HybridLogicalClock.ReceiveEvent(sharedNode.Raft.GetLocalNodeId(), floor.Value);
+            return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
         };
 
-        KvTransactionsManager txManager = new(node.Kahuna, mintLocalT);
-        DatabaseRegistry registry = new(node.Kahuna, txManager, ownedNode, prefix);
+        KvTransactionsManager txManager = new(sharedNode.Kahuna, mintLocalT);
+        DatabaseRegistry registry = new(sharedNode.Kahuna, txManager, "_system/");
         await registry.LoadAsync().ConfigureAwait(false);
         return registry;
     }
@@ -631,8 +599,5 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
         transactions.Dispose();
         writeSem.Dispose();
-
-        if (ownedNode is not null)
-            await ownedNode.DisposeAsync().ConfigureAwait(false);
     }
 }

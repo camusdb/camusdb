@@ -74,7 +74,7 @@ public sealed class TestKvTransactionsManager
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
 
         KvTransactionsManager mgr = new(node.Kahuna);
-        KvTableStore store = new(node.Kahuna, tableId);
+        KvTableStore store = new(node.Kahuna, "testdb", tableId);
         return (node, mgr, store);
     }
 
@@ -351,7 +351,7 @@ public sealed class TestKvTransactionsManager
         // 3 MustRetry responses before delegating to the real Kahuna (< MaxCommitRetries = 5).
         CommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: 3);
         KvTransactionsManager mgr = new(faultKahuna);
-        KvTableStore store = new(node.Kahuna, "fault-a");
+        KvTableStore store = new(node.Kahuna, "testdb", "fault-a");
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(200, 0, 0);
@@ -383,7 +383,7 @@ public sealed class TestKvTransactionsManager
         // 6 MustRetry responses — exhausts all MaxCommitRetries = 5 attempts.
         CommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: 6);
         KvTransactionsManager mgr = new(faultKahuna);
-        KvTableStore store = new(node.Kahuna, "fault-b");
+        KvTableStore store = new(node.Kahuna, "testdb", "fault-b");
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(201, 0, 0);

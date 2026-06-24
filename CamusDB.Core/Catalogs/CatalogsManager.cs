@@ -265,7 +265,6 @@ public sealed class CatalogsManager
     {
         string newName = ticket.NewName ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "NewName is required for RenameIndex");
         SchemaChangeLogEntry entry;
-        TableSchema? tableSchema;
 
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try

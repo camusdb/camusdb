@@ -320,7 +320,7 @@ public sealed class TestKvTableStoreRetry
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
         FaultInjectingKahuna stub = new(node.Kahuna);
-        return (node, stub, new KvTableStore(stub, tableId));
+        return (node, stub, new KvTableStore(stub, "testdb", tableId));
     }
 
     // -----------------------------------------------------------------------

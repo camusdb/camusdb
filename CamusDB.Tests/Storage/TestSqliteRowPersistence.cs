@@ -61,7 +61,7 @@ public sealed class TestSqliteRowPersistence
             CommandValidator validator = new();
             CatalogsManager catalogs = new(logger);
             CommandExecutor executor = new(validator, catalogs, logger,
-                loggerFactory: LoggerFactory, sharedNode: node, isClusterMode: true);
+                sharedNode: node, isClusterMode: true);
 
             DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
 

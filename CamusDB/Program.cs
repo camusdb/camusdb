@@ -116,7 +116,6 @@ if (config.IsClusterMode)
             services.GetRequiredService<CommandValidator>(),
             services.GetRequiredService<CatalogsManager>(),
             services.GetRequiredService<ILogger<ICamusDB>>(),
-            services.GetRequiredService<ILoggerFactory>(),
             services.GetRequiredService<EmbeddedKahuna>(),
             services.GetRequiredService<ISchemaDdlForwarder>(),
             isClusterMode: true
@@ -136,7 +135,6 @@ else
             services.GetRequiredService<CommandValidator>(),
             services.GetRequiredService<CatalogsManager>(),
             services.GetRequiredService<ILogger<ICamusDB>>(),
-            services.GetRequiredService<ILoggerFactory>(),
             services.GetRequiredService<EmbeddedKahuna>(),
             isClusterMode: false
         ));

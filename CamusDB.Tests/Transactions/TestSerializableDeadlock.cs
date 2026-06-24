@@ -49,7 +49,7 @@ public sealed class TestSerializableDeadlock
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tag}/warmup", CancellationToken.None);
         KvTransactionsManager mgr = new(node.Kahuna);
-        KvTableStore store = new(node.Kahuna, tag);
+        KvTableStore store = new(node.Kahuna, "testdb", tag);
         return (node, mgr, store);
     }
 

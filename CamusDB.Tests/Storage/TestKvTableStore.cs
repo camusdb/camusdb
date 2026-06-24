@@ -91,7 +91,7 @@ public sealed class TestKvTableStore
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
-        return (node, new KvTableStore(node.Kahuna, tableId));
+        return (node, new KvTableStore(node.Kahuna, "testdb", tableId));
     }
 
     // ---- tests ------------------------------------------------------------

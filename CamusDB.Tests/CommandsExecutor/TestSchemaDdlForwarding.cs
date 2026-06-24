@@ -548,9 +548,7 @@ public sealed class TestSchemaDdlForwarding
 
             // One shared registry for the whole cluster — all executors share the same
             // in-memory name→id cache so CreateDatabase on any node is visible to all.
-            DatabaseRegistry sharedRegistry = await DatabaseRegistry.OpenAsync(
-                clusterNode: nodes[0],
-                loggerFactory: LoggerFactory).ConfigureAwait(false);
+            DatabaseRegistry sharedRegistry = await DatabaseRegistry.OpenAsync(nodes[0]).ConfigureAwait(false);
 
             return new(nodes, sharedRegistry);
         }
@@ -560,7 +558,6 @@ public sealed class TestSchemaDdlForwarding
             CommandValidator validator = new();
             CatalogsManager catalogs = new(Logger);
             return new(validator, catalogs, Logger,
-                loggerFactory: LoggerFactory,
                 sharedNode: node,
                 schemaDdlForwarder: forwarder,
                 registry: SharedRegistry,
