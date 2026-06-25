@@ -16,11 +16,11 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// <remarks>
 /// <para>
 /// <see cref="QueryResultRow"/> remains the execution payload for today's single-table pipeline.
-/// Join, subquery, and grouped execution (QP3–QP5) should emit <see cref="BoundRow"/> instead of
+/// Join, subquery, and grouped execution should emit <see cref="BoundRow"/> instead of
 /// extending <see cref="QueryResultRow"/> in place.
 /// </para>
 /// <para>
-/// Key naming after binding (QP1.3):
+/// Key naming after binding:
 /// </para>
 /// <list type="bullet">
 /// <item><description>Qualified keys: <c>{alias}.{column}</c></description></item>

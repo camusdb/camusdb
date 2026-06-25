@@ -16,11 +16,12 @@ using CamusDB.Core.Statistics;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
+using System.Runtime.CompilerServices;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Executes inner joins via nested-loop iteration over bound table sources (QP4.3+).
+/// Executes inner joins via nested-loop iteration over bound table sources.
 /// </summary>
 internal sealed class QueryJoinExecutor
 {
@@ -81,6 +82,14 @@ internal sealed class QueryJoinExecutor
             case IndexNestedLoopJoinNode indexJoinNode:
             {
                 await foreach (QueryResultRow row in ExecuteIndexNestedLoopJoin(indexJoinNode, plan).ConfigureAwait(false))
+                    yield return row;
+
+                yield break;
+            }
+
+            case HashJoinNode hashJoinNode:
+            {
+                await foreach (QueryResultRow row in ExecuteHashJoin(hashJoinNode, plan).ConfigureAwait(false))
                     yield return row;
 
                 yield break;
@@ -430,5 +439,300 @@ internal sealed class QueryJoinExecutor
         }
 
         return types;
+    }
+
+    // ── Hash Join ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Materialises the build side into a hash table keyed on the equi-join columns.
+    /// Returns null when the build exceeds <see cref="CamusDBConfig.HashJoinMaxBuildRows"/>
+    /// (signals the caller to fall back to nested-loop).
+    /// Rows whose join key contains any NULL value are excluded.
+    ///
+    /// Note: on cap overflow the build scan is abandoned after reading up to
+    /// <c>HashJoinMaxBuildRows</c> rows; the nested-loop fallback then re-scans the
+    /// build side from scratch, so the build table is read up to ~2× in that rare path.
+    /// This is intentional: correctness over complexity. Disk spilling is out of scope.
+    /// </summary>
+    /// <summary>
+    /// Materialises the build side into a hash table keyed on the equi-join columns.
+    /// Returns null when the build exceeds <see cref="CamusDBConfig.HashJoinMaxBuildRows"/>
+    /// (signals the caller to fall back to nested-loop).
+    /// Rows whose join key contains any NULL value are excluded.
+    ///
+    /// Note: on cap overflow the build scan is abandoned after reading up to
+    /// <c>HashJoinMaxBuildRows</c> rows; the nested-loop fallback then re-scans the
+    /// build side from scratch, so the build table is read up to ~2× in that rare path.
+    /// This is intentional: correctness over complexity. Disk spilling is out of scope.
+    ///
+    /// When <paramref name="buildSide"/> is <see cref="HashJoinBuildSide.Right"/> the
+    /// right source (<see cref="HashJoinNode.BuildSource"/>) is scanned and keyed by
+    /// <see cref="HashJoinNode.BuildKeyColumns"/> (unqualified column names). Stored rows
+    /// are unqualified — <c>MergeRows</c> qualifies them at probe time.
+    ///
+    /// When <paramref name="buildSide"/> is <see cref="HashJoinBuildSide.Left"/> the left
+    /// subtree (<see cref="PhysicalPlanNode.Input"/>) is scanned, each row is qualified
+    /// immediately, and keyed by <see cref="HashJoinNode.ProbeKeyColumns"/> (qualified
+    /// column names such as <c>o.id</c>). Stored rows are already qualified — at probe
+    /// time they are passed directly as the left arg to <c>MergeRows</c>.
+    /// </summary>
+    private async Task<Dictionary<CompositeColumnValue, List<Dictionary<string, ColumnValue>>>?> BuildHashTable(
+        HashJoinNode joinNode,
+        QueryPlan plan,
+        HashJoinBuildSide buildSide)
+    {
+        Dictionary<CompositeColumnValue, List<Dictionary<string, ColumnValue>>> table =
+            new(CompositeColumnValueComparer.Instance);
+
+        int rowCount = 0;
+
+        if (buildSide == HashJoinBuildSide.Right)
+        {
+            IReadOnlyList<string> buildKeys = joinNode.BuildKeyColumns;
+
+            await foreach (QueryResultRow row in ScanJoinRightSource(
+                joinNode.BuildSource, joinNode.BuildExecutionFilter, plan).ConfigureAwait(false))
+            {
+                if (rowCount >= CamusDBConfig.HashJoinMaxBuildRows) return null;
+
+                ColumnValue[] keyValues = new ColumnValue[buildKeys.Count];
+                bool hasNull = false;
+
+                for (int i = 0; i < buildKeys.Count; i++)
+                {
+                    if (!row.Row.TryGetValue(buildKeys[i], out ColumnValue? kv) || kv.Type == ColumnType.Null)
+                    { hasNull = true; break; }
+                    keyValues[i] = kv;
+                }
+
+                if (hasNull) continue;
+
+                CompositeColumnValue key = new(keyValues);
+                if (!table.TryGetValue(key, out List<Dictionary<string, ColumnValue>>? bucket))
+                { bucket = []; table[key] = bucket; }
+
+                bucket.Add(row.Row);
+                rowCount++;
+            }
+        }
+        else
+        {
+            // BuildSide.Left: materialise the left subtree; rows are qualified immediately so
+            // they can be passed directly as the "left" arg to MergeRows during probe.
+            IReadOnlyList<string> probeKeys = joinNode.ProbeKeyColumns;
+
+            await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
+            {
+                if (rowCount >= CamusDBConfig.HashJoinMaxBuildRows) return null;
+
+                Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(
+                    leftRow.Row, ResolveLeftAlias(joinNode.Input!, leftRow));
+
+                ColumnValue[] keyValues = new ColumnValue[probeKeys.Count];
+                bool hasNull = false;
+
+                for (int i = 0; i < probeKeys.Count; i++)
+                {
+                    if (!qualified.TryGetValue(probeKeys[i], out ColumnValue? kv) || kv.Type == ColumnType.Null)
+                    { hasNull = true; break; }
+                    keyValues[i] = kv;
+                }
+
+                if (hasNull) continue;
+
+                CompositeColumnValue key = new(keyValues);
+                if (!table.TryGetValue(key, out List<Dictionary<string, ColumnValue>>? bucket))
+                { bucket = []; table[key] = bucket; }
+
+                bucket.Add(qualified);
+                rowCount++;
+            }
+        }
+
+        return table;
+    }
+
+    private async IAsyncEnumerable<QueryResultRow> ExecuteHashJoin(
+        HashJoinNode joinNode,
+        QueryPlan plan,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        HashJoinBuildSide buildSide = joinNode.BuildSide;
+
+        Dictionary<CompositeColumnValue, List<Dictionary<string, ColumnValue>>>? hashTable =
+            await BuildHashTable(joinNode, plan, buildSide).ConfigureAwait(false);
+
+        if (hashTable is null)
+        {
+            // Build cap exceeded — fall back to nested-loop for correctness.
+            // The nested-loop will re-scan the build side from scratch (~2× cost on this rare path).
+            NestedLoopJoinNode fallback = new(joinNode.Input!, joinNode.BuildSource, joinNode.OnPredicate)
+            {
+                RightExecutionFilter = joinNode.BuildExecutionFilter,
+            };
+
+            await foreach (QueryResultRow row in ExecuteNestedLoopJoin(fallback, plan).ConfigureAwait(false))
+                yield return row;
+
+            yield break;
+        }
+
+        string rightAlias = joinNode.BuildSource.Alias;
+        QueryTicket ticket = plan.Ticket;
+
+        if (buildSide == HashJoinBuildSide.Right)
+        {
+            // Standard path: probe = left subtree, build = right source.
+            // Hash table rows are unqualified; MergeRows qualifies them with rightAlias.
+            IReadOnlyList<string> probeKeys = joinNode.ProbeKeyColumns;
+
+            await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
+            {
+                Dictionary<string, ColumnValue> leftQualified = QueryRowMerger.QualifyRow(
+                    leftRow.Row,
+                    ResolveLeftAlias(joinNode.Input!, leftRow));
+
+                ColumnValue[] probeKeyValues = new ColumnValue[probeKeys.Count];
+                bool hasNull = false;
+
+                for (int i = 0; i < probeKeys.Count; i++)
+                {
+                    if (!leftQualified.TryGetValue(probeKeys[i], out ColumnValue? kv) || kv.Type == ColumnType.Null)
+                    { hasNull = true; break; }
+                    probeKeyValues[i] = kv;
+                }
+
+                if (hasNull) continue;
+
+                CompositeColumnValue probeKey = new(probeKeyValues);
+                if (!hashTable.TryGetValue(probeKey, out List<Dictionary<string, ColumnValue>>? bucket))
+                    continue;
+
+                foreach (Dictionary<string, ColumnValue> buildRow in bucket)
+                {
+                    Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(leftQualified, buildRow, rightAlias);
+
+                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
+                        continue;
+
+                    yield return new QueryResultRow(default(ObjectIdValue), merged);
+                }
+            }
+        }
+        else
+        {
+            // Build-left path: build = left subtree (stored qualified in hash table),
+            // probe = right source (scanned unqualified).
+            // MergeRows(leftQualifiedBuildRow, rightUnqualifiedProbeRow, rightAlias) is the
+            // same call shape as the standard path — output column naming is identical.
+            IReadOnlyList<string> buildKeys = joinNode.BuildKeyColumns;
+
+            await foreach (QueryResultRow rightRow in ScanJoinRightSource(
+                joinNode.BuildSource, joinNode.BuildExecutionFilter, plan).ConfigureAwait(false))
+            {
+                ColumnValue[] probeKeyValues = new ColumnValue[buildKeys.Count];
+                bool hasNull = false;
+
+                for (int i = 0; i < buildKeys.Count; i++)
+                {
+                    if (!rightRow.Row.TryGetValue(buildKeys[i], out ColumnValue? kv) || kv.Type == ColumnType.Null)
+                    { hasNull = true; break; }
+                    probeKeyValues[i] = kv;
+                }
+
+                if (hasNull) continue;
+
+                CompositeColumnValue probeKey = new(probeKeyValues);
+                if (!hashTable.TryGetValue(probeKey, out List<Dictionary<string, ColumnValue>>? bucket))
+                    continue;
+
+                foreach (Dictionary<string, ColumnValue> leftBuildRow in bucket)
+                {
+                    Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(leftBuildRow, rightRow.Row, rightAlias);
+
+                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
+                        continue;
+
+                    yield return new QueryResultRow(default(ObjectIdValue), merged);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Value-based equality comparer for <see cref="CompositeColumnValue"/> hash table keys.
+    ///
+    /// Neither <see cref="CompositeColumnValue"/> nor <see cref="ColumnValue"/> overrides
+    /// <c>Equals</c>/<c>GetHashCode</c> (both only implement <see cref="IComparable"/>), so
+    /// the default dictionary comparer uses reference equality and would match nothing. This
+    /// comparer hashes and compares by <c>Type + payload</c>, consistent with
+    /// <see cref="ColumnValue.CompareTo"/> for non-NULL values. NULL keys are excluded before
+    /// they reach the table so the comparer does not need null-equality semantics.
+    /// </summary>
+    private sealed class CompositeColumnValueComparer : IEqualityComparer<CompositeColumnValue>
+    {
+        public static readonly CompositeColumnValueComparer Instance = new();
+
+        public bool Equals(CompositeColumnValue? x, CompositeColumnValue? y)
+        {
+            if (x is null && y is null) return true;
+            if (x is null || y is null) return false;
+            if (x.Values.Length != y.Values.Length) return false;
+
+            for (int i = 0; i < x.Values.Length; i++)
+            {
+                ColumnValue a = x.Values[i];
+                ColumnValue b = y.Values[i];
+
+                if (a.Type != b.Type) return false;
+                if (a.CompareTo(b) != 0) return false;
+            }
+
+            return true;
+        }
+
+        public int GetHashCode(CompositeColumnValue obj)
+        {
+            HashCode h = new();
+
+            foreach (ColumnValue v in obj.Values)
+            {
+                h.Add((int)v.Type);
+
+                switch (v.Type)
+                {
+                    case ColumnType.String:
+                    case ColumnType.Id:
+                        h.Add(v.StrValue, StringComparer.Ordinal);
+                        break;
+
+                    case ColumnType.Integer64:
+                    case ColumnType.Date:
+                    case ColumnType.DateTime:
+                        h.Add(v.LongValue);
+                        break;
+
+                    case ColumnType.Float64:
+                        h.Add(v.FloatValue);
+                        break;
+
+                    case ColumnType.Float32:
+                        h.Add((float)v.FloatValue);
+                        break;
+
+                    case ColumnType.Bool:
+                        h.Add(v.BoolValue);
+                        break;
+
+                    case ColumnType.Bytes:
+                        if (v.BytesValue is not null)
+                            foreach (byte b in v.BytesValue)
+                                h.Add(b);
+                        break;
+                }
+            }
+
+            return h.ToHashCode();
+        }
     }
 }

@@ -15,7 +15,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Computes the minimal set of base-table columns referenced by a query (QP6.1).
+/// Computes the minimal set of base-table columns referenced by a query.
 /// </summary>
 internal static class RequiredColumnAnalyzer
 {

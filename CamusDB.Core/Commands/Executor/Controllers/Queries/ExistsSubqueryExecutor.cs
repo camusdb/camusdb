@@ -19,7 +19,7 @@ using Kommander.Time;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Executes uncorrelated and correlated EXISTS subqueries (QP5.4).
+/// Executes uncorrelated and correlated EXISTS subqueries.
 /// </summary>
 internal sealed class ExistsSubqueryExecutor
 {

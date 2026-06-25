@@ -11,7 +11,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Maps rewritten correlated EXISTS nodes to their prepared subquery state (QP5.4).
+/// Maps rewritten correlated EXISTS nodes to their prepared subquery state.
 /// </summary>
 public sealed class ExistsSubqueryRegistry
 {

@@ -13,7 +13,7 @@ using CamusDB.Core.CommandsExecutor.Models.Queries;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Annotates physical plan nodes with required column sets for scan-time decoding (QP6.1).
+/// Annotates physical plan nodes with required column sets for scan-time decoding.
 /// </summary>
 internal static class ProjectionPushdownPlanner
 {

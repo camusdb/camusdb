@@ -9,7 +9,7 @@
 namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 
 /// <summary>
-/// A bound column reference after name resolution (QP1.3).
+/// A bound column reference after name resolution.
 /// </summary>
 /// <param name="SourceAlias">
 /// Table or derived-table alias, or <see langword="null"/> when the reference is unqualified.

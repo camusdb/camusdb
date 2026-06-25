@@ -16,7 +16,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Executes a bound derived table into an in-memory row stream (QP5.5).
+/// Executes a bound derived table into an in-memory row stream.
 /// </summary>
 internal sealed class DerivedTableExecutor
 {

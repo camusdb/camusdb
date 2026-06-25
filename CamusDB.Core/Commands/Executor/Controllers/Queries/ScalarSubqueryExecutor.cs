@@ -17,7 +17,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Executes uncorrelated scalar subqueries once under the caller's transaction (QP5.2).
+/// Executes uncorrelated scalar subqueries once under the caller's transaction.
 /// </summary>
 internal sealed class ScalarSubqueryExecutor
 {

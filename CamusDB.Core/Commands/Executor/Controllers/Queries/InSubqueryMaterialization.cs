@@ -11,7 +11,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Materialized uncorrelated IN/NOT IN subquery column values (QP5.3 / QP5.3a).
+/// Materialized uncorrelated IN/NOT IN subquery column values.
 /// </summary>
 internal sealed record InSubqueryMaterialization(
     IReadOnlyList<ColumnValue> Values,

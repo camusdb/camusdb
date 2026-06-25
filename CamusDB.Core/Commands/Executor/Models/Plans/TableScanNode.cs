@@ -20,10 +20,10 @@ public sealed class TableScanNode : PhysicalPlanNode
     /// <summary>Required when <see cref="Source"/> is <see cref="TableScanSource.ForcedIndex"/>.</summary>
     public TableIndexSchema? Index { get; }
 
-    /// <summary>Bound table source for join-plan table scans (QP4.3).</summary>
+    /// <summary>Bound table source for join-plan table scans.</summary>
     public BoundTableSource? BoundSource { get; init; }
 
-    /// <summary>Single-table predicate pushed into this scan (QP4.4).</summary>
+    /// <summary>Single-table predicate pushed into this scan.</summary>
     public NodeAst? ExecutionFilter { get; init; }
 
     public override bool CanDecomposeToLocalPlusMerge => true;

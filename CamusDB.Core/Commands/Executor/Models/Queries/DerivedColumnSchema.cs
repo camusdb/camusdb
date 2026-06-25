@@ -11,6 +11,6 @@ using CamusDB.Core.Catalogs.Models;
 namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 
 /// <summary>
-/// Output column metadata for a bound derived table source (QP5.5).
+/// Output column metadata for a bound derived table source.
 /// </summary>
 public sealed record DerivedColumnSchema(string Name, ColumnType Type);

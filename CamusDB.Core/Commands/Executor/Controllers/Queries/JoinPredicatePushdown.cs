@@ -13,7 +13,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Splits join WHERE clauses into per-source scan filters and post-join residuals (QP4.4).
+/// Splits join WHERE clauses into per-source scan filters and post-join residuals.
 /// </summary>
 internal static class JoinPredicatePushdown
 {

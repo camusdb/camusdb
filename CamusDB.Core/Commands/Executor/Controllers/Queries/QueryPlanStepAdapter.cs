@@ -72,6 +72,9 @@ internal static class QueryPlanStepAdapter
             case IndexNestedLoopJoinNode:
                 return;
 
+            case HashJoinNode:
+                return;
+
             case DerivedTableScanNode:
                 return;
 

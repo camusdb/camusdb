@@ -21,7 +21,7 @@ public sealed class NestedLoopJoinNode : PhysicalPlanNode
 
     public NodeAst OnPredicate { get; }
 
-    /// <summary>Single-table predicate pushed into the right-side scan (QP4.4).</summary>
+    /// <summary>Single-table predicate pushed into the right-side scan.</summary>
     public NodeAst? RightExecutionFilter { get; init; }
 
     public NestedLoopJoinNode(PhysicalPlanNode left, BoundJoinRightSource rightSource, NodeAst onPredicate)

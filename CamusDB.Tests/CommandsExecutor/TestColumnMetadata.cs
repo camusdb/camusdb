@@ -22,7 +22,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// T6 acceptance tests: MaxLength / ArrayElementType plumbing through the full
+/// Acceptance tests: MaxLength / ArrayElementType plumbing through the full
 /// SQL → AST → ColumnInfo → TableColumnSchema pipeline.
 /// </summary>
 [NonParallelizable]

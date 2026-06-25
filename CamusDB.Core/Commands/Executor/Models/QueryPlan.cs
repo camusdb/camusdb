@@ -40,7 +40,7 @@ public sealed class QueryPlan
     /// <summary>Row filter applied during scan execution after index selection.</summary>
     public NodeAst? ExecutionFilter { get; internal set; }
 
-    /// <summary>Bound multi-source query when executing joins (QP4.3).</summary>
+    /// <summary>Bound multi-source query when executing joins.</summary>
     public BoundSelectQuery? BoundQuery { get; internal set; }
 
 	public DatabaseDescriptor Database { get; }
@@ -53,14 +53,14 @@ public sealed class QueryPlan
 
 	public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }
 
-    /// <summary>Cached materializations for derived table scans within a join query (QP5.5).</summary>
+    /// <summary>Cached materializations for derived table scans within a join query.</summary>
     internal Dictionary<BoundDerivedTableSource, List<Dictionary<string, ColumnValue>>> DerivedMaterializations { get; } =
         new();
 
-    /// <summary>Single-table scan column subset (QP6.1). Null means decode all columns.</summary>
+    /// <summary>Single-table scan column subset. Null means decode all columns.</summary>
     public IReadOnlySet<string>? ScanRequiredColumns { get; internal set; }
 
-    /// <summary>Per-alias scan column subsets for join plans (QP6.1).</summary>
+    /// <summary>Per-alias scan column subsets for join plans.</summary>
     internal Dictionary<string, IReadOnlySet<string>>? RequiredColumnsByAlias { get; set; }
 
     internal Dictionary<string, int> TableSchemaVersionByAlias { get; } = new(StringComparer.Ordinal);
@@ -82,7 +82,7 @@ public sealed class QueryPlan
     public IReadOnlyList<(string TableName, int SchemaVersion)>? SchemaDeps { get; internal set; }
 
     /// <summary>
-    /// Optional scan-level row cap for LIMIT pushdown (QP6.3).
+    /// Optional scan-level row cap for LIMIT pushdown.
     /// When set, scan operators may stop after emitting this many rows.
     /// </summary>
     public long? ScanRowLimit { get; internal set; }

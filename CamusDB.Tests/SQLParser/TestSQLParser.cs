@@ -1502,7 +1502,7 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
     }
 
-    #region QP0.2 pending query feature acceptance fixtures
+    #region Pending query feature acceptance fixtures
 
     [Test]
     public void TestParseSelectGroupBySingleColumn()

@@ -15,7 +15,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Parses WHERE clauses into index-friendly comparisons and residual filters (QP2.2).
+/// Parses WHERE clauses into index-friendly comparisons and residual filters.
 /// </summary>
 public static class PredicateAnalyzer
 {

@@ -16,8 +16,8 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Resolves uncorrelated scalar, IN, and NOT IN subqueries before binding and planning (QP5.2–QP5.3a).
-/// EXISTS subqueries are handled by <see cref="ExistsSubqueryPreparer"/> (QP5.4).
+/// Resolves uncorrelated scalar, IN, and NOT IN subqueries before binding and planning.
+/// EXISTS subqueries are handled by <see cref="ExistsSubqueryPreparer"/>.
 /// </summary>
 internal sealed class SubqueryRewriter
 {

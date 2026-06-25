@@ -11,7 +11,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 
 /// <summary>
-/// A predicate attached to a logical query after parsing and, later, binding (QP1.3).
+/// A predicate attached to a logical query after parsing and, later, binding.
 /// </summary>
 /// <param name="Expression">
 /// Parsed predicate tree (<c>WHERE</c>, join <c>ON</c>, or <c>HAVING</c> when supported).

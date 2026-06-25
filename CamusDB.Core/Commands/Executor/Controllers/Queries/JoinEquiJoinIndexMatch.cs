@@ -12,7 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models.Queries;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Describes an indexed equi-join probe on the right join input (QP4.5).
+/// Describes an indexed equi-join probe on the right join input.
 /// </summary>
 internal sealed class JoinEquiJoinIndexMatch
 {

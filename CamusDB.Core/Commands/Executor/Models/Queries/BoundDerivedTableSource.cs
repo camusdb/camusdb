@@ -11,7 +11,7 @@ using CamusDB.Core.Catalogs.Models;
 namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 
 /// <summary>
-/// A derived-table source after binding and schema inference (QP5.5).
+/// A derived-table source after binding and schema inference.
 /// </summary>
 public sealed record BoundDerivedTableSource(
     DerivedTableSource Source,

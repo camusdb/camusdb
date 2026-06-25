@@ -13,7 +13,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
 /// <summary>
-/// Index nested-loop inner join: probe the right table via a secondary index per left row (QP4.5).
+/// Index nested-loop inner join: probe the right table via a secondary index per left row.
 /// </summary>
 public sealed class IndexNestedLoopJoinNode : PhysicalPlanNode
 {

@@ -31,7 +31,7 @@ using CamusDB.Core.Storage.Kv;
 namespace CamusDB.Tests.Storage;
 
 /// <summary>
-/// T2.1 — EmbeddedKahuna wrapper.
+/// EmbeddedKahuna wrapper tests.
 ///
 /// Verifies that the wrapper correctly:
 ///   1. Constructs and starts with default (in-memory) options.

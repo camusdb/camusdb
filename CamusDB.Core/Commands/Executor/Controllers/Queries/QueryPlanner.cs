@@ -19,7 +19,7 @@ using CamusDB.Core.Statistics;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Builds a physical plan tree for single-table SELECT queries (QP2 physical planning phase).
+/// Builds a physical plan tree for single-table SELECT queries.
 /// </summary>
 public sealed class QueryPlanner
 {
@@ -43,7 +43,7 @@ public sealed class QueryPlanner
         plan.ExecutionFilter = PredicateAnalyzer.BuildExecutionFilter(analysis, scanStep, table, absorbedInListConjunct);
 
         // Populate OutputOrdering on the scan node when the chosen index scan guarantees the
-        // requested ORDER BY ordering (QP6.2 / R4). The planner then uses this property to
+        // requested ORDER BY ordering. The planner then uses this property to
         // decide whether to add a SortNode, keeping sort elision explicit and consistent.
         // Guard: GROUP BY and DISTINCT both destroy scan-level ordering before plan output,
         // so the scan's OutputOrdering is only meaningful in the plain (non-grouped,

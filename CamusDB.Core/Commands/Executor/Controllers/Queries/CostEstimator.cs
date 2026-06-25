@@ -77,7 +77,7 @@ internal static class CostEstimator
     // significantly compared to the pre-R9b value of 0.40.
     private const double BreakevenFraction = 0.50;
 
-    private const long DefaultTableRowCount = 10_000;
+    internal const long DefaultTableRowCount = 10_000;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Public API
@@ -318,6 +318,44 @@ internal static class CostEstimator
                     EstimatedRows        = rows,
                     KvPointLookups       = inputCardinality,
                     RowFetchesAfterIndex = inputCardinality,
+                });
+            }
+
+            case HashJoinNode hj:
+            {
+                // inputCardinality = left subtree cardinality (always the Input child).
+                // Depending on BuildSide, left is either probe or build.
+                //
+                // Build side:  scan once + materialise into in-memory hash table.
+                // Probe side:  scan once + O(1) hash lookup per row.
+                //
+                // Total KV cost ≈ buildRows + probeRows   (vs NLJ's buildRows × probeRows)
+                // In-memory cost = buildRows               (hash table)
+                //
+                // Output cardinality ≈ probeRows × buildRows × FilterSelectivity
+                // (same formula as NLJ; a unique build key implies ≤1 match per probe row,
+                // which FilterSelectivity already approximates for typical equi-joins).
+                long rightRows = ResolveRightTableRowCount(hj.BuildSource.Table, database, stats)
+                                 ?? DefaultTableRowCount;
+
+                long probeRows, buildRows;
+                if (hj.BuildSide == HashJoinBuildSide.Right)
+                {
+                    probeRows = inputCardinality;
+                    buildRows = rightRows;
+                }
+                else
+                {
+                    buildRows = inputCardinality;
+                    probeRows = rightRows;
+                }
+
+                long rows = Math.Max(1, (long)(probeRows * buildRows * FilterSelectivity));
+                return (rows, new PlanCost
+                {
+                    EstimatedRows      = rows,
+                    KvRangeScanEntries = buildRows + probeRows,
+                    InMemoryRows       = buildRows,
                 });
             }
 

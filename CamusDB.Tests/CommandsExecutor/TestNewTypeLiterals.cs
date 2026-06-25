@@ -24,7 +24,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// T8 acceptance tests: literal parsing / coercion for float32, date, datetime, bytes, and CAST.
+/// Acceptance tests: literal parsing / coercion for float32, date, datetime, bytes, and CAST.
 /// </summary>
 [NonParallelizable]
 internal sealed class TestNewTypeLiterals : SharedNodeBaseTest

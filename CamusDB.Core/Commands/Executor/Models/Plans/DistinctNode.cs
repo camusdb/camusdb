@@ -8,7 +8,7 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
-/// <summary>Eliminates duplicate projected output rows (QP3.6).</summary>
+/// <summary>Eliminates duplicate projected output rows.</summary>
 public sealed class DistinctNode : PhysicalPlanNode
 {
     /// <summary>

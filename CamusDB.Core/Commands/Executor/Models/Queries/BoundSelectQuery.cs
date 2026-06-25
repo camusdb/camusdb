@@ -22,7 +22,7 @@ public sealed class BoundSelectQuery
     public IReadOnlyList<BoundTableSource> Sources { get; }
 
     /// <summary>
-    /// Bound derived-table sources referenced by the query (QP5.5).
+    /// Bound derived-table sources referenced by the query.
     /// </summary>
     public IReadOnlyList<BoundDerivedTableSource> DerivedSources { get; }
 

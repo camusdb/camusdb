@@ -79,6 +79,13 @@ public static class CamusDBConfig
     public static int SqlParserCacheSweepSeconds = 60;
 
     /// <summary>
+    /// Maximum number of rows the hash-join build phase may materialise before falling back
+    /// to nested-loop for correctness (disk spilling is not implemented).
+    /// Default: 1_000_000 rows.
+    /// </summary>
+    public static int HashJoinMaxBuildRows = 1_000_000;
+
+    /// <summary>
     /// The internal name used to identify primary key indices.
     /// This name should only be changed in a new installation. Changing it after
     /// having databases with tables and data can cause unexpected problems.

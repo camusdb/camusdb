@@ -14,7 +14,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Materializes uncorrelated IN/NOT IN subquery results (QP5.3 / QP5.3a).
+/// Materializes uncorrelated IN/NOT IN subquery results.
 /// </summary>
 internal sealed class InSubqueryExecutor
 {

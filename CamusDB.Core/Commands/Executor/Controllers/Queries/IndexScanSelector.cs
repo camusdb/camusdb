@@ -14,7 +14,7 @@ using CamusDB.Core.Storage.Kv;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Chooses an index scan from analyzed column comparisons and optional ORDER BY (QP2.3).
+/// Chooses an index scan from analyzed column comparisons and optional ORDER BY.
 /// </summary>
 internal static class IndexScanSelector
 {

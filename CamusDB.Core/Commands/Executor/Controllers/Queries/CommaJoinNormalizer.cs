@@ -16,7 +16,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
 /// Normalizes SQL-89 comma joins into left-deep inner join trees and hoists equi-join
-/// predicates from WHERE into ON clauses (QP4.6).
+/// predicates from WHERE into ON clauses.
 /// </summary>
 internal static class CommaJoinNormalizer
 {

@@ -15,7 +15,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <summary>
 /// Binds a logical <see cref="SelectQuery"/> to catalog objects and validates column references.
 /// Opens all table sources (including both sides of inner joins) in left-to-right order for
-/// deterministic nested-loop execution in QP4.3.
+/// deterministic nested-loop execution.
 /// </summary>
 internal sealed class QueryBinder
 {

@@ -12,12 +12,12 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
 /// <summary>
-/// Materialized scan over a bound derived table source (QP5.5).
+/// Materialized scan over a bound derived table source.
 /// </summary>
 public sealed class DerivedTableScanNode : PhysicalPlanNode
 {
     public BoundDerivedTableSource BoundSource { get; init; } = null!;
 
-    /// <summary>Single-source predicate pushed into derived materialization (QP4.4).</summary>
+    /// <summary>Single-source predicate pushed into derived materialization.</summary>
     public NodeAst? ExecutionFilter { get; init; }
 }

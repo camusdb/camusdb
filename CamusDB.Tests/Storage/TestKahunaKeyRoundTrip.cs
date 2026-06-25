@@ -28,7 +28,7 @@ using CamusDB.Core.Storage.Kv;
 namespace CamusDB.Tests.Storage;
 
 /// <summary>
-/// T0.5 — End-to-end key safety spike.
+/// End-to-end key safety tests.
 ///
 /// Verifies two properties:
 ///   1. Prefix scans via LocateAndGetByBucket return keys in ascending ordinal order

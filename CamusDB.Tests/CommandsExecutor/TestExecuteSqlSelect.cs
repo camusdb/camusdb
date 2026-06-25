@@ -1983,7 +1983,7 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
         Assert.IsEmpty(result);
     }
 
-    #region QP0.2 pending query feature acceptance fixtures
+    #region Pending query feature acceptance fixtures
 
     private sealed record AppUsersPostsFixture(
         string DbName,

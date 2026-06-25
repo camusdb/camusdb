@@ -11,7 +11,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
 /// <summary>
-/// Post-aggregate row filter for <c>HAVING</c> predicates (QP3.5).
+/// Post-aggregate row filter for <c>HAVING</c> predicates.
 /// </summary>
 public sealed class HavingFilterNode : PhysicalPlanNode
 {

@@ -16,7 +16,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Rewrites EXISTS subqueries before ticket creation (QP5.4).
+/// Rewrites EXISTS subqueries before ticket creation.
 /// </summary>
 internal sealed class ExistsSubqueryPreparer
 {

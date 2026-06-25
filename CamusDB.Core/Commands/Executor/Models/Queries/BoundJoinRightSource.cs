@@ -11,7 +11,7 @@ using CamusDB.Core.Catalogs.Models;
 namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 
 /// <summary>
-/// Right input to a nested-loop join: base table or derived subquery (QP5.5).
+/// Right input to a nested-loop join: base table or derived subquery.
 /// </summary>
 public sealed record BoundJoinRightSource
 {

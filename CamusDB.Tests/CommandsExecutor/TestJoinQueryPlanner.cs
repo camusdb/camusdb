@@ -41,11 +41,12 @@ public sealed class TestJoinQueryPlanner : BaseTest
 
         QueryPlan plan = new JoinQueryPlanner().GetPlan(database, bound, ticket);
 
-        NestedLoopJoinNode joinNode = FindJoinNode(plan.Root);
+        // Unindexed equi-join → HashJoinNode; the WHERE predicate is pushed to the users scan.
+        HashJoinNode joinNode = FindHashJoinNode(plan.Root);
         TableScanNode usersScan = FindScanForAlias(plan.Root, "u");
 
         Assert.IsNotNull(usersScan.ExecutionFilter);
-        Assert.IsNull(joinNode.RightExecutionFilter);
+        Assert.IsNull(joinNode.BuildExecutionFilter);
         Assert.IsNull(plan.ExecutionFilter);
     }
 
@@ -57,11 +58,12 @@ public sealed class TestJoinQueryPlanner : BaseTest
 
         QueryPlan plan = new JoinQueryPlanner().GetPlan(database, bound, ticket);
 
-        NestedLoopJoinNode joinNode = FindJoinNode(plan.Root);
+        // Unindexed equi-join → HashJoinNode; the WHERE predicate is pushed to the build side.
+        HashJoinNode joinNode = FindHashJoinNode(plan.Root);
         TableScanNode usersScan = FindScanForAlias(plan.Root, "u");
 
         Assert.IsNull(usersScan.ExecutionFilter);
-        Assert.IsNotNull(joinNode.RightExecutionFilter);
+        Assert.IsNotNull(joinNode.BuildExecutionFilter);
         Assert.IsNull(plan.ExecutionFilter);
     }
 
@@ -73,16 +75,17 @@ public sealed class TestJoinQueryPlanner : BaseTest
 
         QueryPlan plan = new JoinQueryPlanner().GetPlan(database, bound, ticket);
 
+        // Unindexed equi-join → HashJoinNode.
         TableScanNode usersScan = FindScanForAlias(plan.Root, "u");
-        NestedLoopJoinNode joinNode = FindJoinNode(plan.Root);
+        HashJoinNode joinNode = FindHashJoinNode(plan.Root);
 
         Assert.IsNotNull(usersScan.ExecutionFilter);
         Assert.IsNotNull(plan.ExecutionFilter);
-        Assert.IsNull(joinNode.RightExecutionFilter);
+        Assert.IsNull(joinNode.BuildExecutionFilter);
     }
 
     [Test]
-    public async Task Plan_UsesNestedLoopJoinWhenRightJoinKeyIsNotIndexed()
+    public async Task Plan_UsesHashJoinWhenRightJoinKeyIsNotIndexed()
     {
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
             "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id",
@@ -90,8 +93,10 @@ public sealed class TestJoinQueryPlanner : BaseTest
 
         QueryPlan plan = new JoinQueryPlanner().GetPlan(database, bound, ticket);
 
-        Assert.IsInstanceOf<NestedLoopJoinNode>(plan.Root);
+        // Equi-join with no index on the right key → HashJoinNode (not NestedLoopJoinNode).
+        Assert.IsInstanceOf<HashJoinNode>(plan.Root);
         Assert.That(plan.Root, Is.Not.TypeOf<IndexNestedLoopJoinNode>());
+        Assert.That(plan.Root, Is.Not.TypeOf<NestedLoopJoinNode>());
     }
 
     [Test]
@@ -564,6 +569,9 @@ public sealed class TestJoinQueryPlanner : BaseTest
             case IndexNestedLoopJoinNode indexJoin:
                 return FindScanForAlias(indexJoin.Input!, alias);
 
+            case HashJoinNode hashJoin:
+                return FindScanForAlias(hashJoin.Input!, alias);
+
             default:
                 throw new AssertionException($"Scan for alias '{alias}' not found in join plan");
         }
@@ -576,5 +584,332 @@ public sealed class TestJoinQueryPlanner : BaseTest
             NestedLoopJoinNode join => join,
             _ => throw new AssertionException("Join node not found in join plan"),
         };
+    }
+
+    private static HashJoinNode FindHashJoinNode(PhysicalPlanNode node)
+    {
+        return node switch
+        {
+            HashJoinNode hj => hj,
+            _ => throw new AssertionException($"HashJoinNode not found; got {node.GetType().Name}"),
+        };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Build-side selection
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Variant of <see cref="BindJoinQuery"/> that also returns the <see cref="CommandExecutor"/>
+    /// so callers can access <see cref="CommandExecutor.Statistics"/> to seed row counts before
+    /// constructing the plan.
+    /// </summary>
+    private async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)>
+        BindJoinQueryWithExecutor(string sql, bool indexPostsUserId = false)
+    {
+        (DatabaseDescriptor db, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(sql, indexPostsUserId);
+        // BindJoinQuery uses CreateCommandExecutor() internally; re-bind returns the same database
+        // but we need access to the executor for stats injection. The simplest approach is to re-bind
+        // using a second executor that shares the same database name — but that would require
+        // a shared KV node.
+        //
+        // Instead, expose BindJoinQuery via a new overload that captures the executor.
+        // This internal helper rebuilds from scratch with executor access.
+        CommandExecutor executor = CreateCommandExecutor();
+        CatalogsManager catalogs = executor.Catalogs;
+        string dbname = $"hj12_{Guid.NewGuid():n}";
+        TrackDatabase(dbname, executor);
+        DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "app_users",
+            columns: [new("id", ColumnType.Id), new("email", ColumnType.String, notNull: true), new("role", ColumnType.String, notNull: true)],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "posts",
+            columns: [new("id", ColumnType.Id), new("user_id", ColumnType.Id, notNull: true), new("title", ColumnType.String, notNull: true), new("published", ColumnType.Bool)],
+            constraints: indexPostsUserId
+                ? [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]), new(ConstraintType.IndexMulti, "posts_user_id_idx", [new("user_id", OrderType.Ascending)])]
+                : [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        await database.Transactions.CommitAsync(txn);
+
+        ExecuteSQLTicket executeTicket = new(
+            txnState: await database.Transactions.BeginAsync(),
+            database: dbname, sql: sql, parameters: null);
+
+        SelectQuery selectQuery = new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(sql));
+        BoundSelectQuery boundQ = await new QueryBinder(new TableOpener(catalogs, logger))
+            .BindAsync(database, selectQuery);
+        QueryTicket ticketQ = QueryTicketAdapter.ToQueryTicket(boundQ, executeTicket);
+
+        return (database, boundQ, ticketQ, executor);
+    }
+
+    [Test]
+    public async Task LeftSideSmaller_BuildSideIsLeft()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindJoinQueryWithExecutor(
+                "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id");
+
+        // Seed: app_users has 10 rows, posts has 10 000 rows → left (app_users) is smaller.
+        TableDescriptor usersTable = await database.TableDescriptors["app_users"];
+        TableDescriptor postsTable = await database.TableDescriptors["posts"];
+        executor.Statistics.SeedRowCountForTesting(database, usersTable, 10);
+        executor.Statistics.SeedRowCountForTesting(database, postsTable, 10_000);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        HashJoinNode join = FindHashJoinNode(plan.Root);
+        Assert.AreEqual(HashJoinBuildSide.Left, join.BuildSide,
+            "app_users (10 rows) < posts (10 000 rows) → build on left");
+    }
+
+    [Test]
+    public async Task RightSideSmaller_BuildSideIsRight()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindJoinQueryWithExecutor(
+                "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id");
+
+        // Seed: app_users has 50 000 rows, posts has 200 rows → right (posts) is smaller.
+        TableDescriptor usersTable = await database.TableDescriptors["app_users"];
+        TableDescriptor postsTable = await database.TableDescriptors["posts"];
+        executor.Statistics.SeedRowCountForTesting(database, usersTable, 50_000);
+        executor.Statistics.SeedRowCountForTesting(database, postsTable, 200);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        HashJoinNode join = FindHashJoinNode(plan.Root);
+        Assert.AreEqual(HashJoinBuildSide.Right, join.BuildSide,
+            "posts (200 rows) < app_users (50 000 rows) → build on right");
+    }
+
+    [Test]
+    public async Task EqualCardinality_DefaultsToRight()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindJoinQueryWithExecutor(
+                "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id");
+
+        // Seed equal row counts → tie → default to right.
+        TableDescriptor usersTable = await database.TableDescriptors["app_users"];
+        TableDescriptor postsTable = await database.TableDescriptors["posts"];
+        executor.Statistics.SeedRowCountForTesting(database, usersTable, 1_000);
+        executor.Statistics.SeedRowCountForTesting(database, postsTable, 1_000);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        HashJoinNode join = FindHashJoinNode(plan.Root);
+        Assert.AreEqual(HashJoinBuildSide.Right, join.BuildSide,
+            "equal cardinality → tie-break defaults to right");
+    }
+
+    [Test]
+    public async Task NoStats_DefaultsToRight()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, _) =
+            await BindJoinQueryWithExecutor(
+                "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id");
+
+        // No stats injected — planner has no StatisticsManager.
+        QueryPlan plan = new JoinQueryPlanner(stats: null).GetPlan(database, bound, ticket);
+
+        HashJoinNode join = FindHashJoinNode(plan.Root);
+        Assert.AreEqual(HashJoinBuildSide.Right, join.BuildSide,
+            "absent stats → safe fallback to right");
+    }
+
+    // Direct unit test for the EstimatePhysicalNodeRows infinite-recurse fix.
+    //
+    // The bug: the IndexRangeScanNode arm did `EstimatePhysicalNodeRows(node.Input ?? node)`, but
+    // IndexRangeScanNode.Input is always null, so it re-passed the same node and recursed forever →
+    // StackOverflow (uncatchable in .NET). The fix returns DefaultTableRowCount without recursing.
+    //
+    // Note this case is NOT reachable through GetPlan today — BuildJoinTree only emits TableScanNode
+    // (never IndexRangeScanNode/IndexLookupNode) into a join subtree, so ChooseBuildSide never sees
+    // one. The arm is defensive, so we test it directly rather than through the planner.
+    [Test]
+    public void EstimatePhysicalNodeRows_IndexRangeScanNode_ReturnsDefaultWithoutRecursing()
+    {
+        TableIndexSchema index = new("idx", ["col"], IndexType.Multi);
+        IndexRangeScanNode node = new(index, fromBound: null, fromInclusive: true, toBound: null, toInclusive: true);
+
+        // database/stats are unused on this arm; a StackOverflow here (the old bug) would crash the
+        // process rather than fail the assert, so reaching the assert at all proves no recursion.
+        long rows = JoinQueryPlanner.EstimatePhysicalNodeRows(node, database: null!, stats: null);
+
+        Assert.AreEqual(CostEstimator.DefaultTableRowCount, rows);
+    }
+
+    [Test]
+    public void EstimatePhysicalNodeRows_IndexLookupNode_ReturnsOne()
+    {
+        TableIndexSchema index = new("idx", ["col"], IndexType.Unique);
+        IndexLookupNode node = new(index, new ColumnValue(ColumnType.Integer64, 1L));
+
+        long rows = JoinQueryPlanner.EstimatePhysicalNodeRows(node, database: null!, stats: null);
+        Assert.AreEqual(1, rows);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Hash join cost model
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [Test]
+    public async Task HashJoinCost_MuchLessThanNestedLoopForSameInputs()
+    {
+        // For two unindexed N-row inputs:
+        //   NestedLoop cost ≈ N × N   KV range-scan entries = N²
+        //   HashJoin cost  ≈ N + N   KV range-scan entries + N × 0.1 in-memory rows
+        //   For N = 1 000 → NLJ Total = 1 000 000,  HJ Total ≈ 2 100
+        //
+        // Both plans are built with the same stats so the comparison is apples-to-apples.
+        const long N = 1_000;
+
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindJoinQueryWithExecutor(
+                "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id");
+
+        TableDescriptor usersTable = await database.TableDescriptors["app_users"];
+        TableDescriptor postsTable = await database.TableDescriptors["posts"];
+        executor.Statistics.SeedRowCountForTesting(database, usersTable, N);
+        executor.Statistics.SeedRowCountForTesting(database, postsTable, N);
+
+        // Hash-join plan (unindexed equi-join → planner picks HashJoinNode).
+        QueryPlan hashPlan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+        HashJoinNode hashJoin = FindHashJoinNode(hashPlan.Root);
+
+        // Manually build an equivalent NestedLoopJoinNode plan and annotate it.
+        // We reuse the same left input and right source so the stats context is identical.
+        NestedLoopJoinNode nljNode = new(hashJoin.Input!, hashJoin.BuildSource, hashJoin.OnPredicate);
+        CostEstimator.AnnotatePlan(nljNode, database, table: null, executor.Statistics);
+
+        Assert.IsNotNull(hashJoin.Cost, "hash join cost must be annotated");
+        Assert.IsNotNull(nljNode.Cost,  "NLJ cost must be annotated");
+
+        double hashCost = hashJoin.Cost!.Value.Total;
+        double nljCost  = nljNode.Cost!.Value.Total;
+
+        Assert.Greater(nljCost, hashCost,
+            $"NLJ cost ({nljCost}) must exceed hash-join cost ({hashCost}) for {N}×{N} inputs");
+
+        // For N=1000, NLJ ≈ 1_000_000 while hash join ≈ 2_100 — check the ratio is substantial.
+        Assert.Greater(nljCost / hashCost, 100,
+            $"Hash join should be at least 100× cheaper than NLJ at N={N}");
+
+        // Sanity: hash join cost fields
+        Assert.AreEqual(N + N, hashJoin.Cost.Value.KvRangeScanEntries,
+            "build scan + probe scan = 2N range entries");
+        Assert.AreEqual(N, hashJoin.Cost.Value.InMemoryRows,
+            "build side materialised in memory");
+        Assert.AreEqual(0, hashJoin.Cost.Value.KvPointLookups);
+    }
+
+    [Test]
+    public async Task HashJoinCost_Annotated_CardinalityNotNull()
+    {
+        // EstimatedCardinality must be set on HashJoinNode after AnnotatePlan, like every other node.
+        const long N = 500;
+
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindJoinQueryWithExecutor(
+                "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id");
+
+        TableDescriptor usersTable = await database.TableDescriptors["app_users"];
+        TableDescriptor postsTable = await database.TableDescriptors["posts"];
+        executor.Statistics.SeedRowCountForTesting(database, usersTable, N);
+        executor.Statistics.SeedRowCountForTesting(database, postsTable, N);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+        HashJoinNode join = FindHashJoinNode(plan.Root);
+
+        Assert.IsNotNull(join.EstimatedCardinality, "EstimatedCardinality must be set by AnnotatePlan");
+        Assert.Greater(join.EstimatedCardinality!.Value, 0);
+        Assert.IsNotNull(join.Cost, "Cost must be set");
+        Assert.Greater(join.Cost!.Value.Total, 0);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cost-based algorithm selection
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Indexed right key + small outer → INLJ should still win.
+    // INLJ cost ≈ 2 × 10 = 20;  hash cost ≈ (10 + 100 000) + 10 × 0.1 ≈ 100 011.
+    [Test]
+    public async Task IndexedRightKey_SmallOuter_PlansIndexNestedLoop()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindJoinQueryWithExecutor(
+                "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id",
+                indexPostsUserId: true);
+
+        TableDescriptor usersTable = await database.TableDescriptors["app_users"];
+        TableDescriptor postsTable = await database.TableDescriptors["posts"];
+        executor.Statistics.SeedRowCountForTesting(database, usersTable, 10);
+        executor.Statistics.SeedRowCountForTesting(database, postsTable, 100_000);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root,
+            "Small outer (10) + large indexed right (100 000) → INLJ is cheaper");
+    }
+
+    // Indexed right key + large outer → hash join should win.
+    // INLJ cost ≈ 2 × 100 000 = 200 000;  hash cost ≈ (100 000 + 10) + 10 × 0.1 ≈ 100 011.
+    [Test]
+    public async Task IndexedRightKey_LargeOuter_PlansHashJoin()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindJoinQueryWithExecutor(
+                "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id",
+                indexPostsUserId: true);
+
+        TableDescriptor usersTable = await database.TableDescriptors["app_users"];
+        TableDescriptor postsTable = await database.TableDescriptors["posts"];
+        executor.Statistics.SeedRowCountForTesting(database, usersTable, 100_000);
+        executor.Statistics.SeedRowCountForTesting(database, postsTable, 10);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<HashJoinNode>(plan.Root,
+            "Large outer (100 000) + small indexed right (10) → hash join is cheaper");
+    }
+
+    // No stats → always prefer INLJ (same behaviour when stats are absent).
+    [Test]
+    public async Task IndexedRightKey_NoStats_DefaultsToIndexNestedLoop()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, _) =
+            await BindJoinQueryWithExecutor(
+                "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id",
+                indexPostsUserId: true);
+
+        // Pass null stats — planner must fall back to INLJ.
+        QueryPlan plan = new JoinQueryPlanner(stats: null).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root,
+            "Absent stats must fall back to INLJ");
+    }
+
+    // Non-equi join → nested-loop (no equi-keys extractable → neither hash nor INLJ).
+    [Test]
+    public async Task NonEquiJoin_PlansNestedLoop()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, _) =
+            await BindJoinQueryWithExecutor(
+                "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.published = true",
+                indexPostsUserId: true);
+
+        QueryPlan plan = new JoinQueryPlanner(stats: null).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<NestedLoopJoinNode>(plan.Root,
+            "Non-equi join must use nested-loop regardless of index");
     }
 }

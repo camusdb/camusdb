@@ -41,7 +41,7 @@ public sealed class QueryTicket
 
     public NodeAst? Offset { get; }
 
-    /// <summary>When true, duplicate projected rows are eliminated (QP3.6).</summary>
+    /// <summary>When true, duplicate projected rows are eliminated.</summary>
     public bool IsDistinct { get; }
 
     public Dictionary<string, ColumnValue>? Parameters { get; }
@@ -51,7 +51,7 @@ public sealed class QueryTicket
     /// <summary>Predicate analysis for <see cref="Where"/>; populated at ticket creation.</summary>
     public PredicateAnalysis? AnalyzedWhere { get; }
 
-    /// <summary>Prepared correlated EXISTS subqueries keyed by rewritten AST nodes (QP5.4).</summary>
+    /// <summary>Prepared correlated EXISTS subqueries keyed by rewritten AST nodes.</summary>
     internal ExistsSubqueryRegistry? ExistsSubqueries { get; }
 
     /// <summary>

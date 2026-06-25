@@ -12,7 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models.Queries;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Merges scanned/joined rows using qualified keys per QP1.1 / <see cref="BoundRow"/> rules.
+/// Merges scanned/joined rows using qualified keys per <see cref="BoundRow"/> rules.
 /// </summary>
 internal static class QueryRowMerger
 {

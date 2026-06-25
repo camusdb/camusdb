@@ -18,7 +18,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Shared uncorrelated subquery execution for scalar and IN subqueries (QP5.2–QP5.3).
+/// Shared uncorrelated subquery execution for scalar and IN subqueries.
 /// </summary>
 internal sealed class SubqueryQueryExecutor
 {

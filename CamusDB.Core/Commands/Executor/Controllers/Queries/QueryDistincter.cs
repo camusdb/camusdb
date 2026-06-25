@@ -13,7 +13,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Removes duplicate output tuples for <c>SELECT DISTINCT</c> (QP3.6).
+/// Removes duplicate output tuples for <c>SELECT DISTINCT</c>.
 /// Comparison uses SQL DISTINCT null semantics: two NULL values are equal.
 /// </summary>
 internal sealed class QueryDistincter

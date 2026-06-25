@@ -653,6 +653,19 @@ public sealed class StatisticsManager
         }
     }
 
+    /// <summary>
+    /// Seeds a known row count for <paramref name="table"/> without a Kahuna round-trip.
+    /// Marks the entry as <c>Loaded</c> so <see cref="GetRowCountEstimate"/> returns it immediately.
+    /// Intended for unit tests only; do not call from production paths.
+    /// </summary>
+    internal void SeedRowCountForTesting(DatabaseDescriptor database, TableDescriptor table, long rowCount)
+    {
+        string key = CacheKey(database.Id, table.Id);
+        Entry entry = _cache.GetOrAdd(key, _ => new Entry());
+        Interlocked.Exchange(ref entry.RowCount, rowCount);
+        entry.Loaded = true;
+    }
+
     private static string CacheKey(string dbId, string tableId)
         => string.Concat(dbId, ":", tableId);
 

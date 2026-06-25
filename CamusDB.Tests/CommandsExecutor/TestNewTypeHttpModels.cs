@@ -27,7 +27,7 @@ using CamusDB.App.Models;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// T9 acceptance tests: HTTP/API request and response models for new column types.
+/// Acceptance tests: HTTP/API request and response models for new column types.
 /// Covers CreateTableColumn DTO JSON deserialization, ColumnValue JSON round-trips
 /// (bytes as base64, date/datetime with IsoValue, arrays as JSON arrays), and
 /// end-to-end create/insert/query for each new type via the HTTP DTO → executor path.
