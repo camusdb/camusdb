@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using System;
+using System.Collections.Generic;
 using NUnit.Framework;
 using CamusDB.Core;
 using CamusDB.Core.SQLParser;
@@ -1949,6 +1951,210 @@ public class TestSQLParser
         NodeAst? ast = SQLParserProcessor.Parse("EXPLAIN (ANALYZE) SELECT * FROM users");
         Assert.That(ast, Is.Not.Null);
         Assert.That(ast!.nodeType, Is.EqualTo(NodeType.ExplainAnalyze));
+    }
+
+    #endregion
+
+    // ── T5 data-type keywords ─────────────────────────────────────────────────
+    #region T5 — new type keyword parsing
+
+    // Walk a CreateTableItemList/CreateTableItem tree and collect (columnName → typeNode) pairs.
+    private static Dictionary<string, NodeAst> CollectColumnTypes(NodeAst node)
+    {
+        var result = new Dictionary<string, NodeAst>(StringComparer.Ordinal);
+        CollectColumnTypesInto(node, result);
+        return result;
+    }
+
+    private static void CollectColumnTypesInto(NodeAst? node, Dictionary<string, NodeAst> result)
+    {
+        if (node is null)
+            return;
+        if (node.nodeType == NodeType.CreateTableItem)
+        {
+            if (node.leftAst?.yytext is string name && node.rightAst is NodeAst typeNode)
+                result[name] = typeNode;
+            return;
+        }
+        if (node.nodeType == NodeType.CreateTableItemList)
+        {
+            CollectColumnTypesInto(node.leftAst, result);
+            CollectColumnTypesInto(node.rightAst, result);
+        }
+    }
+
+    [Test]
+    public void CreateTable_Float32_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (v float32)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeFloat32, cols["v"].nodeType);
+    }
+
+    [Test]
+    public void CreateTable_Float32_AliasReal_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (v real)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeFloat32, cols["v"].nodeType);
+    }
+
+    [Test]
+    public void CreateTable_Int_AliasForInt64_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (v int)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeInteger64, cols["v"].nodeType);
+    }
+
+    [Test]
+    public void CreateTable_Int64_StillParsesAfterIntAlias()
+    {
+        // Longest-match must keep `int64` distinct from the new `int` alias,
+        // and an int-prefixed identifier must remain an identifier.
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (a int64, internal int)");
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeInteger64, cols["a"].nodeType);
+        Assert.AreEqual(NodeType.TypeInteger64, cols["internal"].nodeType);
+    }
+
+    [Test]
+    public void CreateTable_Bytes_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (b bytes)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeBytes, cols["b"].nodeType);
+    }
+
+    [Test]
+    public void CreateTable_Bytes_AliasBlob_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (b blob)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeBytes, cols["b"].nodeType);
+    }
+
+    [Test]
+    public void CreateTable_Date_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (d date)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeDate, cols["d"].nodeType);
+    }
+
+    [Test]
+    public void CreateTable_DateTime_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (dt datetime)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeDateTime, cols["dt"].nodeType);
+    }
+
+    [Test]
+    public void CreateTable_DateTime_AliasTimestamp_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (ts timestamp)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeDateTime, cols["ts"].nodeType);
+    }
+
+    [Test]
+    public void CreateTable_ArrayOfInt64_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (tags array(int64))");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        NodeAst arrNode = cols["tags"];
+        Assert.AreEqual(NodeType.TypeArray, arrNode.nodeType);
+        Assert.AreEqual(NodeType.TypeInteger64, arrNode.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void CreateTable_StringSized_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (name string(32))");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        NodeAst sizedNode = cols["name"];
+        Assert.AreEqual(NodeType.TypeStringSized, sizedNode.nodeType);
+        Assert.AreEqual("32", sizedNode.yytext);
+    }
+
+    [Test]
+    public void CreateTable_AllNewTypes_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "CREATE TABLE t (a float32, b bytes, c date, d datetime, e array(int64), nm string(32))");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+
+        Assert.AreEqual(NodeType.TypeFloat32,    cols["a"].nodeType);
+        Assert.AreEqual(NodeType.TypeBytes,      cols["b"].nodeType);
+        Assert.AreEqual(NodeType.TypeDate,       cols["c"].nodeType);
+        Assert.AreEqual(NodeType.TypeDateTime,   cols["d"].nodeType);
+
+        Assert.AreEqual(NodeType.TypeArray,      cols["e"].nodeType);
+        Assert.AreEqual(NodeType.TypeInteger64,  cols["e"].leftAst!.nodeType);
+
+        Assert.AreEqual(NodeType.TypeStringSized, cols["nm"].nodeType);
+        Assert.AreEqual("32",                    cols["nm"].yytext);
+    }
+
+    [Test]
+    public void CreateTable_ArrayWithStringElement_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (tags array(string))");
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeArray,  cols["tags"].nodeType);
+        Assert.AreEqual(NodeType.TypeString, cols["tags"].leftAst!.nodeType);
+    }
+
+    [Test]
+    public void Cast_Float32_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT CAST(v AS float32) FROM t");
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        NodeAst castNode = ast.leftAst!;
+        Assert.AreEqual(NodeType.ExprCast, castNode.nodeType);
+        Assert.AreEqual(NodeType.TypeFloat32, castNode.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void Cast_Date_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT CAST(ts AS date) FROM t");
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        NodeAst castNode = ast.leftAst!;
+        Assert.AreEqual(NodeType.ExprCast, castNode.nodeType);
+        Assert.AreEqual(NodeType.TypeDate, castNode.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void Cast_DateTime_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT CAST(ts AS datetime) FROM t");
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        NodeAst castNode = ast.leftAst!;
+        Assert.AreEqual(NodeType.ExprCast, castNode.nodeType);
+        Assert.AreEqual(NodeType.TypeDateTime, castNode.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void Cast_Bytes_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT CAST(v AS bytes) FROM t");
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        NodeAst castNode = ast.leftAst!;
+        Assert.AreEqual(NodeType.ExprCast, castNode.nodeType);
+        Assert.AreEqual(NodeType.TypeBytes, castNode.rightAst!.nodeType);
     }
 
     #endregion

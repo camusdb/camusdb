@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -14,9 +14,6 @@ using CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
-/// <summary>
-///
-/// </summary>
 internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
 {
     internal AlterTableTicket CreateAlterTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
@@ -39,11 +36,13 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
                 notNull = constraintTypes.Any(x => x.type == ColumnConstraintType.NotNull);
             }
 
+            (ColumnType colType, int? maxLen, ColumnType? elemType) = GetColumnMeta(ast.extendedOne!);
+
             return new(
                 ticket.DatabaseName,
                 tableName,
                 AlterTableOperation.AddColumn,
-                new ColumnInfo(ast.rightAst!.yytext!, GetColumnType(ast.extendedOne!), notNull, defaultValue)
+                new ColumnInfo(ast.rightAst!.yytext!, colType, notNull, defaultValue, maxLen, elemType)
             );
         }
 
@@ -69,23 +68,40 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
         );
     }
 
-    private static ColumnType GetColumnType(NodeAst nodeAst)
+    // Returns (ColumnType, MaxLength, ArrayElementType) from a field_type AST node.
+    private static (ColumnType type, int? maxLength, ColumnType? arrayElementType) GetColumnMeta(NodeAst nodeAst)
     {
-        if (nodeAst.nodeType == NodeType.TypeInteger64)
-            return ColumnType.Integer64;
+        switch (nodeAst.nodeType)
+        {
+            case NodeType.TypeInteger64: return (ColumnType.Integer64, null, null);
+            case NodeType.TypeFloat64:   return (ColumnType.Float64,   null, null);
+            case NodeType.TypeFloat32:   return (ColumnType.Float32,   null, null);
+            case NodeType.TypeObjectId:  return (ColumnType.Id,        null, null);
+            case NodeType.TypeBool:      return (ColumnType.Bool,      null, null);
+            case NodeType.TypeDate:      return (ColumnType.Date,      null, null);
+            case NodeType.TypeDateTime:  return (ColumnType.DateTime,  null, null);
+            case NodeType.TypeBytes:     return (ColumnType.Bytes,     null, null);
+            case NodeType.TypeString:    return (ColumnType.String,    null, null);
 
-        if (nodeAst.nodeType == NodeType.TypeFloat64)
-            return ColumnType.Float64;
+            case NodeType.TypeStringSized:
+                if (!int.TryParse(nodeAst.yytext, out int n) || n <= 0)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                        $"Invalid string size '{nodeAst.yytext}': must be a positive integer");
+                return (ColumnType.String, n, null);
 
-        if (nodeAst.nodeType == NodeType.TypeString)
-            return ColumnType.String;
+            case NodeType.TypeArray:
+            {
+                NodeAst elemNode = nodeAst.leftAst
+                    ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Array type node missing element type");
+                if (elemNode.nodeType == NodeType.TypeArray)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                        "Nested arrays are not supported: array(array(...)) is invalid");
+                (ColumnType elemType, _, _) = GetColumnMeta(elemNode);
+                return (ColumnType.Array, null, elemType);
+            }
 
-        if (nodeAst.nodeType == NodeType.TypeObjectId)
-            return ColumnType.Id;
-
-        if (nodeAst.nodeType == NodeType.TypeBool)
-            return ColumnType.Bool;
-
-        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown field type: " + nodeAst.nodeType);
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown field type: " + nodeAst.nodeType);
+        }
     }
 }

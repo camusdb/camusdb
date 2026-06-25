@@ -28,8 +28,7 @@ internal sealed class QueryScanner
 
     internal async IAsyncEnumerable<QueryResultRow> ScanUsingTableIndex(
         QueryPlan plan,
-        QueryFilterer queryFilterer,
-        RowDeserializer rowDeserializer
+        QueryFilterer queryFilterer
     )
     {
         TableDescriptor table = plan.Table;
@@ -70,8 +69,7 @@ internal sealed class QueryScanner
 
     internal async IAsyncEnumerable<QueryResultRow> ScanUsingIndex(
         QueryPlan plan,
-        QueryFilterer queryFilterer,
-        RowDeserializer rowDeserializer
+        QueryFilterer queryFilterer
     )
     {
         TableDescriptor table = plan.Table;

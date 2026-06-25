@@ -60,11 +60,20 @@ TDesc           (D|d)(E|e)(S|s)(C|c)
 TDescribe       (D|d)(E|e)(S|s)(C|c)(R|r)(I|i)(B|b)(E|e)
 TTypeString     (S|s)(T|t)(R|r)(I|i)(N|n)(G|g)
 TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
+TTypeInt        (I|i)(N|n)(T|t)
 TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
+TTypeFloat32    (F|f)(L|l)(O|o)(A|a)(T|t)(3)(2)
+TTypeReal       (R|r)(E|e)(A|a)(L|l)
 TTypeObjectId   (O|o)(B|b)(J|j)(E|e)(C|c)(T|t)(_)(I|i)(D|d)
 TTypeSObjectId  (O|o)(I|i)(D|d)
 TTypeBool       (B|b)(O|o)(O|o)(L|l)
 TTypeBoolean    (B|b)(O|o)(O|o)(L|l)(E|e)(A|a)(N|n)
+TTypeBytes      (B|b)(Y|y)(T|t)(E|e)(S|s)
+TTypeBlob       (B|b)(L|l)(O|o)(B|b)
+TTypeDatetime   (D|d)(A|a)(T|t)(E|e)(T|t)(I|i)(M|m)(E|e)
+TTypeTimestamp  (T|t)(I|i)(M|m)(E|e)(S|s)(T|t)(A|a)(M|m)(P|p)
+TTypeDate       (D|d)(A|a)(T|t)(E|e)
+TTypeArray      (A|a)(R|r)(R|r)(A|a)(Y|y)
 TCast           (C|c)(A|a)(S|s)(T|t)
 TInteger        (I|i)(N|n)(T|t)(E|e)(G|g)(E|e)(R|r)
 TDouble         (D|d)(O|o)(U|u)(B|b)(L|l)(E|e)
@@ -258,11 +267,29 @@ TDot            \.
 
 {TTypeInt64} { return (int)Token.TTYPE_INT64; }
 
+{TTypeInt} { return (int)Token.TTYPE_INT64; }
+
 {TTypeFloat64} { return (int)Token.TTYPE_FLOAT64; }
+
+{TTypeFloat32} { return (int)Token.TTYPE_FLOAT32; }
+
+{TTypeReal} { return (int)Token.TTYPE_FLOAT32; }
 
 {TTypeBool} { return (int)Token.TTYPE_BOOL; }
 
 {TTypeBoolean} { return (int)Token.TTYPE_BOOL; }
+
+{TTypeBytes} { return (int)Token.TTYPE_BYTES; }
+
+{TTypeBlob} { return (int)Token.TTYPE_BYTES; }
+
+{TTypeDatetime} { return (int)Token.TTYPE_DATETIME; }
+
+{TTypeTimestamp} { return (int)Token.TTYPE_DATETIME; }
+
+{TTypeDate} { return (int)Token.TTYPE_DATE; }
+
+{TTypeArray} { return (int)Token.TTYPE_ARRAY; }
 
 {TCast} { return (int)Token.TCAST; }
 

@@ -15,6 +15,9 @@ using Kommander.Time;
 namespace CamusDB.Core.Catalogs;
 
 [JsonSerializable(typeof(long))]
+[JsonSerializable(typeof(byte[]))]
+[JsonSerializable(typeof(List<ColumnValue>))]
+[JsonSerializable(typeof(IReadOnlyList<ColumnValue>))]
 [JsonSerializable(typeof(ColumnValue))]
 [JsonSerializable(typeof(SchemaElementState))]
 [JsonSerializable(typeof(SchemaElementKind))]

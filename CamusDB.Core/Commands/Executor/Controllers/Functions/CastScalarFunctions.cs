@@ -11,17 +11,36 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.ObjectIds;
+using System.Buffers.Text;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 
 internal static class CastScalarFunctions
 {
+    // Date formats accepted by CamusDB for date literals (yyyy-MM-dd).
+    private const string DateFormat = "yyyy-MM-dd";
+
+    // DateTime formats accepted by CamusDB for datetime literals (UTC only).
+    private static readonly string[] DateTimeFormats =
+    [
+        "yyyy-MM-ddTHH:mm:ssZ",
+        "yyyy-MM-ddTHH:mm:ss.fffZ",
+        "yyyy-MM-ddTHH:mm:ss.ffZ",
+        "yyyy-MM-ddTHH:mm:ss.fZ",
+        "yyyy-MM-ddTHH:mm:sszzz",
+        "yyyy-MM-ddTHH:mm:ss",
+    ];
+
     public static void Register(ScalarFunctionRegistry registry)
     {
-        RegisterUnaryCast(registry, "to_string", ColumnType.String);
-        RegisterUnaryCast(registry, "to_int64", ColumnType.Integer64);
-        RegisterUnaryCast(registry, "to_float64", ColumnType.Float64);
-        RegisterUnaryCast(registry, "to_bool", ColumnType.Bool);
+        RegisterUnaryCast(registry, "to_string",   ColumnType.String);
+        RegisterUnaryCast(registry, "to_int64",    ColumnType.Integer64);
+        RegisterUnaryCast(registry, "to_float64",  ColumnType.Float64);
+        RegisterUnaryCast(registry, "to_bool",     ColumnType.Bool);
+        RegisterUnaryCast(registry, "to_float32",  ColumnType.Float32);
+        RegisterUnaryCast(registry, "to_date",     ColumnType.Date);
+        RegisterUnaryCast(registry, "to_datetime", ColumnType.DateTime);
+        RegisterUnaryCast(registry, "to_bytes",    ColumnType.Bytes);
 
         registry.Register(new ScalarFunctionDescriptor
         {
@@ -68,12 +87,39 @@ internal static class CastScalarFunctions
 
         return targetType switch
         {
-            ColumnType.String => CastToString(castName, value),
+            ColumnType.String    => CastToString(castName, value),
             ColumnType.Integer64 => CastToInt64(castName, value),
-            ColumnType.Float64 => CastToFloat64(castName, value),
-            ColumnType.Bool => CastToBool(castName, value),
-            ColumnType.Id => CastToId(castName, value),
+            ColumnType.Float64   => CastToFloat64(castName, value),
+            ColumnType.Float32   => CastToFloat32(castName, value),
+            ColumnType.Bool      => CastToBool(castName, value),
+            ColumnType.Id        => CastToId(castName, value),
+            ColumnType.Date      => CastToDate(castName, value),
+            ColumnType.DateTime  => CastToDateTime(castName, value),
+            ColumnType.Bytes     => CastToBytes(castName, value),
             _ => throw UnknownTargetType(castName, targetType.ToString()),
+        };
+    }
+
+    /// <summary>
+    /// Coerces a value produced by EvalExpr to the declared column type.
+    /// Only fires for the narrow set of implicit conversions the engine supports;
+    /// all other combinations are passed through unchanged (type mismatches are
+    /// caught by the row encoder or constraint layer).
+    /// </summary>
+    internal static ColumnValue CoerceToColumnType(ColumnValue value, TableColumnSchema column)
+    {
+        if (value.Type == ColumnType.Null || value.Type == column.Type)
+            return value;
+
+        return (value.Type, column.Type) switch
+        {
+            (ColumnType.String,    ColumnType.Id)       => CastToId("coerce", value),
+            (ColumnType.Float64,   ColumnType.Float32)  => CastToFloat32("coerce", value),
+            (ColumnType.Integer64, ColumnType.Float32)  => CastToFloat32("coerce", value),
+            (ColumnType.String,    ColumnType.Date)     => CastToDate("coerce", value),
+            (ColumnType.String,    ColumnType.DateTime) => CastToDateTime("coerce", value),
+            (ColumnType.String,    ColumnType.Bytes)    => CastToBytes("coerce", value),
+            _ => value,
         };
     }
 
@@ -81,12 +127,17 @@ internal static class CastScalarFunctions
     {
         return targetTypeAst.nodeType switch
         {
-            NodeType.TypeString => ColumnType.String,
+            NodeType.TypeString    => ColumnType.String,
             NodeType.TypeInteger64 => ColumnType.Integer64,
-            NodeType.TypeFloat64 => ColumnType.Float64,
-            NodeType.TypeBool => ColumnType.Bool,
-            NodeType.TypeObjectId => ColumnType.Id,
-            NodeType.Identifier => ResolveIdentifierTargetType(castName, targetTypeAst.yytext!),
+            NodeType.TypeFloat64   => ColumnType.Float64,
+            NodeType.TypeFloat32   => ColumnType.Float32,
+            NodeType.TypeBool      => ColumnType.Bool,
+            NodeType.TypeObjectId  => ColumnType.Id,
+            NodeType.TypeDate      => ColumnType.Date,
+            NodeType.TypeDateTime  => ColumnType.DateTime,
+            NodeType.TypeBytes     => ColumnType.Bytes,
+            NodeType.TypeStringSized => ColumnType.String,
+            NodeType.Identifier    => ResolveIdentifierTargetType(castName, targetTypeAst.yytext!),
             _ => throw UnknownTargetType(castName, targetTypeAst.nodeType.ToString()),
         };
     }
@@ -157,6 +208,142 @@ internal static class CastScalarFunctions
             ColumnType.String => FromStringToId(castName, value.StrValue!),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.Id),
         };
+    }
+
+    private static ColumnValue CastToFloat32(string castName, ColumnValue value)
+    {
+        return value.Type switch
+        {
+            ColumnType.Float32   => value,
+            ColumnType.Float64   => new ColumnValue(ColumnType.Float32, (double)(float)value.FloatValue),
+            ColumnType.Integer64 => new ColumnValue(ColumnType.Float32, (double)(float)value.LongValue),
+            ColumnType.String    => FromStringToFloat32(castName, value.StrValue!),
+            _ => throw InvalidConversion(castName, value.Type, ColumnType.Float32),
+        };
+    }
+
+    private static ColumnValue CastToDate(string castName, ColumnValue value)
+    {
+        return value.Type switch
+        {
+            ColumnType.Date     => value,
+            ColumnType.DateTime => new ColumnValue(ColumnType.Date, TruncateToMidnight(value.LongValue)),
+            ColumnType.String   => FromStringToDate(castName, value.StrValue!),
+            _ => throw InvalidConversion(castName, value.Type, ColumnType.Date),
+        };
+    }
+
+    private static ColumnValue CastToDateTime(string castName, ColumnValue value)
+    {
+        return value.Type switch
+        {
+            ColumnType.DateTime => value,
+            ColumnType.Date     => value, // Date is already stored as ticks at midnight UTC
+            ColumnType.String   => FromStringToDateTime(castName, value.StrValue!),
+            _ => throw InvalidConversion(castName, value.Type, ColumnType.DateTime),
+        };
+    }
+
+    private static ColumnValue CastToBytes(string castName, ColumnValue value)
+    {
+        return value.Type switch
+        {
+            ColumnType.Bytes  => value,
+            ColumnType.String => FromStringToBytes(castName, value.StrValue!),
+            _ => throw InvalidConversion(castName, value.Type, ColumnType.Bytes),
+        };
+    }
+
+    private static ColumnValue FromStringToFloat32(string castName, string text)
+    {
+        if (!float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsed)
+            || float.IsNaN(parsed) || float.IsInfinity(parsed))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{castName}' cannot convert string '{text}' to float32");
+
+        return new ColumnValue(ColumnType.Float32, (double)parsed);
+    }
+
+    private static ColumnValue FromStringToDate(string castName, string text)
+    {
+        if (!DateTimeOffset.TryParseExact(text, DateFormat, CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal, out DateTimeOffset dto))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{castName}' cannot parse '{text}' as date — expected format: yyyy-MM-dd");
+
+        long ticks = TruncateToMidnight(dto.UtcDateTime.Ticks);
+        return new ColumnValue(ColumnType.Date, ticks);
+    }
+
+    private static ColumnValue FromStringToDateTime(string castName, string text)
+    {
+        if (!DateTimeOffset.TryParseExact(text, DateTimeFormats, CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal, out DateTimeOffset dto))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{castName}' cannot parse '{text}' as datetime — expected ISO-8601 UTC format, e.g. 2026-01-01T12:00:00Z");
+
+        return new ColumnValue(ColumnType.DateTime, dto.UtcTicks);
+    }
+
+    // Bytes literals use 0x-prefixed hex: '0xABCD01'. Base-64 is NOT accepted.
+    private static ColumnValue FromStringToBytes(string castName, string text)
+    {
+        ReadOnlySpan<char> span = text.AsSpan();
+
+        if (span.Length < 2 || span[0] != '0' || (span[1] != 'x' && span[1] != 'X'))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{castName}' expects a 0x-prefixed hex literal for bytes, got '{text}'");
+
+        span = span[2..];
+
+        if (span.Length % 2 != 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{castName}' hex literal must have an even number of hex digits");
+
+        byte[] bytes = new byte[span.Length / 2];
+
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            if (!TryParseHexByte(span[i * 2], span[i * 2 + 1], out byte b))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Function '{castName}' invalid hex character in bytes literal '{text}'");
+            bytes[i] = b;
+        }
+
+        return new ColumnValue(bytes);
+    }
+
+    private static bool TryParseHexByte(char hi, char lo, out byte result)
+    {
+        if (!TryHexChar(hi, out int h) || !TryHexChar(lo, out int l))
+        {
+            result = 0;
+            return false;
+        }
+        result = (byte)((h << 4) | l);
+        return true;
+    }
+
+    private static bool TryHexChar(char c, out int value)
+    {
+        if (c >= '0' && c <= '9') { value = c - '0'; return true; }
+        if (c >= 'a' && c <= 'f') { value = c - 'a' + 10; return true; }
+        if (c >= 'A' && c <= 'F') { value = c - 'A' + 10; return true; }
+        value = 0;
+        return false;
+    }
+
+    // Truncate ticks to UTC midnight (date-only).
+    private static long TruncateToMidnight(long ticks)
+    {
+        const long ticksPerDay = TimeSpan.TicksPerDay;
+        return ticks - (ticks % ticksPerDay);
     }
 
     private static ColumnValue FromStringToInt64(string castName, string text)

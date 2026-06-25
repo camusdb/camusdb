@@ -19,4 +19,14 @@ public sealed class CreateTableColumn
     public bool NotNull { get; set; }
 
     public ColumnValue? DefaultValue { get; set; }
+
+    /// <summary>
+    /// Maximum length in characters (string) or bytes (bytes/blob). Null = default cap.
+    /// </summary>
+    public int? MaxLength { get; set; }
+
+    /// <summary>
+    /// Element type keyword for array columns (e.g. "int64", "string"). Null for non-array types.
+    /// </summary>
+    public string? ArrayElementType { get; set; }
 }

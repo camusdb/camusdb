@@ -24,8 +24,6 @@ internal sealed class QueryExecutor
 {
     private readonly ILogger<ICamusDB> logger;
 
-    private readonly RowDeserializer rowDeserializer = new();
-
     private readonly QueryPlanner queryPlanner;
 
     private readonly QueryFilterer queryFilterer = new(new ExistsSubqueryExecutor());
@@ -99,11 +97,11 @@ internal sealed class QueryExecutor
                     break;
 
                 case QueryPlanStepType.FullScanFromIndex:
-                    plan.DataCursor = queryScanner.ScanUsingIndex(plan, queryFilterer, rowDeserializer);
+                    plan.DataCursor = queryScanner.ScanUsingIndex(plan, queryFilterer);
                     break;
 
                 case QueryPlanStepType.FullScanFromTableIndex:
-                    plan.DataCursor = queryScanner.ScanUsingTableIndex(plan, queryFilterer, rowDeserializer);
+                    plan.DataCursor = queryScanner.ScanUsingTableIndex(plan, queryFilterer);
                     break;
 
                 case QueryPlanStepType.SortBy:

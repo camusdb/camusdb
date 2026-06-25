@@ -13,6 +13,7 @@ using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using System.Text.RegularExpressions;
+using System.Globalization;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
@@ -49,14 +50,14 @@ internal abstract class SQLExecutorBaseCreator
         switch (expr.nodeType)
         {
             case NodeType.Integer:
-                if (!long.TryParse(expr.yytext!, out long longValue))
+                if (!long.TryParse(expr.yytext!, NumberStyles.Integer, CultureInfo.InvariantCulture, out long longValue))
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Int64: " + expr.yytext!);
 
                 return new ColumnValue(ColumnType.Integer64, longValue);
 
             case NodeType.Float:
-                if (!double.TryParse(expr.yytext!, out double doubleValue))
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Int64: " + expr.yytext!);
+                if (!double.TryParse(expr.yytext!, NumberStyles.Float, CultureInfo.InvariantCulture, out double doubleValue))
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Float64: " + expr.yytext!);
 
                 return new ColumnValue(ColumnType.Float64, doubleValue);
 

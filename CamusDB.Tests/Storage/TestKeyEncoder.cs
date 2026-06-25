@@ -25,9 +25,13 @@ public class TestKeyEncoder
     {
         ColumnType.Integer64,
         ColumnType.Float64,
+        ColumnType.Float32,
         ColumnType.Bool,
         ColumnType.String,
-        ColumnType.Id
+        ColumnType.Id,
+        ColumnType.Date,
+        ColumnType.DateTime,
+        ColumnType.Bytes,
     };
 
     /// <summary>
@@ -403,6 +407,200 @@ public class TestKeyEncoder
         }
     }
 
+    // ---- new indexable types: order + round-trip + ASCII --------------------
+
+    [Test]
+    public void Float32_OrderingMatchesCompareTo()
+    {
+        Random random = new(20260625);
+        for (int iter = 0; iter < 2000; iter++)
+        {
+            ColumnValue a = new(ColumnType.Float32, (double)RandomFloat(random));
+            ColumnValue b = new(ColumnType.Float32, (double)RandomFloat(random));
+
+            int semantic = Math.Sign(a.CompareTo(b));
+            int encoded  = Math.Sign(string.CompareOrdinal(
+                KeyEncoder.Encode(Single(a)), KeyEncoder.Encode(Single(b))));
+
+            Assert.AreEqual(semantic, encoded, $"Float32 order mismatch: {a} vs {b}");
+        }
+    }
+
+    [Test]
+    public void Float32_RoundTrip()
+    {
+        float[] samples = { float.MinValue, -1.5f, 0f, 1.5f, float.MaxValue };
+        foreach (float v in samples)
+        {
+            CompositeColumnValue orig = Single(new ColumnValue(ColumnType.Float32, (double)v));
+            CompositeColumnValue dec  = KeyEncoder.Decode(KeyEncoder.Encode(orig), [ColumnType.Float32]);
+            Assert.That(dec.Values[0].Type, Is.EqualTo(ColumnType.Float32));
+            Assert.That((float)dec.Values[0].FloatValue, Is.EqualTo(v), $"Float32 round-trip failed for {v}");
+        }
+    }
+
+    [Test]
+    public void Float32_EncodedIsAscii()
+    {
+        foreach (float v in new[] { float.MinValue, -1f, 0f, 1f, float.MaxValue })
+        {
+            string enc = KeyEncoder.Encode(Single(new ColumnValue(ColumnType.Float32, (double)v)));
+            foreach (char c in enc)
+                Assert.That(c, Is.LessThan(''), $"Non-ASCII char U+{(int)c:X4} for float32 {v}");
+        }
+    }
+
+    [Test]
+    public void Date_OrderingMatchesCompareTo()
+    {
+        Random random = new(20260625);
+        for (int iter = 0; iter < 2000; iter++)
+        {
+            ColumnValue a = new(ColumnType.Date, RandomDateTicks(random));
+            ColumnValue b = new(ColumnType.Date, RandomDateTicks(random));
+
+            int semantic = Math.Sign(a.CompareTo(b));
+            int encoded  = Math.Sign(string.CompareOrdinal(
+                KeyEncoder.Encode(Single(a)), KeyEncoder.Encode(Single(b))));
+
+            Assert.AreEqual(semantic, encoded, $"Date order mismatch");
+        }
+    }
+
+    [Test]
+    public void Date_RoundTrip()
+    {
+        long[] samples =
+        [
+            DateTime.MinValue.Ticks,
+            new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks,
+            new DateTime(2026, 6, 25, 0, 0, 0, DateTimeKind.Utc).Ticks,
+            DateTime.MaxValue.Ticks
+        ];
+        foreach (long t in samples)
+        {
+            CompositeColumnValue orig = Single(new ColumnValue(ColumnType.Date, t));
+            CompositeColumnValue dec  = KeyEncoder.Decode(KeyEncoder.Encode(orig), [ColumnType.Date]);
+            Assert.That(dec.Values[0].Type, Is.EqualTo(ColumnType.Date));
+            Assert.That(dec.Values[0].LongValue, Is.EqualTo(t));
+        }
+    }
+
+    [Test]
+    public void DateTime_OrderingMatchesCompareTo()
+    {
+        Random random = new(20260625);
+        for (int iter = 0; iter < 2000; iter++)
+        {
+            ColumnValue a = new(ColumnType.DateTime, RandomDateTicks(random));
+            ColumnValue b = new(ColumnType.DateTime, RandomDateTicks(random));
+
+            int semantic = Math.Sign(a.CompareTo(b));
+            int encoded  = Math.Sign(string.CompareOrdinal(
+                KeyEncoder.Encode(Single(a)), KeyEncoder.Encode(Single(b))));
+
+            Assert.AreEqual(semantic, encoded);
+        }
+    }
+
+    [Test]
+    public void DateTime_RoundTrip_MinMax()
+    {
+        foreach (long t in new[] { DateTime.MinValue.Ticks, DateTime.MaxValue.Ticks })
+        {
+            CompositeColumnValue orig = Single(new ColumnValue(ColumnType.DateTime, t));
+            CompositeColumnValue dec  = KeyEncoder.Decode(KeyEncoder.Encode(orig), [ColumnType.DateTime]);
+            Assert.That(dec.Values[0].Type, Is.EqualTo(ColumnType.DateTime));
+            Assert.That(dec.Values[0].LongValue, Is.EqualTo(t));
+        }
+    }
+
+    [Test]
+    public void Bytes_OrderingMatchesCompareTo()
+    {
+        Random random = new(20260625);
+        for (int iter = 0; iter < 2000; iter++)
+        {
+            ColumnValue a = new(RandomBytes(random));
+            ColumnValue b = new(RandomBytes(random));
+
+            int semantic = Math.Sign(a.CompareTo(b));
+            int encoded  = Math.Sign(string.CompareOrdinal(
+                KeyEncoder.Encode(Single(a)), KeyEncoder.Encode(Single(b))));
+
+            Assert.AreEqual(semantic, encoded, $"Bytes order mismatch");
+        }
+    }
+
+    [Test]
+    public void Bytes_PrefixSortCorrectly()
+    {
+        byte[][] ascending = [[], [0x00], [0x00, 0x00], [0x00, 0x01], [0xFF]];
+        for (int i = 0; i + 1 < ascending.Length; i++)
+        {
+            ColumnValue a = new(ascending[i]);
+            ColumnValue b = new(ascending[i + 1]);
+            string ea = KeyEncoder.Encode(Single(a));
+            string eb = KeyEncoder.Encode(Single(b));
+            Assert.That(string.CompareOrdinal(ea, eb), Is.LessThan(0),
+                $"Bytes prefix order failed at index {i}");
+        }
+    }
+
+    [Test]
+    public void Bytes_RoundTrip()
+    {
+        byte[][] samples = [[], [0x00], [0xDE, 0xAD, 0xBE, 0xEF], [0xFF, 0x00, 0x01]];
+        foreach (byte[] payload in samples)
+        {
+            CompositeColumnValue orig = Single(new ColumnValue(payload));
+            CompositeColumnValue dec  = KeyEncoder.Decode(KeyEncoder.Encode(orig), [ColumnType.Bytes]);
+            Assert.That(dec.Values[0].Type, Is.EqualTo(ColumnType.Bytes));
+            Assert.That(dec.Values[0].BytesValue, Is.EqualTo(payload));
+        }
+    }
+
+    [Test]
+    public void Bytes_EncodedIsAscii()
+    {
+        byte[] payload = [0x00, 0x7F, 0x80, 0xFF];
+        string enc = KeyEncoder.Encode(Single(new ColumnValue(payload)));
+        foreach (char c in enc)
+            Assert.That(c, Is.LessThan(''), $"Non-ASCII char U+{(int)c:X4} in bytes encoding");
+    }
+
+    [Test]
+    public void Array_EncodeThrows()
+    {
+        ColumnValue arr = ColumnValue.FromArray(ColumnType.Integer64, [new(ColumnType.Integer64, 1L)]);
+        Assert.Throws<CamusDB.Core.CamusDBException>(() => KeyEncoder.Encode(Single(arr)));
+    }
+
+    [Test]
+    public void Composite_MixingNewTypesWithExisting_RoundTrips()
+    {
+        long dateTicks = new DateTime(2026, 6, 25, 0, 0, 0, DateTimeKind.Utc).Ticks;
+        ColumnValue[] cols =
+        [
+            new(ColumnType.Integer64, -7L),
+            new(ColumnType.Float32,   (double)1.5f),
+            new(ColumnType.Date,      dateTicks),
+            new(new byte[] { 0xAB, 0xCD }),
+            new(ColumnType.String,    "hello"),
+        ];
+
+        CompositeColumnValue orig = new(cols);
+        ColumnType[] schema = [ColumnType.Integer64, ColumnType.Float32, ColumnType.Date, ColumnType.Bytes, ColumnType.String];
+
+        CompositeColumnValue dec = KeyEncoder.Decode(KeyEncoder.Encode(orig), schema);
+
+        Assert.That(dec.Values[0].LongValue,           Is.EqualTo(-7L));
+        Assert.That((float)dec.Values[1].FloatValue,   Is.EqualTo(1.5f));
+        Assert.That(dec.Values[2].LongValue,           Is.EqualTo(dateTicks));
+        Assert.That(dec.Values[3].BytesValue,          Is.EqualTo(new byte[] { 0xAB, 0xCD }));
+        Assert.That(dec.Values[4].StrValue,            Is.EqualTo("hello"));
+    }
+
     private static void AssertSorted<T>(T[] ascendingSamples, Func<T, CompositeColumnValue> toComposite)
     {
         for (int i = 0; i + 1 < ascendingSamples.Length; i++)
@@ -440,6 +638,9 @@ public class TestKeyEncoder
             case ColumnType.Float64:
                 return new ColumnValue(ColumnType.Float64, RandomDouble(random));
 
+            case ColumnType.Float32:
+                return new ColumnValue(ColumnType.Float32, (double)RandomFloat(random));
+
             case ColumnType.Bool:
                 return new ColumnValue(ColumnType.Bool, random.Next(2) == 0);
 
@@ -448,6 +649,15 @@ public class TestKeyEncoder
 
             case ColumnType.Id:
                 return new ColumnValue(ColumnType.Id, RandomString(random));
+
+            case ColumnType.Date:
+                return new ColumnValue(ColumnType.Date, RandomDateTicks(random));
+
+            case ColumnType.DateTime:
+                return new ColumnValue(ColumnType.DateTime, RandomDateTicks(random));
+
+            case ColumnType.Bytes:
+                return new ColumnValue(RandomBytes(random));
 
             default:
                 throw new InvalidOperationException("Unsupported type: " + type);
@@ -478,6 +688,42 @@ public class TestKeyEncoder
             3 => random.NextDouble() * 1e6,
             _ => (random.NextDouble() - 0.5) * 10
         };
+    }
+
+    private static float RandomFloat(Random random)
+    {
+        int bucket = random.Next(5);
+        return bucket switch
+        {
+            0 => float.MinValue,
+            1 => float.MaxValue,
+            2 => -(float)(random.NextDouble() * 1e6),
+            3 => (float)(random.NextDouble() * 1e6),
+            _ => (float)((random.NextDouble() - 0.5) * 10)
+        };
+    }
+
+    private static readonly long DateTicksMin = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks;
+    private static readonly long DateTicksMax = new DateTime(2100, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks;
+
+    private static long RandomDateTicks(Random random)
+    {
+        // Uniformly sample ticks in a realistic calendar range, with boundary samples.
+        int bucket = random.Next(4);
+        return bucket switch
+        {
+            0 => DateTime.MinValue.Ticks,
+            1 => DateTime.MaxValue.Ticks,
+            _ => DateTicksMin + (long)(random.NextDouble() * (DateTicksMax - DateTicksMin))
+        };
+    }
+
+    private static byte[] RandomBytes(Random random)
+    {
+        int len = random.Next(0, 16);
+        byte[] b = new byte[len];
+        random.NextBytes(b);
+        return b;
     }
 
     // Tokens deliberately span the full UTF-16 range an index key can contain, not just ASCII —

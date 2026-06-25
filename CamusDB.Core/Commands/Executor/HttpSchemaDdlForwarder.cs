@@ -223,6 +223,8 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         Type = col.Type,
         NotNull = col.NotNull,
         Default = col.Default,
+        MaxLength = col.MaxLength,
+        ArrayElementType = col.ArrayElementType,
     };
 
     private static ColumnInfoRequest[] MapColumns(ColumnInfo[] cols)

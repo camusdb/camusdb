@@ -54,6 +54,7 @@ public static class CamusDBErrorCodes
 
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
+    public const string ValueTooLong = "CADB0302";
     
     public const string TransactionAlreadyCompleted = "CADB0501";
     public const string TransactionConflict = "CADB0502";

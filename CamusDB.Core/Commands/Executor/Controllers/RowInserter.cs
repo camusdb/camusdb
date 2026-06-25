@@ -87,6 +87,46 @@ internal sealed class RowInserter
                     );
                 }
             }
+
+            // Step #3. Check string/bytes length bounds
+            foreach (TableColumnSchema columnSchema in columns)
+            {
+                if (!SchemaElementStateRules.IsWritable(columnSchema))
+                    continue;
+
+                if (columnSchema.Type != ColumnType.String && columnSchema.Type != ColumnType.Bytes)
+                    continue;
+
+                if (!values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
+                    continue;
+
+                if (columnValue.Type == ColumnType.Null)
+                    continue;
+
+                EnforceLengthBound(columnSchema, columnValue);
+            }
+        }
+    }
+
+    private static void EnforceLengthBound(TableColumnSchema column, ColumnValue value)
+    {
+        if (column.Type == ColumnType.String)
+        {
+            string s = value.StrValue ?? "";
+            int max = column.MaxLength ?? CamusDBConfig.DefaultStringMaxLength;
+            if (s.Length > max)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ValueTooLong,
+                    $"value too long for column '{column.Name}' (max {max}, got {s.Length})");
+        }
+        else if (column.Type == ColumnType.Bytes)
+        {
+            byte[] b = value.BytesValue ?? [];
+            int max = column.MaxLength ?? CamusDBConfig.DefaultBytesMaxLength;
+            if (b.Length > max)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ValueTooLong,
+                    $"value too long for column '{column.Name}' (max {max}, got {b.Length})");
         }
     }
 

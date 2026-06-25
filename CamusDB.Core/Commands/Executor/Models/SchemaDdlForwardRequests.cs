@@ -20,6 +20,8 @@ public sealed class ColumnInfoRequest
     public ColumnType Type { get; set; }
     public bool NotNull { get; set; }
     public ColumnValue? Default { get; set; }
+    public int? MaxLength { get; set; }
+    public ColumnType? ArrayElementType { get; set; }
 }
 
 public sealed class ColumnIndexInfoRequest

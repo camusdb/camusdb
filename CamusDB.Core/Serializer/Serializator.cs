@@ -146,10 +146,39 @@ public sealed class Serializator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteFloat(byte[] buffer, float number, ref int pointer)
+    {
+        BinaryPrimitives.WriteSingleLittleEndian(buffer.AsSpan(pointer), number);
+        pointer += 4;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteDouble(byte[] buffer, double number, ref int pointer)
     {
         BinaryPrimitives.WriteDoubleLittleEndian(buffer.AsSpan(pointer), number);
         pointer += 8;
+    }
+
+    /// <summary>Writes a 4-byte length prefix followed by the raw byte payload.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteBytesPayload(byte[] buffer, byte[] bytes, ref int pointer)
+    {
+        int length = bytes.Length;
+        buffer[pointer + 0] = (byte)((length >>  0) & 0xff);
+        buffer[pointer + 1] = (byte)((length >>  8) & 0xff);
+        buffer[pointer + 2] = (byte)((length >> 16) & 0xff);
+        buffer[pointer + 3] = (byte)((length >> 24) & 0xff);
+        pointer += 4;
+        Buffer.BlockCopy(bytes, 0, buffer, pointer, length);
+        pointer += length;
+    }
+
+    /// <summary>Reads a 4-byte length prefix and the following byte payload.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static byte[] ReadBytesPayload(byte[] buffer, ref int pointer)
+    {
+        int length = ReadInt32(buffer, ref pointer);
+        return ReadByteArray(buffer, length, ref pointer);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

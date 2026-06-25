@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -48,13 +48,28 @@ public sealed class TableColumnSchema
     /// </summary>
     public SchemaElementState State { get; }
 
+    /// <summary>
+    /// Maximum length in characters (String) or bytes (Bytes). Null means unbounded-but-capped
+    /// at the default (see <see cref="CamusDB.Core.CamusDBConfig.DefaultStringMaxLength"/> /
+    /// <see cref="CamusDB.Core.CamusDBConfig.DefaultBytesMaxLength"/>). Persisted in schema JSON.
+    /// Ignored for other types.
+    /// </summary>
+    public int? MaxLength { get; }
+
+    /// <summary>
+    /// Element type for Array columns. Null for all non-Array types. Persisted in schema JSON.
+    /// </summary>
+    public ColumnType? ArrayElementType { get; }
+
     public TableColumnSchema(
         string id,
         string name,
         ColumnType type,
         bool notNull,
         ColumnValue? defaultValue,
-        SchemaElementState state = SchemaElementState.Public
+        SchemaElementState state = SchemaElementState.Public,
+        int? maxLength = null,
+        ColumnType? arrayElementType = null
     )
     {
         Id = id;
@@ -63,5 +78,7 @@ public sealed class TableColumnSchema
         NotNull = notNull;
         DefaultValue = defaultValue;
         State = state;
+        MaxLength = maxLength;
+        ArrayElementType = arrayElementType;
     }
 }

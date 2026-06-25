@@ -56,6 +56,16 @@ public sealed class SchemaColumnPayload
 
     public SchemaElementState State { get; set; } = SchemaElementState.Public;
 
+    /// <summary>
+    /// Maximum length in characters (String) or bytes (Bytes). Null = unbounded-but-default-capped.
+    /// </summary>
+    public int? MaxLength { get; set; }
+
+    /// <summary>
+    /// Element type for Array columns. Null for non-Array types.
+    /// </summary>
+    public ColumnType? ArrayElementType { get; set; }
+
     public static SchemaColumnPayload FromColumnInfo(ColumnInfo column)
     {
         return new()
@@ -63,7 +73,9 @@ public sealed class SchemaColumnPayload
             Name = column.Name,
             Type = column.Type,
             NotNull = column.NotNull,
-            DefaultValue = column.Default
+            DefaultValue = column.Default,
+            MaxLength = column.MaxLength,
+            ArrayElementType = column.ArrayElementType,
         };
     }
 }

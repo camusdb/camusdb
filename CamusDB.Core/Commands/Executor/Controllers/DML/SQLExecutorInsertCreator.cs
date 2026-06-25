@@ -10,6 +10,7 @@ using CamusDB.Core.SQLParser;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
@@ -50,6 +51,10 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
 
         GetBatchValuesList(table, ast.extendedOne, new(), ticket.Parameters, valuesList);
 
+        // Build a lookup from column name → schema so we can coerce literal values to the declared type.
+        Dictionary<string, TableColumnSchema> colSchemaByName = table.Schema.Columns!
+            .ToDictionary(c => c.Name, c => c, StringComparer.Ordinal);
+
         int position = 0;
 
         foreach (List<ColumnValue?> valuesRow in valuesList)
@@ -63,10 +68,12 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
             {
                 ColumnValue? columnValue = valuesRow.ElementAt(i); // @todo optimize this
 
-                if (columnValue is not null)
-                    values.Add(fields[i], columnValue);
-                else
-                    values.Add(fields[i], GetDefaultValue(table.Schema.Columns, fields[i]));
+                ColumnValue val = columnValue ?? GetDefaultValue(table.Schema.Columns, fields[i]);
+
+                if (colSchemaByName.TryGetValue(fields[i], out TableColumnSchema? colDef))
+                    val = CastScalarFunctions.CoerceToColumnType(val, colDef);
+
+                values.Add(fields[i], val);
             }
 
             // Try to include any missing field with its default value if available

@@ -220,6 +220,22 @@ public static class CamusDBConfig
     public static int MaxTablesPerDatabase = 10_000;
 
     /// <summary>
+    /// Default maximum length (in UTF-16 <c>string.Length</c> characters) for a <c>String</c>
+    /// column declared without an explicit <c>string(N)</c> bound.
+    /// Applied at write-validation time (T7); stored as <c>null</c> in the schema metadata.
+    /// Value: 2 621 440 characters (~5 MB in the worst-case UTF-16 encoding).
+    /// </summary>
+    public const int DefaultStringMaxLength = 2_621_440;
+
+    /// <summary>
+    /// Default maximum payload length (in bytes) for a <c>Bytes</c> column declared without
+    /// an explicit bound.
+    /// Applied at write-validation time (T7); stored as <c>null</c> in the schema metadata.
+    /// Value: 10 485 760 bytes (10 MB).
+    /// </summary>
+    public const int DefaultBytesMaxLength = 10_485_760;
+
+    /// <summary>
     /// Resolved Kahuna engine overrides from <c>config.yml</c>. Applied when constructing embedded
     /// nodes in cluster and standalone modes.
     /// </summary>

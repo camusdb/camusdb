@@ -24,6 +24,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
 %token TTRUE TFALSE TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
 %token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL TCAST TINTEGER TDOUBLE
+%token TTYPE_FLOAT32 TTYPE_BYTES TTYPE_DATE TTYPE_DATETIME TTYPE_ARRAY
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
@@ -382,9 +383,15 @@ default_expr : int { $$.n = $1.n; $$.s = $1.s; }
 
 field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }
            | TTYPE_STRING { $$.n = NodeAst.TypeString; }
+           | TTYPE_STRING LPAREN TDIGIT RPAREN { $$.n = new(NodeType.TypeStringSized, null, null, null, null, null, null, null, $3.s); }
            | TTYPE_INT64 { $$.n = NodeAst.TypeInteger64; }
            | TTYPE_FLOAT64 { $$.n = NodeAst.TypeFloat64; }
-           | TTYPE_BOOL { $$.n = NodeAst.TypeBool; } 
+           | TTYPE_BOOL { $$.n = NodeAst.TypeBool; }
+           | TTYPE_FLOAT32 { $$.n = NodeAst.TypeFloat32; }
+           | TTYPE_BYTES { $$.n = NodeAst.TypeBytes; }
+           | TTYPE_DATE { $$.n = NodeAst.TypeDate; }
+           | TTYPE_DATETIME { $$.n = NodeAst.TypeDateTime; }
+           | TTYPE_ARRAY LPAREN field_type RPAREN { $$.n = new(NodeType.TypeArray, $3.n, null, null, null, null, null, null, null); }
            ;
 
 cast_target_type : field_type { $$.n = $1.n; $$.s = $1.s; }

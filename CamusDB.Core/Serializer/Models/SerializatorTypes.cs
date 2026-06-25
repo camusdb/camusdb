@@ -46,5 +46,11 @@ public static class SerializatorTypes
     public const int TypeObject32 = 20;    
 
     public const int TypeWordsDict = 22;
+
+    // New types added for data-type expansion. Codes 19 and 21 are skipped
+    // (19 is the TypeObject8/TypeObject16 collision; 21 is reserved).
+    public const int TypeDate = 23;
+    public const int TypeDateTime = 24;
+    public const int TypeBytes = 25;
 }
 

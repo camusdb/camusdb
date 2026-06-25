@@ -990,7 +990,9 @@ public sealed class CatalogsManager
                     type: column.Type,
                     notNull: column.NotNull,
                     defaultValue: column.DefaultValue,
-                    state: column.State
+                    state: column.State,
+                    maxLength: column.MaxLength,
+                    arrayElementType: column.ArrayElementType
                 )
             );
         }
@@ -1134,7 +1136,9 @@ public sealed class CatalogsManager
             type: current.Type,
             notNull: current.NotNull,
             defaultValue: current.DefaultValue,
-            state: current.State
+            state: current.State,
+            maxLength: current.MaxLength,
+            arrayElementType: current.ArrayElementType
         );
 
         tableSchema.Version++;
@@ -1151,7 +1155,8 @@ public sealed class CatalogsManager
             TableColumnSchema hCol = history.Columns[hIdx];
             history.Columns[hIdx] = new TableColumnSchema(
                 id: hCol.Id, name: payload.NewName, type: hCol.Type,
-                notNull: hCol.NotNull, defaultValue: hCol.DefaultValue, state: hCol.State);
+                notNull: hCol.NotNull, defaultValue: hCol.DefaultValue, state: hCol.State,
+                maxLength: hCol.MaxLength, arrayElementType: hCol.ArrayElementType);
         }
 
         tableSchema.SchemaHistory.Add(new() { Version = tableSchema.Version, Columns = tableSchema.Columns });
@@ -1258,7 +1263,9 @@ public sealed class CatalogsManager
                 type: newColumn.Type,
                 notNull: newColumn.NotNull,
                 defaultValue: newColumn.DefaultValue,
-                state: newColumn.State
+                state: newColumn.State,
+                maxLength: newColumn.MaxLength,
+                arrayElementType: newColumn.ArrayElementType
             )
         );
 

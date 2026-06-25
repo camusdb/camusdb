@@ -38,6 +38,18 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
 
         GetCreateTableConstraintFromFieldList(ast.rightAst, constraintInfos);
 
+        // Reject array columns in any PK or index — arrays are not indexable.
+        Dictionary<string, ColumnType> colTypeByName = columnInfos.ToDictionary(c => c.Name, c => c.Type, StringComparer.Ordinal);
+        foreach (ConstraintInfo constraint in constraintInfos)
+        {
+            foreach (ColumnIndexInfo col in constraint.Columns)
+            {
+                if (colTypeByName.TryGetValue(col.Name, out ColumnType colType) && colType == ColumnType.Array)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                        $"Column '{col.Name}' has type Array which cannot be used in an index or primary key");
+            }
+        }
+
         return new(
             databaseName: ticket.DatabaseName,
             tableName: tableName,
@@ -162,25 +174,31 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             if (fieldList.rightAst is null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing field type");
 
+            (ColumnType colType, int? maxLen, ColumnType? elemType) = GetColumnMeta(fieldList.rightAst);
+
             if (fieldList.extendedOne != null)
             {
                 List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
-
                 GetColumnConstraintList(fieldList.extendedOne, constraintTypes);
 
                 allFieldLists.Add(
                     new ColumnInfo(
                         name: fieldList.leftAst.yytext! ?? "",
-                        type: GetColumnType(fieldList.rightAst),
+                        type: colType,
                         notNull: constraintTypes.Any(x => x.type == ColumnConstraintType.NotNull),
-                        defaultValue: GetDefaultFromConstraints(constraintTypes)
+                        defaultValue: GetDefaultFromConstraints(constraintTypes),
+                        maxLength: maxLen,
+                        arrayElementType: elemType
                     )
                 );
-
                 return;
             }
 
-            allFieldLists.Add(new ColumnInfo(fieldList.leftAst.yytext! ?? "", GetColumnType(fieldList.rightAst)));
+            allFieldLists.Add(new ColumnInfo(
+                name: fieldList.leftAst.yytext! ?? "",
+                type: colType,
+                maxLength: maxLen,
+                arrayElementType: elemType));
             return;
         }
 
@@ -203,29 +221,41 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid create table field list");
     }
 
-    /// <summary>
-    /// Returns the default value as ColumnValue
-    /// </summary>
-    /// <param name="constraintTypes"></param>
-    /// <returns></returns>
-    private static ColumnType GetColumnType(NodeAst nodeAst)
+    // Returns (ColumnType, MaxLength, ArrayElementType) from a field_type AST node.
+    private static (ColumnType type, int? maxLength, ColumnType? arrayElementType) GetColumnMeta(NodeAst nodeAst)
     {
-        if (nodeAst.nodeType == NodeType.TypeInteger64)
-            return ColumnType.Integer64;
+        switch (nodeAst.nodeType)
+        {
+            case NodeType.TypeInteger64: return (ColumnType.Integer64, null, null);
+            case NodeType.TypeFloat64:   return (ColumnType.Float64,   null, null);
+            case NodeType.TypeFloat32:   return (ColumnType.Float32,   null, null);
+            case NodeType.TypeObjectId:  return (ColumnType.Id,        null, null);
+            case NodeType.TypeBool:      return (ColumnType.Bool,      null, null);
+            case NodeType.TypeDate:      return (ColumnType.Date,      null, null);
+            case NodeType.TypeDateTime:  return (ColumnType.DateTime,  null, null);
+            case NodeType.TypeBytes:     return (ColumnType.Bytes,     null, null);
+            case NodeType.TypeString:    return (ColumnType.String,    null, null);
 
-        if (nodeAst.nodeType == NodeType.TypeFloat64)
-            return ColumnType.Float64;
+            case NodeType.TypeStringSized:
+                if (!int.TryParse(nodeAst.yytext, out int n) || n <= 0)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                        $"Invalid string size '{nodeAst.yytext}': must be a positive integer");
+                return (ColumnType.String, n, null);
 
-        if (nodeAst.nodeType == NodeType.TypeString)
-            return ColumnType.String;
+            case NodeType.TypeArray:
+            {
+                NodeAst elemNode = nodeAst.leftAst
+                    ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Array type node missing element type");
+                if (elemNode.nodeType == NodeType.TypeArray)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                        "Nested arrays are not supported: array(array(...)) is invalid");
+                (ColumnType elemType, _, _) = GetColumnMeta(elemNode);
+                return (ColumnType.Array, null, elemType);
+            }
 
-        if (nodeAst.nodeType == NodeType.TypeObjectId)
-            return ColumnType.Id;
-
-        if (nodeAst.nodeType == NodeType.TypeBool)
-            return ColumnType.Bool;
-
-        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown field type: " + nodeAst.nodeType);
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown field type: " + nodeAst.nodeType);
+        }
     }
 
     private static void GetCreateTableConstraintFromFieldList(NodeAst fieldList, List<ConstraintInfo> constraintInfos)

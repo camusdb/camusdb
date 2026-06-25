@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
 
 using NUnit.Framework;
@@ -327,11 +328,11 @@ public sealed class TestRowEncoder
     }
 
     [Test]
-    public void ByteCompatibility_MatchesRowSerializerFormat()
+    public void ByteCompatibility_EncodeDecodeRoundTrips()
     {
         // Verify byte-level compatibility: the bytes produced by RowEncoder.Encode
-        // must be decodable by RowEncoder.Decode.  Since both mirror the internal
-        // RowSerializer/RowDeserializer exactly, the format is verified by construction.
+        // must be decodable by RowEncoder.Decode for the original column types — pins
+        // the on-disk wire format so legacy data keeps decoding.
         TableSchema schema = MakeSchema(0,
             Col("a", ColumnType.Integer64),
             Col("b", ColumnType.String),
@@ -360,6 +361,213 @@ public sealed class TestRowEncoder
         Assert.AreEqual("test", decoded["b"].StrValue);
         Assert.AreEqual(false,  decoded["c"].BoolValue);
         Assert.AreEqual(3.14,   decoded["d"].FloatValue);
+    }
+
+    // ---- new type round-trips -----------------------------------------------
+
+    [Test]
+    public void RoundTrip_Float32()
+    {
+        TableSchema schema = MakeSchema(0, Col("f", ColumnType.Float32));
+        ObjectIdValue rowId = RowId();
+
+        foreach (float v in new[] { float.MinValue, -1.5f, 0f, 1.5f, float.MaxValue })
+        {
+            Dictionary<string, ColumnValue> row = new() { ["f"] = new(ColumnType.Float32, (double)v) };
+            byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+            Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+            Assert.That(decoded["f"].Type, Is.EqualTo(ColumnType.Float32));
+            Assert.That((float)decoded["f"].FloatValue, Is.EqualTo(v), $"Float32 round-trip failed for {v}");
+        }
+    }
+
+    [Test]
+    public void RoundTrip_Float32_Zero_And_Negative()
+    {
+        TableSchema schema = MakeSchema(0, Col("f", ColumnType.Float32));
+        ObjectIdValue rowId = RowId();
+
+        foreach (double v in new[] { -999.0, 0.0, 1.0 })
+        {
+            Dictionary<string, ColumnValue> row = new() { ["f"] = new(ColumnType.Float32, v) };
+            byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+            Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+            Assert.That((float)decoded["f"].FloatValue, Is.EqualTo((float)v));
+        }
+    }
+
+    [Test]
+    public void RoundTrip_Date()
+    {
+        TableSchema schema = MakeSchema(0, Col("d", ColumnType.Date));
+        ObjectIdValue rowId = RowId();
+
+        long[] ticks =
+        [
+            new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks,
+            new DateTime(2026, 6, 25, 0, 0, 0, DateTimeKind.Utc).Ticks,
+            DateTime.MinValue.Ticks,
+        ];
+
+        foreach (long t in ticks)
+        {
+            Dictionary<string, ColumnValue> row = new() { ["d"] = new(ColumnType.Date, t) };
+            byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+            Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+            Assert.That(decoded["d"].Type, Is.EqualTo(ColumnType.Date));
+            Assert.That(decoded["d"].LongValue, Is.EqualTo(t));
+        }
+    }
+
+    [Test]
+    public void RoundTrip_DateTime_MinMax()
+    {
+        TableSchema schema = MakeSchema(0, Col("dt", ColumnType.DateTime));
+        ObjectIdValue rowId = RowId();
+
+        long[] ticks = [DateTime.MinValue.Ticks, DateTime.MaxValue.Ticks,
+            new DateTime(2026, 1, 1, 12, 30, 0, DateTimeKind.Utc).Ticks];
+
+        foreach (long t in ticks)
+        {
+            Dictionary<string, ColumnValue> row = new() { ["dt"] = new(ColumnType.DateTime, t) };
+            byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+            Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+            Assert.That(decoded["dt"].Type, Is.EqualTo(ColumnType.DateTime));
+            Assert.That(decoded["dt"].LongValue, Is.EqualTo(t));
+        }
+    }
+
+    [Test]
+    public void RoundTrip_Bytes_Empty()
+    {
+        TableSchema schema = MakeSchema(0, Col("b", ColumnType.Bytes));
+        ObjectIdValue rowId = RowId();
+
+        Dictionary<string, ColumnValue> row = new() { ["b"] = new(Array.Empty<byte>()) };
+        byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+        Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+        Assert.That(decoded["b"].Type, Is.EqualTo(ColumnType.Bytes));
+        Assert.That(decoded["b"].BytesValue, Is.Not.Null);
+        Assert.That(decoded["b"].BytesValue!.Length, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void RoundTrip_Bytes_Payload()
+    {
+        TableSchema schema = MakeSchema(0, Col("b", ColumnType.Bytes));
+        ObjectIdValue rowId = RowId();
+
+        byte[] payload = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF];
+        Dictionary<string, ColumnValue> row = new() { ["b"] = new(payload) };
+        byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+        Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+        Assert.That(decoded["b"].Type, Is.EqualTo(ColumnType.Bytes));
+        Assert.That(decoded["b"].BytesValue, Is.EqualTo(payload));
+    }
+
+    [Test]
+    public void RoundTrip_Array_Empty()
+    {
+        TableSchema schema = MakeSchema(0, Col("a", ColumnType.Array));
+        ObjectIdValue rowId = RowId();
+
+        Dictionary<string, ColumnValue> row = new()
+        {
+            ["a"] = ColumnValue.FromArray(ColumnType.Integer64, [])
+        };
+        byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+        Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+        Assert.That(decoded["a"].Type, Is.EqualTo(ColumnType.Array));
+        Assert.That(decoded["a"].ArrayElementType, Is.EqualTo(ColumnType.Integer64));
+        Assert.That(decoded["a"].ArrayValues!.Count, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void RoundTrip_Array_WithNullElement()
+    {
+        TableSchema schema = MakeSchema(0, Col("a", ColumnType.Array));
+        ObjectIdValue rowId = RowId();
+
+        Dictionary<string, ColumnValue> row = new()
+        {
+            ["a"] = ColumnValue.FromArray(ColumnType.Integer64, [
+                new(ColumnType.Integer64, 10L),
+                ColumnValue.Null,
+                new(ColumnType.Integer64, 30L)
+            ])
+        };
+        byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+        Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+        Assert.That(decoded["a"].ArrayValues![0].LongValue, Is.EqualTo(10L));
+        Assert.That(decoded["a"].ArrayValues![1].Type, Is.EqualTo(ColumnType.Null));
+        Assert.That(decoded["a"].ArrayValues![2].LongValue, Is.EqualTo(30L));
+    }
+
+    [Test]
+    public void RoundTrip_AllNewTypes_MultiColumnRow()
+    {
+        TableSchema schema = MakeSchema(0,
+            Col("f32",  ColumnType.Float32),
+            Col("dt",   ColumnType.DateTime),
+            Col("d",    ColumnType.Date),
+            Col("blob", ColumnType.Bytes),
+            Col("arr",  ColumnType.Array)
+        );
+        ObjectIdValue rowId = RowId();
+
+        long dateTimeTicks = new DateTime(2026, 6, 25, 12, 0, 0, DateTimeKind.Utc).Ticks;
+        long dateTicks     = new DateTime(2026, 6, 25, 0,  0, 0, DateTimeKind.Utc).Ticks;
+        byte[] blob = [1, 2, 3, 4];
+
+        Dictionary<string, ColumnValue> row = new()
+        {
+            ["f32"]  = new(ColumnType.Float32,  3.14),
+            ["dt"]   = new(ColumnType.DateTime, dateTimeTicks),
+            ["d"]    = new(ColumnType.Date,     dateTicks),
+            ["blob"] = new(blob),
+            ["arr"]  = ColumnValue.FromArray(ColumnType.Integer64, [new(ColumnType.Integer64, 7L)])
+        };
+
+        byte[] bytes   = RowEncoder.Encode(schema, row, rowId);
+        Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+        Assert.That((float)decoded["f32"].FloatValue,  Is.EqualTo((float)3.14));
+        Assert.That(decoded["dt"].LongValue,           Is.EqualTo(dateTimeTicks));
+        Assert.That(decoded["d"].LongValue,            Is.EqualTo(dateTicks));
+        Assert.That(decoded["blob"].BytesValue,        Is.EqualTo(blob));
+        Assert.That(decoded["arr"].ArrayValues![0].LongValue, Is.EqualTo(7L));
+    }
+
+    [Test]
+    public void RoundTrip_OldSchemaVersion_UnchangedColumns()
+    {
+        // A row written with only Integer64/String (old schema) must still decode correctly
+        // after schema version bumps — backward compat by construction.
+        TableSchema schema = MakeSchema(0,
+            Col("id",   ColumnType.Integer64),
+            Col("name", ColumnType.String));
+        ObjectIdValue rowId = RowId();
+
+        Dictionary<string, ColumnValue> row = new()
+        {
+            ["id"]   = new(ColumnType.Integer64, 42L),
+            ["name"] = new(ColumnType.String, "legacy")
+        };
+
+        byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+        Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+        Assert.That(decoded["id"].LongValue,  Is.EqualTo(42L));
+        Assert.That(decoded["name"].StrValue, Is.EqualTo("legacy"));
     }
 
     [Test]

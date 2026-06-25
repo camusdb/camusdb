@@ -18,6 +18,7 @@ using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.Diagnostics;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 
@@ -231,6 +232,58 @@ public sealed class RowUpdater
                 );
             }
         }
+
+        foreach (TableColumnSchema columnSchema in columns)
+        {
+            if (!SchemaElementStateRules.IsWritable(columnSchema))
+                continue;
+
+            if (columnSchema.Type != ColumnType.String && columnSchema.Type != ColumnType.Bytes)
+                continue;
+
+            if (!rowValues.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
+                continue;
+
+            if (columnValue.Type == ColumnType.Null)
+                continue;
+
+            EnforceLengthBound(columnSchema, columnValue);
+        }
+    }
+
+    private static void CoerceRowValues(TableDescriptor table, Dictionary<string, ColumnValue> rowValues)
+    {
+        foreach (TableColumnSchema column in table.Schema.Columns!)
+        {
+            if (!rowValues.TryGetValue(column.Name, out ColumnValue? val))
+                continue;
+
+            ColumnValue coerced = CastScalarFunctions.CoerceToColumnType(val, column);
+            if (!ReferenceEquals(coerced, val))
+                rowValues[column.Name] = coerced;
+        }
+    }
+
+    private static void EnforceLengthBound(TableColumnSchema column, ColumnValue value)
+    {
+        if (column.Type == ColumnType.String)
+        {
+            string s = value.StrValue ?? "";
+            int max = column.MaxLength ?? CamusDBConfig.DefaultStringMaxLength;
+            if (s.Length > max)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ValueTooLong,
+                    $"value too long for column '{column.Name}' (max {max}, got {s.Length})");
+        }
+        else if (column.Type == ColumnType.Bytes)
+        {
+            byte[] b = value.BytesValue ?? [];
+            int max = column.MaxLength ?? CamusDBConfig.DefaultBytesMaxLength;
+            if (b.Length > max)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ValueTooLong,
+                    $"value too long for column '{column.Name}' (max {max}, got {b.Length})");
+        }
     }
 
     private static Dictionary<string, ColumnValue> GetNewUpdatedRow(
@@ -280,6 +333,8 @@ public sealed class RowUpdater
             ObjectIdValue rowId = queryRow.RowId;
             Dictionary<string, ColumnValue> oldRow = await LoadWritableRow(state.Database, table, tx, rowId).ConfigureAwait(false);
             Dictionary<string, ColumnValue> rowValues = GetNewUpdatedRow(oldRow, queryRow, ticket);
+
+            CoerceRowValues(table, rowValues);
 
             CheckForNotNulls(table, rowValues);
 

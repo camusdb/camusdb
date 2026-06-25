@@ -92,6 +92,11 @@ public sealed class NodeAst
     public static readonly NodeAst TypeInteger64 = Leaf(NodeType.TypeInteger64);
     public static readonly NodeAst TypeFloat64 = Leaf(NodeType.TypeFloat64);
     public static readonly NodeAst TypeBool = Leaf(NodeType.TypeBool);
+    public static readonly NodeAst TypeFloat32 = Leaf(NodeType.TypeFloat32);
+    public static readonly NodeAst TypeBytes = Leaf(NodeType.TypeBytes);
+    public static readonly NodeAst TypeDate = Leaf(NodeType.TypeDate);
+    public static readonly NodeAst TypeDateTime = Leaf(NodeType.TypeDateTime);
+    // TypeArray and TypeStringSized carry child data — construct them dynamically (no shared sentinel).
 
     // ── DDL constraint sentinels ───────────────────────────────────────────────
 

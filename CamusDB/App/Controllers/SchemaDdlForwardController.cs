@@ -425,7 +425,7 @@ public sealed class SchemaDdlForwardController : CommandsController
         { StatusCode = 500 };
 
     private static ColumnInfo MapColumn(ColumnInfoRequest r) =>
-        new(r.Name, r.Type, r.NotNull, r.Default);
+        new(r.Name, r.Type, r.NotNull, r.Default, r.MaxLength, r.ArrayElementType);
 
     private static ColumnInfo[] MapColumns(ColumnInfoRequest[] cols) =>
         cols.Select(MapColumn).ToArray();

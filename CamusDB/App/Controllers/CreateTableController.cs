@@ -33,19 +33,25 @@ public sealed class CreateTableController : CommandsController
         if (string.IsNullOrEmpty(name))
             throw new Exception("Invalid type");
 
-        if (name == "int64")
-            return ColumnType.Integer64;
-
-        if (name == "string")
-            return ColumnType.String;
-
-        if (name == "bool")
-            return ColumnType.Bool;
-
-        if (name == "id")
-            return ColumnType.Id;
-
-        throw new Exception("Unknown type " + name);
+        return name.ToLowerInvariant() switch
+        {
+            "id"        => ColumnType.Id,
+            "int64"     => ColumnType.Integer64,
+            "int"       => ColumnType.Integer64,
+            "integer"   => ColumnType.Integer64,
+            "string"    => ColumnType.String,
+            "bool"      => ColumnType.Bool,
+            "float64"   => ColumnType.Float64,
+            "float32"   => ColumnType.Float32,
+            "real"      => ColumnType.Float32,
+            "date"      => ColumnType.Date,
+            "datetime"  => ColumnType.DateTime,
+            "timestamp" => ColumnType.DateTime,
+            "bytes"     => ColumnType.Bytes,
+            "blob"      => ColumnType.Bytes,
+            "array"     => ColumnType.Array,
+            _           => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown type: " + name),
+        };
     }
 
     private static IndexType GetIndexType(string? type)
@@ -73,11 +79,17 @@ public sealed class CreateTableController : CommandsController
 
         foreach (CreateTableColumn column in columns)
         {
+            ColumnType? arrayElementType = null;
+            if (!string.IsNullOrEmpty(column.ArrayElementType))
+                arrayElementType = GetColumnType(column.ArrayElementType);
+
             columnInfos[i++] = new ColumnInfo(
                 name: column.Name ?? "",
                 type: GetColumnType(column.Type),
                 notNull: column.NotNull,
-                defaultValue: column.DefaultValue
+                defaultValue: column.DefaultValue,
+                maxLength: column.MaxLength,
+                arrayElementType: arrayElementType
             );
         }
 

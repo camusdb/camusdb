@@ -30,6 +30,13 @@ namespace CamusDB.Core.Storage.Kv;
 /// Bodies:
 ///   Integer64  : 16-char uppercase hex of (ulong)value with the sign bit flipped (fixed width).
 ///   Float64    : 16-char uppercase hex of an order-preserving transform of the IEEE-754 bits.
+///   Float32    : 8-char uppercase hex of an order-preserving transform of the single-precision bits
+///                (same sign-bit / complement trick as Float64, but on 32-bit).
+///   Date       : 16-char uppercase hex of the backing long (UTC ticks, midnight-aligned) via the
+///                same sign-bit-flipped integer transform — inherits Integer64 ordering.
+///   DateTime   : 16-char uppercase hex of the backing long (UTC ticks) via the integer transform.
+///   Bytes      : each byte as 2 uppercase hex chars, terminated by the field terminator
+///                (pure ASCII, prefix-correct, bytewise-order-preserving).
 ///   Bool       : "0" / "1".
 ///   String/Id  : each UTF-16 code unit as 4 uppercase hex chars (fixed width), terminated by the
 ///                field terminator. The output is pure ASCII, so the key's UTF-8 byte order (how the
@@ -40,9 +47,12 @@ namespace CamusDB.Core.Storage.Kv;
 ///                order (matches <see cref="ColumnValue.CompareTo"/>). String and Id share this
 ///                encoding so a String literal in a query matches an Id-typed stored key.
 ///
-/// Fixed-width fields (Integer64/Float64/Bool) need no terminator; the decoder knows their width
-/// from the column type. Variable-length fields (String/Id) are terminated so composite keys keep
-/// correct prefix ordering ("ab" sorts before "abc").
+/// Fixed-width fields (Integer64/Float64/Float32/Bool/Date/DateTime) need no terminator; the decoder
+/// knows their width from the column type. Variable-length fields (String/Id/Bytes) are terminated
+/// so composite keys keep correct prefix ordering.
+///
+/// Array is not indexable — <see cref="EncodeValue(StringBuilder,ColumnValue)"/> throws
+/// <see cref="CamusDBException"/> <c>InvalidInput</c> if an Array value is passed.
 ///
 /// Note: <see cref="ColumnValue.CompareTo"/> has a quirk where null.CompareTo(null) returns 1 rather
 /// than 0; this codec treats two NULLs as equal (the intended semantics). Property tests therefore
@@ -103,9 +113,25 @@ public static class KeyEncoder
                 builder.Append(value.BoolValue ? '1' : '0');
                 break;
 
+            case ColumnType.Float32:
+                builder.Append(EncodeFloat32((float)value.FloatValue));
+                break;
+
+            case ColumnType.Date:
+            case ColumnType.DateTime:
+                builder.Append(EncodeInteger64(value.LongValue));
+                break;
+
+            case ColumnType.Bytes:
+                AppendBytesHex(builder, value.BytesValue ?? []);
+                break;
+
+            case ColumnType.Array:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Array columns are not indexable");
+
             // String and Id share one encoding so a String literal in a query (e.g. WHERE id IN ('…'))
             // produces the same key as the Id-typed value stored in the index — the two must stay
-            // interchangeable. Both use the order-preserving ASCII-hex form (C3b).
+            // interchangeable. Both use the order-preserving ASCII-hex form.
             case ColumnType.String:
             case ColumnType.Id:
                 AppendStringHex(builder, value.StrValue ?? "");
@@ -143,6 +169,22 @@ public static class KeyEncoder
     }
 
 
+    /// <summary>
+    /// Maps a single-precision float to an order-preserving 8-char hex string using the same
+    /// sign-bit / complement trick as <see cref="EncodeFloat64"/>, but on 32-bit IEEE-754 bits.
+    /// </summary>
+    private static string EncodeFloat32(float value)
+    {
+        int bits = BitConverter.SingleToInt32Bits(value);
+
+        if (bits < 0)
+            bits = ~bits;
+        else
+            bits ^= int.MinValue;
+
+        return ((uint)bits).ToString("X8");
+    }
+
     private const string HexChars = "0123456789ABCDEF";
 
     /// <summary>
@@ -164,6 +206,23 @@ public static class KeyEncoder
             builder.Append(HexChars[(c >> 8) & 0xF]);
             builder.Append(HexChars[(c >> 4) & 0xF]);
             builder.Append(HexChars[c & 0xF]);
+        }
+
+        builder.Append(FieldTerminatorLead);
+        builder.Append(FieldTerminatorTail);
+    }
+
+    /// <summary>
+    /// Order-preserving pure-ASCII encoding for Bytes keys: each byte becomes 2 uppercase hex chars,
+    /// terminated by the field terminator. Bytewise order is preserved because "AB" &lt; "AC" ordinal,
+    /// and the terminator (which sorts before any hex digit) preserves prefix ordering.
+    /// </summary>
+    private static void AppendBytesHex(StringBuilder builder, byte[] value)
+    {
+        foreach (byte b in value)
+        {
+            builder.Append(HexChars[(b >> 4) & 0xF]);
+            builder.Append(HexChars[b & 0xF]);
         }
 
         builder.Append(FieldTerminatorLead);
@@ -217,6 +276,64 @@ public static class KeyEncoder
                         : ~storedBits;                 // was negative: undo complement
                     values[i] = new ColumnValue(ColumnType.Float64, BitConverter.Int64BitsToDouble(originalBits));
                     pos += 16;
+                    break;
+                }
+
+                case ColumnType.Float32:
+                {
+                    uint stored = uint.Parse(key.AsSpan(pos, 8), System.Globalization.NumberStyles.HexNumber);
+                    int storedBits = (int)stored;
+                    int originalBits = storedBits < 0
+                        ? storedBits ^ int.MinValue  // was non-negative: undo sign-bit flip
+                        : ~storedBits;               // was negative: undo complement
+                    float floatValue = BitConverter.Int32BitsToSingle(originalBits);
+                    values[i] = new ColumnValue(ColumnType.Float32, (double)floatValue);
+                    pos += 8;
+                    break;
+                }
+
+                case ColumnType.Date:
+                {
+                    ulong stored = ulong.Parse(key.AsSpan(pos, 16), System.Globalization.NumberStyles.HexNumber);
+                    long ticks = (long)(stored ^ 0x8000_0000_0000_0000UL);
+                    values[i] = new ColumnValue(ColumnType.Date, ticks);
+                    pos += 16;
+                    break;
+                }
+
+                case ColumnType.DateTime:
+                {
+                    ulong stored = ulong.Parse(key.AsSpan(pos, 16), System.Globalization.NumberStyles.HexNumber);
+                    long ticks = (long)(stored ^ 0x8000_0000_0000_0000UL);
+                    values[i] = new ColumnValue(ColumnType.DateTime, ticks);
+                    pos += 16;
+                    break;
+                }
+
+                case ColumnType.Bytes:
+                {
+                    List<byte> bytes = new();
+                    while (true)
+                    {
+                        if (pos >= key.Length)
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unterminated bytes field at field {i}");
+
+                        if (key[pos] == FieldTerminatorLead)
+                        {
+                            pos++;
+                            if (pos >= key.Length || key[pos] != FieldTerminatorTail)
+                                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Malformed bytes terminator at field {i}");
+                            pos++;
+                            break;
+                        }
+
+                        if (pos + 2 > key.Length)
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated hex byte at field {i}");
+
+                        bytes.Add(byte.Parse(key.AsSpan(pos, 2), System.Globalization.NumberStyles.HexNumber));
+                        pos += 2;
+                    }
+                    values[i] = new ColumnValue(bytes.ToArray());
                     break;
                 }
 

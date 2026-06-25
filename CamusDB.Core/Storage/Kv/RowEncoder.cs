@@ -20,9 +20,8 @@ namespace CamusDB.Core.Storage.Kv;
 /// Thin wrapper over <see cref="Serializator"/> that encodes/decodes a full row
 /// (all columns + embedded rowId) as a <c>byte[]</c> for storage as a Kahuna KV value.
 ///
-/// Wire format is identical to the one produced by <c>RowSerializer</c> and consumed
-/// by <c>RowDeserializer</c> so existing data written by the old storage layer can be
-/// read back without migration.
+/// Wire format is identical to the one produced by the original storage layer so existing
+/// data written before this codec can be read back without migration.
 ///
 /// Layout:
 ///   [TypeInteger32 marker][4-byte schema version]
@@ -101,6 +100,37 @@ public static class RowEncoder
                 case ColumnType.Bool:
                     Serializator.WriteBool(buffer, columnValue.BoolValue, ref pointer);
                     break;
+
+                case ColumnType.Float32:
+                    Serializator.WriteType(buffer, SerializatorTypes.TypeFloat, ref pointer);
+                    Serializator.WriteFloat(buffer, (float)columnValue.FloatValue, ref pointer);
+                    break;
+
+                case ColumnType.Date:
+                    Serializator.WriteType(buffer, SerializatorTypes.TypeDate, ref pointer);
+                    Serializator.WriteInt64(buffer, columnValue.LongValue, ref pointer);
+                    break;
+
+                case ColumnType.DateTime:
+                    Serializator.WriteType(buffer, SerializatorTypes.TypeDateTime, ref pointer);
+                    Serializator.WriteInt64(buffer, columnValue.LongValue, ref pointer);
+                    break;
+
+                case ColumnType.Bytes:
+                    Serializator.WriteType(buffer, SerializatorTypes.TypeBytes, ref pointer);
+                    Serializator.WriteBytesPayload(buffer, columnValue.BytesValue ?? [], ref pointer);
+                    break;
+
+                case ColumnType.Array:
+                {
+                    IReadOnlyList<ColumnValue> elements = columnValue.ArrayValues ?? [];
+                    Serializator.WriteType(buffer, SerializatorTypes.TypeArray32, ref pointer);
+                    Serializator.WriteInt32(buffer, elements.Count, ref pointer);
+                    buffer[pointer++] = (byte)columnValue.ArrayElementType;
+                    foreach (ColumnValue el in elements)
+                        WriteArrayElement(buffer, el, ref pointer);
+                    break;
+                }
 
                 case ColumnType.Null:
                     Serializator.WriteType(buffer, SerializatorTypes.TypeNull, ref pointer);
@@ -396,6 +426,74 @@ public static class RowEncoder
                 };
             }
 
+            case ColumnType.Float32:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeFloat =>
+                        new(ColumnType.Float32, (double)Serializator.ReadFloat(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        new(ColumnType.Null, 0L),
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Date:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeDate =>
+                        new(ColumnType.Date, Serializator.ReadInt64(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        new(ColumnType.Null, 0L),
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.DateTime:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeDateTime =>
+                        new(ColumnType.DateTime, Serializator.ReadInt64(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        new(ColumnType.Null, 0L),
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Bytes:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeBytes =>
+                        new(Serializator.ReadBytesPayload(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        new(ColumnType.Null, 0L),
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Array:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeNull)
+                    return new(ColumnType.Null, 0L);
+                if (t != SerializatorTypes.TypeArray32)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+
+                int count = Serializator.ReadInt32(data, ref pointer);
+                ColumnType elementType = (ColumnType)Serializator.ReadInt8(data, ref pointer);
+                List<ColumnValue> elements = new(count);
+                for (int j = 0; j < count; j++)
+                    elements.Add(ReadArrayElement(elementType, data, ref pointer));
+                return ColumnValue.FromArray(elementType, elements);
+            }
+
             default:
                 throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + column.Type);
         }
@@ -453,8 +551,185 @@ public static class RowEncoder
                 break;
             }
 
+            case ColumnType.Float32:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeFloat)
+                    pointer += SerializatorTypeSizes.TypeFloat32;
+                else if (t != SerializatorTypes.TypeNull)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
+            case ColumnType.Date:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeDate)
+                    pointer += SerializatorTypeSizes.TypeInteger64;
+                else if (t != SerializatorTypes.TypeNull)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
+            case ColumnType.DateTime:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeDateTime)
+                    pointer += SerializatorTypeSizes.TypeInteger64;
+                else if (t != SerializatorTypes.TypeNull)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
+            case ColumnType.Bytes:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeBytes)
+                    Serializator.ReadBytesPayload(data, ref pointer);
+                else if (t != SerializatorTypes.TypeNull)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
+            case ColumnType.Array:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeNull)
+                    break;
+                if (t != SerializatorTypes.TypeArray32)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                int count = Serializator.ReadInt32(data, ref pointer);
+                Serializator.ReadInt8(data, ref pointer); // element type byte — discard
+                for (int j = 0; j < count; j++)
+                    SkipArrayElement(data, ref pointer);
+                break;
+            }
+
             default:
                 throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnType);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Array element helpers
+    // -------------------------------------------------------------------------
+
+    private static int ArrayElementsSize(IReadOnlyList<ColumnValue> elements)
+    {
+        int total = 0;
+        foreach (ColumnValue el in elements)
+        {
+            total += el.Type switch
+            {
+                ColumnType.Null      => 1,
+                ColumnType.Bool      => 1,
+                ColumnType.Integer64 => 1 + SerializatorTypeSizes.TypeInteger64,
+                ColumnType.Float32   => 1 + SerializatorTypeSizes.TypeFloat32,
+                ColumnType.Float64   => 1 + SerializatorTypeSizes.TypeDouble,
+                ColumnType.Date or ColumnType.DateTime => 1 + SerializatorTypeSizes.TypeInteger64,
+                ColumnType.String    => 1 + SerializatorTypeSizes.TypeInteger32 + Encoding.Unicode.GetByteCount(el.StrValue!),
+                ColumnType.Bytes     => 1 + SerializatorTypeSizes.TypeInteger32 + (el.BytesValue?.Length ?? 0),
+                _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Array element type not supported in size: " + el.Type)
+            };
+        }
+        return total;
+    }
+
+    private static void WriteArrayElement(byte[] buffer, ColumnValue el, ref int pointer)
+    {
+        switch (el.Type)
+        {
+            case ColumnType.Null:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeNull, ref pointer);
+                break;
+            case ColumnType.Integer64:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeInteger64, ref pointer);
+                Serializator.WriteInt64(buffer, el.LongValue, ref pointer);
+                break;
+            case ColumnType.Float32:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeFloat, ref pointer);
+                Serializator.WriteFloat(buffer, (float)el.FloatValue, ref pointer);
+                break;
+            case ColumnType.Float64:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeDouble, ref pointer);
+                Serializator.WriteDouble(buffer, el.FloatValue, ref pointer);
+                break;
+            case ColumnType.Bool:
+                Serializator.WriteBool(buffer, el.BoolValue, ref pointer);
+                break;
+            case ColumnType.String:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeString32, ref pointer);
+                Serializator.WriteString(buffer, el.StrValue!, ref pointer);
+                break;
+            case ColumnType.Bytes:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeBytes, ref pointer);
+                Serializator.WriteBytesPayload(buffer, el.BytesValue ?? [], ref pointer);
+                break;
+            case ColumnType.Date:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeDate, ref pointer);
+                Serializator.WriteInt64(buffer, el.LongValue, ref pointer);
+                break;
+            case ColumnType.DateTime:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeDateTime, ref pointer);
+                Serializator.WriteInt64(buffer, el.LongValue, ref pointer);
+                break;
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Array element type not supported in write: " + el.Type);
+        }
+    }
+
+    private static ColumnValue ReadArrayElement(ColumnType elementType, byte[] data, ref int pointer)
+    {
+        int t = Serializator.ReadType(data, ref pointer);
+        if (t == SerializatorTypes.TypeNull)
+            return ColumnValue.Null;
+
+        return elementType switch
+        {
+            ColumnType.Integer64 => new(ColumnType.Integer64, Serializator.ReadInt64(data, ref pointer)),
+            ColumnType.Float32   => new(ColumnType.Float32,   (double)Serializator.ReadFloat(data, ref pointer)),
+            ColumnType.Float64   => new(ColumnType.Float64,   Serializator.ReadDouble(data, ref pointer)),
+            ColumnType.Bool      => new(ColumnType.Bool,      Serializator.ReadBool(data, ref pointer)),
+            ColumnType.String    => new(ColumnType.String,    Serializator.ReadString(data, ref pointer)),
+            ColumnType.Bytes     => new(Serializator.ReadBytesPayload(data, ref pointer)),
+            ColumnType.Date      => new(ColumnType.Date,      Serializator.ReadInt64(data, ref pointer)),
+            ColumnType.DateTime  => new(ColumnType.DateTime,  Serializator.ReadInt64(data, ref pointer)),
+            _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Unknown array element type: " + elementType)
+        };
+    }
+
+    private static void SkipArrayElement(byte[] data, ref int pointer)
+    {
+        int t = Serializator.ReadType(data, ref pointer);
+        switch (t)
+        {
+            case SerializatorTypes.TypeNull:
+                break;
+            case SerializatorTypes.TypeBool:
+                break; // value is in the same byte as the type tag — already consumed
+            case SerializatorTypes.TypeInteger64:
+                pointer += SerializatorTypeSizes.TypeInteger64;
+                break;
+            case SerializatorTypes.TypeFloat:
+                pointer += SerializatorTypeSizes.TypeFloat32;
+                break;
+            case SerializatorTypes.TypeDouble:
+                pointer += SerializatorTypeSizes.TypeDouble;
+                break;
+            case SerializatorTypes.TypeDate:
+            case SerializatorTypes.TypeDateTime:
+                pointer += SerializatorTypeSizes.TypeInteger64;
+                break;
+            case SerializatorTypes.TypeString8:
+            case SerializatorTypes.TypeString16:
+            case SerializatorTypes.TypeString32:
+                Serializator.ReadString(data, ref pointer);
+                break;
+            case SerializatorTypes.TypeBytes:
+                Serializator.ReadBytesPayload(data, ref pointer);
+                break;
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Unknown array element disk type: " + t);
         }
     }
 
@@ -494,11 +769,21 @@ public static class RowEncoder
                     SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger64,
                 ColumnType.Float64 =>
                     SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeDouble,
+                ColumnType.Float32 =>
+                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeFloat32,
                 ColumnType.String =>
                     SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32
                     + Encoding.Unicode.GetByteCount(columnValue.StrValue!),
                 ColumnType.Bool =>
                     SerializatorTypeSizes.TypeBool,
+                ColumnType.Date or ColumnType.DateTime =>
+                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger64,
+                ColumnType.Bytes =>
+                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32
+                    + (columnValue.BytesValue?.Length ?? 0),
+                ColumnType.Array =>
+                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + 1  // type + count + element-type byte
+                    + ArrayElementsSize(columnValue.ArrayValues ?? []),
                 _ => throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnValue.Type)
             };
         }
