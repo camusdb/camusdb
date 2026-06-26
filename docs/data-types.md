@@ -153,6 +153,50 @@ To declare `string(N)` / `array(T)` over HTTP, the create-table column carries `
 
 ---
 
+## Temporal functions
+
+The built-in date/time functions return engine-typed `date` or `datetime` values, not strings. The
+JSON wire representation is unchanged (ISO-8601 string via the `isoValue` field), but the engine
+type is now correct — so comparisons against typed columns, INSERT without CAST, and indexing all
+work with function results.
+
+| Function | Return type | Notes |
+|----------|-------------|-------|
+| `NOW()` / `CURRENT_TIMESTAMP()` | `datetime` | Current UTC instant |
+| `CURRENT_DATE()` | `date` | Current UTC date |
+| `DATE_ADD(temporal, n, unit)` | `datetime` | See promotion rule below |
+| `DATE_TRUNC(unit, temporal)` | `datetime` | Always yields datetime (Postgres-compatible) |
+| `FROM_UNIXTIME(seconds)` | `datetime` | Unix epoch seconds → UTC datetime |
+| `DATE_DIFF(a, b, unit)` | `int64` | Difference in `unit` units (unchanged) |
+| `DATE_PART(unit, temporal)` | `int64` | Extracts calendar component (unchanged) |
+| `UNIX_TIMESTAMP([temporal])` | `int64` | UTC seconds since epoch (unchanged) |
+
+**DATE_ADD promotion rule:** the return type is always `datetime`. The evaluator promotes any `date`
+input to `datetime` before applying the arithmetic, consistent with Postgres `date + interval`
+behavior. The unit argument stays a string literal (`'day'`, `'hour'`, etc.).
+
+**Typed temporal arguments:** all temporal-consuming functions (`DATE_ADD`, `DATE_DIFF`, `DATE_PART`,
+`DATE_TRUNC`, `UNIX_TIMESTAMP`) accept `date` or `datetime` column references directly, in addition
+to string literals. Passing a typed temporal column no longer requires `CAST` to string.
+
+**Wire format unchanged:** `NOW()` still serializes as an ISO-8601 string in JSON responses (via
+`isoValue`). Only the engine-internal type changes.
+
+Examples:
+
+```sql
+-- INSERT without CAST (NOW() returns datetime, not string)
+INSERT INTO events (id, created) VALUES (gen_id(), NOW())
+
+-- Typed comparison (datetime column vs datetime function result)
+SELECT * FROM events WHERE created < NOW()
+
+-- Typed column through DATE_ADD
+SELECT DATE_ADD(created, 7, 'day') FROM events
+```
+
+---
+
 ## Reserved keywords
 
 The type keywords (and their aliases) are **reserved words** and cannot be used as column or table names

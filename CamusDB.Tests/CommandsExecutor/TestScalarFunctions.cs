@@ -184,8 +184,9 @@ public class TestScalarFunctions : SharedNodeBaseTest
             dbname,
             "SELECT current_timestamp() FROM robots LIMIT 1");
 
-        string timestamp = result[0].Row["0"].StrValue!;
-        Assert.IsTrue(DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out DateTimeOffset parsed));
+        ColumnValue tsVal = result[0].Row["0"];
+        Assert.AreEqual(ColumnType.DateTime, tsVal.Type);
+        Assert.IsTrue(DateTimeOffset.TryParse(tsVal.IsoValue, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out DateTimeOffset parsed));
         Assert.AreEqual(TimeSpan.Zero, parsed.Offset);
     }
 
@@ -198,9 +199,10 @@ public class TestScalarFunctions : SharedNodeBaseTest
         List<QueryResultRow> lower = await ExecuteSelect(executor, database, dbname, "SELECT now() FROM robots LIMIT 1");
         List<QueryResultRow> upper = await ExecuteSelect(executor, database, dbname, "SELECT NOW() FROM robots LIMIT 1");
 
-        foreach (string timestamp in new[] { lower[0].Row["0"].StrValue!, upper[0].Row["0"].StrValue! })
+        foreach (ColumnValue val in new[] { lower[0].Row["0"], upper[0].Row["0"] })
         {
-            Assert.IsTrue(DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out DateTimeOffset parsed));
+            Assert.AreEqual(ColumnType.DateTime, val.Type);
+            Assert.IsTrue(DateTimeOffset.TryParse(val.IsoValue, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out DateTimeOffset parsed));
             Assert.AreEqual(TimeSpan.Zero, parsed.Offset);
         }
     }

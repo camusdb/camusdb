@@ -43,7 +43,7 @@ internal static class DateTimeScalarFunctions
             MaxArity = 0,
             IsVolatile = true,
             Evaluator = EvaluateCurrentTimestamp,
-            InferReturnType = _ => ColumnType.String,
+            InferReturnType = _ => ColumnType.DateTime,
         });
 
         registry.Register(new ScalarFunctionDescriptor
@@ -53,13 +53,16 @@ internal static class DateTimeScalarFunctions
             MaxArity = 0,
             IsVolatile = true,
             Evaluator = EvaluateCurrentDate,
-            InferReturnType = _ => ColumnType.String,
+            InferReturnType = _ => ColumnType.Date,
         });
 
-        RegisterTernary(registry, "date_add", EvaluateDateAdd, _ => ColumnType.String);
+        // date_add always infers DateTime: the Date-vs-DateTime promotion rule (Date+subday→DateTime,
+        // Date+day→Date) requires knowing the unit value at plan time, which InferReturnType cannot do
+        // (it only sees argument types). Widening to DateTime keeps Evaluator and InferReturnType in agreement.
+        RegisterTernary(registry, "date_add", EvaluateDateAdd, _ => ColumnType.DateTime);
         RegisterTernary(registry, "date_diff", EvaluateDateDiff, _ => ColumnType.Integer64);
         RegisterBinary(registry, "date_part", EvaluateDatePart, _ => ColumnType.Integer64);
-        RegisterBinary(registry, "date_trunc", EvaluateDateTrunc, _ => ColumnType.String);
+        RegisterBinary(registry, "date_trunc", EvaluateDateTrunc, _ => ColumnType.DateTime);
 
         registry.Register(new ScalarFunctionDescriptor
         {
@@ -71,7 +74,7 @@ internal static class DateTimeScalarFunctions
             InferReturnType = _ => ColumnType.Integer64,
         });
 
-        RegisterUnary(registry, "from_unixtime", EvaluateFromUnixtime, _ => ColumnType.String);
+        RegisterUnary(registry, "from_unixtime", EvaluateFromUnixtime, _ => ColumnType.DateTime);
     }
 
     private static void RegisterUnary(
@@ -124,14 +127,12 @@ internal static class DateTimeScalarFunctions
 
     private static ColumnValue EvaluateCurrentTimestamp(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
-        string timestamp = FormatUtc(DateTimeOffset.UtcNow);
-        return new ColumnValue(ColumnType.String, timestamp);
+        return MakeDateTime(DateTimeOffset.UtcNow);
     }
 
     private static ColumnValue EvaluateCurrentDate(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
-        string date = DateTimeOffset.UtcNow.ToString(DateOnlyFormat, CultureInfo.InvariantCulture);
-        return new ColumnValue(ColumnType.String, date);
+        return MakeDate(DateTimeOffset.UtcNow);
     }
 
     private static ColumnValue EvaluateDateAdd(string calledName, IReadOnlyList<ColumnValue> arguments)
@@ -139,16 +140,15 @@ internal static class DateTimeScalarFunctions
         if (PropagateNull(arguments) is ColumnValue nullResult)
             return nullResult;
 
-        RequireString(calledName, 0, arguments[0]);
         RequireInteger(calledName, 1, arguments[1]);
         RequireString(calledName, 2, arguments[2]);
 
-        DateTimeOffset value = ParseDateTimeValue(calledName, arguments[0].StrValue!);
+        DateTimeOffset value = ReadTemporal(calledName, 0, arguments[0]);
         long amount = arguments[1].LongValue;
         DateTimeUnit unit = ParseUnit(calledName, arguments[2].StrValue!);
 
         DateTimeOffset result = ApplyDateAdd(calledName, value, amount, unit);
-        return new ColumnValue(ColumnType.String, FormatUtc(result));
+        return MakeDateTime(result);
     }
 
     private static ColumnValue EvaluateDateDiff(string calledName, IReadOnlyList<ColumnValue> arguments)
@@ -156,12 +156,10 @@ internal static class DateTimeScalarFunctions
         if (PropagateNull(arguments) is ColumnValue nullResult)
             return nullResult;
 
-        RequireString(calledName, 0, arguments[0]);
-        RequireString(calledName, 1, arguments[1]);
         RequireString(calledName, 2, arguments[2]);
 
-        DateTimeOffset start = ParseDateTimeValue(calledName, arguments[0].StrValue!);
-        DateTimeOffset end = ParseDateTimeValue(calledName, arguments[1].StrValue!);
+        DateTimeOffset start = ReadTemporal(calledName, 0, arguments[0]);
+        DateTimeOffset end = ReadTemporal(calledName, 1, arguments[1]);
         DateTimeUnit unit = ParseUnit(calledName, arguments[2].StrValue!);
 
         long difference = ComputeDateDiff(start, end, unit);
@@ -174,10 +172,9 @@ internal static class DateTimeScalarFunctions
             return nullResult;
 
         RequireString(calledName, 0, arguments[0]);
-        RequireString(calledName, 1, arguments[1]);
 
         DateTimeUnit unit = ParseUnit(calledName, arguments[0].StrValue!);
-        DateTimeOffset value = ParseDateTimeValue(calledName, arguments[1].StrValue!);
+        DateTimeOffset value = ReadTemporal(calledName, 1, arguments[1]);
         DateTimeOffset utc = value.ToUniversalTime();
 
         long part = unit switch
@@ -201,13 +198,12 @@ internal static class DateTimeScalarFunctions
             return nullResult;
 
         RequireString(calledName, 0, arguments[0]);
-        RequireString(calledName, 1, arguments[1]);
 
         DateTimeUnit unit = ParseUnit(calledName, arguments[0].StrValue!);
-        DateTimeOffset value = ParseDateTimeValue(calledName, arguments[1].StrValue!);
+        DateTimeOffset value = ReadTemporal(calledName, 1, arguments[1]);
         DateTimeOffset truncated = TruncateUtc(value, unit);
 
-        return new ColumnValue(ColumnType.String, FormatUtc(truncated));
+        return MakeDateTime(truncated);
     }
 
     private static ColumnValue EvaluateUnixTimestamp(string calledName, IReadOnlyList<ColumnValue> arguments)
@@ -218,9 +214,7 @@ internal static class DateTimeScalarFunctions
         if (PropagateNull(arguments) is ColumnValue nullResult)
             return nullResult;
 
-        RequireString(calledName, 0, arguments[0]);
-
-        DateTimeOffset value = ParseDateTimeValue(calledName, arguments[0].StrValue!);
+        DateTimeOffset value = ReadTemporal(calledName, 0, arguments[0]);
         return new ColumnValue(ColumnType.Integer64, value.ToUnixTimeSeconds());
     }
 
@@ -236,13 +230,31 @@ internal static class DateTimeScalarFunctions
         try
         {
             DateTimeOffset value = DateTimeOffset.UnixEpoch.AddSeconds(seconds);
-            return new ColumnValue(ColumnType.String, FormatUtc(value));
+            return MakeDateTime(value);
         }
         catch (ArgumentOutOfRangeException)
         {
             throw InvalidUnixTimestamp(calledName, seconds);
         }
     }
+
+    private static DateTimeOffset ReadTemporal(string calledName, int argIndex, ColumnValue arg)
+    {
+        return arg.Type switch
+        {
+            ColumnType.Date or ColumnType.DateTime => new DateTimeOffset(new DateTime(arg.LongValue, DateTimeKind.Utc)),
+            ColumnType.String => ParseDateTimeValue(calledName, arg.StrValue!),
+            _ => throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{calledName}' argument {argIndex} expects a date/datetime value but received {arg.Type}"),
+        };
+    }
+
+    private static ColumnValue MakeDateTime(DateTimeOffset value)
+        => new(ColumnType.DateTime, value.ToUniversalTime().Ticks);
+
+    private static ColumnValue MakeDate(DateTimeOffset value)
+        => new(ColumnType.Date, value.ToUniversalTime().Date.Ticks);
 
     private static DateTimeOffset ApplyDateAdd(string calledName, DateTimeOffset value, long amount, DateTimeUnit unit)
     {
@@ -400,9 +412,6 @@ internal static class DateTimeScalarFunctions
             _ => throw InvalidUnit(calledName, unit),
         };
     }
-
-    private static string FormatUtc(DateTimeOffset value)
-        => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
 
     private static CamusDBException InvalidDate(string calledName, string value)
         => new(

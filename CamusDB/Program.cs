@@ -23,6 +23,13 @@ using Kommander;
 using Kommander.Communication.Grpc;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 
+Console.WriteLine("   ____                          ____  ____  ");
+Console.WriteLine("  / ___|__ _ _ __ ___  _   _ ___|  _ \\| __ ) ");
+Console.WriteLine(" | |   / _` | '_ ` _ \\| | | / __| | | |  _ \\ ");
+Console.WriteLine(" | |__| (_| | | | | | | |_| \\__ \\ |_| | |_) |");
+Console.WriteLine("  \\____\\__,_|_| |_| |_|\\__,_|___/____/|____/ ");
+Console.WriteLine();
+
 // Parse CLI flags; fall back to defaults on parse failure so the server still starts.
 ParserResult<CamusCommandLineOptions> optsResult = Parser.Default.ParseArguments<CamusCommandLineOptions>(args);
 CamusCommandLineOptions opts = optsResult.Value ?? new();

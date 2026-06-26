@@ -68,6 +68,51 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
         return (dbname, database, executor);
     }
 
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupTableWithDatetime()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.CreateTable(new(
+            databaseName: dbname,
+            tableName: "events",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("created_at", ColumnType.DateTime),
+                new("event_date", ColumnType.Date),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false));
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        DateTimeOffset ts = new(2024, 6, 15, 10, 30, 0, TimeSpan.Zero);
+        long tsTicks = ts.ToUniversalTime().Ticks;
+        long dateTicks = ts.ToUniversalTime().Date.Ticks;
+
+        InsertTicket insertTicket = new(
+            txnState: txnState,
+            databaseName: dbname,
+            tableName: "events",
+            values: new()
+            {
+                new()
+                {
+                    { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "created_at", new(ColumnType.DateTime, tsTicks) },
+                    { "event_date", new(ColumnType.Date, dateTicks) },
+                }
+            });
+
+        await executor.Insert(insertTicket);
+        await database.Transactions.CommitAsync(txnState);
+
+        return (dbname, database, executor);
+    }
+
     private static async Task<List<QueryResultRow>> ExecuteSelect(
         CommandExecutor executor,
         DatabaseDescriptor database,
@@ -109,7 +154,26 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
-    public async Task CurrentDate_ReturnsUtcDateOnlyString()
+    public async Task CurrentTimestamp_ReturnsDateTimeType()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupBasicTable();
+
+        List<QueryResultRow> result = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT current_timestamp() FROM robots LIMIT 1");
+
+        ColumnValue val = result[0].Row["0"];
+        Assert.AreEqual(ColumnType.DateTime, val.Type);
+        // Wire format is still ISO-8601 via IsoValue
+        string iso = val.IsoValue;
+        Assert.IsTrue(DateTimeOffset.TryParse(iso, out _), $"IsoValue should be parseable: {iso}");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task CurrentDate_ReturnsDateType()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupBasicTable();
 
@@ -119,9 +183,12 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
             dbname,
             "SELECT current_date() FROM robots LIMIT 1");
 
-        string date = result[0].Row["0"].StrValue!;
-        Assert.IsTrue(DateTime.TryParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _));
-        Assert.AreEqual(10, date.Length);
+        ColumnValue val = result[0].Row["0"];
+        Assert.AreEqual(ColumnType.Date, val.Type);
+        string iso = val.IsoValue;
+        Assert.IsTrue(DateTime.TryParseExact(iso, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _),
+            $"IsoValue should be date-only: {iso}");
+        Assert.AreEqual(10, iso.Length);
     }
 
     [Test]
@@ -136,7 +203,9 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
             dbname,
             "SELECT date_add(\"2024-06-15\", 1, \"day\") FROM robots LIMIT 1");
 
-        Assert.AreEqual("2024-06-16T00:00:00.0000000+00:00", result[0].Row["0"].StrValue);
+        ColumnValue val = result[0].Row["0"];
+        Assert.AreEqual(ColumnType.DateTime, val.Type);
+        Assert.AreEqual("2024-06-16T00:00:00.0000000Z", val.IsoValue);
     }
 
     [Test]
@@ -151,7 +220,9 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
             dbname,
             "SELECT date_add(\"2024-06-15\", 2, \"months\") FROM robots LIMIT 1");
 
-        Assert.AreEqual("2024-08-15T00:00:00.0000000+00:00", result[0].Row["0"].StrValue);
+        ColumnValue val = result[0].Row["0"];
+        Assert.AreEqual(ColumnType.DateTime, val.Type);
+        Assert.AreEqual("2024-08-15T00:00:00.0000000Z", val.IsoValue);
     }
 
     [Test]
@@ -166,7 +237,43 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
             dbname,
             "SELECT date_add(\"2024-06-15T10:30:00Z\", 2, \"hours\") FROM robots LIMIT 1");
 
-        Assert.AreEqual("2024-06-15T12:30:00.0000000+00:00", result[0].Row["0"].StrValue);
+        ColumnValue val = result[0].Row["0"];
+        Assert.AreEqual(ColumnType.DateTime, val.Type);
+        Assert.AreEqual("2024-06-15T12:30:00.0000000Z", val.IsoValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DateAdd_TypedDatetimeColumn_AddsHours()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableWithDatetime();
+
+        List<QueryResultRow> result = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT date_add(created_at, 2, \"hours\") FROM events LIMIT 1");
+
+        ColumnValue val = result[0].Row["0"];
+        Assert.AreEqual(ColumnType.DateTime, val.Type);
+        Assert.AreEqual("2024-06-15T12:30:00.0000000Z", val.IsoValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DateAdd_TypedDateColumn_AddsDays()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableWithDatetime();
+
+        List<QueryResultRow> result = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT date_add(event_date, 1, \"day\") FROM events LIMIT 1");
+
+        ColumnValue val = result[0].Row["0"];
+        Assert.AreEqual(ColumnType.DateTime, val.Type);
+        Assert.AreEqual("2024-06-16T00:00:00.0000000Z", val.IsoValue);
     }
 
     [Test]
@@ -330,9 +437,29 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
             dbname,
             "SELECT date_trunc(\"hour\", \"2024-06-15T10:30:45.123Z\") FROM robots LIMIT 1");
 
-        Assert.AreEqual("2024-06-01T00:00:00.0000000+00:00", month[0].Row["0"].StrValue);
-        Assert.AreEqual("2024-06-15T00:00:00.0000000+00:00", day[0].Row["0"].StrValue);
-        Assert.AreEqual("2024-06-15T10:00:00.0000000+00:00", hour[0].Row["0"].StrValue);
+        Assert.AreEqual(ColumnType.DateTime, month[0].Row["0"].Type);
+        Assert.AreEqual(ColumnType.DateTime, day[0].Row["0"].Type);
+        Assert.AreEqual(ColumnType.DateTime, hour[0].Row["0"].Type);
+        Assert.AreEqual("2024-06-01T00:00:00.0000000Z", month[0].Row["0"].IsoValue);
+        Assert.AreEqual("2024-06-15T00:00:00.0000000Z", day[0].Row["0"].IsoValue);
+        Assert.AreEqual("2024-06-15T10:00:00.0000000Z", hour[0].Row["0"].IsoValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DateTrunc_TypedDatetimeColumn_Truncates()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableWithDatetime();
+
+        List<QueryResultRow> result = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT date_trunc(\"hour\", created_at) FROM events LIMIT 1");
+
+        ColumnValue val = result[0].Row["0"];
+        Assert.AreEqual(ColumnType.DateTime, val.Type);
+        Assert.AreEqual("2024-06-15T10:00:00.0000000Z", val.IsoValue);
     }
 
     [Test]
@@ -475,7 +602,7 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
-    public async Task FromUnixtime_ConvertsSecondsToIso8601UtcString()
+    public async Task FromUnixtime_ReturnsDateTimeType()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupBasicTable();
 
@@ -490,8 +617,10 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
             dbname,
             "SELECT from_unixtime(1718447400) FROM robots LIMIT 1");
 
-        Assert.AreEqual("1970-01-01T00:00:00.0000000+00:00", epoch[0].Row["0"].StrValue);
-        Assert.AreEqual("2024-06-15T10:30:00.0000000+00:00", value[0].Row["0"].StrValue);
+        Assert.AreEqual(ColumnType.DateTime, epoch[0].Row["0"].Type);
+        Assert.AreEqual(ColumnType.DateTime, value[0].Row["0"].Type);
+        Assert.AreEqual("1970-01-01T00:00:00.0000000Z", epoch[0].Row["0"].IsoValue);
+        Assert.AreEqual("2024-06-15T10:30:00.0000000Z", value[0].Row["0"].IsoValue);
     }
 
     [Test]
@@ -506,7 +635,9 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
             dbname,
             "SELECT from_unixtime(unix_timestamp(\"2024-06-15T10:30:00+00:00\")) FROM robots LIMIT 1");
 
-        Assert.AreEqual("2024-06-15T10:30:00.0000000+00:00", result[0].Row["0"].StrValue);
+        ColumnValue val = result[0].Row["0"];
+        Assert.AreEqual(ColumnType.DateTime, val.Type);
+        Assert.AreEqual("2024-06-15T10:30:00.0000000Z", val.IsoValue);
     }
 
     [Test]
@@ -528,5 +659,109 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
 
         Assert.AreEqual(ColumnType.Null, toSeconds[0].Row["0"].Type);
         Assert.AreEqual(ColumnType.Null, fromSeconds[0].Row["0"].Type);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DateDiff_TypedDatetimeColumns_ReturnsDiff()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableWithDatetime();
+
+        List<QueryResultRow> result = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT date_diff(event_date, created_at, \"hours\") FROM events LIMIT 1");
+
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["0"].Type);
+        Assert.AreEqual(10, result[0].Row["0"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DatePart_TypedDatetimeColumn_ExtractsPart()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableWithDatetime();
+
+        List<QueryResultRow> hour = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT date_part(\"hour\", created_at) FROM events LIMIT 1");
+        List<QueryResultRow> day = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT date_part(\"day\", event_date) FROM events LIMIT 1");
+
+        Assert.AreEqual(10, hour[0].Row["0"].LongValue);
+        Assert.AreEqual(15, day[0].Row["0"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task UnixTimestamp_TypedDatetimeColumn_ReturnsSeconds()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableWithDatetime();
+
+        List<QueryResultRow> result = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT unix_timestamp(created_at) FROM events LIMIT 1");
+
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["0"].Type);
+        Assert.AreEqual(1718447400L, result[0].Row["0"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task NowInsert_IntoDatetimeColumn_RoundTripsWithoutCast()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.CreateTable(new(
+            databaseName: dbname,
+            tableName: "logs",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("created", ColumnType.DateTime),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false));
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket insertTicket = new(
+            txnState: txn,
+            database: dbname,
+            sql: "INSERT INTO logs (id, created) VALUES (gen_id(), now())",
+            parameters: null);
+        await executor.ExecuteNonSQLQuery(insertTicket);
+        await database.Transactions.CommitAsync(txn);
+
+        List<QueryResultRow> result = await ExecuteSelect(executor, database, dbname,
+            "SELECT created FROM logs LIMIT 1");
+
+        Assert.AreEqual(ColumnType.DateTime, result[0].Row["created"].Type);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task NowComparison_InWhereClause_WorksTypedToTyped()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableWithDatetime();
+
+        List<QueryResultRow> result = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT created_at FROM events WHERE created_at < now() LIMIT 1");
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(ColumnType.DateTime, result[0].Row["created_at"].Type);
     }
 }
