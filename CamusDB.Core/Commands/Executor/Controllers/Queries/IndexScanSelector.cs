@@ -212,6 +212,13 @@ internal static class IndexScanSelector
             if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
                 continue;
 
+            // A unique index omits entries for rows with a NULL in any indexed column (NULLs are
+            // distinct). An unbounded ordered scan over such an index would silently drop those rows,
+            // so it cannot satisfy ORDER BY unless every indexed column is NOT NULL. The query falls
+            // back to a full table scan plus an explicit sort. (Multi indexes always contain NULL rows.)
+            if (index.Type == IndexType.Unique && !AllColumnsNotNull(table, index))
+                continue;
+
             int matchLength = MatchOrderByPrefixLength(index, orderBy);
             if (matchLength == 0)
                 continue;
@@ -237,6 +244,22 @@ internal static class IndexScanSelector
             fromInclusive: true,
             toBound: null,
             toInclusive: true);
+    }
+
+    /// <summary>
+    /// Returns true when every column of the index is declared NOT NULL. A unique index whose columns
+    /// are all NOT NULL can never omit a row, so it remains eligible for an unbounded ordered scan.
+    /// </summary>
+    private static bool AllColumnsNotNull(TableDescriptor table, TableIndexSchema index)
+    {
+        foreach (string columnName in index.Columns)
+        {
+            TableColumnSchema? schema = table.Schema.Columns!.Find(c => c.Name == columnName);
+            if (schema is null || !schema.NotNull)
+                return false;
+        }
+
+        return true;
     }
 
     /// <summary>

@@ -510,27 +510,33 @@ public sealed class CommandExecutor : IAsyncDisposable
                         table.Schema, tx.TransactionId, rowId, data,
                         visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
 
-                    int i = 0;
-                    ColumnValue[] columnValues = unique
-                        ? new ColumnValue[indexInfo.ColumnNames.Length]
-                        : new ColumnValue[indexInfo.ColumnNames.Length + 1];
-
-                    foreach (string columnName in indexInfo.ColumnNames)
+                    // NULLs are distinct: a unique index omits entries for rows with a NULL (or absent)
+                    // value in any indexed column, so multiple such rows can coexist. This must match
+                    // the incremental insert path so a backfilled index equals one built row-by-row.
+                    if (!unique || !HasNullIndexColumn(row, indexInfo.ColumnNames))
                     {
-                        ColumnValue? keyValue = row.GetValueOrDefault(columnName);
-                        if (keyValue is null)
-                            throw new CamusDBException(
-                                CamusDBErrorCodes.InvalidInternalOperation,
-                                $"A null value was found for index key field '{columnName}'"
-                            );
-                        columnValues[i++] = keyValue;
+                        int i = 0;
+                        ColumnValue[] columnValues = unique
+                            ? new ColumnValue[indexInfo.ColumnNames.Length]
+                            : new ColumnValue[indexInfo.ColumnNames.Length + 1];
+
+                        foreach (string columnName in indexInfo.ColumnNames)
+                        {
+                            ColumnValue? keyValue = row.GetValueOrDefault(columnName);
+                            if (keyValue is null)
+                                throw new CamusDBException(
+                                    CamusDBErrorCodes.InvalidInternalOperation,
+                                    $"A null value was found for index key field '{columnName}'"
+                                );
+                            columnValues[i++] = keyValue;
+                        }
+
+                        if (!unique)
+                            columnValues[i] = new(ColumnType.Id, rowId.ToString());
+
+                        CompositeColumnValue compositeKey = new(columnValues);
+                        await table.Store.PutIndexEntry(tx, indexInfo.IndexName, compositeKey, rowId, unique, backfillMode: true).ConfigureAwait(false);
                     }
-
-                    if (!unique)
-                        columnValues[i] = new(ColumnType.Id, rowId.ToString());
-
-                    CompositeColumnValue compositeKey = new(columnValues);
-                    await table.Store.PutIndexEntry(tx, indexInfo.IndexName, compositeKey, rowId, unique, backfillMode: true).ConfigureAwait(false);
 
                     lastRowId = rowId;
                     batchRows++;
@@ -562,6 +568,22 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
 
         Log.LogIndexBackfillComplete(logger, totalRows, indexInfo.IndexName);
+    }
+
+    /// <summary>
+    /// Returns true when any of the index's columns is absent from the row or holds a NULL value.
+    /// Such a row is exempt from a unique index (NULLs are distinct) and is skipped during backfill.
+    /// </summary>
+    private static bool HasNullIndexColumn(Dictionary<string, ColumnValue> row, string[] columnNames)
+    {
+        foreach (string columnName in columnNames)
+        {
+            ColumnValue? value = row.GetValueOrDefault(columnName);
+            if (value is null || value.Type == ColumnType.Null)
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>

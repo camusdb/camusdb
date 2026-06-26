@@ -174,6 +174,21 @@ public sealed class RowUpdater
         return new CompositeColumnValue(columnValues);
     }
 
+    /// <summary>
+    /// Returns true when any of the index's columns is absent from the row or holds a NULL value.
+    /// Such a row is exempt from a unique index (NULLs are distinct) and carries no index entry.
+    /// </summary>
+    private static bool HasNullKeyColumn(Dictionary<string, ColumnValue> rowValues, string[] columnNames)
+    {
+        foreach (string name in columnNames)
+        {
+            if (!rowValues.TryGetValue(name, out ColumnValue? value) || value.Type == ColumnType.Null)
+                return true;
+        }
+
+        return false;
+    }
+
     private async Task<FluxAction> LocateTuplesToUpdate(UpdateFluxState state)
     {
         UpdateTicket ticket = state.Ticket;
@@ -388,11 +403,20 @@ public sealed class RowUpdater
             if (index.Type != IndexType.Unique || !SchemaElementStateRules.IsWritableIndex(table.Schema, index))
                 continue;
 
-            CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns);
-            CompositeColumnValue newKey = GetColumnValue(newRow, index.Columns);
+            // NULLs are distinct: a row with a NULL (or absent) value in any indexed column has no
+            // unique index entry. So only delete the old entry if the old row had one, and only put
+            // the new entry if the new row qualifies (value->NULL removes it, NULL->value adds it).
+            if (!HasNullKeyColumn(oldRow, index.Columns))
+            {
+                CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns);
+                await table.Store.DeleteIndexEntry(tx, index.Name, oldKey, rowId, unique: true).ConfigureAwait(false);
+            }
 
-            await table.Store.DeleteIndexEntry(tx, index.Name, oldKey, rowId, unique: true).ConfigureAwait(false);
-            await table.Store.PutIndexEntry(tx, index.Name, newKey, rowId, unique: true).ConfigureAwait(false);
+            if (!HasNullKeyColumn(newRow, index.Columns))
+            {
+                CompositeColumnValue newKey = GetColumnValue(newRow, index.Columns);
+                await table.Store.PutIndexEntry(tx, index.Name, newKey, rowId, unique: true).ConfigureAwait(false);
+            }
         }
     }
 

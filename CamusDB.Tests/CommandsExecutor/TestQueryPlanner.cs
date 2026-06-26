@@ -513,16 +513,21 @@ public class TestQueryPlanner
     }
 
     [Test]
-    public void PlanElidesSortWhenCompositeIndexMatchesOrderBy()
+    public void PlanKeepsSortForOrderByOnNullableUniqueCompositeIndex()
     {
+        // year_enabled_idx is a UNIQUE index whose columns (year, enabled) are nullable. Rows with a
+        // NULL in either column carry no unique index entry (NULLs are distinct), so an unbounded
+        // ordered scan over that index would silently drop them. The planner must therefore keep the
+        // explicit sort over a full table scan instead of eliding it.
         QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots ORDER BY year, enabled");
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
+        // The nullable unique composite index is no longer used to fully elide the sort. The planner
+        // falls to year_idx (a multi index, which contains NULL rows) for the leading-column ordering
+        // and keeps an explicit SortBy — so no NULL rows can be dropped.
         Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
-        Assert.AreEqual("year_enabled_idx", plan.Steps[0].Index!.Name);
-        CollectionAssert.AreEqual(
-            new[] { QueryPlanStepType.RangeScanFromIndex },
-            StepTypes(plan));
+        Assert.AreNotEqual("year_enabled_idx", plan.Steps[0].Index!.Name);
+        CollectionAssert.Contains(StepTypes(plan), QueryPlanStepType.SortBy);
     }
 
     [Test]

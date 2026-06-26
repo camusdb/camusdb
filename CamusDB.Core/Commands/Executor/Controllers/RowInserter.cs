@@ -159,6 +159,21 @@ internal sealed class RowInserter
         return new CompositeColumnValue(columnValues);
     }
 
+    /// <summary>
+    /// Returns true when any of the index's columns is absent from the row or holds a NULL value.
+    /// Such a row is exempt from a unique index (NULLs are distinct) and carries no index entry.
+    /// </summary>
+    private static bool HasNullKeyColumn(Dictionary<string, ColumnValue> rowValues, string[] columnNames)
+    {
+        foreach (string name in columnNames)
+        {
+            if (!rowValues.TryGetValue(name, out ColumnValue? value) || value.Type == ColumnType.Null)
+                return true;
+        }
+
+        return false;
+    }
+
     public async Task<int> Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
         Validate(table, ticket);
@@ -202,6 +217,12 @@ internal sealed class RowInserter
 
                 if (index.Type == IndexType.Unique)
                 {
+                    // NULLs are distinct: a row with a NULL (or absent) value in any indexed column is
+                    // exempt from the unique constraint and carries no index entry, so multiple such
+                    // rows can coexist (standard SQL / Postgres / MySQL semantics).
+                    if (HasNullKeyColumn(values, index.Columns))
+                        continue;
+
                     CompositeColumnValue uniqueKeyValue = GetColumnValue(values, index.Columns);
                     write.IndexEntries.Add(new(index.Name, uniqueKeyValue, Unique: true));
                 }

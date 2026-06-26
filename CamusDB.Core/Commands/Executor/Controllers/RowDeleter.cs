@@ -68,6 +68,21 @@ internal sealed class RowDeleter
         return new CompositeColumnValue(columnValues);
     }
 
+    /// <summary>
+    /// Returns true when any of the index's columns is absent from the row or holds a NULL value.
+    /// Such a row is exempt from a unique index (NULLs are distinct) and carries no index entry.
+    /// </summary>
+    private static bool HasNullKeyColumn(Dictionary<string, ColumnValue> rowValues, string[] columnNames)
+    {
+        foreach (string name in columnNames)
+        {
+            if (!rowValues.TryGetValue(name, out ColumnValue? value) || value.Type == ColumnType.Null)
+                return true;
+        }
+
+        return false;
+    }
+
     private async Task<FluxAction> LocateTupleToDelete(DeleteFluxState state)
     {
         DeleteTicket ticket = state.Ticket;
@@ -169,6 +184,11 @@ internal sealed class RowDeleter
 
             if (index.Type == IndexType.Unique)
             {
+                // NULLs are distinct: a row with a NULL (or absent) value in any indexed column never
+                // had a unique index entry, so there is nothing to delete.
+                if (HasNullKeyColumn(row, index.Columns))
+                    continue;
+
                 CompositeColumnValue key = GetColumnValue(row, index.Columns);
                 rowDelete.IndexEntries.Add(new KvTableStore.IndexDelete(index.Name, key, rowId, Unique: true));
             }
