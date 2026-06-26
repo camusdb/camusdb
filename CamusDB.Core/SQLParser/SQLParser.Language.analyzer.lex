@@ -59,6 +59,8 @@ TTables         (T|t)(A|a)(B|b)(L|l)(E|e)(S|s)
 TDesc           (D|d)(E|e)(S|s)(C|c)
 TDescribe       (D|d)(E|e)(S|s)(C|c)(R|r)(I|i)(B|b)(E|e)
 TTypeString     (S|s)(T|t)(R|r)(I|i)(N|n)(G|g)
+TTypeChar       (C|c)(H|h)(A|a)(R|r)
+TTypeVarchar    (V|v)(A|a)(R|r)(C|c)(H|h)(A|a)(R|r)
 TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
 TTypeInt        (I|i)(N|n)(T|t)
 TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
@@ -262,6 +264,10 @@ TDot            \.
 {TTypeObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
 
 {TTypeSObjectId} { return (int)Token.TTYPE_OBJECT_ID; }
+
+{TTypeVarchar} { return (int)Token.TTYPE_STRING; }
+
+{TTypeChar} { return (int)Token.TTYPE_STRING; }
 
 {TTypeString} { return (int)Token.TTYPE_STRING; }
 

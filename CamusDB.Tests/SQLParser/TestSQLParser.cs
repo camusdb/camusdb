@@ -2157,5 +2157,69 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.TypeBytes, castNode.rightAst!.nodeType);
     }
 
+    [Test]
+    public void CreateTable_Char_AliasForString_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (name char)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeString, cols["name"].nodeType);
+    }
+
+    [Test]
+    public void CreateTable_Varchar_AliasForString_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (name varchar)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeString, cols["name"].nodeType);
+    }
+
+    [Test]
+    public void CreateTable_VarcharSized_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (name varchar(255))");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeStringSized, cols["name"].nodeType);
+        Assert.AreEqual("255", cols["name"].yytext);
+    }
+
+    [Test]
+    public void CreateTable_CharSized_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (code char(10))");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeStringSized, cols["code"].nodeType);
+        Assert.AreEqual("10", cols["code"].yytext);
+    }
+
+    [Test]
+    public void CreateTable_CharAndVarchar_MixedWithOtherTypes_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "CREATE TABLE t (id int64, name varchar(64), code char, tag char(8))");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeInteger64,   cols["id"].nodeType);
+        Assert.AreEqual(NodeType.TypeStringSized, cols["name"].nodeType);
+        Assert.AreEqual("64",                     cols["name"].yytext);
+        Assert.AreEqual(NodeType.TypeString,      cols["code"].nodeType);
+        Assert.AreEqual(NodeType.TypeStringSized, cols["tag"].nodeType);
+        Assert.AreEqual("8",                      cols["tag"].yytext);
+    }
+
+    [Test]
+    public void CreateTable_VarcharNotMistakenForChar_ParsesCorrectly()
+    {
+        // Longest-match must resolve `varchar` as a whole, not `char` + trailing text.
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (a varchar, b char)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeString, cols["a"].nodeType);
+        Assert.AreEqual(NodeType.TypeString, cols["b"].nodeType);
+    }
+
     #endregion
 }

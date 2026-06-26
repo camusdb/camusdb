@@ -40,6 +40,8 @@ public sealed class CreateTableController : CommandsController
             "int"       => ColumnType.Integer64,
             "integer"   => ColumnType.Integer64,
             "string"    => ColumnType.String,
+            "char"      => ColumnType.String,
+            "varchar"   => ColumnType.String,
             "bool"      => ColumnType.Bool,
             "float64"   => ColumnType.Float64,
             "float32"   => ColumnType.Float32,
