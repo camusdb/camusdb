@@ -912,4 +912,383 @@ public sealed class TestJoinQueryPlanner : BaseTest
         Assert.IsInstanceOf<NestedLoopJoinNode>(plan.Root,
             "Non-equi join must use nested-loop regardless of index");
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Merge-join sort elision / explicit SortNode wiring
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Merge-join sort-elision test fixture: orders (left) JOIN line_items (right) ON o.ext_key = li.order_ext_key.
+    /// <para>
+    /// The join key is a non-PK string column on both sides, so no existing index covers it
+    /// by default — <paramref name="indexLeftJoinKey"/> and <paramref name="indexRightJoinKey"/>
+    /// control whether a secondary index is added on each side. This cleanly separates the
+    /// "index exists / does not exist" cases from the always-present <c>~pk</c> primary key.
+    /// </para>
+    /// <para>
+    /// ForceMergeJoinForTesting is set so every inner equi-join routes through
+    /// <see cref="MergeJoinNode"/> regardless of cost.
+    /// </para>
+    /// </summary>
+    private async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)>
+        BindMergeJoinQuery(
+            string sql,
+            bool indexLeftJoinKey  = false,
+            bool indexRightJoinKey = false)
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        CatalogsManager catalogs = executor.Catalogs;
+
+        string dbname = $"hj32_{Guid.NewGuid():n}";
+        TrackDatabase(dbname, executor);
+        DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        // orders: PK on id, optional secondary index on ext_key (the join column).
+        ConstraintInfo[] ordersConstraints = indexLeftJoinKey
+            ?
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "orders_ext_key_idx", [new("ext_key", OrderType.Ascending)]),
+            ]
+            :
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+            ];
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "orders",
+            columns:
+            [
+                new("id",      ColumnType.Id),
+                new("ext_key", ColumnType.String, notNull: true),
+                new("name",    ColumnType.String, notNull: true),
+            ],
+            constraints: ordersConstraints,
+            ifNotExists: false));
+
+        // line_items: PK on id, optional secondary index on order_ext_key (the join column).
+        ConstraintInfo[] itemsConstraints = indexRightJoinKey
+            ?
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "li_order_ext_key_idx", [new("order_ext_key", OrderType.Ascending)]),
+            ]
+            :
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+            ];
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "line_items",
+            columns:
+            [
+                new("id",            ColumnType.Id),
+                new("order_ext_key", ColumnType.String),
+                new("product",       ColumnType.String, notNull: true),
+            ],
+            constraints: itemsConstraints,
+            ifNotExists: false));
+
+        await database.Transactions.CommitAsync(txn);
+
+        // Force merge join for all inner equi-joins in this test.
+        executor.Statistics.ForceMergeJoinForTesting = true;
+
+        ExecuteSQLTicket executeTicket = new(
+            txnState: await database.Transactions.BeginAsync(),
+            database: dbname, sql: sql, parameters: null);
+
+        SelectQuery selectQuery = new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(sql));
+        BoundSelectQuery bound = await new QueryBinder(new TableOpener(catalogs, logger))
+            .BindAsync(database, selectQuery);
+        QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(bound, executeTicket);
+
+        return (database, bound, ticket, executor);
+    }
+
+    // SQL uses the non-PK join key columns ext_key / order_ext_key.
+    private const string MjJoinSql =
+        "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_ext_key = o.ext_key";
+
+    /// <summary>
+    /// When neither side has an index on the join key, the planner must insert a
+    /// <see cref="SortNode"/> on both sides of the merge join.
+    /// </summary>
+    [Test]
+    public async Task MergeJoin_SortElision_NoIndex_BothSidesGetSortNode()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindMergeJoinQuery(MjJoinSql, indexLeftJoinKey: false, indexRightJoinKey: false);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<MergeJoinNode>(plan.Root);
+        MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
+
+        // Left Input must be a SortNode (wrapping the orders TableScanNode).
+        Assert.IsInstanceOf<SortNode>(mergeJoin.Input,
+            "No index on orders.ext_key → left side must be wrapped in a SortNode");
+
+        // Right physical node must be a SortNode (wrapping the line_items TableScanNode).
+        Assert.IsNotNull(mergeJoin.RightPhysicalNode,
+            "RightPhysicalNode must be set for table-source right sides");
+        Assert.IsInstanceOf<SortNode>(mergeJoin.RightPhysicalNode,
+            "No index on line_items.order_ext_key → right side must be wrapped in a SortNode");
+
+        Assert.IsTrue(mergeJoin.LeftIsOrdered,  "LeftIsOrdered must be true (SortNode handles it)");
+        Assert.IsTrue(mergeJoin.RightIsOrdered, "RightIsOrdered must be true (SortNode handles it)");
+    }
+
+    /// <summary>
+    /// When both sides have an index on the join key columns, the planner must use
+    /// ForcedIndex table scans on both sides — no <see cref="SortNode"/> inserted.
+    /// </summary>
+    [Test]
+    public async Task MergeJoin_SortElision_BothIndexed_NoSortNodeInserted()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindMergeJoinQuery(MjJoinSql, indexLeftJoinKey: true, indexRightJoinKey: true);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<MergeJoinNode>(plan.Root);
+        MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
+
+        // Left: ForcedIndex scan on orders.ext_key index.
+        Assert.IsInstanceOf<TableScanNode>(mergeJoin.Input,
+            "orders.ext_key indexed → left side must be a ForcedIndex TableScanNode (no SortNode)");
+        TableScanNode leftScan = (TableScanNode)mergeJoin.Input!;
+        Assert.AreEqual(TableScanSource.ForcedIndex, leftScan.Source,
+            "Left scan must use ForcedIndex source");
+        Assert.IsNotNull(leftScan.Index, "Left scan must carry the index descriptor");
+        Assert.AreEqual("orders_ext_key_idx", leftScan.Index!.Name);
+
+        // Right: ForcedIndex scan on line_items.order_ext_key index.
+        Assert.IsNotNull(mergeJoin.RightPhysicalNode);
+        Assert.IsInstanceOf<TableScanNode>(mergeJoin.RightPhysicalNode,
+            "line_items.order_ext_key indexed → right side must be a ForcedIndex TableScanNode (no SortNode)");
+        TableScanNode rightScan = (TableScanNode)mergeJoin.RightPhysicalNode!;
+        Assert.AreEqual(TableScanSource.ForcedIndex, rightScan.Source,
+            "Right scan must use ForcedIndex source");
+        Assert.IsNotNull(rightScan.Index);
+        Assert.AreEqual("li_order_ext_key_idx", rightScan.Index!.Name);
+
+        Assert.IsTrue(mergeJoin.LeftIsOrdered);
+        Assert.IsTrue(mergeJoin.RightIsOrdered);
+    }
+
+    /// <summary>
+    /// When only the right side has an index, the left gets a <see cref="SortNode"/>
+    /// and the right uses a ForcedIndex scan.
+    /// </summary>
+    [Test]
+    public async Task MergeJoin_SortElision_RightIndexOnly_LeftSortNode_RightForcedIndex()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindMergeJoinQuery(MjJoinSql, indexLeftJoinKey: false, indexRightJoinKey: true);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<MergeJoinNode>(plan.Root);
+        MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
+
+        Assert.IsInstanceOf<SortNode>(mergeJoin.Input,
+            "No index on orders.ext_key → left must get a SortNode");
+
+        Assert.IsNotNull(mergeJoin.RightPhysicalNode);
+        Assert.IsInstanceOf<TableScanNode>(mergeJoin.RightPhysicalNode,
+            "line_items.order_ext_key indexed → right must use ForcedIndex scan (no SortNode)");
+        Assert.AreEqual(TableScanSource.ForcedIndex, ((TableScanNode)mergeJoin.RightPhysicalNode!).Source);
+    }
+
+    /// <summary>
+    /// When only the left side has an index, the right gets a <see cref="SortNode"/>
+    /// and the left uses a ForcedIndex scan.
+    /// </summary>
+    [Test]
+    public async Task MergeJoin_SortElision_LeftIndexOnly_RightSortNode_LeftForcedIndex()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindMergeJoinQuery(MjJoinSql, indexLeftJoinKey: true, indexRightJoinKey: false);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<MergeJoinNode>(plan.Root);
+        MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
+
+        Assert.IsInstanceOf<TableScanNode>(mergeJoin.Input,
+            "orders.ext_key indexed → left must use ForcedIndex scan (no SortNode)");
+        Assert.AreEqual(TableScanSource.ForcedIndex, ((TableScanNode)mergeJoin.Input!).Source);
+
+        Assert.IsNotNull(mergeJoin.RightPhysicalNode);
+        Assert.IsInstanceOf<SortNode>(mergeJoin.RightPhysicalNode,
+            "No index on line_items.order_ext_key → right must get a SortNode");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cost-based merge-join selection (production, no ForceMergeJoin flag)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Variant of <see cref="BindMergeJoinQuery"/> without <c>ForceMergeJoinForTesting</c>.
+    /// Used to verify production cost-based selection.
+    /// </summary>
+    private async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)>
+        BindCostSelectionQuery(
+            string sql,
+            bool indexLeftJoinKey  = false,
+            bool indexRightJoinKey = false)
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        CatalogsManager catalogs = executor.Catalogs;
+
+        string dbname = $"hj41_{Guid.NewGuid():n}";
+        TrackDatabase(dbname, executor);
+        DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        ConstraintInfo[] ordersConstraints = indexLeftJoinKey
+            ?
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "orders_ext_key_idx", [new("ext_key", OrderType.Ascending)]),
+            ]
+            :
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+            ];
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "orders",
+            columns:
+            [
+                new("id",      ColumnType.Id),
+                new("ext_key", ColumnType.String, notNull: true),
+                new("name",    ColumnType.String, notNull: true),
+            ],
+            constraints: ordersConstraints,
+            ifNotExists: false));
+
+        ConstraintInfo[] itemsConstraints = indexRightJoinKey
+            ?
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "li_order_ext_key_idx", [new("order_ext_key", OrderType.Ascending)]),
+            ]
+            :
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+            ];
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "line_items",
+            columns:
+            [
+                new("id",            ColumnType.Id),
+                new("order_ext_key", ColumnType.String),
+                new("product",       ColumnType.String, notNull: true),
+            ],
+            constraints: itemsConstraints,
+            ifNotExists: false));
+
+        await database.Transactions.CommitAsync(txn);
+
+        // ForceMergeJoinForTesting is intentionally NOT set — production cost selection.
+
+        ExecuteSQLTicket executeTicket = new(
+            txnState: await database.Transactions.BeginAsync(),
+            database: dbname, sql: sql, parameters: null);
+
+        SelectQuery selectQuery = new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(sql));
+        BoundSelectQuery bound = await new QueryBinder(new TableOpener(catalogs, logger))
+            .BindAsync(database, selectQuery);
+        QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(bound, executeTicket);
+
+        return (database, bound, ticket, executor);
+    }
+
+    private const string CostSelectionSql =
+        "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_ext_key = o.ext_key";
+
+    /// <summary>
+    /// When neither side has a secondary index on the join key, the planner must
+    /// choose hash join (not merge join) — no free ordering available.
+    /// </summary>
+    [Test]
+    public async Task MergeJoin_CostSelect_NoIndex_ChoosesHashJoin()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindCostSelectionQuery(CostSelectionSql, indexLeftJoinKey: false, indexRightJoinKey: false);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<HashJoinNode>(plan.Root,
+            "No index on either side → hash join (no free ordering for merge)");
+    }
+
+    /// <summary>
+    /// When only the right side has a secondary index (the left is unindexed), the planner
+    /// must choose INLJ or hash join — not merge join (left side not free-ordered).
+    /// </summary>
+    [Test]
+    public async Task MergeJoin_CostSelect_RightIndexOnly_NoMergeJoin()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindCostSelectionQuery(CostSelectionSql, indexLeftJoinKey: false, indexRightJoinKey: true);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsNotInstanceOf<MergeJoinNode>(plan.Root,
+            "Only right side indexed → left not free-ordered → planner must NOT pick merge join");
+    }
+
+    /// <summary>
+    /// When both sides have secondary indexes on the join key and the left (outer) side
+    /// is estimated as large, the planner must pick merge join in production (no force flag).
+    /// </summary>
+    [Test]
+    public async Task MergeJoin_CostSelect_BothIndexed_LargeInput_ChoosesMergeJoin()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindCostSelectionQuery(CostSelectionSql, indexLeftJoinKey: true, indexRightJoinKey: true);
+
+        // Seed large cardinalities so the merge preference threshold (100 rows) is exceeded.
+        TableDescriptor ordersTable    = await database.TableDescriptors["orders"];
+        TableDescriptor lineItemsTable = await database.TableDescriptors["line_items"];
+        executor.Statistics.SeedRowCountForTesting(database, ordersTable,    10_000);
+        executor.Statistics.SeedRowCountForTesting(database, lineItemsTable, 50_000);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<MergeJoinNode>(plan.Root,
+            "Both sides indexed + large input → cost-based selection must pick merge join");
+        MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
+        Assert.IsTrue(mergeJoin.LeftIsOrdered,  "ForcedIndex left scan → LeftIsOrdered=true");
+        Assert.IsTrue(mergeJoin.RightIsOrdered, "ForcedIndex right scan → RightIsOrdered=true");
+    }
+
+    /// <summary>
+    /// When both sides have secondary indexes but the outer side is small (below
+    /// <c>MergeJoinPreferenceThreshold</c>), INLJ is preferred over merge join.
+    /// </summary>
+    [Test]
+    public async Task MergeJoin_CostSelect_BothIndexed_SmallOuter_PrefersInlj()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindCostSelectionQuery(CostSelectionSql, indexLeftJoinKey: true, indexRightJoinKey: true);
+
+        // Seed small outer, large inner — INLJ wins (few point lookups).
+        TableDescriptor ordersTable    = await database.TableDescriptors["orders"];
+        TableDescriptor lineItemsTable = await database.TableDescriptors["line_items"];
+        executor.Statistics.SeedRowCountForTesting(database, ordersTable,    5);
+        executor.Statistics.SeedRowCountForTesting(database, lineItemsTable, 50_000);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsNotInstanceOf<MergeJoinNode>(plan.Root,
+            "Small outer (5 rows) → INLJ preferred over merge join even with both sides indexed");
+    }
 }

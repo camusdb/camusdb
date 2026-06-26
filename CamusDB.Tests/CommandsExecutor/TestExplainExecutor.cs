@@ -390,7 +390,10 @@ public class TestExplainExecutor : SharedNodeBaseTest
 
         string[] nodes = rows.Select(r => r.Row["node"].StrValue!).ToArray();
         Assert.IsTrue(
-            nodes.Contains("nested-loop-join") || nodes.Contains("index-nested-loop-join"),
+            nodes.Contains("nested-loop-join")       ||
+            nodes.Contains("index-nested-loop-join") ||
+            nodes.Contains("hash-join")              ||
+            nodes.Contains("merge-join"),
             $"Expected a join node; got: {string.Join(", ", nodes)}");
     }
 

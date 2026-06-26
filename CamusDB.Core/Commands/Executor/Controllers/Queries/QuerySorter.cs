@@ -31,6 +31,26 @@ internal sealed class QuerySorter
             yield return row;
     }
 
+    /// <summary>
+    /// Materialises <paramref name="cursor"/>, sorts by <paramref name="orderBy"/>, and
+    /// yields the sorted rows. Used by <see cref="QueryJoinExecutor"/> to execute a
+    /// <see cref="CamusDB.Core.CommandsExecutor.Models.Plans.SortNode"/> inside a join tree
+    /// without needing a full <see cref="QueryTicket"/> context.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> SortByKeys(
+        IAsyncEnumerable<QueryResultRow> cursor,
+        IReadOnlyList<QueryOrderBy> orderBy)
+    {
+        List<QueryResultRow> rows = new();
+        await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
+            rows.Add(row);
+
+        rows.Sort(new QueryResultRowOrderComparer(orderBy));
+
+        foreach (QueryResultRow row in rows)
+            yield return row;
+    }
+
     private static void ValidateSortKeys(IReadOnlyList<QueryOrderBy> orderBy, IReadOnlyList<QueryResultRow> rows)
     {
         foreach (QueryResultRow row in rows)

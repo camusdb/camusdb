@@ -75,6 +75,14 @@ internal static class QueryPlanStepAdapter
             case HashJoinNode:
                 return;
 
+            case MergeJoinNode mergeJoin:
+                // The right physical node (SortNode or ForcedIndex TableScanNode) is a separate
+                // branch not reachable via Input — flatten it explicitly so the linear step list
+                // includes the right-side sort / scan steps for EXPLAIN.
+                if (mergeJoin.RightPhysicalNode is not null)
+                    Flatten(mergeJoin.RightPhysicalNode, steps, stepNodes);
+                return;
+
             case DerivedTableScanNode:
                 return;
 

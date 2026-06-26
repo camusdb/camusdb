@@ -99,6 +99,8 @@ public static class PlanRenderer
             DistinctNode n => n.IsStreaming ? "distinct(streaming: true)" : "distinct(hash)",
             NestedLoopJoinNode n => RenderNestedLoopJoin(n),
             IndexNestedLoopJoinNode n => RenderIndexNestedLoopJoin(n),
+            HashJoinNode n => RenderHashJoin(n),
+            MergeJoinNode n => RenderMergeJoin(n),
             DerivedTableScanNode n => RenderDerivedTableScan(n),
             SemiJoinNode n => RenderSemiJoin(n),
             _ => node.GetType().Name,
@@ -246,6 +248,29 @@ public static class PlanRenderer
         if (node.RightExecutionFilter is not null)
             detail += $", right-filter={RenderExpr(node.RightExecutionFilter)}";
         return $"index-nested-loop-join({detail})";
+    }
+
+    private static string RenderHashJoin(HashJoinNode node)
+    {
+        string keys = string.Join(", ", node.ProbeKeyColumns.Zip(node.BuildKeyColumns,
+            (p, b) => $"{p}={b}"));
+        string build = node.BuildSide == HashJoinBuildSide.Left
+            ? node.Input?.GetType().Name ?? "left"
+            : node.BuildSource.Alias;
+        string detail = $"on={keys}, build={build}";
+        if (node.BuildExecutionFilter is not null)
+            detail += $", build-filter={RenderExpr(node.BuildExecutionFilter)}";
+        return $"hash-join({detail})";
+    }
+
+    private static string RenderMergeJoin(MergeJoinNode node)
+    {
+        string keys = string.Join(", ", node.LeftKeyColumns.Zip(node.RightKeyColumns,
+            (l, r) => $"{l}={r}"));
+        string detail = $"on={keys}";
+        if (node.RightExecutionFilter is not null)
+            detail += $", right-filter={RenderExpr(node.RightExecutionFilter)}";
+        return $"merge-join({detail})";
     }
 
     private static string RenderDerivedTableScan(DerivedTableScanNode node) =>

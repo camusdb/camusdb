@@ -95,9 +95,36 @@ internal sealed class QueryJoinExecutor
                 yield break;
             }
 
+            case MergeJoinNode mergeJoinNode:
+            {
+                await foreach (QueryResultRow row in ExecuteMergeJoin(mergeJoinNode, plan).ConfigureAwait(false))
+                    yield return row;
+
+                yield break;
+            }
+
             case NestedLoopJoinNode joinNode:
             {
                 await foreach (QueryResultRow row in ExecuteNestedLoopJoin(joinNode, plan).ConfigureAwait(false))
+                    yield return row;
+
+                yield break;
+            }
+
+            case SortNode { Input: not null } sortNode when sortNode.OrderBy is { Count: > 0 }:
+            {
+                IAsyncEnumerable<QueryResultRow> sorted = querySorter.SortByKeys(
+                    ExecuteJoinTree(sortNode.Input, plan), sortNode.OrderBy);
+                await foreach (QueryResultRow row in sorted.ConfigureAwait(false))
+                    yield return row;
+
+                yield break;
+            }
+
+            case TableScanNode { BoundSource: not null, Source: TableScanSource.ForcedIndex, Index: not null } indexScanNode:
+            {
+                await foreach (QueryResultRow row in ScanBoundTableByIndex(
+                    indexScanNode.BoundSource, indexScanNode.Index, indexScanNode.ExecutionFilter, plan).ConfigureAwait(false))
                     yield return row;
 
                 yield break;
@@ -313,6 +340,10 @@ internal sealed class QueryJoinExecutor
             case DerivedTableScanNode { BoundSource: not null } derivedScanNode:
                 return derivedScanNode.BoundSource.Alias;
 
+            // Left side may be wrapped in a SortNode; delegate to its inner scan.
+            case SortNode { Input: not null } sortNode:
+                return ResolveLeftAlias(sortNode.Input, leftRow);
+
             default:
                 break;
         }
@@ -361,6 +392,56 @@ internal sealed class QueryJoinExecutor
         await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(plan.Ticket.TxnState).ConfigureAwait(false))
         {
             if (data.Length == 0)
+                continue;
+
+            Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                table.Schema,
+                txId,
+                rowId,
+                data,
+                required,
+                GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
+
+            if (executionFilter is not null)
+            {
+                Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
+
+                if (!await queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
+                    continue;
+            }
+
+            yield return new QueryResultRow(rowId, row);
+        }
+    }
+
+    /// <summary>
+    /// Scans a table in join-key order by walking its secondary index from the first entry to
+    /// the last. Used by <see cref="ExecuteMergeJoin"/> when the planner detected free ordering
+    /// on the right side (a <see cref="TableScanSource.ForcedIndex"/> node). One row-fetch is
+    /// issued per index entry; deleted or empty rows are skipped.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> ScanBoundTableByIndex(
+        BoundTableSource source,
+        TableIndexSchema index,
+        NodeAst? executionFilter,
+        QueryPlan plan)
+    {
+        TableDescriptor table = source.Table;
+        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
+        ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
+        IReadOnlySet<string>? required = GetRequiredColumnsForAlias(plan, source.Alias);
+
+        bool unique = index.Type == IndexType.Unique;
+
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+            plan.Ticket.TxnState,
+            index.Name,
+            keyTypes,
+            from: null, to: null, unique: unique).ConfigureAwait(false))
+        {
+            byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
+
+            if (data is null || data.Length == 0)
                 continue;
 
             Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
@@ -657,6 +738,149 @@ internal sealed class QueryJoinExecutor
                 }
             }
         }
+    }
+
+    // ── Merge Join ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Materialises both sides, sorts them on the equi-join key(s), then walks two pointers
+    /// in lockstep. On equal keys, buffers the full right-side run of matching rows and emits
+    /// the cross-product with every left row in the equal-key group (one-to-many correctness).
+    /// Residual <see cref="MergeJoinNode.OnPredicate"/> is applied per emitted pair.
+    ///
+    /// NULL keys are excluded from both sides — consistent with SQL inner-join semantics.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> ExecuteMergeJoin(
+        MergeJoinNode joinNode,
+        QueryPlan plan,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        QueryTicket ticket = plan.Ticket;
+        string rightAlias = joinNode.RightSource.Alias;
+
+        // ── Materialise left side (qualify each row immediately) ────────────
+        List<(ColumnValue[] Key, Dictionary<string, ColumnValue> QualifiedRow)> leftRows = new();
+
+        await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
+        {
+            Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(
+                leftRow.Row, ResolveLeftAlias(joinNode.Input!, leftRow));
+
+            ColumnValue[]? key = ExtractMergeKey(qualified, joinNode.LeftKeyColumns);
+            if (key is null) continue;
+
+            leftRows.Add((key, qualified));
+        }
+
+        // Sort only when not already ordered by the plan (via SortNode or ForcedIndex scan).
+        if (!joinNode.LeftIsOrdered)
+            leftRows.Sort((a, b) => CompareMergeKeys(a.Key, b.Key));
+
+        // ── Materialise right side (unqualified; MergeRows qualifies at emit time) ──
+        List<(ColumnValue[] Key, Dictionary<string, ColumnValue> Row)> rightRows = new();
+
+        if (joinNode.RightIsOrdered && joinNode.RightPhysicalNode is not null)
+        {
+            // Stream the right physical node (SortNode or ForcedIndex scan) — already ordered.
+            await foreach (QueryResultRow rightRow in ExecuteJoinTree(joinNode.RightPhysicalNode, plan).ConfigureAwait(false))
+            {
+                ColumnValue[]? key = ExtractMergeKey(rightRow.Row, joinNode.RightKeyColumns);
+                if (key is null) continue;
+                rightRows.Add((key, rightRow.Row));
+            }
+        }
+        else
+        {
+            // Fallback: full scan via ScanJoinRightSource + internal sort.
+            await foreach (QueryResultRow rightRow in ScanJoinRightSource(
+                joinNode.RightSource, joinNode.RightExecutionFilter, plan).ConfigureAwait(false))
+            {
+                ColumnValue[]? key = ExtractMergeKey(rightRow.Row, joinNode.RightKeyColumns);
+                if (key is null) continue;
+                rightRows.Add((key, rightRow.Row));
+            }
+
+            rightRows.Sort((a, b) => CompareMergeKeys(a.Key, b.Key));
+        }
+
+        // ── Two-pointer sort-merge ────────────────────────────────────────────
+        int li = 0;
+        int ri = 0;
+
+        while (li < leftRows.Count && ri < rightRows.Count)
+        {
+            int cmp = CompareMergeKeys(leftRows[li].Key, rightRows[ri].Key);
+
+            if (cmp < 0) { li++; continue; }
+            if (cmp > 0) { ri++; continue; }
+
+            // Equal keys — find the extent of both equal-key runs.
+            int leftRunStart  = li;
+            int rightRunStart = ri;
+
+            while (li < leftRows.Count  && CompareMergeKeys(leftRows[li].Key,  leftRows[leftRunStart].Key)   == 0) li++;
+            while (ri < rightRows.Count && CompareMergeKeys(rightRows[ri].Key, rightRows[rightRunStart].Key) == 0) ri++;
+
+            // Emit cross-product of left[leftRunStart..li) × right[rightRunStart..ri).
+            for (int l = leftRunStart; l < li; l++)
+            {
+                for (int r = rightRunStart; r < ri; r++)
+                {
+                    Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(
+                        leftRows[l].QualifiedRow, rightRows[r].Row, rightAlias);
+
+                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
+                        continue;
+
+                    yield return new QueryResultRow(default(ObjectIdValue), merged);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Extracts the merge-join key values from a row.
+    /// Returns null when any key column is absent or NULL (the row is excluded).
+    /// </summary>
+    private static ColumnValue[]? ExtractMergeKey(
+        IReadOnlyDictionary<string, ColumnValue> row,
+        IReadOnlyList<string> keyColumns)
+    {
+        ColumnValue[] key = new ColumnValue[keyColumns.Count];
+
+        for (int i = 0; i < keyColumns.Count; i++)
+        {
+            if (!row.TryGetValue(keyColumns[i], out ColumnValue? v) || v.Type == ColumnType.Null)
+                return null;
+
+            key[i] = v;
+        }
+
+        return key;
+    }
+
+    /// <summary>
+    /// Lexicographic comparison of two parallel key arrays using <see cref="ColumnValue.CompareTo"/>.
+    /// Both arrays must have the same length (guaranteed by construction).
+    ///
+    /// Compares by <c>Type</c> ordinal first: <see cref="ColumnValue.CompareTo"/> throws on mismatched
+    /// types, so a cross-type equi-join key (e.g. <c>a.intCol = b.strCol</c>) would otherwise crash the
+    /// merge. Ordering by type first makes mismatched types sort deterministically and never
+    /// compare-equal — so such a join simply yields no matches, matching the hash-join comparer's
+    /// graceful "different type ⇒ not equal" behaviour. (NULL keys are already excluded upstream.)
+    /// </summary>
+    private static int CompareMergeKeys(ColumnValue[] x, ColumnValue[] y)
+    {
+        for (int i = 0; i < x.Length; i++)
+        {
+            int typeCmp = ((int)x[i].Type).CompareTo((int)y[i].Type);
+            if (typeCmp != 0) return typeCmp;
+
+            int c = x[i].CompareTo(y[i]);
+            if (c != 0) return c;
+        }
+
+        return 0;
     }
 
     /// <summary>

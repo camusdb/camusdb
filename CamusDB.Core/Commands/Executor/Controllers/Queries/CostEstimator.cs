@@ -359,6 +359,28 @@ internal static class CostEstimator
                 });
             }
 
+            case MergeJoinNode mj:
+            {
+                // KV cost: scan both sides once (same scan cost as hash join).
+                // No in-memory hash table → no build-side memory vs hash join.
+                // Sort memory is charged when a side is not free-ordered (i.e. the planner
+                // wrapped it in a SortNode); free-ordered sides (ForcedIndex scan) pay nothing.
+                long rightRows = ResolveRightTableRowCount(mj.RightSource.Table, database, stats)
+                                 ?? DefaultTableRowCount;
+
+                long sortMemory = 0;
+                if (!mj.LeftIsOrdered)  sortMemory += inputCardinality;
+                if (!mj.RightIsOrdered) sortMemory += rightRows;
+
+                long rows = Math.Max(1, (long)(inputCardinality * rightRows * FilterSelectivity));
+                return (rows, new PlanCost
+                {
+                    EstimatedRows      = rows,
+                    KvRangeScanEntries = inputCardinality + rightRows,
+                    InMemoryRows       = sortMemory,
+                });
+            }
+
             case DerivedTableScanNode:
                 return (inputCardinality, new PlanCost { EstimatedRows = inputCardinality });
 

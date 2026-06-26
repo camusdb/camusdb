@@ -1,0 +1,95 @@
+
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
+using CamusDB.Core.CommandsExecutor.Models.Queries;
+using CamusDB.Core.SQLParser;
+
+namespace CamusDB.Core.CommandsExecutor.Models.Plans;
+
+/// <summary>
+/// Sort-merge inner join: materialize and sort both inputs on the equi-join key(s), then
+/// advance two pointers in lockstep — skip on key mismatch, emit the cross-product of
+/// equal-key groups via <c>QueryRowMerger</c>.
+///
+/// NULL join-key values are excluded from both sides (consistent with inner-join semantics
+/// where NULL = NULL is unknown).
+///
+/// Both inputs are materialised in memory and sorted in O(n log n) by the executor;
+/// when both sides arrive pre-ordered (index scan on the join column) the sort cost is
+/// zero but that optimisation lives in the planner, not here.
+///
+/// <see cref="CanDecomposeToLocalPlusMerge"/> is false.
+/// <see cref="PhysicalPlanNode.OutputOrdering"/> is set to ascending on
+/// <see cref="LeftKeyColumns"/> — the executor sorts on those columns, so downstream
+/// ORDER BY clauses on the join key can be elided by the planner.
+/// </summary>
+public sealed class MergeJoinNode : PhysicalPlanNode
+{
+    /// <summary>Right (build) source of the join.</summary>
+    public BoundJoinRightSource RightSource { get; }
+
+    /// <summary>Full ON predicate including residual non-equi conjuncts.</summary>
+    public NodeAst OnPredicate { get; }
+
+    /// <summary>
+    /// Qualified left-side key column names, one per equi-key conjunct, e.g. <c>o.id</c>.
+    /// Parallel to <see cref="RightKeyColumns"/>.
+    /// </summary>
+    public IReadOnlyList<string> LeftKeyColumns { get; }
+
+    /// <summary>
+    /// Unqualified column names on the right side, e.g. <c>order_id</c>.
+    /// Parallel to <see cref="LeftKeyColumns"/>.
+    /// </summary>
+    public IReadOnlyList<string> RightKeyColumns { get; }
+
+    /// <summary>Single-table predicate pushed into the right-side scan.</summary>
+    public NodeAst? RightExecutionFilter { get; init; }
+
+    /// <summary>
+    /// Physical plan node for the right side. When non-null the executor iterates this node
+    /// (which may be a <see cref="SortNode"/> wrapping a scan, or a <c>ForcedIndex</c>
+    /// <see cref="TableScanNode"/> for free ordering) instead of scanning
+    /// <see cref="RightSource"/> directly.
+    /// </summary>
+    public PhysicalPlanNode? RightPhysicalNode { get; init; }
+
+    /// <summary>
+    /// When <see langword="true"/>, the executor streams the left input via
+    /// <c>ExecuteJoinTree(Input)</c> without an internal in-memory sort. The left side
+    /// either already has <see cref="PhysicalPlanNode.OutputOrdering"/> covering the join
+    /// key (free ordering from an index) or carries a <see cref="SortNode"/> that the
+    /// executor resolves. When <see langword="false"/> the executor materialises and sorts
+    /// the left side internally.
+    /// </summary>
+    public bool LeftIsOrdered { get; init; }
+
+    /// <summary>
+    /// When <see langword="true"/> and <see cref="RightPhysicalNode"/> is non-null, the
+    /// executor streams the right side via <c>ExecuteJoinTree(RightPhysicalNode)</c> without
+    /// an internal sort. When <see langword="false"/> the executor materialises and sorts
+    /// <see cref="RightSource"/> internally.
+    /// </summary>
+    public bool RightIsOrdered { get; init; }
+
+    public MergeJoinNode(
+        PhysicalPlanNode left,
+        BoundJoinRightSource rightSource,
+        NodeAst onPredicate,
+        IReadOnlyList<string> leftKeyColumns,
+        IReadOnlyList<string> rightKeyColumns)
+    {
+        Input = left;
+        RightSource = rightSource;
+        OnPredicate = onPredicate;
+        LeftKeyColumns = leftKeyColumns;
+        RightKeyColumns = rightKeyColumns;
+    }
+
+    public override bool CanDecomposeToLocalPlusMerge => false;
+}

@@ -41,6 +41,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// </summary>
 internal sealed class JoinQueryPlanner
 {
+    // Outer-side row count below which INLJ is preferred over merge join even when both sides
+    // have free index ordering (small outer → few point lookups wins over full-scan merge).
+    private const long MergeJoinPreferenceThreshold = 100;
+
     private readonly StatisticsManager? _stats;
 
     public JoinQueryPlanner(StatisticsManager? stats = null)
@@ -168,23 +172,33 @@ internal sealed class JoinQueryPlanner
                 bool hasIndexMatch = right.Table is not null
                     && JoinEquiJoinAnalyzer.TryMatch(right.Table, joinSource.OnPredicate, bound, out indexMatch);
 
+                // Test-only override: force merge join for any inner equi-join.
+                if (hasEquiKeys && stats?.ForceMergeJoinForTesting == true)
+                    return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter);
+
+                // Cost-based merge-join selection: check whether both sides have free index
+                // ordering before entering the index/hash branches; if yes, merge join beats
+                // both INLJ and hash for large inputs.
+                (bool leftFree, bool rightFree) = hasEquiKeys
+                    ? CheckFreeOrdering(left, right, equiKeys!)
+                    : (false, false);
+
                 if (hasIndexMatch)
                 {
-                    // Cost-based selection between INLJ and hash join.
-                    //
-                    // When both operators are viable (equi-keys exist + index exists) and stats are
-                    // available, pick whichever has lower estimated cost:
-                    //   INLJ  ≈ 2 × leftRows   (one point-lookup + one row-fetch per outer row)
-                    //   Hash  ≈ leftRows + rightRows + min(L,R) × 0.1
-                    //
-                    // Without stats we always choose INLJ (same behaviour when stats are absent — no regression).
-                    // INLJ wins when the outer side is small (fewest lookups); hash wins when the outer
-                    // side is large and both sides can be scanned once instead of n×m.
-                    if (hasEquiKeys
-                        && stats is not null
-                        && ShouldPreferHashOverIndexNestedLoop(left, right, database, stats))
+                    // Three-way selection: merge / hash / INLJ.
+                    //   Merge  — both sides have a secondary index covering the join key AND the outer
+                    //            side is large (scanning in index order wins over per-row lookups).
+                    //   Hash   — outer side large relative to inner indexed side.
+                    //   INLJ   — outer side small (few point lookups; default when stats absent).
+                    if (hasEquiKeys && stats is not null)
                     {
-                        return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats);
+                        long leftRows = EstimatePhysicalNodeRows(left, database, stats);
+
+                        if (leftFree && rightFree && leftRows > MergeJoinPreferenceThreshold)
+                            return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter);
+
+                        if (ShouldPreferHashOverIndexNestedLoop(left, right, database, stats))
+                            return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats);
                     }
 
                     return new IndexNestedLoopJoinNode(
@@ -199,9 +213,14 @@ internal sealed class JoinQueryPlanner
                     };
                 }
 
-                // Hash join for unindexed equi-joins (inner only — outer join variants are not yet implemented).
+                // No right-side index: choose merge or hash.
+                // Merge is preferred when both sides have a secondary index covering the join key
+                // (free ordering — no sort overhead, beats hash's in-memory build cost).
                 if (hasEquiKeys)
                 {
+                    if (leftFree && rightFree)
+                        return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter);
+
                     return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats);
                 }
 
@@ -216,6 +235,196 @@ internal sealed class JoinQueryPlanner
                     CamusDBErrorCodes.InvalidInput,
                     $"Unsupported join source: {source.GetType().Name}");
         }
+    }
+
+    /// <summary>
+    /// Constructs a <see cref="MergeJoinNode"/> from pre-extracted equi-keys, wiring in
+    /// sort-elision:
+    /// <list type="bullet">
+    ///   <item>Left side: if <c>left.OutputOrdering</c> already covers the join keys (free
+    ///     ordering from a prior index scan or sort), the left input is used as-is and
+    ///     <see cref="MergeJoinNode.LeftIsOrdered"/> is set. Otherwise the left input is
+    ///     wrapped in a <see cref="SortNode"/>.</item>
+    ///   <item>Right side: if the right table has an index whose leading columns match the
+    ///     join key columns, a <c>ForcedIndex</c> <see cref="TableScanNode"/> is created
+    ///     for free ordering. Otherwise a <see cref="SortNode"/> is inserted above a
+    ///     full-scan node. In either case the result is stored in
+    ///     <see cref="MergeJoinNode.RightPhysicalNode"/>.</item>
+    /// </list>
+    /// Also sets <see cref="PhysicalPlanNode.OutputOrdering"/> to ascending on the left key
+    /// columns so a downstream ORDER BY on those columns can be elided by the planner.
+    /// </summary>
+    private static MergeJoinNode BuildMergeJoinNode(
+        PhysicalPlanNode left,
+        BoundJoinRightSource right,
+        NodeAst onPredicate,
+        IReadOnlyList<JoinEquiKeyPair> equiKeys,
+        NodeAst? rightFilter)
+    {
+        string[] leftKeys  = new string[equiKeys.Count];
+        string[] rightKeys = new string[equiKeys.Count];
+        string[] bareLeftKeys = new string[equiKeys.Count];
+
+        for (int i = 0; i < equiKeys.Count; i++)
+        {
+            leftKeys[i]  = equiKeys[i].LeftLookupColumn;   // qualified: "o.id"
+            rightKeys[i] = equiKeys[i].RightColumnName;    // unqualified: "order_id"
+            bareLeftKeys[i] = BareColumnName(leftKeys[i]); // bare: "id"
+        }
+
+        List<QueryOrderBy> leftKeyOrdering  = BuildKeyOrdering(leftKeys);
+        List<QueryOrderBy> rightKeyOrdering = BuildKeyOrdering(rightKeys);
+
+        // ── Left side ──────────────────────────────────────────────────────────
+        // Free ordering: OutputOrdering already covers the join keys (ascending prefix match).
+        PhysicalPlanNode leftInput;
+
+        if (OutputOrderingCoversKeys(left.OutputOrdering, leftKeyOrdering))
+        {
+            leftInput = left;
+        }
+        else if (left is TableScanNode { BoundSource: { } ls, Source: TableScanSource.PrimaryRows }
+                 && FindIndexForJoinKey(ls.Table, bareLeftKeys) is { } leftIndex)
+        {
+            // Flip to an index-ordered scan on the left table.
+            leftInput = new TableScanNode(TableScanSource.ForcedIndex, leftIndex)
+            {
+                BoundSource = ls,
+                ExecutionFilter = left is TableScanNode lsn ? lsn.ExecutionFilter : null,
+                OutputOrdering = leftKeyOrdering,
+            };
+        }
+        else
+        {
+            // Explicit sort: wrap left in a SortNode.
+            leftInput = new SortNode(left) { OrderBy = leftKeyOrdering, OutputOrdering = leftKeyOrdering };
+        }
+
+        // ── Right side ─────────────────────────────────────────────────────────
+        PhysicalPlanNode? rightPhysicalNode = null;
+        bool rightIsOrdered = false;
+
+        if (right.Table is { } rightBound)
+        {
+            if (FindIndexForJoinKey(rightBound.Table, rightKeys) is { } rightIndex)
+            {
+                // Free ordering via index scan on the right table.
+                rightPhysicalNode = new TableScanNode(TableScanSource.ForcedIndex, rightIndex)
+                {
+                    BoundSource = rightBound,
+                    ExecutionFilter = rightFilter,
+                    OutputOrdering = rightKeyOrdering,
+                };
+                rightIsOrdered = true;
+            }
+            else
+            {
+                // Explicit sort: full primary-rows scan wrapped in a SortNode.
+                TableScanNode rightScan = new(TableScanSource.PrimaryRows)
+                {
+                    BoundSource = rightBound,
+                    ExecutionFilter = rightFilter,
+                };
+                rightPhysicalNode = new SortNode(rightScan)
+                {
+                    OrderBy = rightKeyOrdering,
+                    OutputOrdering = rightKeyOrdering,
+                };
+                rightIsOrdered = true;
+            }
+        }
+        // else: derived table — RightPhysicalNode stays null; executor falls back to
+        // ScanJoinRightSource + internal sort (RightIsOrdered = false).
+
+        MergeJoinNode node = new(leftInput, right, onPredicate, leftKeys, rightKeys)
+        {
+            RightExecutionFilter = rightFilter,
+            LeftIsOrdered  = true,  // left is always ordered: either free-ordering or SortNode
+            RightIsOrdered = rightIsOrdered,
+            RightPhysicalNode = rightPhysicalNode,
+        };
+
+        // Advertise output ordering on the join key for downstream sort-elision.
+        node.OutputOrdering = leftKeyOrdering;
+
+        return node;
+    }
+
+    private static List<QueryOrderBy> BuildKeyOrdering(string[] keys)
+    {
+        List<QueryOrderBy> ordering = new(keys.Length);
+        foreach (string col in keys)
+            ordering.Add(new QueryOrderBy(col, OrderType.Ascending));
+        return ordering;
+    }
+
+    /// <summary>
+    /// Returns true when <paramref name="outputOrdering"/> already covers
+    /// <paramref name="keyOrdering"/> as an ascending leading prefix.
+    /// </summary>
+    private static bool OutputOrderingCoversKeys(
+        IReadOnlyList<QueryOrderBy>? outputOrdering,
+        IReadOnlyList<QueryOrderBy> keyOrdering)
+    {
+        if (outputOrdering is null || outputOrdering.Count < keyOrdering.Count)
+            return false;
+
+        for (int i = 0; i < keyOrdering.Count; i++)
+        {
+            if (outputOrdering[i].Type != OrderType.Ascending)
+                return false;
+            if (!string.Equals(BareColumnName(outputOrdering[i].ColumnName),
+                               BareColumnName(keyOrdering[i].ColumnName),
+                               StringComparison.Ordinal))
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Searches <paramref name="table"/>'s public in-memory indexes (column-name-resolved) for
+    /// one whose leading columns match <paramref name="bareKeyColumns"/> exactly (ordinal).
+    /// Uses <see cref="TableDescriptor.Indexes"/> (the projection populated by
+    /// <see cref="TableOpener"/> with bare column names) rather than
+    /// <see cref="CamusDB.Core.Catalogs.Models.TableSchema.Indexes"/> (which stores
+    /// raw column IDs before name resolution). Returns the first match or null.
+    /// </summary>
+    private static TableIndexSchema? FindIndexForJoinKey(
+        TableDescriptor table,
+        IReadOnlyList<string> bareKeyColumns)
+    {
+        foreach (TableIndexSchema index in table.Indexes.Values)
+        {
+            // Skip the synthetic primary-key index: ~pk is equivalent to ScanRows and
+            // requires a different unique-key parse mode — only secondary indexes here.
+            if (index.Name == "~pk")
+                continue;
+
+            if (index.State != SchemaElementState.Public)
+                continue;
+
+            if (index.Columns.Length < bareKeyColumns.Count)
+                continue;
+
+            bool match = true;
+            for (int i = 0; i < bareKeyColumns.Count; i++)
+            {
+                if (!string.Equals(index.Columns[i], bareKeyColumns[i], StringComparison.Ordinal))
+                { match = false; break; }
+            }
+
+            if (match)
+                return index;
+        }
+
+        return null;
+    }
+
+    private static string BareColumnName(string columnName)
+    {
+        int dot = columnName.LastIndexOf('.');
+        return dot >= 0 && dot < columnName.Length - 1 ? columnName[(dot + 1)..] : columnName;
     }
 
     /// <summary>
@@ -247,6 +456,34 @@ internal sealed class JoinQueryPlanner
             BuildExecutionFilter = rightFilter,
             BuildSide = buildSide,
         };
+    }
+
+    /// <summary>
+    /// Checks whether both sides of an equi-join have free index ordering on the join key
+    /// columns: left via <see cref="OutputOrderingCoversKeys"/> or a secondary index found
+    /// by <see cref="FindIndexForJoinKey"/>, right via <see cref="FindIndexForJoinKey"/>.
+    /// Used by cost-based merge-join selection to detect the "both free → merge beats hash
+    /// and INLJ" case without calling <see cref="BuildMergeJoinNode"/> speculatively.
+    /// </summary>
+    private static (bool LeftFree, bool RightFree) CheckFreeOrdering(
+        PhysicalPlanNode left,
+        BoundJoinRightSource right,
+        IReadOnlyList<JoinEquiKeyPair> equiKeys)
+    {
+        string[] leftBareKeys  = equiKeys.Select(k => BareColumnName(k.LeftLookupColumn)).ToArray();
+        string[] rightBareKeys = equiKeys.Select(k => k.RightColumnName).ToArray();
+
+        List<QueryOrderBy> leftKeyOrdering  = BuildKeyOrdering(leftBareKeys);
+        List<QueryOrderBy> rightKeyOrdering = BuildKeyOrdering(rightBareKeys);
+
+        bool leftFree = OutputOrderingCoversKeys(left.OutputOrdering, leftKeyOrdering);
+        if (!leftFree && left is TableScanNode { Source: TableScanSource.PrimaryRows, BoundSource: not null } leftScan)
+            leftFree = FindIndexForJoinKey(leftScan.BoundSource.Table, leftBareKeys) is not null;
+
+        bool rightFree = right.Table is not null
+                         && FindIndexForJoinKey(right.Table.Table, rightBareKeys) is not null;
+
+        return (leftFree, rightFree);
     }
 
     /// <summary>

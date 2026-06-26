@@ -666,6 +666,12 @@ public sealed class StatisticsManager
         entry.Loaded = true;
     }
 
+    /// <summary>
+    /// When true, the join planner emits <c>MergeJoinNode</c> for any inner equi-join instead
+    /// of the normal cost-based algorithm selection. Intended for unit tests only.
+    /// </summary>
+    internal bool ForceMergeJoinForTesting { get; set; }
+
     private static string CacheKey(string dbId, string tableId)
         => string.Concat(dbId, ":", tableId);
 

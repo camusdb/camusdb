@@ -547,7 +547,10 @@ public class TestPlanJoinDistributedPropertiesLimitation : SharedNodeBaseTest
 
         string[] nodes = rows.Select(r => r.Row["node"].StrValue!).ToArray();
         Assert.IsTrue(
-            nodes.Contains("nested-loop-join") || nodes.Contains("index-nested-loop-join"),
+            nodes.Contains("nested-loop-join")       ||
+            nodes.Contains("index-nested-loop-join") ||
+            nodes.Contains("hash-join")              ||
+            nodes.Contains("merge-join"),
             "Expected a join node in the plan");
 
         // Verify the plan rows carry the explain schema (not data rows) — join EXPLAIN works end-to-end.
