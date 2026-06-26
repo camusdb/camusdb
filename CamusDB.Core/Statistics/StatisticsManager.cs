@@ -672,6 +672,18 @@ public sealed class StatisticsManager
     /// </summary>
     internal bool ForceMergeJoinForTesting { get; set; }
 
+    /// <summary>
+    /// When true, the join planner emits <c>HashJoinNode</c> for any inner equi-join instead
+    /// of the normal algorithm selection. Intended for parity-sweep tests only.
+    /// </summary>
+    internal bool ForceHashJoinForTesting { get; set; }
+
+    /// <summary>
+    /// When true, the join planner emits <c>NestedLoopJoinNode</c> for every inner join
+    /// regardless of available indexes or equi-keys. Intended for parity-sweep tests only.
+    /// </summary>
+    internal bool ForceNestedLoopForTesting { get; set; }
+
     private static string CacheKey(string dbId, string tableId)
         => string.Concat(dbId, ":", tableId);
 

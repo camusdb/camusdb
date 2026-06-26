@@ -1138,8 +1138,9 @@ public sealed class TestJoinQueryPlanner : BaseTest
     private async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)>
         BindCostSelectionQuery(
             string sql,
-            bool indexLeftJoinKey  = false,
-            bool indexRightJoinKey = false)
+            bool indexLeftJoinKey   = false,
+            bool indexRightJoinKey  = false,
+            bool compositeRightIndex = false)
     {
         CommandExecutor executor = CreateCommandExecutor();
         CatalogsManager catalogs = executor.Catalogs;
@@ -1172,16 +1173,26 @@ public sealed class TestJoinQueryPlanner : BaseTest
             constraints: ordersConstraints,
             ifNotExists: false));
 
-        ConstraintInfo[] itemsConstraints = indexRightJoinKey
-            ?
+        ConstraintInfo[] itemsConstraints = (indexRightJoinKey, compositeRightIndex) switch
+        {
+            // Composite (order_ext_key, product): TryMatch misses it (Columns.Length > 1),
+            // FindIndexForJoinKey finds it as a leading-prefix match.
+            (_, true) =>
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "li_composite_idx",
+                    [new("order_ext_key", OrderType.Ascending), new("product", OrderType.Ascending)]),
+            ],
+            (true, false) =>
             [
                 new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
                 new(ConstraintType.IndexMulti, "li_order_ext_key_idx", [new("order_ext_key", OrderType.Ascending)]),
-            ]
-            :
+            ],
+            _ =>
             [
                 new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
-            ];
+            ],
+        };
 
         await executor.CreateTable(new CreateTableTicket(
             databaseName: dbname, tableName: "line_items",
@@ -1200,7 +1211,10 @@ public sealed class TestJoinQueryPlanner : BaseTest
 
         ExecuteSQLTicket executeTicket = new(
             txnState: await database.Transactions.BeginAsync(),
-            database: dbname, sql: sql, parameters: null);
+            database: dbname, 
+            sql: sql, 
+            parameters: null
+        );
 
         SelectQuery selectQuery = new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(sql));
         BoundSelectQuery bound = await new QueryBinder(new TableOpener(catalogs, logger))
@@ -1290,5 +1304,60 @@ public sealed class TestJoinQueryPlanner : BaseTest
 
         Assert.IsNotInstanceOf<MergeJoinNode>(plan.Root,
             "Small outer (5 rows) → INLJ preferred over merge join even with both sides indexed");
+    }
+
+    /// <summary>
+    /// When the right side has a composite index whose leading column is the join key,
+    /// TryMatch (requires single-column index) returns false but FindIndexForJoinKey
+    /// (accepts leading-prefix match) returns true. With a small outer side the planner
+    /// must fall through to hash join — not merge join — enforcing the same large-input
+    /// gate as the indexed branch.
+    /// </summary>
+    [Test]
+    public async Task MergeJoin_CostSelect_CompositeRightIndex_SmallOuter_ChoosesHash()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindCostSelectionQuery(CostSelectionSql,
+                indexLeftJoinKey: true,
+                compositeRightIndex: true);
+
+        // Small outer: below MergeJoinPreferenceThreshold (100).
+        TableDescriptor ordersTable    = await database.TableDescriptors["orders"];
+        TableDescriptor lineItemsTable = await database.TableDescriptors["line_items"];
+        executor.Statistics.SeedRowCountForTesting(database, ordersTable,    5);
+        executor.Statistics.SeedRowCountForTesting(database, lineItemsTable, 50_000);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsNotInstanceOf<MergeJoinNode>(plan.Root,
+            "Composite right index + small outer → threshold not met → must NOT pick merge join");
+    }
+
+    /// <summary>
+    /// Same composite-index scenario but with a large outer side — the unindexed branch
+    /// (TryMatch miss, FindIndexForJoinKey hit) should elect merge join, consistent with
+    /// the large-input threshold applied in the indexed branch.
+    /// </summary>
+    [Test]
+    public async Task MergeJoin_CostSelect_CompositeRightIndex_LargeInput_ChoosesMergeJoin()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindCostSelectionQuery(CostSelectionSql,
+                indexLeftJoinKey: true,
+                compositeRightIndex: true);
+
+        // Large outer: exceeds MergeJoinPreferenceThreshold (100).
+        TableDescriptor ordersTable    = await database.TableDescriptors["orders"];
+        TableDescriptor lineItemsTable = await database.TableDescriptors["line_items"];
+        executor.Statistics.SeedRowCountForTesting(database, ordersTable,    10_000);
+        executor.Statistics.SeedRowCountForTesting(database, lineItemsTable, 50_000);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<MergeJoinNode>(plan.Root,
+            "Composite right index + large input → unindexed branch must pick merge join (same threshold as indexed branch)");
+        MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
+        Assert.IsTrue(mergeJoin.LeftIsOrdered,  "Left has single-column index → ForcedIndex scan → LeftIsOrdered=true");
+        Assert.IsTrue(mergeJoin.RightIsOrdered, "Right has composite index → FindIndexForJoinKey → ForcedIndex scan → RightIsOrdered=true");
     }
 }

@@ -255,13 +255,20 @@ public static class PlanRenderer
         string keys = string.Join(", ", node.ProbeKeyColumns.Zip(node.BuildKeyColumns,
             (p, b) => $"{p}={b}"));
         string build = node.BuildSide == HashJoinBuildSide.Left
-            ? node.Input?.GetType().Name ?? "left"
+            ? ResolveNodeAlias(node.Input) ?? node.BuildSource.Alias
             : node.BuildSource.Alias;
         string detail = $"on={keys}, build={build}";
         if (node.BuildExecutionFilter is not null)
             detail += $", build-filter={RenderExpr(node.BuildExecutionFilter)}";
         return $"hash-join({detail})";
     }
+
+    private static string? ResolveNodeAlias(PhysicalPlanNode? node) => node switch
+    {
+        TableScanNode ts       => ts.BoundSource?.Alias,
+        DerivedTableScanNode d => d.BoundSource.Alias,
+        _                      => null,
+    };
 
     private static string RenderMergeJoin(MergeJoinNode node)
     {

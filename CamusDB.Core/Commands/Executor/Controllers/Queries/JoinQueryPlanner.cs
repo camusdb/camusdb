@@ -172,7 +172,14 @@ internal sealed class JoinQueryPlanner
                 bool hasIndexMatch = right.Table is not null
                     && JoinEquiJoinAnalyzer.TryMatch(right.Table, joinSource.OnPredicate, bound, out indexMatch);
 
-                // Test-only override: force merge join for any inner equi-join.
+                // Test-only overrides — checked before any algorithm selection.
+                if (stats?.ForceNestedLoopForTesting == true)
+                    return new NestedLoopJoinNode(left, right, joinSource.OnPredicate)
+                        { RightExecutionFilter = rightFilter };
+
+                if (hasEquiKeys && stats?.ForceHashJoinForTesting == true)
+                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats);
+
                 if (hasEquiKeys && stats?.ForceMergeJoinForTesting == true)
                     return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter);
 
@@ -213,13 +220,18 @@ internal sealed class JoinQueryPlanner
                     };
                 }
 
-                // No right-side index: choose merge or hash.
-                // Merge is preferred when both sides have a secondary index covering the join key
-                // (free ordering — no sort overhead, beats hash's in-memory build cost).
+                // No right-side INLJ index (right has a composite or multi-column index whose
+                // leading prefix covers the join key, so TryMatch missed it but FindIndexForJoinKey
+                // found it): apply the same threshold guard as the indexed branch to avoid
+                // materialising both sides for small joins.
                 if (hasEquiKeys)
                 {
-                    if (leftFree && rightFree)
-                        return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter);
+                    if (leftFree && rightFree && stats is not null)
+                    {
+                        long leftRows = EstimatePhysicalNodeRows(left, database, stats);
+                        if (leftRows > MergeJoinPreferenceThreshold)
+                            return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter);
+                    }
 
                     return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats);
                 }

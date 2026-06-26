@@ -310,6 +310,8 @@ All extend `PhysicalPlanNode` (`Models/Plans/PhysicalPlanNode.cs`): a single `In
 | `LimitNode` | `Limit` | LIMIT / OFFSET |
 | `NestedLoopJoinNode` | _(join path only)_ | Nested-loop inner join |
 | `IndexNestedLoopJoinNode` | _(join path only)_ | Index-probed inner join |
+| `HashJoinNode` | _(join path only)_ | In-memory hash-table inner equi-join (builds the smaller side) |
+| `MergeJoinNode` | _(join path only)_ | Streaming two-pointer inner equi-join over index-ordered sides |
 | `DerivedTableScanNode` | _(join path only)_ | Scan of a materialized derived table |
 
 ### 4b. PredicateAnalyzer
@@ -363,8 +365,14 @@ the ascending index encoding and forces a real `SortNode`.
 3. **Tree construction** — `BuildJoinTree` recurses the (possibly reordered) `QuerySource`:
    - `TableSource` → `TableScanNode` with its pushed-down filter
    - `DerivedTableSource` → `DerivedTableScanNode` (inner query materialized lazily at execution)
-   - `JoinSource` → left built recursively; the right source is checked by `JoinEquiJoinAnalyzer`. If the
-     right join key is indexed → `IndexNestedLoopJoinNode`; else `NestedLoopJoinNode`.
+   - `JoinSource` → left built recursively; the right source is checked by `JoinEquiJoinAnalyzer`
+     and `JoinQueryPlanner` for algorithm selection:
+     - Right join key has a single-column index → `IndexNestedLoopJoinNode` (INLJ); unless…
+     - Both sides have free index ordering (secondary index prefix covers the join key) **and** the
+       outer side is large (> 100 rows estimated) → `MergeJoinNode` (streaming merge join); or…
+     - Equi-join with stats available and hash preferred over INLJ → `HashJoinNode` (build =
+       smaller estimated side); else…
+     - No suitable right index → `HashJoinNode` for equi-joins, `NestedLoopJoinNode` otherwise.
 4. Same Phase-C passes as the single-table planner.
 
 ## Stage 5 — Execution
@@ -402,6 +410,13 @@ applies the `PostJoinFilter`, then hands the cursor to `QueryPostScanPipeline.Ap
 - `NestedLoopJoinNode` → for each left row, scan the full right source, merge, evaluate `ON`.
 - `IndexNestedLoopJoinNode` → for each left row, probe the right index (unique → point lookup;
   non-unique → equality-prefix scan).
+- `HashJoinNode` → materialise the build side into an in-memory hash table keyed on the equi-join
+  columns; stream the probe side and look up each row. Falls back to nested-loop if the build
+  side exceeds `HashJoinMaxBuildRows`. Build side is the smaller estimated input.
+- `MergeJoinNode` → when both sides have free index ordering (ForcedIndex scan or upstream
+  SortNode), advance two enumerators in lockstep; buffer only the current equal-key run on the
+  right side (O(run size) memory). When only one or neither side is pre-ordered, the unordered
+  side(s) are materialised and sorted first.
 
 Row merging (`QueryRowMerger`): right columns are stored as `alias.column` and also unqualified when
 there is no collision; **merged rows carry `RowId = default`** — there is no single source row id.
@@ -431,8 +446,9 @@ deterministic, indented, multi-line string with one **canonical node name** per 
 the stable vocabulary reused everywhere:
 
 ```
-table-scan, index-lookup, index-range-scan, filter, having-filter, aggregate, sort,
-limit, project, distinct, nested-loop-join, index-nested-loop-join, derived-table-scan
+table-scan, index-lookup, index-range-scan, index-in-list, filter, having-filter, aggregate, sort,
+limit, project, distinct, semi-join, anti-join, null-aware-anti-join, nested-loop-join,
+index-nested-loop-join, hash-join, merge-join, derived-table-scan
 ```
 
 `PlanRenderer.Render(plan, includeRequiredColumns, includeDistributedProperties)` produces the string
@@ -488,9 +504,13 @@ blocked. On `PhysicalPlanNode`:
 | `EstimatedCardinality` | Estimated output rows | Populated by the `CostEstimator` (single-table accurate; join estimates are placeholders) |
 | `Cost` (`PlanCost?`) | Weighted cost estimate for the node | Populated by the `CostEstimator`; `null` if the plan was not costed |
 | `PartitionLocality` | Partition affinity hint | `null` (single-partition placeholder) |
-| `CanDecomposeToLocalPlusMerge` | Whether the operator splits into per-partition local work + a merge | `true` for scan/filter/project; `AggregateNode` only for `COUNT`/`SUM`/`MIN`/`MAX` (not `AVG`); `false` for sort/limit/distinct/join |
+| `CanDecomposeToLocalPlusMerge` | Whether the operator splits into per-partition local work + a merge | `true` for scan/filter/project; `AggregateNode` only for `COUNT`/`SUM`/`MIN`/`MAX` (not `AVG`); `false` for sort/limit/distinct/all join operators |
 
-These are populated only by the single-table `QueryPlanner` today; join plans leave them at defaults.
+`OutputOrdering` is set by the single-table `QueryPlanner` on index scans and sort nodes, and by
+`JoinQueryPlanner` on `MergeJoinNode` (ascending on the left key columns — a downstream `ORDER BY`
+on those columns can be elided). `HashJoinNode` leaves `OutputOrdering` null (hash does not preserve order).
+All join nodes set `CanDecomposeToLocalPlusMerge = false`.
+All other join-plan properties (`EstimatedCardinality`, `Cost`, `PartitionLocality`) use default values today.
 They are descriptive metadata — no execution behavior depends on them yet except sort elision (which uses
 `OutputOrdering`).
 
@@ -542,9 +562,9 @@ They are descriptive metadata — no execution behavior depends on them yet exce
   source in a join is costed with the default 10 000 row count — `EstimatedCardinality`/`estimated_cost`
   for join plans are not meaningful yet. Join-order and algorithm choice do not consume the cost
   model; they remain heuristic.
-- **The cost model is advisory and single-decision.** It computes costs for all nodes but only the
-  range-scan-vs-full-scan choice consumes them. Unique-lookup-vs-scan and nested-loop-vs-index-nested-loop
-  remain rule-based.
+- **The cost model is advisory and drives a few decisions.** It computes costs for all nodes; the
+  range-scan-vs-full-scan choice and **join-algorithm selection** (index-nested-loop vs hash vs merge)
+  consume them. Unique-lookup-vs-scan and join *ordering* remain rule-based.
 
 ## Join-order heuristics in detail
 
@@ -577,7 +597,8 @@ Parse, bind, plan, and execute for: single-table SELECT with index selection (un
 `WHERE` with predicate analysis and filter absorption, `GROUP BY` + `HAVING`, global and grouped
 aggregates (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `SELECT DISTINCT` (hash or index-ordered streaming),
 `ORDER BY` (with index-based sort elision), `LIMIT`/`OFFSET` (with pushdown), `[INNER]`/comma joins
-(nested-loop and index-nested-loop), derived tables, scalar/`IN`/`NOT IN`/`EXISTS` subqueries with
+(nested-loop, index-nested-loop, hash, and merge join — chosen cost-based), derived tables,
+scalar/`IN`/`NOT IN`/`EXISTS` subqueries with
 semi/anti-join rewrite for indexed `IN`/`NOT IN`, index-driven value-list `IN` (`x IN (v1, v2, …)`),
 projection pushdown (including partial-decode locate for `UPDATE`/`DELETE`), join-order heuristics, advisory
 statistics (row counts, per-index counts, per-column min/max — persisted, configurable flush cadence), a
@@ -593,7 +614,7 @@ These are the meaningful missing pieces and where new work fits.
 |------|-------|-------|
 | **Table statistics — row counts** | **Done** | `StatisticsManager` tracks/persists `RowCount` per table (Kahuna meta KV `{db}:stats:{tableId}`), with a configurable flush cadence (`stats_flush_interval_ms`) and a close-hook flush. |
 | **Index counts & column min/max** | **Done** | `StatisticsManager` tracks/persists per-index entry counts and per-column min/max (`ColumnMinMax`/`ScalarBound`), respecting index element-state. Consumed by the cost model for real range selectivity. |
-| **Cost model** | **Done (small)** | `PlanCost` + `CostEstimator` populate `EstimatedCardinality`/`Cost` and veto low-selectivity index range scans. Range selectivity is min/max-driven; join costs are still rough; only the range-vs-fullscan decision is cost-driven. |
+| **Cost model** | **Done (small)** | `PlanCost` + `CostEstimator` populate `EstimatedCardinality`/`Cost`, veto low-selectivity index range scans, and drive **join-algorithm selection** (index-nested-loop vs hash vs merge). Range selectivity is min/max-driven; join *ordering* is still heuristic (`JoinOrderOptimizer`), but join *algorithm* choice is cost-based. |
 | **Plan-cache hooks** | **Partial** | Plans record `TableSchemaVersion`; no stable query-shape identifier yet. No plan reuse. |
 | **Semi-/anti-join rewrite** | **Done** | Eligible uncorrelated `IN`/`NOT IN` over an **indexed** inner column rewrite to semi / anti / null-aware-anti join (`SemiJoinAnalyzer`/`SemiJoinExecutor`); non-indexed falls back to materialization. Three-valued `NOT IN` semantics preserved. |
 | **DISTINCT streaming** | **Done** | `SELECT DISTINCT` over a NOT-NULL index set-prefix streams (adjacent-row dedup, O(1) memory); otherwise hash dedup. |
@@ -601,7 +622,7 @@ These are the meaningful missing pieces and where new work fits.
 | **Logical EXPLAIN** | **Cosmetic** | `(LOGICAL)` renders the physical tree relabeled; there is no distinct logical-plan rendering. |
 | **Per-node timing** | **Root-only** | `actual_time_ms` is only measured for the whole plan, not per operator. |
 | **Error/semantics matrix** | **Done** | `TestErrorMatrix.cs` — 14 negative cases (ambiguous column, bad HAVING refs, multi-column/multi-row subqueries, `COUNT(DISTINCT)`, etc.) asserting precise codes + messages. |
-| **Query microbenchmarks** | **Missing** | No benchmarks for grouped aggregation, join algorithms, or subquery materialization. The one remaining roadmap item. |
+| **Query microbenchmarks** | **Missing** | No benchmarks for grouped aggregation, join algorithms, or subquery materialization. The last item from the original optimizer backlog (R14). |
 
 Explicitly deferred (by design): OUTER joins, window functions, CTEs, quantified predicates beyond
 `IN`/`NOT IN` (`ANY`/`ALL`/`SOME`), `COUNT(DISTINCT …)`, full cost-based join reordering, and distributed

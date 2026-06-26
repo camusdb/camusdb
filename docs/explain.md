@@ -78,6 +78,7 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 | `table-scan`             | Full table scan or forced-index scan | `table=<name>` (forced-index adds `, forced-index=<name>`) |
 | `index-lookup`           | Equality on a **unique** index | `index=<name>, key=<value>` |
 | `index-range-scan`       | Range predicate (`<`, `>`, `BETWEEN`), or equality on a **non-unique** index | `index=<name>, from>=<val>, to<<val>` |
+| `index-in-list`          | `x IN (v1, v2, …)` on an indexed column — one index seek per distinct value, results unioned | `index=<name>, values=<n>` (count of seek values) |
 | `filter`                 | Residual predicate not satisfied by the chosen index | `<expr>` |
 | `aggregate`              | `GROUP BY` or aggregate functions | `group=[<exprs>], aggs=[<calls>]` |
 | `having-filter`          | `HAVING` clause applied after aggregation | `<expr>` |
@@ -90,6 +91,8 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 | `null-aware-anti-join`   | `NOT IN (subquery)` over a **nullable** indexed inner column (SQL three-valued semantics) | `outer=<col>, inner=<table>.<col>, index=<name>` |
 | `nested-loop-join`       | Inner join without a usable index on the right side | `on=<expr>, right=<alias>` |
 | `index-nested-loop-join` | Inner join where the right side's join key is indexed | `on=<expr>, index=<name>, left=<col>, right=<col>` |
+| `hash-join`              | Inner equi-join using an in-memory hash table; chosen over INLJ when the outer side is large relative to the inner | `on=<left>=<right>, build=<alias>` (build-filter appended when a pushed-down filter is present) |
+| `merge-join`             | Inner equi-join using a streaming two-pointer merge; chosen when both sides have free index ordering on the join key | `on=<left>=<right>` (right-filter appended when present) |
 | `derived-table-scan`     | Subquery in the `FROM` clause | `alias=<alias>` |
 
 Notes:
@@ -98,6 +101,10 @@ Notes:
   is materialized instead and no join node appears.
 - A `distinct` row reports `streaming: true` when the input arrives in index order covering
   all (NOT NULL) DISTINCT columns; otherwise `hash`.
+- `hash-join` `build=<alias>` names the side materialised into the in-memory hash table; the
+  planner picks the smaller estimated side as the build side to minimise memory.
+- `merge-join` streams both inputs when both arrive pre-ordered (ForcedIndex scan or an upstream
+  sort); only the current equal-key run is buffered — O(run size) memory, not O(n+m).
 
 The examples below focus on the `stage` / `node` / `detail` columns (the stable part of the
 output). Every row also carries `estimated_rows` / `estimated_cost` as described above; the
@@ -206,6 +213,53 @@ physical  index-range-scan  index=code_idx
 When the DISTINCT columns form an index set-prefix and are all NOT NULL, the scan emits rows
 in index order and `distinct` deduplicates adjacent rows with O(1) memory. Otherwise the
 `distinct` row shows `hash` and a hash set is used.
+
+---
+
+### Hash join — equi-join with no index on the join key
+
+```sql
+EXPLAIN SELECT o.name, li.product
+        FROM orders o
+        JOIN line_items li ON li.order_id = o.id;
+-- orders.id is the PK; line_items.order_id has no secondary index
+```
+
+```
+stage     node        detail
+physical  hash-join   on=o.id=order_id, build=li
+physical  table-scan  table=orders
+physical  table-scan  table=line_items
+```
+
+`build=li` means `line_items` is materialized into the in-memory hash table; `orders` is
+streamed as the probe side. The planner chose `li` as the build side because it estimated
+fewer rows than `orders`. When the build side exceeds `HashJoinMaxBuildRows` (default 1 000 000)
+the executor falls back to nested-loop join for that query.
+
+---
+
+### Merge join — both sides have a secondary index on the join key
+
+```sql
+EXPLAIN SELECT o.name, li.product
+        FROM orders o
+        JOIN line_items li ON li.order_id = o.ext_key;
+-- orders has index orders_ext_key_idx on (ext_key)
+-- line_items has index li_order_id_idx on (order_id)
+-- both sides estimated > 100 rows → cost model picks merge
+```
+
+```
+stage     node              detail
+physical  merge-join        on=o.ext_key=order_id
+physical  table-scan        table=orders, forced-index=orders_ext_key_idx
+physical  table-scan        table=line_items, forced-index=li_order_id_idx
+```
+
+Both scans use a `forced-index` so their rows arrive in join-key order. The executor streams
+both sides simultaneously and buffers only the current equal-key run — no full materialization
+of either side. `LeftIsOrdered = RightIsOrdered = true` on the `MergeJoinNode`.
 
 ---
 

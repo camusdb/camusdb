@@ -12,21 +12,20 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
 /// <summary>
-/// Sort-merge inner join: materialize and sort both inputs on the equi-join key(s), then
-/// advance two pointers in lockstep — skip on key mismatch, emit the cross-product of
-/// equal-key groups via <c>QueryRowMerger</c>.
+/// Sort-merge inner join: advance two pointers in lockstep over equi-join key(s), skip on
+/// mismatch, emit the cross-product of equal-key groups via <c>QueryRowMerger</c>.
 ///
 /// NULL join-key values are excluded from both sides (consistent with inner-join semantics
 /// where NULL = NULL is unknown).
 ///
-/// Both inputs are materialised in memory and sorted in O(n log n) by the executor;
-/// when both sides arrive pre-ordered (index scan on the join column) the sort cost is
-/// zero but that optimisation lives in the planner, not here.
+/// When both <see cref="LeftIsOrdered"/> and <see cref="RightIsOrdered"/> are true the
+/// executor uses a streaming two-pointer path that buffers only the current equal-key run
+/// on the right side — O(max right run size) memory. When either side is unordered the
+/// executor materialises that side and sorts it in O(n log n) before merging.
 ///
 /// <see cref="CanDecomposeToLocalPlusMerge"/> is false.
 /// <see cref="PhysicalPlanNode.OutputOrdering"/> is set to ascending on
-/// <see cref="LeftKeyColumns"/> — the executor sorts on those columns, so downstream
-/// ORDER BY clauses on the join key can be elided by the planner.
+/// <see cref="LeftKeyColumns"/> so downstream ORDER BY on the join key can be elided.
 /// </summary>
 public sealed class MergeJoinNode : PhysicalPlanNode
 {

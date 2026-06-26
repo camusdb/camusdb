@@ -6,7 +6,9 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -301,5 +303,434 @@ public sealed class TestJoinParityOracle : SharedNodeBaseTest
             Assert.AreEqual(withoutNullRows[i].Row["name"].StrValue,    withNullRows[i].Row["name"].StrValue,    $"row[{i}].name");
             Assert.AreEqual(withoutNullRows[i].Row["product"].StrValue, withNullRows[i].Row["product"].StrValue, $"row[{i}].product");
         }
+    }
+
+    // ── Three-way parity sweep (NLJ vs Hash vs Merge) ─────────────────────────
+    //
+    // Uses force flags on StatisticsManager to override algorithm selection so each
+    // scenario can be exercised under all three algorithms regardless of index
+    // availability or row-count thresholds.
+
+    private sealed record ParityFixture(
+        string DbName,
+        DatabaseDescriptor Database,
+        CommandExecutor Executor);
+
+    /// <summary>
+    /// Fixture with orders (score column), line_items (null-key row), shipments, and a
+    /// multi-key table pair. No secondary indexes — algorithms are forced via flags.
+    /// </summary>
+    private async Task<ParityFixture> SetupThreeWayFixture()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "orders",
+            columns:
+            [
+                new("id",    ColumnType.Id),
+                new("name",  ColumnType.String,    notNull: true),
+                new("score", ColumnType.Integer64),
+            ],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "line_items",
+            columns:
+            [
+                new("id",       ColumnType.Id),
+                new("order_id", ColumnType.Id),
+                new("product",  ColumnType.String, notNull: true),
+                new("qty",      ColumnType.Integer64),
+            ],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "shipments",
+            columns:
+            [
+                new("id",       ColumnType.Id),
+                new("order_id", ColumnType.Id),
+                new("carrier",  ColumnType.String, notNull: true),
+            ],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        string oaId = ObjectIdGenerator.Generate().ToString();
+        string obId = ObjectIdGenerator.Generate().ToString();
+        string ocId = ObjectIdGenerator.Generate().ToString();
+        string odId = ObjectIdGenerator.Generate().ToString();
+
+        await executor.Insert(new InsertTicket(txn, dbname, "orders",
+            values:
+            [
+                new() { { "id", new(ColumnType.Id, oaId) }, { "name", new(ColumnType.String, "Order-A") }, { "score", new(ColumnType.Integer64, 10L) } },
+                new() { { "id", new(ColumnType.Id, obId) }, { "name", new(ColumnType.String, "Order-B") }, { "score", new(ColumnType.Integer64, 20L) } },
+                new() { { "id", new(ColumnType.Id, ocId) }, { "name", new(ColumnType.String, "Order-C") }, { "score", new(ColumnType.Integer64, 30L) } },
+                new() { { "id", new(ColumnType.Id, odId) }, { "name", new(ColumnType.String, "Order-D") }, { "score", new(ColumnType.Integer64, 40L) } },
+            ]));
+
+        // A→Widget, B→Gadget, B→Doohickey, D→Sprocket, NULL→GhostPart
+        await executor.Insert(new InsertTicket(txn, dbname, "line_items",
+            values:
+            [
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, oaId) }, { "product", new(ColumnType.String, "Widget")    }, { "qty", new(ColumnType.Integer64, 5L) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, obId) }, { "product", new(ColumnType.String, "Gadget")    }, { "qty", new(ColumnType.Integer64, 3L) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, obId) }, { "product", new(ColumnType.String, "Doohickey") }, { "qty", new(ColumnType.Integer64, 7L) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, odId) }, { "product", new(ColumnType.String, "Sprocket")  }, { "qty", new(ColumnType.Integer64, 2L) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Null, 0)  }, { "product", new(ColumnType.String, "GhostPart") }, { "qty", new(ColumnType.Integer64, 99L) } },
+            ]));
+
+        await executor.Insert(new InsertTicket(txn, dbname, "shipments",
+            values:
+            [
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, oaId) }, { "carrier", new(ColumnType.String, "FedEx") } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, obId) }, { "carrier", new(ColumnType.String, "UPS")   } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, ocId) }, { "carrier", new(ColumnType.String, "DHL")   } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, odId) }, { "carrier", new(ColumnType.String, "USPS")  } },
+            ]));
+
+        await database.Transactions.CommitAsync(txn);
+        return new ParityFixture(dbname, database, executor);
+    }
+
+    private async Task<ParityFixture> SetupMultiKeyFixture()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "categories",
+            columns:
+            [
+                new("id",        ColumnType.Integer64),
+                new("region_id", ColumnType.Integer64),
+                new("name",      ColumnType.String, notNull: true),
+            ],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "items",
+            columns:
+            [
+                new("id",        ColumnType.Integer64),
+                new("cat_id",    ColumnType.Integer64),
+                new("region_id", ColumnType.Integer64),
+                new("label",     ColumnType.String, notNull: true),
+            ],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        await executor.Insert(new InsertTicket(txn, dbname, "categories",
+            values:
+            [
+                new() { { "id", new(ColumnType.Integer64, 1L) }, { "region_id", new(ColumnType.Integer64, 10L) }, { "name", new(ColumnType.String, "Alpha") } },
+                new() { { "id", new(ColumnType.Integer64, 2L) }, { "region_id", new(ColumnType.Integer64, 20L) }, { "name", new(ColumnType.String, "Beta")  } },
+                new() { { "id", new(ColumnType.Integer64, 3L) }, { "region_id", new(ColumnType.Integer64, 10L) }, { "name", new(ColumnType.String, "Gamma") } },
+            ]));
+
+        await executor.Insert(new InsertTicket(txn, dbname, "items",
+            values:
+            [
+                new() { { "id", new(ColumnType.Integer64, 1L) }, { "cat_id", new(ColumnType.Integer64, 1L) }, { "region_id", new(ColumnType.Integer64, 10L) }, { "label", new(ColumnType.String, "A1") } },
+                new() { { "id", new(ColumnType.Integer64, 2L) }, { "cat_id", new(ColumnType.Integer64, 1L) }, { "region_id", new(ColumnType.Integer64, 10L) }, { "label", new(ColumnType.String, "A2") } },
+                new() { { "id", new(ColumnType.Integer64, 3L) }, { "cat_id", new(ColumnType.Integer64, 2L) }, { "region_id", new(ColumnType.Integer64, 20L) }, { "label", new(ColumnType.String, "B1") } },
+                new() { { "id", new(ColumnType.Integer64, 4L) }, { "cat_id", new(ColumnType.Integer64, 3L) }, { "region_id", new(ColumnType.Integer64, 10L) }, { "label", new(ColumnType.String, "G1") } },
+                // region mismatch → no match (cat_id matches but region_id does not)
+                new() { { "id", new(ColumnType.Integer64, 5L) }, { "cat_id", new(ColumnType.Integer64, 1L) }, { "region_id", new(ColumnType.Integer64, 99L) }, { "label", new(ColumnType.String, "X1") } },
+                // cat_id with no matching category
+                new() { { "id", new(ColumnType.Integer64, 6L) }, { "cat_id", new(ColumnType.Integer64, 9L) }, { "region_id", new(ColumnType.Integer64, 10L) }, { "label", new(ColumnType.String, "Z1") } },
+            ]));
+
+        await database.Transactions.CommitAsync(txn);
+        return new ParityFixture(dbname, database, executor);
+    }
+
+    private enum JoinAlgorithm { NestedLoop, Hash, Merge }
+
+    private static async Task<List<string>> RunSorted(ParityFixture f, string sql, JoinAlgorithm algo)
+    {
+        f.Executor.Statistics.ForceNestedLoopForTesting = false;
+        f.Executor.Statistics.ForceHashJoinForTesting   = false;
+        f.Executor.Statistics.ForceMergeJoinForTesting  = false;
+
+        switch (algo)
+        {
+            case JoinAlgorithm.NestedLoop: f.Executor.Statistics.ForceNestedLoopForTesting = true; break;
+            case JoinAlgorithm.Hash:       f.Executor.Statistics.ForceHashJoinForTesting   = true; break;
+            case JoinAlgorithm.Merge:      f.Executor.Statistics.ForceMergeJoinForTesting  = true; break;
+        }
+
+        KvTransaction txn = await f.Database.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(txnState: txn, database: f.DbName, sql: sql, parameters: null);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await f.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+
+        return rows.Select(r =>
+                string.Join("|", r.Row.OrderBy(kv => kv.Key).Select(kv => kv.Value.ToString() ?? "null")))
+            .OrderBy(s => s, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static void AssertParityAll(List<string> nlj, List<string> hash, List<string> merge, string scenario)
+    {
+        Assert.AreEqual(nlj.Count, hash.Count,  $"{scenario}: NLJ={nlj.Count} vs Hash={hash.Count}");
+        Assert.AreEqual(nlj.Count, merge.Count, $"{scenario}: NLJ={nlj.Count} vs Merge={merge.Count}");
+        for (int i = 0; i < nlj.Count; i++)
+        {
+            Assert.AreEqual(nlj[i], hash[i],  $"{scenario} row[{i}]: NLJ vs Hash");
+            Assert.AreEqual(nlj[i], merge[i], $"{scenario} row[{i}]: NLJ vs Merge");
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Parity_OneToOne_AllAlgorithmsAgree()
+    {
+        ParityFixture f = await SetupThreeWayFixture();
+        const string sql = "SELECT o.name, s.carrier FROM orders o JOIN shipments s ON s.order_id = o.id";
+
+        List<string> nlj   = await RunSorted(f, sql, JoinAlgorithm.NestedLoop);
+        List<string> hash  = await RunSorted(f, sql, JoinAlgorithm.Hash);
+        List<string> merge = await RunSorted(f, sql, JoinAlgorithm.Merge);
+
+        Assert.AreEqual(4, nlj.Count, "expected 4 matched pairs (one per order)");
+        AssertParityAll(nlj, hash, merge, "one-to-one");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Parity_OneToMany_AllAlgorithmsAgree()
+    {
+        ParityFixture f = await SetupThreeWayFixture();
+        const string sql =
+            "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_id = o.id";
+
+        List<string> nlj   = await RunSorted(f, sql, JoinAlgorithm.NestedLoop);
+        List<string> hash  = await RunSorted(f, sql, JoinAlgorithm.Hash);
+        List<string> merge = await RunSorted(f, sql, JoinAlgorithm.Merge);
+
+        // A→Widget, B→Gadget, B→Doohickey, D→Sprocket (C has no items; GhostPart has null key)
+        Assert.AreEqual(4, nlj.Count, "expected 4 matched pairs");
+        AssertParityAll(nlj, hash, merge, "one-to-many");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Parity_NullJoinKey_ExcludedByAllAlgorithms()
+    {
+        ParityFixture f = await SetupThreeWayFixture();
+        const string sql =
+            "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_id = o.id";
+
+        List<string> nlj   = await RunSorted(f, sql, JoinAlgorithm.NestedLoop);
+        List<string> hash  = await RunSorted(f, sql, JoinAlgorithm.Hash);
+        List<string> merge = await RunSorted(f, sql, JoinAlgorithm.Merge);
+
+        Assert.IsFalse(nlj.Any(r   => r.Contains("GhostPart")), "NLJ must exclude null-key row");
+        Assert.IsFalse(hash.Any(r  => r.Contains("GhostPart")), "Hash must exclude null-key row");
+        Assert.IsFalse(merge.Any(r => r.Contains("GhostPart")), "Merge must exclude null-key row");
+        AssertParityAll(nlj, hash, merge, "null-key exclusion");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Parity_ResidualNonEquiConjunct_AllAlgorithmsAgree()
+    {
+        ParityFixture f = await SetupThreeWayFixture();
+        // score > 15 → only B(20), C(30), D(40). C has no line_items → B×2 + D×1 = 3 rows.
+        const string sql =
+            "SELECT o.name, li.product " +
+            "FROM orders o JOIN line_items li ON li.order_id = o.id AND o.score > 15";
+
+        List<string> nlj   = await RunSorted(f, sql, JoinAlgorithm.NestedLoop);
+        List<string> hash  = await RunSorted(f, sql, JoinAlgorithm.Hash);
+        List<string> merge = await RunSorted(f, sql, JoinAlgorithm.Merge);
+
+        Assert.AreEqual(3, nlj.Count, "NLJ: B×2 + D×1 = 3 rows after residual filter");
+        AssertParityAll(nlj, hash, merge, "residual non-equi conjunct");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Parity_MultiColumnEquiJoin_AllAlgorithmsAgree()
+    {
+        ParityFixture f = await SetupMultiKeyFixture();
+        const string sql =
+            "SELECT c.name, i.label " +
+            "FROM categories c JOIN items i ON i.cat_id = c.id AND i.region_id = c.region_id";
+
+        List<string> nlj   = await RunSorted(f, sql, JoinAlgorithm.NestedLoop);
+        List<string> hash  = await RunSorted(f, sql, JoinAlgorithm.Hash);
+        List<string> merge = await RunSorted(f, sql, JoinAlgorithm.Merge);
+
+        // (1,10)→A1, (1,10)→A2, (2,20)→B1, (3,10)→G1; X1 and Z1 have no match
+        Assert.AreEqual(4, nlj.Count, "NLJ: 4 matching (cat,region) pairs");
+        AssertParityAll(nlj, hash, merge, "multi-column equi-join");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Parity_ThreeTableChain_AllAlgorithmsAgree()
+    {
+        ParityFixture f = await SetupThreeWayFixture();
+        const string sql =
+            "SELECT o.name, li.product, s.carrier " +
+            "FROM orders o " +
+            "JOIN line_items li ON li.order_id = o.id " +
+            "JOIN shipments s ON s.order_id = o.id";
+
+        List<string> nlj   = await RunSorted(f, sql, JoinAlgorithm.NestedLoop);
+        List<string> hash  = await RunSorted(f, sql, JoinAlgorithm.Hash);
+        List<string> merge = await RunSorted(f, sql, JoinAlgorithm.Merge);
+
+        // A→Widget×FedEx, B→Gadget×UPS, B→Doohickey×UPS, D→Sprocket×USPS
+        Assert.AreEqual(4, nlj.Count, "NLJ: 4 matched triples");
+        AssertParityAll(nlj, hash, merge, "three-table chain");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Parity_NoMatchingRows_AllAlgorithmsReturnEmpty()
+    {
+        ParityFixture f = await SetupThreeWayFixture();
+        const string sql =
+            "SELECT o.name, li.product " +
+            "FROM orders o JOIN line_items li ON li.order_id = o.id AND o.score < 0";
+
+        List<string> nlj   = await RunSorted(f, sql, JoinAlgorithm.NestedLoop);
+        List<string> hash  = await RunSorted(f, sql, JoinAlgorithm.Hash);
+        List<string> merge = await RunSorted(f, sql, JoinAlgorithm.Merge);
+
+        Assert.AreEqual(0, nlj.Count,   "NLJ: score < 0 matches nothing");
+        Assert.AreEqual(0, hash.Count,  "Hash: score < 0 matches nothing");
+        Assert.AreEqual(0, merge.Count, "Merge: score < 0 matches nothing");
+    }
+
+    // ── Benchmarks (gated — run on demand only) ───────────────────────────────
+
+    [Test]
+    [NonParallelizable]
+    [Explicit("Benchmark: hash join vs nested-loop on 1 000-row unindexed tables. Not suitable for CI.")]
+    public async Task Benchmark_HashVsNlj_LargeUnindexed()
+    {
+        const int rows = 1_000;
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "left_tbl",
+            columns: [new("id", ColumnType.Integer64), new("val", ColumnType.String, notNull: true)],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "right_tbl",
+            columns:
+            [
+                new("id",    ColumnType.Integer64),
+                new("fk",    ColumnType.Integer64),
+                new("label", ColumnType.String, notNull: true),
+            ],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        List<Dictionary<string, ColumnValue>> leftBatch = [];
+        List<Dictionary<string, ColumnValue>> rightBatch = [];
+        for (int i = 0; i < rows; i++)
+        {
+            leftBatch.Add(new() { { "id", new(ColumnType.Integer64, (long)i) }, { "val", new(ColumnType.String, $"L{i}") } });
+            rightBatch.Add(new() { { "id", new(ColumnType.Integer64, (long)i) }, { "fk", new(ColumnType.Integer64, (long)(i % rows)) }, { "label", new(ColumnType.String, $"R{i}") } });
+        }
+        await executor.Insert(new InsertTicket(txn, dbname, "left_tbl",  values: leftBatch));
+        await executor.Insert(new InsertTicket(txn, dbname, "right_tbl", values: rightBatch));
+        await database.Transactions.CommitAsync(txn);
+
+        const string sql = "SELECT l.val, r.label FROM left_tbl l JOIN right_tbl r ON r.fk = l.id";
+        ParityFixture f  = new(dbname, database, executor);
+
+        var sw = Stopwatch.StartNew();
+        List<string> hashRows = await RunSorted(f, sql, JoinAlgorithm.Hash);
+        long hashMs = sw.ElapsedMilliseconds;
+
+        sw.Restart();
+        List<string> nljRows = await RunSorted(f, sql, JoinAlgorithm.NestedLoop);
+        long nljMs = sw.ElapsedMilliseconds;
+
+        Console.WriteLine($"[Benchmark] Hash={hashMs}ms  NLJ={nljMs}ms  rows={hashRows.Count}");
+
+        Assert.AreEqual(hashRows.Count, nljRows.Count, "hash and NLJ must return the same row count");
+        Assert.Less(hashMs, nljMs, "hash join must be faster than nested-loop on large unindexed tables");
+    }
+
+    [Test]
+    [NonParallelizable]
+    [Explicit("Benchmark: merge join vs hash join on pre-sorted (indexed) inputs. Not suitable for CI.")]
+    public async Task Benchmark_MergeVsHash_PreSortedInputs()
+    {
+        const int rows = 1_000;
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "left_tbl",
+            columns: [new("id", ColumnType.Integer64), new("val", ColumnType.String, notNull: true)],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk",   [new("id", OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "l_idx", [new("id", OrderType.Ascending)]),
+            ],
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "right_tbl",
+            columns:
+            [
+                new("id",    ColumnType.Integer64),
+                new("fk",    ColumnType.Integer64),
+                new("label", ColumnType.String, notNull: true),
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk",   [new("id", OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "r_idx", [new("fk", OrderType.Ascending)]),
+            ],
+            ifNotExists: false));
+
+        List<Dictionary<string, ColumnValue>> leftBatch = [];
+        List<Dictionary<string, ColumnValue>> rightBatch = [];
+        for (int i = 0; i < rows; i++)
+        {
+            leftBatch.Add(new() { { "id", new(ColumnType.Integer64, (long)i) }, { "val", new(ColumnType.String, $"L{i}") } });
+            rightBatch.Add(new() { { "id", new(ColumnType.Integer64, (long)i) }, { "fk", new(ColumnType.Integer64, (long)i) }, { "label", new(ColumnType.String, $"R{i}") } });
+        }
+        await executor.Insert(new InsertTicket(txn, dbname, "left_tbl",  values: leftBatch));
+        await executor.Insert(new InsertTicket(txn, dbname, "right_tbl", values: rightBatch));
+        await database.Transactions.CommitAsync(txn);
+
+        // Seed high row counts so merge is cost-selected over INLJ (>MergeJoinPreferenceThreshold=100).
+        TableDescriptor leftTable  = await database.TableDescriptors["left_tbl"];
+        TableDescriptor rightTable = await database.TableDescriptors["right_tbl"];
+        executor.Statistics.SeedRowCountForTesting(database, leftTable,  rows);
+        executor.Statistics.SeedRowCountForTesting(database, rightTable, rows);
+
+        const string sql = "SELECT l.val, r.label FROM left_tbl l JOIN right_tbl r ON r.fk = l.id";
+        ParityFixture f  = new(dbname, database, executor);
+
+        var sw = Stopwatch.StartNew();
+        List<string> mergeRows = await RunSorted(f, sql, JoinAlgorithm.Merge);
+        long mergeMs = sw.ElapsedMilliseconds;
+
+        sw.Restart();
+        List<string> hashRows = await RunSorted(f, sql, JoinAlgorithm.Hash);
+        long hashMs = sw.ElapsedMilliseconds;
+
+        Console.WriteLine($"[Benchmark] Merge={mergeMs}ms  Hash={hashMs}ms  rows={mergeRows.Count}");
+
+        Assert.AreEqual(mergeRows.Count, hashRows.Count, "merge and hash must return the same row count");
     }
 }

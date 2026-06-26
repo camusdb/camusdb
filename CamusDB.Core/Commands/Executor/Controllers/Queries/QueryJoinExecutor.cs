@@ -743,10 +743,11 @@ internal sealed class QueryJoinExecutor
     // ── Merge Join ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Materialises both sides, sorts them on the equi-join key(s), then walks two pointers
-    /// in lockstep. On equal keys, buffers the full right-side run of matching rows and emits
-    /// the cross-product with every left row in the equal-key group (one-to-many correctness).
-    /// Residual <see cref="MergeJoinNode.OnPredicate"/> is applied per emitted pair.
+    /// Dispatches to the streaming or materializing two-pointer merge based on whether
+    /// both sides are pre-ordered. When both sides are ordered (both use a ForcedIndex scan or
+    /// SortNode) the streaming path buffers only the current equal-key run on the right side —
+    /// O(max right run size) memory rather than O(n + m). When one or both sides need an
+    /// internal sort, the materializing path is used.
     ///
     /// NULL keys are excluded from both sides — consistent with SQL inner-join semantics.
     /// </summary>
@@ -755,6 +756,13 @@ internal sealed class QueryJoinExecutor
         QueryPlan plan,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        if (joinNode.LeftIsOrdered && joinNode.RightIsOrdered && joinNode.RightPhysicalNode is not null)
+        {
+            await foreach (QueryResultRow r in StreamMergeJoin(joinNode, plan, ct).ConfigureAwait(false))
+                yield return r;
+            yield break;
+        }
+
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.RightSource.Alias;
 
@@ -781,7 +789,6 @@ internal sealed class QueryJoinExecutor
 
         if (joinNode.RightIsOrdered && joinNode.RightPhysicalNode is not null)
         {
-            // Stream the right physical node (SortNode or ForcedIndex scan) — already ordered.
             await foreach (QueryResultRow rightRow in ExecuteJoinTree(joinNode.RightPhysicalNode, plan).ConfigureAwait(false))
             {
                 ColumnValue[]? key = ExtractMergeKey(rightRow.Row, joinNode.RightKeyColumns);
@@ -834,6 +841,89 @@ internal sealed class QueryJoinExecutor
 
                     yield return new QueryResultRow(default(ObjectIdValue), merged);
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Streaming two-pointer merge for pre-ordered inputs. Advances left and right enumerators
+    /// in lockstep; on equal keys buffers only the right equal-key run, then iterates all left
+    /// rows with that key one at a time emitting the cross-product. Memory = O(right run size)
+    /// instead of O(n + m), making the cost model's InMemoryRows = 0 claim hold.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> StreamMergeJoin(
+        MergeJoinNode joinNode,
+        QueryPlan plan,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        QueryTicket ticket = plan.Ticket;
+        string rightAlias = joinNode.RightSource.Alias;
+
+        await using IAsyncEnumerator<QueryResultRow> leftEnum  =
+            ExecuteJoinTree(joinNode.Input!, plan).GetAsyncEnumerator(ct);
+        await using IAsyncEnumerator<QueryResultRow> rightEnum =
+            ExecuteJoinTree(joinNode.RightPhysicalNode!, plan).GetAsyncEnumerator(ct);
+
+        bool leftHasMore  = await leftEnum.MoveNextAsync().ConfigureAwait(false);
+        bool rightHasMore = await rightEnum.MoveNextAsync().ConfigureAwait(false);
+
+        while (leftHasMore && rightHasMore)
+        {
+            // Qualify current left row and extract its key.
+            string leftAlias = ResolveLeftAlias(joinNode.Input!, leftEnum.Current);
+            Dictionary<string, ColumnValue> leftQualified =
+                QueryRowMerger.QualifyRow(leftEnum.Current.Row, leftAlias);
+            ColumnValue[]? leftKey = ExtractMergeKey(leftQualified, joinNode.LeftKeyColumns);
+            if (leftKey is null)
+            {
+                leftHasMore = await leftEnum.MoveNextAsync().ConfigureAwait(false);
+                continue;
+            }
+
+            ColumnValue[]? rightKey = ExtractMergeKey(rightEnum.Current.Row, joinNode.RightKeyColumns);
+            if (rightKey is null)
+            {
+                rightHasMore = await rightEnum.MoveNextAsync().ConfigureAwait(false);
+                continue;
+            }
+
+            int cmp = CompareMergeKeys(leftKey, rightKey);
+            if (cmp < 0) { leftHasMore  = await leftEnum.MoveNextAsync().ConfigureAwait(false);  continue; }
+            if (cmp > 0) { rightHasMore = await rightEnum.MoveNextAsync().ConfigureAwait(false); continue; }
+
+            // Equal keys — buffer the right equal-key run.
+            ColumnValue[] runKey = leftKey;
+            List<Dictionary<string, ColumnValue>> rightRun = [];
+            while (rightHasMore)
+            {
+                ColumnValue[]? rk = ExtractMergeKey(rightEnum.Current.Row, joinNode.RightKeyColumns);
+                if (rk is null || CompareMergeKeys(rk, runKey) != 0) break;
+                rightRun.Add(rightEnum.Current.Row);
+                rightHasMore = await rightEnum.MoveNextAsync().ConfigureAwait(false);
+            }
+
+            // Emit all left rows with the same key × the buffered right run.
+            // Current left row is already qualified; loop advances after each emission.
+            while (true)
+            {
+                foreach (Dictionary<string, ColumnValue> rightRow in rightRun)
+                {
+                    Dictionary<string, ColumnValue> merged =
+                        QueryRowMerger.MergeRows(leftQualified, rightRow, rightAlias);
+
+                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
+                        continue;
+
+                    yield return new QueryResultRow(default(ObjectIdValue), merged);
+                }
+
+                leftHasMore = await leftEnum.MoveNextAsync().ConfigureAwait(false);
+                if (!leftHasMore) break;
+
+                string la = ResolveLeftAlias(joinNode.Input!, leftEnum.Current);
+                leftQualified = QueryRowMerger.QualifyRow(leftEnum.Current.Row, la);
+                ColumnValue[]? lk = ExtractMergeKey(leftQualified, joinNode.LeftKeyColumns);
+                if (lk is null || CompareMergeKeys(lk, runKey) != 0) break;
             }
         }
     }
