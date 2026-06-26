@@ -288,6 +288,38 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseSimpleSelectWhereNotBoolColumn()
+    {
+        // Unary prefix NOT applied to a boolean column.
+        NodeAst ast = SQLParserProcessor.Parse("SELECT * FROM robots WHERE NOT enabled");
+
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        Assert.AreEqual(NodeType.ExprNot, ast.extendedOne!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.extendedOne!.leftAst!.nodeType);
+        Assert.AreEqual("enabled", ast.extendedOne!.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectWhereNotBindsLooserThanComparison()
+    {
+        // NOT a = b parses as NOT (a = b) — comparison binds tighter than NOT.
+        NodeAst ast = SQLParserProcessor.Parse("SELECT * FROM robots WHERE NOT year = 2001");
+
+        Assert.AreEqual(NodeType.ExprNot, ast.extendedOne!.nodeType);
+        Assert.AreEqual(NodeType.ExprEquals, ast.extendedOne!.leftAst!.nodeType);
+    }
+
+    [Test]
+    public void TestParseSimpleSelectWhereNotBindsTighterThanAnd()
+    {
+        // NOT enabled AND ready parses as (NOT enabled) AND ready — NOT binds tighter than AND.
+        NodeAst ast = SQLParserProcessor.Parse("SELECT * FROM robots WHERE NOT enabled AND ready");
+
+        Assert.AreEqual(NodeType.ExprAnd, ast.extendedOne!.nodeType);
+        Assert.AreEqual(NodeType.ExprNot, ast.extendedOne!.leftAst!.nodeType);
+    }
+
+    [Test]
     public void TestParseSimpleSelectWhereBetween()
     {
         NodeAst ast = SQLParserProcessor.Parse("SELECT year FROM robots WHERE year BETWEEN 2001 AND 2004");

@@ -118,6 +118,7 @@ internal static class QueryHavingWorkspace
                     || (expression.extendedTwo is not null
                         && ContainsHiddenExpression(expression.extendedTwo, ticket, outputNames, insideAggregate));
 
+            case NodeType.ExprNot:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
                 return expression.leftAst is not null
@@ -231,6 +232,7 @@ internal static class QueryHavingWorkspace
 
                 return;
 
+            case NodeType.ExprNot:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
                 if (expression.leftAst is not null)

@@ -190,6 +190,21 @@ internal abstract class SQLExecutorBaseCreator
                     return ColumnValue.FromBool(leftValue.BoolValue && rightValue.BoolValue);
                 }
 
+            case NodeType.ExprNot:
+                {
+                    ColumnValue value = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+
+                    // Three-valued logic: NOT NULL is NULL (unknown), which the predicate filter
+                    // treats as non-matching.
+                    if (value.Type == ColumnType.Null)
+                        return ColumnValue.Null;
+
+                    if (value.Type != ColumnType.Bool)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator NOT for argument type: {value.Type}");
+
+                    return ColumnValue.FromBool(!value.BoolValue);
+                }
+
             case NodeType.ExprAdd:
                 {
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);

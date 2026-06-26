@@ -14,6 +14,7 @@
 
 %left TOR
 %left TAND
+%right TNOT
 %left TLIKE TILIKE
 %left TEQUALS TNOTEQUALS TBETWEEN
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
@@ -454,6 +455,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | between_expr { $$.n = $1.n; }
            | and_expr { $$.n = $1.n; }
            | or_expr { $$.n = $1.n; }
+           | not_expr { $$.n = $1.n; }
            | add_expr { $$.n = $1.n; }
            | sub_expr { $$.n = $1.n; }
            | mult_expr { $$.n = $1.n; }
@@ -477,6 +479,9 @@ and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, 
           ; 
 
 or_expr   : condition TOR condition { $$.n = new(NodeType.ExprOr, $1.n, $3.n, null, null, null, null, null, null); }
+          ;
+
+not_expr  : TNOT condition { $$.n = new(NodeType.ExprNot, $2.n, null, null, null, null, null, null, null); }
           ;
 
 equals_expr : condition TEQUALS condition { $$.n = new(NodeType.ExprEquals, $1.n, $3.n, null, null, null, null, null, null); }

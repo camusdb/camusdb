@@ -93,6 +93,16 @@ internal static class QueryHavingEvaluator
                 return ColumnValue.FromBool(leftValue.BoolValue && rightValue.BoolValue);
             }
 
+            case NodeType.ExprNot:
+                {
+                    ColumnValue value = Evaluate(expression.leftAst!, row, ticket, parameters);
+                    if (value.Type == ColumnType.Null)
+                        return ColumnValue.Null;
+                    if (value.Type != ColumnType.Bool)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator NOT for argument type: {value.Type}");
+                    return ColumnValue.FromBool(!value.BoolValue);
+                }
+
             case NodeType.ExprIsNull:
                 return ColumnValue.FromBool(
                     Evaluate(expression.leftAst!, row, ticket, parameters).Type == ColumnType.Null);

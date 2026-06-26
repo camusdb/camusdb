@@ -30,6 +30,7 @@ public enum NodeType
     ExprBetween,
     ExprOr,
     ExprAnd,
+    ExprNot,
     ExprAdd,
     ExprSub,
     ExprMult,

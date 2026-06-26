@@ -633,6 +633,7 @@ internal static class RequiredColumnAnalyzer
 
                 return;
 
+            case NodeType.ExprNot:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
                 if (expression.leftAst is not null)
@@ -851,6 +852,7 @@ internal static class RequiredColumnAnalyzer
 
                 return;
 
+            case NodeType.ExprNot:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
                 if (expression.leftAst is not null)

@@ -50,6 +50,7 @@ internal static class QueryExpressionWalker
 
                 return;
 
+            case NodeType.ExprNot:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
             case NodeType.ExprInMembership:

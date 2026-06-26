@@ -130,6 +130,7 @@ internal static class QueryPostAggregateScopeValidator
 
                 return;
 
+            case NodeType.ExprNot:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
                 if (expression.leftAst is not null)
