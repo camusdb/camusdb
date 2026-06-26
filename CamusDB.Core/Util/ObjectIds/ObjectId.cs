@@ -24,37 +24,41 @@ public sealed class ObjectId
     }
 
     public static string ToString(int _a, int _b, int _c)
+        => string.Create(24, (_a, _b, _c), static (span, s) => WriteHex(span, s.Item1, s.Item2, s.Item3));
+
+    /// <summary>
+    /// Writes the 24-char lowercase-hex representation of the id into the first 24 chars of
+    /// <paramref name="dest"/>. Lets callers compose a key (prefix + id) directly into a destination
+    /// span with no intermediate string. <paramref name="dest"/> must have room for 24 chars.
+    /// </summary>
+    public static void WriteHex(Span<char> dest, int _a, int _b, int _c)
     {
-        char[] c = new char[24];
+        dest[0] = ToHexChar((_a >> 28) & 0x0f);
+        dest[1] = ToHexChar((_a >> 24) & 0x0f);
+        dest[2] = ToHexChar((_a >> 20) & 0x0f);
+        dest[3] = ToHexChar((_a >> 16) & 0x0f);
+        dest[4] = ToHexChar((_a >> 12) & 0x0f);
+        dest[5] = ToHexChar((_a >> 8) & 0x0f);
+        dest[6] = ToHexChar((_a >> 4) & 0x0f);
+        dest[7] = ToHexChar(_a & 0x0f);
 
-        c[0] = ToHexChar((_a >> 28) & 0x0f);
-        c[1] = ToHexChar((_a >> 24) & 0x0f);
-        c[2] = ToHexChar((_a >> 20) & 0x0f);
-        c[3] = ToHexChar((_a >> 16) & 0x0f);
-        c[4] = ToHexChar((_a >> 12) & 0x0f);
-        c[5] = ToHexChar((_a >> 8) & 0x0f);
-        c[6] = ToHexChar((_a >> 4) & 0x0f);
-        c[7] = ToHexChar(_a & 0x0f);
+        dest[8] = ToHexChar((_b >> 28) & 0x0f);
+        dest[9] = ToHexChar((_b >> 24) & 0x0f);
+        dest[10] = ToHexChar((_b >> 20) & 0x0f);
+        dest[11] = ToHexChar((_b >> 16) & 0x0f);
+        dest[12] = ToHexChar((_b >> 12) & 0x0f);
+        dest[13] = ToHexChar((_b >> 8) & 0x0f);
+        dest[14] = ToHexChar((_b >> 4) & 0x0f);
+        dest[15] = ToHexChar(_b & 0x0f);
 
-        c[8] = ToHexChar((_b >> 28) & 0x0f);
-        c[9] = ToHexChar((_b >> 24) & 0x0f);
-        c[10] = ToHexChar((_b >> 20) & 0x0f);
-        c[11] = ToHexChar((_b >> 16) & 0x0f);
-        c[12] = ToHexChar((_b >> 12) & 0x0f);
-        c[13] = ToHexChar((_b >> 8) & 0x0f);
-        c[14] = ToHexChar((_b >> 4) & 0x0f);
-        c[15] = ToHexChar(_b & 0x0f);
-
-        c[16] = ToHexChar((_c >> 28) & 0x0f);
-        c[17] = ToHexChar((_c >> 24) & 0x0f);
-        c[18] = ToHexChar((_c >> 20) & 0x0f);
-        c[19] = ToHexChar((_c >> 16) & 0x0f);
-        c[20] = ToHexChar((_c >> 12) & 0x0f);
-        c[21] = ToHexChar((_c >> 8) & 0x0f);
-        c[22] = ToHexChar((_c >> 4) & 0x0f);
-        c[23] = ToHexChar(_c & 0x0f);
-
-        return new string(c);
+        dest[16] = ToHexChar((_c >> 28) & 0x0f);
+        dest[17] = ToHexChar((_c >> 24) & 0x0f);
+        dest[18] = ToHexChar((_c >> 20) & 0x0f);
+        dest[19] = ToHexChar((_c >> 16) & 0x0f);
+        dest[20] = ToHexChar((_c >> 12) & 0x0f);
+        dest[21] = ToHexChar((_c >> 8) & 0x0f);
+        dest[22] = ToHexChar((_c >> 4) & 0x0f);
+        dest[23] = ToHexChar(_c & 0x0f);
     }
 
     private static bool TryParseHexChar(char c, out int value)

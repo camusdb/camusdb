@@ -51,8 +51,8 @@ namespace CamusDB.Core.Storage.Kv;
 /// knows their width from the column type. Variable-length fields (String/Id/Bytes) are terminated
 /// so composite keys keep correct prefix ordering.
 ///
-/// Array is not indexable — <see cref="EncodeValue(StringBuilder,ColumnValue)"/> throws
-/// <see cref="CamusDBException"/> <c>InvalidInput</c> if an Array value is passed.
+/// Array is not indexable — encoding throws <see cref="CamusDBException"/> <c>InvalidInput</c>
+/// if an Array value is passed.
 ///
 /// Note: <see cref="ColumnValue.CompareTo"/> has a quirk where null.CompareTo(null) returns 1 rather
 /// than 0; this codec treats two NULLs as equal (the intended semantics). Property tests therefore
@@ -74,56 +74,92 @@ public static class KeyEncoder
     {
         ArgumentNullException.ThrowIfNull(composite);
 
-        StringBuilder builder = new();
+        int length = MeasureComposite(composite);
 
-        foreach (ColumnValue value in composite.Values)
-            EncodeValue(builder, value);
-
-        return builder.ToString();
+        // Write straight into the new string's backing buffer: one allocation, no StringBuilder and
+        // no per-field ToString("X…") temporaries. The destination span IS the final string, so the
+        // large-value case (String/Id/Bytes can expand to millions of chars) is heap-sized exactly —
+        // no stackalloc size ceiling applies.
+        return string.Create(length, composite, static (span, state) =>
+        {
+            int pos = 0;
+            foreach (ColumnValue value in state.Values)
+                WriteValue(span, ref pos, value);
+        });
     }
 
     public static string EncodeValue(ColumnValue value)
     {
-        StringBuilder builder = new();
-        EncodeValue(builder, value);
-        return builder.ToString();
+        int length = MeasureValue(value);
+        return string.Create(length, value, static (span, v) =>
+        {
+            int pos = 0;
+            WriteValue(span, ref pos, v);
+        });
     }
 
-    private static void EncodeValue(StringBuilder builder, ColumnValue value)
+    // -- length measurement (must mirror WriteValue's layout exactly) -----------------------------
+
+    private static int MeasureComposite(CompositeColumnValue composite)
+    {
+        int total = 0;
+        foreach (ColumnValue value in composite.Values)
+            total += MeasureValue(value);
+        return total;
+    }
+
+    private static int MeasureValue(ColumnValue value)
+    {
+        if (value.Type == ColumnType.Null)
+            return 1; // NullMarker only
+
+        // 1 for the PresentMarker + the body width.
+        return value.Type switch
+        {
+            ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Date or ColumnType.DateTime => 1 + 16,
+            ColumnType.Float32 => 1 + 8,
+            ColumnType.Bool => 1 + 1,
+            ColumnType.Bytes => 1 + 2 * (value.BytesValue?.Length ?? 0) + 2,            // 2 hex/byte + terminator
+            ColumnType.String or ColumnType.Id => 1 + 4 * (value.StrValue?.Length ?? 0) + 2, // 4 hex/code unit + terminator
+            ColumnType.Array => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Array columns are not indexable"),
+            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot encode column type: " + value.Type),
+        };
+    }
+
+    // -- span writers -----------------------------------------------------------------------------
+
+    private static void WriteValue(Span<char> dest, ref int pos, ColumnValue value)
     {
         if (value.Type == ColumnType.Null)
         {
-            builder.Append(NullMarker);
+            dest[pos++] = NullMarker;
             return;
         }
 
-        builder.Append(PresentMarker);
+        dest[pos++] = PresentMarker;
 
         switch (value.Type)
         {
             case ColumnType.Integer64:
-                builder.Append(EncodeInteger64(value.LongValue));
+            case ColumnType.Date:
+            case ColumnType.DateTime:
+                WriteHex16(dest, ref pos, (ulong)value.LongValue ^ 0x8000_0000_0000_0000UL);
                 break;
 
             case ColumnType.Float64:
-                builder.Append(EncodeFloat64(value.FloatValue));
+                WriteHex16(dest, ref pos, Float64Ordered(value.FloatValue));
                 break;
 
             case ColumnType.Bool:
-                builder.Append(value.BoolValue ? '1' : '0');
+                dest[pos++] = value.BoolValue ? '1' : '0';
                 break;
 
             case ColumnType.Float32:
-                builder.Append(EncodeFloat32((float)value.FloatValue));
-                break;
-
-            case ColumnType.Date:
-            case ColumnType.DateTime:
-                builder.Append(EncodeInteger64(value.LongValue));
+                WriteHex8(dest, ref pos, Float32Ordered((float)value.FloatValue));
                 break;
 
             case ColumnType.Bytes:
-                AppendBytesHex(builder, value.BytesValue ?? []);
+                WriteBytesHex(dest, ref pos, value.BytesValue ?? []);
                 break;
 
             case ColumnType.Array:
@@ -134,7 +170,7 @@ public static class KeyEncoder
             // interchangeable. Both use the order-preserving ASCII-hex form.
             case ColumnType.String:
             case ColumnType.Id:
-                AppendStringHex(builder, value.StrValue ?? "");
+                WriteStringHex(dest, ref pos, value.StrValue ?? "");
                 break;
 
             default:
@@ -143,20 +179,28 @@ public static class KeyEncoder
     }
 
     /// <summary>
-    /// Maps a signed long to an order-preserving 16-char hex string by flipping the sign bit, so
-    /// negatives sort before positives.
+    /// Writes <paramref name="ordered"/> as 16 fixed-width uppercase hex chars straight into
+    /// <paramref name="dest"/> (no intermediate string). Callers pass the order-preserving transform
+    /// of the value (sign-bit flip for integers/dates, bit complement for floats).
     /// </summary>
-    private static string EncodeInteger64(long value)
+    private static void WriteHex16(Span<char> dest, ref int pos, ulong ordered)
     {
-        ulong ordered = (ulong)value ^ 0x8000_0000_0000_0000UL;
-        return ordered.ToString("X16");
+        ordered.TryFormat(dest.Slice(pos, 16), out _, "X16");
+        pos += 16;
+    }
+
+    /// <summary>32-bit counterpart of <see cref="WriteHex16"/> — 8 fixed-width uppercase hex chars.</summary>
+    private static void WriteHex8(Span<char> dest, ref int pos, uint ordered)
+    {
+        ordered.TryFormat(dest.Slice(pos, 8), out _, "X8");
+        pos += 8;
     }
 
     /// <summary>
-    /// Maps a double to an order-preserving 16-char hex string. For negatives all bits are flipped;
+    /// Order-preserving transform of a double's IEEE-754 bits: for negatives all bits are flipped;
     /// for non-negatives only the sign bit is flipped. This yields ascending order for ascending doubles.
     /// </summary>
-    private static string EncodeFloat64(double value)
+    private static ulong Float64Ordered(double value)
     {
         long bits = BitConverter.DoubleToInt64Bits(value);
 
@@ -165,15 +209,13 @@ public static class KeyEncoder
         else
             bits ^= long.MinValue;
 
-        return ((ulong)bits).ToString("X16");
+        return (ulong)bits;
     }
 
-
     /// <summary>
-    /// Maps a single-precision float to an order-preserving 8-char hex string using the same
-    /// sign-bit / complement trick as <see cref="EncodeFloat64"/>, but on 32-bit IEEE-754 bits.
+    /// Single-precision counterpart of <see cref="Float64Ordered"/>, on 32-bit IEEE-754 bits.
     /// </summary>
-    private static string EncodeFloat32(float value)
+    private static uint Float32Ordered(float value)
     {
         int bits = BitConverter.SingleToInt32Bits(value);
 
@@ -182,7 +224,7 @@ public static class KeyEncoder
         else
             bits ^= int.MinValue;
 
-        return ((uint)bits).ToString("X8");
+        return (uint)bits;
     }
 
     private const string HexChars = "0123456789ABCDEF";
@@ -198,18 +240,18 @@ public static class KeyEncoder
     /// across composite fields. A literal U+0000 inside the value is content (encoded as "0000") and is
     /// never confused with the U+0000 terminator char, so no escaping is needed.
     /// </summary>
-    private static void AppendStringHex(StringBuilder builder, string value)
+    private static void WriteStringHex(Span<char> dest, ref int pos, string value)
     {
         foreach (char c in value)
         {
-            builder.Append(HexChars[(c >> 12) & 0xF]);
-            builder.Append(HexChars[(c >> 8) & 0xF]);
-            builder.Append(HexChars[(c >> 4) & 0xF]);
-            builder.Append(HexChars[c & 0xF]);
+            dest[pos++] = HexChars[(c >> 12) & 0xF];
+            dest[pos++] = HexChars[(c >> 8) & 0xF];
+            dest[pos++] = HexChars[(c >> 4) & 0xF];
+            dest[pos++] = HexChars[c & 0xF];
         }
 
-        builder.Append(FieldTerminatorLead);
-        builder.Append(FieldTerminatorTail);
+        dest[pos++] = FieldTerminatorLead;
+        dest[pos++] = FieldTerminatorTail;
     }
 
     /// <summary>
@@ -217,16 +259,16 @@ public static class KeyEncoder
     /// terminated by the field terminator. Bytewise order is preserved because "AB" &lt; "AC" ordinal,
     /// and the terminator (which sorts before any hex digit) preserves prefix ordering.
     /// </summary>
-    private static void AppendBytesHex(StringBuilder builder, byte[] value)
+    private static void WriteBytesHex(Span<char> dest, ref int pos, byte[] value)
     {
         foreach (byte b in value)
         {
-            builder.Append(HexChars[(b >> 4) & 0xF]);
-            builder.Append(HexChars[b & 0xF]);
+            dest[pos++] = HexChars[(b >> 4) & 0xF];
+            dest[pos++] = HexChars[b & 0xF];
         }
 
-        builder.Append(FieldTerminatorLead);
-        builder.Append(FieldTerminatorTail);
+        dest[pos++] = FieldTerminatorLead;
+        dest[pos++] = FieldTerminatorTail;
     }
 
     public static CompositeColumnValue Decode(string key, ColumnType[] types)

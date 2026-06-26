@@ -9,6 +9,8 @@
 using Kahuna;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CamusDB.Core.Transactions;
 
@@ -41,6 +43,7 @@ namespace CamusDB.Core.Transactions;
 public sealed class KvTransactionsManager : IDisposable
 {
     private readonly IKahuna kahuna;
+    private readonly ILogger logger;
 
     /// <summary>
     /// Mints a local HLC timestamp without opening a Kahuna transaction. Used by the cheap
@@ -58,11 +61,12 @@ public sealed class KvTransactionsManager : IDisposable
     private readonly Lock heartbeatSync = new();
     private readonly Dictionary<Kommander.Time.HLCTimestamp, CancellationTokenSource> heartbeats = [];
 
-    public KvTransactionsManager(IKahuna kahuna, Func<Kommander.Time.HLCTimestamp?, Kommander.Time.HLCTimestamp>? mintLocalT = null)
+    public KvTransactionsManager(IKahuna kahuna, Func<Kommander.Time.HLCTimestamp?, Kommander.Time.HLCTimestamp>? mintLocalT = null, ILogger<ICamusDB>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         this.kahuna = kahuna;
         this.mintLocalT = mintLocalT;
+        this.logger = logger ?? NullLogger<ICamusDB>.Instance;
     }
 
     /// <summary>
@@ -124,6 +128,7 @@ public sealed class KvTransactionsManager : IDisposable
     public async Task<KvTransaction> BeginAsync(
         CamusIsolationLevel? isolationLevel = null,
         CamusTransactionMode? transactionMode = null,
+        int? mutationLimitOverride = null,
         CancellationToken cancellationToken = default)
     {
         CamusIsolationLevel level = isolationLevel ?? CamusDBConfig.DefaultIsolationLevel;
@@ -152,7 +157,8 @@ public sealed class KvTransactionsManager : IDisposable
                 $"Failed to start Kahuna transaction: {type}"
             );
 
-        KvTransaction tx = new(txId, uniqueId, isReadOnly: false, level, mode);
+        int mutationLimit = mutationLimitOverride ?? CamusDBConfig.MaxMutationsPerTransaction;
+        KvTransaction tx = new(txId, uniqueId, isReadOnly: false, level, mode, mutationLimit: mutationLimit);
         Track(tx);
 
         // Start the range-lock heartbeat for Serializable+RW transactions. This background loop
@@ -379,6 +385,7 @@ public sealed class KvTransactionsManager : IDisposable
         if (result == KeyValueResponseType.Committed)
         {
             tx.Status = KvTransactionStatus.Committed;
+            Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, tx.GetAcquiredLocks().Count);
             await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
             Untrack(tx);
             return mintLocalT?.Invoke(null) ?? tx.TransactionId;
@@ -430,6 +437,8 @@ public sealed class KvTransactionsManager : IDisposable
         tx.Status = KvTransactionStatus.RolledBack;
         Untrack(tx);
 
+        Log.LogTransactionFinalized(logger, "rolled back", tx.UniqueId, tx.GetAcquiredLocks().Count);
+
         await kahuna.LocateAndRollbackTransaction(
             tx.UniqueId,
             tx.TransactionId,
@@ -471,6 +480,7 @@ public sealed class KvTransactionsManager : IDisposable
             {
                 await kahuna.LocateAndTryReleaseExclusivePrefixLock(
                     tx.TransactionId, prefix, durability, cancellationToken).ConfigureAwait(false);
+                Log.LogRangeLockReleased(logger, "Prefix", prefix, "-∞", "+∞", tx.UniqueId);
             }
             catch
             {
@@ -498,6 +508,9 @@ public sealed class KvTransactionsManager : IDisposable
                     tx.TransactionId, bounds.Prefix,
                     bounds.StartKey, bounds.StartInclusive, bounds.EndKey, bounds.EndInclusive,
                     bounds.Durability, cancellationToken).ConfigureAwait(false);
+                Log.LogRangeLockReleased(
+                    logger, bounds.Mode.ToString(), bounds.Prefix,
+                    bounds.StartKey ?? "-∞", bounds.EndKey ?? "+∞", tx.UniqueId);
             }
             catch
             {

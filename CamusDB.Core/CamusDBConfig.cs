@@ -180,6 +180,29 @@ public static class CamusDBConfig
     public static int LockEscalationThreshold = 50;
 
     /// <summary>
+    /// Maximum number of row + secondary-index mutations a single read-write transaction may
+    /// accumulate, mirroring Cloud Spanner's per-commit mutation cap.
+    ///
+    /// <para>One CamusDB mutation = one row-blob write/delete <em>or</em> one secondary-index
+    /// entry write/delete. Rows are stored as single KV blobs (not column-per-cell), so each
+    /// INSERT counts as <c>1 + K</c> mutations (row + K index entries), and each UPDATE that
+    /// touches an indexed column counts <c>1 + 2</c> per changed index (row rewrite + old-entry
+    /// delete + new-entry insert). The counter is monotonic — updating the same row twice counts
+    /// twice.</para>
+    ///
+    /// <para>A transaction that would exceed this limit throws
+    /// <see cref="CamusDBErrorCodes.TransactionMutationLimitExceeded"/> (<c>CADB0506</c>) before
+    /// any of the offending writes are sent to Kahuna. This error is <b>non-retryable</b>: the
+    /// caller must split the work into smaller transactions.</para>
+    ///
+    /// <para><c>&lt;= 0</c> — limit is disabled; equivalent to today's unlimited behaviour.
+    /// DDL and backfill transactions always run with limit = 0 regardless of this setting.</para>
+    ///
+    /// Default: <c>20_000</c> (matches Spanner's historical default).
+    /// </summary>
+    public static int MaxMutationsPerTransaction = 20_000;
+
+    /// <summary>
     /// Wall-clock cap, in milliseconds, for a single lock-acquire retry loop during Serializable
     /// conflicts. Bounds deadlock and persistent lock-conflict latency per operation.
     /// Default: 500 ms.

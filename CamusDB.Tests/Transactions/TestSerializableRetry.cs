@@ -240,7 +240,7 @@ public sealed class TestSerializableRetry : SharedNodeBaseTest
         {
             bobAttempts++;
             KvTransaction bob = await db.Transactions.BeginAsync(
-                CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite, ct);
+                CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite, cancellationToken: ct);
             try
             {
                 // Filter on balance (non-indexed) so the planner uses ScanUsingTableIndex

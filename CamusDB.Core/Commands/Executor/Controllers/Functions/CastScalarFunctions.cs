@@ -148,7 +148,7 @@ internal static class CastScalarFunctions
         {
             "id" or "object_id" => ColumnType.Id,
             "integer" => ColumnType.Integer64,
-            "char" or "varchar" => ColumnType.String,
+            "char" or "varchar" or "text" => ColumnType.String,
             "double" => ColumnType.Float64,
             _ => throw UnknownTargetType(castName, identifier),
         };

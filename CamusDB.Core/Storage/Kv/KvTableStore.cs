@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -13,6 +14,8 @@ using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Transactions;
@@ -47,6 +50,7 @@ namespace CamusDB.Core.Storage.Kv;
 public sealed class KvTableStore
 {
     private readonly IKahuna kahuna;
+    private readonly ILogger logger;
     private readonly string tableId;
     private readonly string tableName;
     private readonly string tableKeyPrefix;        // "{dbId}:{tableId}" — shared prefix for row and index keys
@@ -57,6 +61,10 @@ public sealed class KvTableStore
     // Index IDs (names) registered as key-range routed by TableOpener.
     // Written once during table open (inside AsyncLazy, single-threaded), then only read.
     private readonly HashSet<string> rangedIndexIds = [];
+
+    // Caches "{dbId}:{tableId}:i:{indexId}" per index so the bucket prefix is interpolated once
+    // instead of on every lock/scan. The index-id set is small and bounded by the table's schema.
+    private readonly ConcurrentDictionary<string, string> indexBucketPrefixCache = new();
 
     private const int RowIdHexLength = 24;
     private const int DefaultPageSize = 512;
@@ -93,13 +101,14 @@ public sealed class KvTableStore
     // Guard against int overflow: `1 << attempt` becomes negative for attempt >= 31.
     private static int RetryDelayMs(int attempt) => attempt < 6 ? 1 << attempt : MaxRetryDelayMs;
 
-    public KvTableStore(IKahuna kahuna, string dbId, string tableId, string tableName = "")
+    public KvTableStore(IKahuna kahuna, string dbId, string tableId, string tableName = "", ILogger<ICamusDB>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         ArgumentException.ThrowIfNullOrEmpty(dbId);
         ArgumentException.ThrowIfNullOrEmpty(tableId);
 
         this.kahuna = kahuna;
+        this.logger = logger ?? NullLogger<ICamusDB>.Instance;
         this.tableId = tableId;
         this.tableName = tableName;
         tableKeyPrefix  = $"{dbId}:{tableId}";
@@ -294,6 +303,9 @@ public sealed class KvTableStore
             if (type == KeyValueResponseType.Locked)
             {
                 tx.TrackRangeLock(bucketPrefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent, mode);
+                Log.LogRangeLockAcquired(
+                    logger, mode.ToString(), bucketPrefix,
+                    startKey ?? "-∞", startInclusive, endKey ?? "+∞", endInclusive, tx.UniqueId);
                 return;
             }
 
@@ -528,6 +540,8 @@ public sealed class KvTableStore
     {
         string key = BuildRowKey(rowId);
 
+        tx.ReserveMutations(1);
+
         if (IsSerializableReadWrite(tx) && HasSharedPointLock(tx, rowBucketPrefix, key))
             await UpgradeToExclusivePointLockAsync(tx, rowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
@@ -720,6 +734,8 @@ public sealed class KvTableStore
 
         byte[] value = Encoding.UTF8.GetBytes(rowId.ToString());
 
+        tx.ReserveMutations(1);
+
         string indexBucketPrefix = BuildIndexBucketPrefix(indexId);
         if (IsSerializableReadWrite(tx) && HasSharedPointLock(tx, indexBucketPrefix, kvKey))
             await UpgradeToExclusivePointLockAsync(tx, indexBucketPrefix, kvKey, cancellationToken).ConfigureAwait(false);
@@ -833,6 +849,8 @@ public sealed class KvTableStore
             }
         }
 
+        tx.ReserveMutations(lockKeys.Count);
+
         // Phase 1 — acquire every lock for the batch in one round-trip (retrying only transients).
         await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
 
@@ -865,7 +883,10 @@ public sealed class KvTableStore
             foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, _) in responses)
             {
                 if (type == KeyValueResponseType.Locked)
+                {
                     tx.TrackLock(key, durability);
+                    Log.LogPointLockAcquired(logger, key, tx.UniqueId);
+                }
             }
 
             // Second pass: queue transient failures for retry; throw on hard failures.
@@ -999,6 +1020,8 @@ public sealed class KvTableStore
             }
         }
 
+        tx.ReserveMutations(keys.Count);
+
         await DeleteKeysBatch(tx, keys, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1016,6 +1039,8 @@ public sealed class KvTableStore
         string kvKey = unique
             ? BuildUniqueIndexKey(indexId, key)
             : BuildNonUniqueIndexKey(indexId, key, rowId);
+
+        tx.ReserveMutations(1);
 
         string indexBucketPrefixDel = BuildIndexBucketPrefix(indexId);
         if (IsSerializableReadWrite(tx) && HasSharedPointLock(tx, indexBucketPrefixDel, kvKey))
@@ -1149,6 +1174,7 @@ public sealed class KvTableStore
 
     private async Task WriteRow(KvTransaction tx, ObjectIdValue rowId, byte[] data, CancellationToken cancellationToken)
     {
+        tx.ReserveMutations(1);
         string key = BuildRowKey(rowId);
 
         // If this Serializable+RW transaction already holds a shared point lock on this key
@@ -1190,6 +1216,7 @@ public sealed class KvTableStore
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {lockType}");
 
         tx.TrackLock(key, lockDurability);
+        Log.LogPointLockAcquired(logger, key, tx.UniqueId);
     }
 
     /// <summary>
@@ -1356,14 +1383,23 @@ public sealed class KvTableStore
         return 0;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private string BuildRowKey(ObjectIdValue rowId) => rowKeyPrefix + rowId.ToString();
+    // Composes "{dbId}:{tableId}:r/{rowIdHex24}" directly into the new string's buffer — one
+    // allocation, no separate rowId.ToString() temporary. The length is small and bounded
+    // (compact db/table ids + 24 hex), so this is allocation-minimal on the per-row hot path.
+    private string BuildRowKey(ObjectIdValue rowId)
+        => string.Create(rowKeyPrefix.Length + 24, (rowKeyPrefix, rowId), static (span, state) =>
+        {
+            state.rowKeyPrefix.CopyTo(span);
+            ObjectId.WriteHex(span[state.rowKeyPrefix.Length..], state.rowId.a, state.rowId.b, state.rowId.c);
+        });
 
     // Returns "{dbId}:{tableId}:i:{indexId}" — the bucket prefix (no trailing slash) used for
     // LocateAndScanRange so that SimpleHash("{dbId}:{tableId}:i:{indexId}") matches the routing
-    // hash of keys "{dbId}:{tableId}:i:{indexId}/{...}".
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private string BuildIndexBucketPrefix(string indexId) => $"{tableKeyPrefix}:i:{indexId}";
+    // hash of keys "{dbId}:{tableId}:i:{indexId}/{...}". Cached per index id (see field).
+    private string BuildIndexBucketPrefix(string indexId)
+        => indexBucketPrefixCache.TryGetValue(indexId, out string? cached)
+            ? cached
+            : indexBucketPrefixCache.GetOrAdd(indexId, static (id, prefix) => $"{prefix}:i:{id}", tableKeyPrefix);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildUniqueIndexKey(string indexId, CompositeColumnValue key)

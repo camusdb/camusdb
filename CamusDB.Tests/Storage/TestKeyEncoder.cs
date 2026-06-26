@@ -616,6 +616,40 @@ public class TestKeyEncoder
         }
     }
 
+    /// <summary>
+    /// Allocation benchmark (manual): a representative 3-column key should cost roughly a single
+    /// heap allocation — the output string itself — with no StringBuilder or per-field ToString
+    /// temporaries. [Explicit] so it never runs in CI; run it by name to see bytes/op.
+    /// </summary>
+    [Test, Explicit]
+    public void EncodeAllocatesAboutOneStringPerKey()
+    {
+        CompositeColumnValue key = new(new[]
+        {
+            new ColumnValue(ColumnType.Integer64, 1234567890L),
+            new ColumnValue(ColumnType.String, "user-000123"),
+            new ColumnValue(ColumnType.Date, DateTime.UtcNow.Date.Ticks),
+        });
+
+        // Warm up the JIT and let any first-call statics settle.
+        for (int i = 0; i < 1000; i++)
+            _ = KeyEncoder.Encode(key);
+
+        const int iterations = 100_000;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < iterations; i++)
+            _ = KeyEncoder.Encode(key);
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        double bytesPerOp = (after - before) / (double)iterations;
+        TestContext.WriteLine($"KeyEncoder.Encode: {bytesPerOp:F1} bytes/op over {iterations:N0} iterations");
+
+        // The encoded key is ~38 chars → one string object ≈ 22 (header) + 2*len ≈ 100 bytes.
+        // A generous ceiling that still fails loudly if StringBuilder/temp-string churn returns.
+        Assert.That(bytesPerOp, Is.LessThan(256),
+            "KeyEncoder.Encode allocated more than one string's worth per call — intermediate churn regressed");
+    }
+
     private static CompositeColumnValue Single(ColumnValue value) => new(new[] { value });
 
     private static CompositeColumnValue RandomComposite(Random random, ColumnType[] schema)

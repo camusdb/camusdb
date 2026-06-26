@@ -130,6 +130,20 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Debug, Message = "Forwarding DDL {Operation} to {Endpoint}")]
     public static partial void LogForwardingDdl(ILogger logger, string operation, Uri endpoint);
 
+    // Locking (transaction lock acquisition — Debug level; enable to trace which locks a query takes)
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Lock acquired: {Mode} range on '{Bucket}' [{Start} (incl={StartInclusive}) .. {End} (incl={EndInclusive})] tx={TxId}")]
+    public static partial void LogRangeLockAcquired(ILogger logger, string mode, string bucket, string start, bool startInclusive, string end, bool endInclusive, string txId);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Lock acquired: Exclusive point on '{Key}' tx={TxId}")]
+    public static partial void LogPointLockAcquired(ILogger logger, string key, string txId);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Lock released: {Mode} range on '{Bucket}' [{Start} .. {End}] tx={TxId}")]
+    public static partial void LogRangeLockReleased(ILogger logger, string mode, string bucket, string start, string end, string txId);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Transaction {Outcome}: tx={TxId}, released {PointLocks} exclusive point lock(s)")]
+    public static partial void LogTransactionFinalized(ILogger logger, string outcome, string txId, int pointLocks);
+
     // SQL parser cache
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "SQL parser cache sweep: {Count} entries, {Hits} hits, {Misses} misses, {Evictions} evictions (cumulative)")]

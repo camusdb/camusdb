@@ -139,7 +139,7 @@ public sealed class TestSerializableAutoRetry : SharedNodeBaseTest
         async Task AutocommitBody(CancellationToken ct)
         {
             attempts++;
-            KvTransaction tx = await db.Transactions.BeginAsync(null, null, ct);
+            KvTransaction tx = await db.Transactions.BeginAsync(null, null, cancellationToken: ct);
             try
             {
                 UpdateTicket ticket = new(
@@ -195,7 +195,7 @@ public sealed class TestSerializableAutoRetry : SharedNodeBaseTest
         async Task AutocommitBody(CancellationToken ct)
         {
             attempts++;
-            KvTransaction tx = await db.Transactions.BeginAsync(null, null, ct);
+            KvTransaction tx = await db.Transactions.BeginAsync(null, null, cancellationToken: ct);
             try
             {
                 // Insert the same id again → DuplicateUniqueKeyValue (not retryable).
@@ -251,7 +251,7 @@ public sealed class TestSerializableAutoRetry : SharedNodeBaseTest
         async Task AutocommitBody(CancellationToken ct)
         {
             attempts++;
-            KvTransaction tx = await db.Transactions.BeginAsync(null, null, ct);
+            KvTransaction tx = await db.Transactions.BeginAsync(null, null, cancellationToken: ct);
             try
             {
                 await executor.Insert(new InsertTicket(

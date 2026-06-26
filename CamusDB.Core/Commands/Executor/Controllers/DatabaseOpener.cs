@@ -122,7 +122,7 @@ internal sealed class DatabaseOpener
             return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
         };
 
-        KvTransactionsManager transactions = new(sharedNode.Kahuna, mintLocalT);
+        KvTransactionsManager transactions = new(sharedNode.Kahuna, mintLocalT, logger);
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new();
 
         DatabaseDescriptor databaseDescriptor = new(

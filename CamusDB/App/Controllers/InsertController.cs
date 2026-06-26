@@ -107,7 +107,7 @@ public sealed class InsertController : CommandsController
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new InsertResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
+            return new JsonResult(new InsertResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
         catch (Exception e)
         {

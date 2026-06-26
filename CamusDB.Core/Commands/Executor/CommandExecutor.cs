@@ -297,7 +297,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
 
         KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            mutationLimitOverride: 0
         ).ConfigureAwait(false);
         try
         {
@@ -439,7 +440,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         );
 
         KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            mutationLimitOverride: 0
         ).ConfigureAwait(false);
         try
         {
@@ -493,7 +495,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         while (true)
         {
             KvTransaction tx = await database.Transactions.BeginAsync(
-                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+                mutationLimitOverride: 0
             ).ConfigureAwait(false);
             int batchRows = 0;
             ObjectIdValue lastRowId = default;
@@ -777,7 +780,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             // Phase 1: run local DDL (including backfill) and commit so the index KV
             // entries are durable and visible before the schema delta is published.
             KvTransaction tx1 = await database.Transactions.BeginAsync(
-                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+                mutationLimitOverride: 0
             ).ConfigureAwait(false);
             bool result;
             try
@@ -801,7 +805,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             // no KV writes happen under it (ReplicateIndexChangeAsync creates its own
             // internal checkpoint transaction via PersistSchemaCheckpointAsync).
             KvTransaction tx2 = await database.Transactions.BeginAsync(
-                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+                mutationLimitOverride: 0
             ).ConfigureAwait(false);
             try
             {

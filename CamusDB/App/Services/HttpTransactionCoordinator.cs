@@ -52,7 +52,7 @@ public sealed class HttpTransactionCoordinator
 
         DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
 
-        KvTransaction tx = await database.Transactions.BeginAsync(isolationLevel, transactionMode, cancellationToken).ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(isolationLevel, transactionMode, cancellationToken: cancellationToken).ConfigureAwait(false);
         Register(database.Transactions, tx);
         return tx;
     }

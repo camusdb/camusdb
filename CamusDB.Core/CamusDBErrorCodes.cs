@@ -83,5 +83,24 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string TransactionLifetimeExceeded = "CADB0505";
 
+    /// <summary>
+    /// A read-write transaction exceeded <see cref="CamusDBConfig.MaxMutationsPerTransaction"/>.
+    /// Permanent (non-retryable): the transaction must be split into smaller batches. Mirrors
+    /// Cloud Spanner's "too many mutations" rejection. One CamusDB mutation = one row-blob
+    /// write/delete or one secondary-index entry write/delete.
+    /// </summary>
+    public const string TransactionMutationLimitExceeded = "CADB0506";
+
     public const string InvalidConfig = "CADB0600";
+
+    /// <summary>
+    /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
+    /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
+    /// all other codes map to 500.
+    /// </summary>
+    public static int GetHttpStatus(string code) => code switch
+    {
+        TransactionMutationLimitExceeded => 400,
+        _ => 500
+    };
 }

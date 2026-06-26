@@ -106,6 +106,10 @@ public sealed class KvTransaction
     /// </summary>
     private readonly Stopwatch? lifetimeWatch;
 
+    // Mutation budget (ML2). guarded by trackSync.
+    private int mutationCount;
+    private readonly int mutationLimit; // 0 or negative = unlimited (DDL, read-only, disabled)
+
     /// <summary>
     /// Returns <c>true</c> if <paramref name="maxLifetimeMs"/> is positive and the transaction
     /// has been open longer than that duration. Always <c>false</c> for zero-snapshot (RO) transactions.
@@ -115,13 +119,37 @@ public sealed class KvTransaction
         lifetimeWatch is not null &&
         lifetimeWatch.ElapsedMilliseconds > maxLifetimeMs;
 
+    /// <summary>
+    /// Reserves <paramref name="count"/> mutations against this transaction's budget before the
+    /// corresponding writes are issued. Throws <see cref="CamusDBErrorCodes.TransactionMutationLimitExceeded"/>
+    /// if the budget would be exceeded; otherwise adds to the running total monotonically.
+    /// No-op when the limit is disabled (<c>&lt;= 0</c>) or <paramref name="count"/> is zero.
+    /// </summary>
+    public void ReserveMutations(int count)
+    {
+        if (mutationLimit <= 0 || count == 0) return;
+        lock (trackSync)
+        {
+            if ((long)mutationCount + count > mutationLimit)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMutationLimitExceeded,
+                    $"Transaction {UniqueId} would exceed the maximum of {mutationLimit} mutations " +
+                    $"(already {mutationCount}, requested {count}); split the work into smaller transactions");
+            mutationCount += count;
+        }
+    }
+
+    /// <summary>Running total of mutations reserved so far in this transaction.</summary>
+    public int MutationCount { get { lock (trackSync) return mutationCount; } }
+
     public KvTransaction(
         HLCTimestamp transactionId,
         string uniqueId,
         bool isReadOnly = false,
         CamusIsolationLevel isolationLevel = CamusIsolationLevel.ReadCommitted,
         CamusTransactionMode transactionMode = CamusTransactionMode.ReadWrite,
-        HLCTimestamp readTimestamp = default)
+        HLCTimestamp readTimestamp = default,
+        int mutationLimit = 0)
     {
         TransactionId = transactionId;
         UniqueId = uniqueId;
@@ -129,6 +157,7 @@ public sealed class KvTransaction
         IsolationLevel = isolationLevel;
         TransactionMode = transactionMode;
         ReadTimestamp = readTimestamp;
+        this.mutationLimit = mutationLimit;
         if (transactionId != HLCTimestamp.Zero)
             lifetimeWatch = Stopwatch.StartNew();
     }
