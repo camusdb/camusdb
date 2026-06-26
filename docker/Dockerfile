@@ -1,8 +1,16 @@
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build-env
+# Pin the build stage to the NATIVE build platform: running the .NET SDK under QEMU
+# emulation throws MSB4184 GetTargetPlatformIdentifier(''). The framework-dependent
+# publish is portable and carries per-RID native assets selected at load time.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build-env
 
 RUN rm -fr /src && mkdir -p /src
 COPY CamusDB.Core /src/CamusDB.Core/
 COPY CamusDB /src/CamusDB/
+
+# Scrub host-built obj/bin that slipped into the context; a host-restored
+# obj/project.assets.json poisons the in-container restore for the target arch
+# (MSB4184: GetTargetPlatformIdentifier('') cannot be evaluated).
+RUN find /src \( -type d -name obj -o -type d -name bin \) -prune -exec rm -rf {} +
 
 RUN cd /src/CamusDB/ && dotnet publish --no-self-contained --configuration Release -p:RunAnalyzers=false -o /app
 

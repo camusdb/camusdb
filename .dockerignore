@@ -1,0 +1,18 @@
+# Keep host build artifacts out of the build context. Copying a host-restored obj/
+# into the container breaks cross-platform restore (MSB4184 GetTargetPlatformIdentifier).
+**/bin
+**/obj
+
+.git/
+.github/
+.idea/
+.serena/
+.claude/
+.vs/
+
+CamusDB.Tests/
+CamusDB.Cluster.Tests/
+CamusDB.Sandbox/
+bench/
+docs/
+specs/
