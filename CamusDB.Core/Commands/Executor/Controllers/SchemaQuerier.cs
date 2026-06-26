@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Globalization;
 using System.Text;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
@@ -55,7 +56,7 @@ internal sealed class SchemaQuerier
             yield return new QueryResultRow(default, new()
             {
                 { "Field", new ColumnValue(ColumnType.String, column.Name) },
-                { "Type", new ColumnValue(ColumnType.String, column.Type.ToString()) },
+                { "Type", new ColumnValue(ColumnType.String, GetSQLType(column)) },
                 { "Null", new ColumnValue(ColumnType.String, column.NotNull ? "NO" : "YES") },
                 { "Key", new ColumnValue(ColumnType.String, IsPrimary(column.Name, table.Indexes) ? "PRI" : "") },
                 { "Default", GetDefaultValue(column) },
@@ -85,8 +86,13 @@ internal sealed class SchemaQuerier
             ColumnType.Id => new ColumnValue(ColumnType.String, column.DefaultValue.StrValue!),
             ColumnType.String => new ColumnValue(ColumnType.String, column.DefaultValue.StrValue!),
             ColumnType.Bool => new ColumnValue(ColumnType.String, column.DefaultValue.BoolValue.ToString()),
-            ColumnType.Integer64 => new ColumnValue(ColumnType.String, column.DefaultValue.LongValue.ToString()),
-            ColumnType.Float64 => new ColumnValue(ColumnType.String, column.DefaultValue.FloatValue.ToString()),
+            ColumnType.Integer64 => new ColumnValue(ColumnType.String, column.DefaultValue.LongValue.ToString(CultureInfo.InvariantCulture)),
+            ColumnType.Float64 => new ColumnValue(ColumnType.String, column.DefaultValue.FloatValue.ToString(CultureInfo.InvariantCulture)),
+            ColumnType.Float32 => new ColumnValue(ColumnType.String, ((float)column.DefaultValue.FloatValue).ToString(CultureInfo.InvariantCulture)),
+            // Date/DateTime render as their ISO-8601 form (yyyy-MM-dd / round-trip "o").
+            ColumnType.Date or ColumnType.DateTime => new ColumnValue(ColumnType.String, column.DefaultValue.IsoValue!),
+            // Bytes render as a 0x-hex literal, matching the SQL bytes-literal syntax.
+            ColumnType.Bytes => new ColumnValue(ColumnType.String, "0x" + Convert.ToHexString(column.DefaultValue.BytesValue ?? [])),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown default type :" + column.DefaultValue.Type),
         };
     }
@@ -132,7 +138,7 @@ internal sealed class SchemaQuerier
             createTableSql.Append(column.Name);
             createTableSql.Append('`');
             createTableSql.Append(' ');
-            createTableSql.Append(GetSQLType(column.Type));
+            createTableSql.Append(GetSQLType(column));
             createTableSql.Append(' ');
             createTableSql.Append(GetSQLConstraint(column));
             createTableSql.Append(',');
@@ -231,7 +237,27 @@ internal sealed class SchemaQuerier
         return pi == pattern.Length;
     }
 
-    private static string GetSQLType(ColumnType type)
+    /// <summary>
+    /// Renders a column's type as re-parseable CREATE TABLE syntax. Strings carry their explicit
+    /// <c>MaxLength</c> as <c>STRING(n)</c> (bare <c>STRING</c> when unbounded/default-capped);
+    /// arrays render as <c>ARRAY(element)</c>. Bytes has no sized SQL form, so it always renders
+    /// bare <c>BYTES</c>.
+    /// </summary>
+    private static string GetSQLType(TableColumnSchema column)
+    {
+        return column.Type switch
+        {
+            ColumnType.String => column.MaxLength is int n ? $"STRING({n.ToString(CultureInfo.InvariantCulture)})" : "STRING",
+            ColumnType.Array => $"ARRAY({ScalarSQLType(column.ArrayElementType ?? ColumnType.Null)})",
+            _ => ScalarSQLType(column.Type),
+        };
+    }
+
+    /// <summary>
+    /// SQL keyword for a scalar (non-sized, non-array) type. Used directly for scalar columns and
+    /// for the element type of an <c>ARRAY(...)</c>.
+    /// </summary>
+    private static string ScalarSQLType(ColumnType type)
     {
         return type switch
         {
@@ -239,8 +265,12 @@ internal sealed class SchemaQuerier
             ColumnType.Id => "OID",
             ColumnType.Integer64 => "INT64",
             ColumnType.Float64 => "FLOAT64",
+            ColumnType.Float32 => "FLOAT32",
             ColumnType.Bool => "BOOL",
-            _ => throw new NotImplementedException(),
+            ColumnType.Bytes => "BYTES",
+            ColumnType.Date => "DATE",
+            ColumnType.DateTime => "DATETIME",
+            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot render SQL type for: " + type),
         };
     }
 

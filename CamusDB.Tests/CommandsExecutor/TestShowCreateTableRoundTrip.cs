@@ -204,4 +204,113 @@ public sealed class TestShowCreateTableRoundTrip : BaseTest
         Assert.AreEqual("abc", rows[0].Row["code"].StrValue);
         Assert.AreEqual(42,    rows[0].Row["score"].LongValue);
     }
+
+    [Test]
+    public async Task ShowCreateTable_NewTypesAndSizedString_RoundTrips()
+    {
+        // A table covering every new data type plus a sized string. SHOW CREATE TABLE must render
+        // SQL type keywords (not enum names), carry the string length and array element type, and
+        // re-parse cleanly.
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "src",
+            columns: new ColumnInfo[]
+            {
+                new("id",      ColumnType.Id,        notNull: true),
+                new("name",    ColumnType.String,    maxLength: 32),
+                new("ratio",   ColumnType.Float32),
+                new("payload", ColumnType.Bytes),
+                new("day",     ColumnType.Date),
+                new("ts",      ColumnType.DateTime),
+                new("tags",    ColumnType.Array,     arrayElementType: ColumnType.Integer64),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        List<QueryResultRow> showRows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE src");
+        string ddl = showRows[0].Row["Create Table"].StrValue!;
+
+        Assert.That(ddl, Does.Contain("STRING(32)"),  "sized string must keep its length");
+        Assert.That(ddl, Does.Contain("FLOAT32"),     "float32 must render as FLOAT32");
+        Assert.That(ddl, Does.Contain("BYTES"),       "bytes must render as BYTES");
+        Assert.That(ddl, Does.Contain("DATETIME"),    "datetime must render as DATETIME");
+        Assert.That(ddl, Does.Contain("ARRAY(INT64)"),"array must render with its element type");
+        // The 'day' DATE column: it must render as DATE, but not be confused with DATETIME.
+        Assert.That(ddl, Does.Match(@"`day`\s+DATE\b"), "date must render as DATE");
+        // No raw C# enum names should leak through.
+        Assert.That(ddl, Does.Not.Contain("Integer64"));
+        Assert.That(ddl, Does.Not.Contain("Float32"));   // enum casing (SQL is FLOAT32)
+        Assert.That(ddl, Does.Not.Contain("DateTime"));  // enum casing (SQL is DATETIME)
+
+        // Re-parse the emitted DDL under a new name.
+        string ddl2 = ddl.Replace("`src`", "`src2`", System.StringComparison.Ordinal);
+        await DdlAsync(executor, db, dbname, ddl2);
+
+        // The string length and array element type survive the round-trip.
+        List<QueryResultRow> cols = await QueryAsync(executor, db, dbname, "SHOW COLUMNS FROM src2");
+        string NameType(string field) => cols.First(r => r.Row["Field"].StrValue == field).Row["Type"].StrValue!;
+        Assert.AreEqual("STRING(32)",  NameType("name"));
+        Assert.AreEqual("ARRAY(INT64)", NameType("tags"));
+        Assert.AreEqual("FLOAT32",     NameType("ratio"));
+        Assert.AreEqual("DATETIME",    NameType("ts"));
+    }
+
+    [Test]
+    public async Task ShowColumns_RendersSqlTypeNames_NotEnumNames()
+    {
+        // SHOW COLUMNS / DESCRIBE must report SQL type names, not C# enum names.
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "src",
+            columns: new ColumnInfo[]
+            {
+                new("id",    ColumnType.Id,        notNull: true),
+                new("count", ColumnType.Integer64),
+                new("ts",    ColumnType.DateTime),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        List<QueryResultRow> cols = await QueryAsync(executor, db, dbname, "DESCRIBE src");
+        string Type(string field) => cols.First(r => r.Row["Field"].StrValue == field).Row["Type"].StrValue!;
+
+        Assert.AreEqual("OID",      Type("id"));
+        Assert.AreEqual("INT64",    Type("count"));   // not "Integer64"
+        Assert.AreEqual("DATETIME", Type("ts"));      // not "DateTime"
+    }
+
+    [Test]
+    public async Task ShowColumns_RendersDefaultsForNewTypes_WithoutThrowing()
+    {
+        // GetDefaultValue previously threw for new-type defaults; verify it renders them.
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "src",
+            columns: new ColumnInfo[]
+            {
+                new("id",    ColumnType.Id, notNull: true),
+                new("ratio", ColumnType.Float32, defaultValue: new ColumnValue(ColumnType.Float32, 1.5)),
+                new("day",   ColumnType.Date,    defaultValue: new ColumnValue(ColumnType.Date, new System.DateTime(2026, 6, 26, 0, 0, 0, System.DateTimeKind.Utc).Ticks)),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        List<QueryResultRow> cols = await QueryAsync(executor, db, dbname, "SHOW COLUMNS FROM src");
+        string Default(string field) => cols.First(r => r.Row["Field"].StrValue == field).Row["Default"].StrValue!;
+
+        Assert.AreEqual("1.5",        Default("ratio"));
+        Assert.AreEqual("2026-06-26", Default("day"));
+    }
 }
