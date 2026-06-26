@@ -2221,5 +2221,14 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.TypeString, cols["b"].nodeType);
     }
 
+    [Test]
+    public void CreateTable_Text_AliasForString_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (body text)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        Assert.AreEqual(NodeType.TypeString, cols["body"].nodeType);
+    }
+
     #endregion
 }
