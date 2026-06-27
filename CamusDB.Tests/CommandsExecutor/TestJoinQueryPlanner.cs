@@ -788,7 +788,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
 
         // Manually build an equivalent NestedLoopJoinNode plan and annotate it.
         // We reuse the same left input and right source so the stats context is identical.
-        NestedLoopJoinNode nljNode = new(hashJoin.Input!, hashJoin.BuildSource, hashJoin.OnPredicate);
+        NestedLoopJoinNode nljNode = new(hashJoin.Input!, hashJoin.BuildSource, hashJoin.OnPredicate!);
         CostEstimator.AnnotatePlan(nljNode, database, table: null, executor.Statistics);
 
         Assert.IsNotNull(hashJoin.Cost, "hash join cost must be annotated");

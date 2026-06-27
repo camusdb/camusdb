@@ -167,7 +167,7 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
         ColumnValue val = result[0].Row["0"];
         Assert.AreEqual(ColumnType.DateTime, val.Type);
         // Wire format is still ISO-8601 via IsoValue
-        string iso = val.IsoValue;
+        string iso = val.IsoValue!;
         Assert.IsTrue(DateTimeOffset.TryParse(iso, out _), $"IsoValue should be parseable: {iso}");
     }
 
@@ -185,7 +185,7 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
 
         ColumnValue val = result[0].Row["0"];
         Assert.AreEqual(ColumnType.Date, val.Type);
-        string iso = val.IsoValue;
+        string iso = val.IsoValue!;
         Assert.IsTrue(DateTime.TryParseExact(iso, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _),
             $"IsoValue should be date-only: {iso}");
         Assert.AreEqual(10, iso.Length);

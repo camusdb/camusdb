@@ -30,8 +30,10 @@ namespace CamusDB.Core.Statistics;
 /// Thread-safety:
 ///   <see cref="Entry.RowCount"/> and <see cref="Entry.IndexEntries"/> values are updated
 ///   with <see cref="Interlocked"/> operations.
-///   <see cref="Entry.ColumnStats"/> is protected by <see cref="Entry.ColumnStatsLock"/>
-///   (read-modify-write on struct fields requires a lock).
+///   <see cref="Entry.ColumnStats"/>, <see cref="Entry.Histograms"/>,
+///   <see cref="Entry.ColumnNdv"/>, and <see cref="Entry.KeyNdv"/> are protected by
+///   <see cref="Entry.ColumnStatsLock"/> (read-modify-write on struct fields, and wholesale
+///   replacement of ANALYZE-written dicts, both require a lock).
 ///   Flushes are fire-and-forget; at most one runs per table at a time.
 ///
 /// Key layout in Kahuna: <c>{dbId}:stats:{tableId}</c> where <c>dbId</c> is
@@ -68,6 +70,15 @@ public sealed class StatisticsManager
         // Key = column name; value = running min/max.
         public readonly Dictionary<string, ColumnMinMax> ColumnStats = new(StringComparer.Ordinal);
         public readonly object ColumnStatsLock = new();
+
+        // Per-column equi-depth histograms. Set wholesale by ANALYZE; not maintained
+        // incrementally. Protected by ColumnStatsLock (same lock as ColumnStats for simplicity).
+        public Dictionary<string, ColumnHistogram>? Histograms;
+
+        // Per-column NDV and per-key-tuple NDV. Set wholesale by ANALYZE.
+        // Protected by ColumnStatsLock.
+        public Dictionary<string, long>? ColumnNdv;
+        public Dictionary<string, long>? KeyNdv;
     }
 
     private readonly ConcurrentDictionary<string, Entry> _cache = new(StringComparer.Ordinal);
@@ -121,6 +132,139 @@ public sealed class StatisticsManager
         {
             return entry.ColumnStats.TryGetValue(columnName, out ColumnMinMax? mm) ? mm : null;
         }
+    }
+
+    /// <summary>
+    /// Returns the equi-depth histogram for <paramref name="columnName"/>, or null if no
+    /// <c>ANALYZE</c> has been run for that column yet.
+    /// </summary>
+    public ColumnHistogram? GetColumnHistogram(DatabaseDescriptor database, TableDescriptor table, string columnName)
+    {
+        string key = CacheKey(database.Id, table.Id);
+        if (!_cache.TryGetValue(key, out Entry? entry) || !entry.Loaded)
+            return null;
+
+        lock (entry.ColumnStatsLock)
+        {
+            return entry.Histograms is not null &&
+                   entry.Histograms.TryGetValue(columnName, out ColumnHistogram? h) ? h : null;
+        }
+    }
+
+    /// <summary>
+    /// Returns the canonical column-tuple signature used as a key in <see cref="GetKeyNdv"/>.
+    /// Columns are joined with <c>","</c> in the supplied order — callers must pass them in
+    /// index-key order (same order used when the NDV was computed by <c>ANALYZE</c>).
+    ///
+    /// The delimiter is <c>","</c>. SQL column identifiers are restricted to alphanumeric
+    /// characters and underscores, so a comma cannot appear in a valid column name. This
+    /// assumption is validated at call time so schema changes that introduce quoted identifiers
+    /// with embedded commas are caught immediately rather than silently producing wrong stats.
+    /// </summary>
+    public static string KeyTupleSignature(IReadOnlyList<string> columns)
+    {
+        foreach (string col in columns)
+        {
+            if (col.Contains(',', StringComparison.Ordinal))
+                throw new ArgumentException(
+                    $"Column name '{col}' contains the key-tuple delimiter ',' — cannot build an unambiguous signature.",
+                    nameof(columns));
+        }
+        return string.Join(",", columns);
+    }
+
+    /// <summary>
+    /// Returns the approximate distinct-value count for <paramref name="columnName"/>, or null
+    /// if <c>ANALYZE</c> has not been run for that column yet.
+    /// </summary>
+    public long? GetColumnNdv(DatabaseDescriptor database, TableDescriptor table, string columnName)
+    {
+        string key = CacheKey(database.Id, table.Id);
+        if (!_cache.TryGetValue(key, out Entry? entry) || !entry.Loaded)
+            return null;
+
+        lock (entry.ColumnStatsLock)
+        {
+            return entry.ColumnNdv is not null &&
+                   entry.ColumnNdv.TryGetValue(columnName, out long ndv) ? ndv : null;
+        }
+    }
+
+    /// <summary>
+    /// Returns the approximate distinct-value count for a multi-column key prefix, or null if
+    /// not available. <paramref name="columns"/> must be in index-key order; use
+    /// <see cref="KeyTupleSignature"/> to build the lookup key.
+    /// </summary>
+    public long? GetKeyNdv(DatabaseDescriptor database, TableDescriptor table, IReadOnlyList<string> columns)
+    {
+        string key = CacheKey(database.Id, table.Id);
+        if (!_cache.TryGetValue(key, out Entry? entry) || !entry.Loaded)
+            return null;
+
+        string sig = KeyTupleSignature(columns);
+        lock (entry.ColumnStatsLock)
+        {
+            return entry.KeyNdv is not null &&
+                   entry.KeyNdv.TryGetValue(sig, out long ndv) ? ndv : null;
+        }
+    }
+
+    /// <summary>
+    /// Replaces the in-memory NDV sets for <paramref name="table"/> and persists them.
+    /// Called by <c>ANALYZE</c> after rebuilding all column and key-tuple NDV counts.
+    /// The supplied dictionaries are stored by reference — callers must not mutate them
+    /// after passing them in.
+    ///
+    /// Either argument may be null (e.g., when the table has no composite indexes, pass
+    /// null for <paramref name="keyNdv"/>).
+    /// </summary>
+    public async Task SetNdvAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        Dictionary<string, long>? columnNdv,
+        Dictionary<string, long>? keyNdv)
+    {
+        await LoadByIdAsync(database, table.Id).ConfigureAwait(false);
+
+        string key = CacheKey(database.Id, table.Id);
+        Entry entry = GetOrCreateEntry(database, table, key);
+
+        lock (entry.ColumnStatsLock)
+        {
+            if (columnNdv is not null) entry.ColumnNdv = columnNdv;
+            if (keyNdv    is not null) entry.KeyNdv    = keyNdv;
+        }
+
+        await FlushAsync(database, table).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Replaces the in-memory histogram set for <paramref name="table"/> and persists it.
+    /// Called by <c>ANALYZE</c> after rebuilding all column histograms. The supplied dictionary
+    /// is stored by reference — callers must not mutate it after passing it in.
+    ///
+    /// The method ensures the entry is loaded from Kahuna before writing so that
+    /// <see cref="FlushInternalAsync"/> does not early-return on <c>!entry.Loaded</c>.
+    /// </summary>
+    public async Task SetHistogramsAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        Dictionary<string, ColumnHistogram> histograms)
+    {
+        // Guarantee the entry is marked Loaded; FlushInternalAsync is a no-op otherwise.
+        await LoadByIdAsync(database, table.Id).ConfigureAwait(false);
+
+        string key = CacheKey(database.Id, table.Id);
+        Entry entry = GetOrCreateEntry(database, table, key);
+
+        lock (entry.ColumnStatsLock)
+        {
+            entry.Histograms = histograms;
+        }
+
+        // ANALYZE is an explicit, user-initiated operation — flush synchronously so
+        // the caller can rely on the data being durable when the call returns.
+        await FlushAsync(database, table).ConfigureAwait(false);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -302,6 +446,8 @@ public sealed class StatisticsManager
                 MergeBaseIntoEntry(entry, loaded.RowCount >= 0 ? loaded.RowCount : 0);
                 MergeIndexCounts(entry, loaded.IndexEntryCounts);
                 MergeColumnStats(entry, loaded.ColumnStats);
+                MergeHistograms(entry, loaded.Histograms);
+                MergeNdv(entry, loaded.ColumnNdv, loaded.KeyNdv);
             }
 
             entry.Loaded = true;
@@ -458,6 +604,32 @@ public sealed class StatisticsManager
         }
     }
 
+    // Histograms/NDV are set wholesale by ANALYZE. On load, take the persisted dict when no
+    // in-memory version exists yet; otherwise the in-process ANALYZE result takes precedence.
+    private static void MergeHistograms(Entry entry, Dictionary<string, ColumnHistogram>? persisted)
+    {
+        if (persisted is null || persisted.Count == 0) return;
+
+        lock (entry.ColumnStatsLock)
+        {
+            entry.Histograms ??= new Dictionary<string, ColumnHistogram>(persisted, StringComparer.Ordinal);
+        }
+    }
+
+    private static void MergeNdv(Entry entry, Dictionary<string, long>? persistedCol, Dictionary<string, long>? persistedKey)
+    {
+        if (persistedCol is null && persistedKey is null) return;
+
+        lock (entry.ColumnStatsLock)
+        {
+            if (persistedCol is { Count: > 0 })
+                entry.ColumnNdv ??= new Dictionary<string, long>(persistedCol, StringComparer.Ordinal);
+
+            if (persistedKey is { Count: > 0 })
+                entry.KeyNdv ??= new Dictionary<string, long>(persistedKey, StringComparer.Ordinal);
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Flush scheduling
     // ─────────────────────────────────────────────────────────────────────────
@@ -513,6 +685,9 @@ public sealed class StatisticsManager
         // Snapshot all stats under the column-stats lock to avoid partial reads.
         Dictionary<string, long>? indexSnapshot = null;
         Dictionary<string, ColumnMinMax>? colSnapshot = null;
+        Dictionary<string, ColumnHistogram>? histSnapshot = null;
+        Dictionary<string, long>? colNdvSnapshot = null;
+        Dictionary<string, long>? keyNdvSnapshot = null;
 
         lock (entry.ColumnStatsLock)
         {
@@ -531,6 +706,16 @@ public sealed class StatisticsManager
                     };
                 }
             }
+
+            // Histograms and NDV dicts are replaced wholesale by ANALYZE — shallow copies suffice.
+            if (entry.Histograms is { Count: > 0 })
+                histSnapshot = new Dictionary<string, ColumnHistogram>(entry.Histograms, StringComparer.Ordinal);
+
+            if (entry.ColumnNdv is { Count: > 0 })
+                colNdvSnapshot = new Dictionary<string, long>(entry.ColumnNdv, StringComparer.Ordinal);
+
+            if (entry.KeyNdv is { Count: > 0 })
+                keyNdvSnapshot = new Dictionary<string, long>(entry.KeyNdv, StringComparer.Ordinal);
         }
 
         TableStatistics snapshot = new()
@@ -538,6 +723,9 @@ public sealed class StatisticsManager
             RowCount         = Interlocked.Read(ref entry.RowCount),
             IndexEntryCounts = indexSnapshot,
             ColumnStats      = colSnapshot,
+            Histograms       = histSnapshot,
+            ColumnNdv        = colNdvSnapshot,
+            KeyNdv           = keyNdvSnapshot,
         };
 
         byte[] bytes = MetaJsonSerializer.Serialize(snapshot, MetaJsonContext.Default.TableStatistics);
@@ -605,6 +793,8 @@ public sealed class StatisticsManager
                 MergeBaseIntoEntry(entry, loaded.RowCount >= 0 ? loaded.RowCount : 0);
                 MergeIndexCounts(entry, loaded.IndexEntryCounts);
                 MergeColumnStats(entry, loaded.ColumnStats);
+                MergeHistograms(entry, loaded.Histograms);
+                MergeNdv(entry, loaded.ColumnNdv, loaded.KeyNdv);
             }
 
             entry.Loaded = true;
@@ -665,6 +855,15 @@ public sealed class StatisticsManager
         Interlocked.Exchange(ref entry.RowCount, rowCount);
         entry.Loaded = true;
     }
+
+    /// <summary>
+    /// Drops the cached in-memory entry for <paramref name="table"/> so the next access
+    /// reloads it from Kahuna through <see cref="LoadAndCacheAsync"/> / <see cref="LoadByIdAsync"/>.
+    /// Simulates a database reopen within a single process. Intended for unit tests only;
+    /// do not call from production paths.
+    /// </summary>
+    internal void EvictForTesting(DatabaseDescriptor database, TableDescriptor table)
+        => _cache.TryRemove(CacheKey(database.Id, table.Id), out _);
 
     /// <summary>
     /// When true, the join planner emits <c>MergeJoinNode</c> for any inner equi-join instead
