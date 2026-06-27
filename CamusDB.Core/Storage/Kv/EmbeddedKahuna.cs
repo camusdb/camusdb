@@ -226,6 +226,13 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         => new(EmbeddedKahunaOptionsBuilder.BuildStandalone(dataPath, CamusDBConfig.Kahuna), loggerFactory);
 
     /// <summary>
+    /// Constructs the embedded engine backed by RocksDB for both KV and WAL at <paramref name="dataPath"/>.
+    /// Suitable for production standalone deployments that need higher write throughput than SQLite.
+    /// </summary>
+    public static EmbeddedKahuna CreateRocksDb(string dataPath, ILoggerFactory? loggerFactory = null)
+        => new(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(dataPath, CamusDBConfig.Kahuna), loggerFactory);
+
+    /// <summary>
     /// Starts the Raft cluster and waits for the initial partition to elect a leader.
     /// Must be called once before any KV operations.
     /// </summary>
@@ -1037,8 +1044,10 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         NodeName = "camusdb-embedded",
         Storage = "rocksdb",
         StoragePath = System.IO.Path.Combine(dataPath, "kv"),
-        WalStorage = "sqlite",
+        StorageRevision = "v1",
+        WalStorage = "rocksdb",
         WalPath = System.IO.Path.Combine(dataPath, "wal"),
+        WalRevision = "v1",
         InitialPartitions = 1
     };
 

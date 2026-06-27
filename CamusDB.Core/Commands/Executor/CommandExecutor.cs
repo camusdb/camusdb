@@ -146,7 +146,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         rowDeleter = new(logger);
         statisticsManager = new(logger);
         queryExecutor = new(logger, statisticsManager);
-        sqlExecutor = new(logger);
+        sqlExecutor = new();
         schemaQuerier = new(catalogs, logger);
         queryBinder = new QueryBinder(tableOpener);
         SubqueryQueryExecutor subqueryQueryExecutor = new(queryBinder, queryExecutor);

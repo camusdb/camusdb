@@ -114,7 +114,7 @@ internal sealed class QueryJoinExecutor
             case SortNode { Input: not null } sortNode when sortNode.OrderBy is { Count: > 0 }:
             {
                 IAsyncEnumerable<QueryResultRow> sorted = querySorter.SortByKeys(
-                    ExecuteJoinTree(sortNode.Input, plan), sortNode.OrderBy);
+                    ExecuteJoinTree(sortNode.Input!, plan), sortNode.OrderBy);
                 await foreach (QueryResultRow row in sorted.ConfigureAwait(false))
                     yield return row;
 
@@ -342,7 +342,7 @@ internal sealed class QueryJoinExecutor
 
             // Left side may be wrapped in a SortNode; delegate to its inner scan.
             case SortNode { Input: not null } sortNode:
-                return ResolveLeftAlias(sortNode.Input, leftRow);
+                return ResolveLeftAlias(sortNode.Input!, leftRow);
 
             default:
                 break;
@@ -647,7 +647,7 @@ internal sealed class QueryJoinExecutor
         {
             // Build cap exceeded — fall back to nested-loop for correctness.
             // The nested-loop will re-scan the build side from scratch (~2× cost on this rare path).
-            NestedLoopJoinNode fallback = new(joinNode.Input!, joinNode.BuildSource, joinNode.OnPredicate)
+            NestedLoopJoinNode fallback = new(joinNode.Input!, joinNode.BuildSource, joinNode.OnPredicate!)
             {
                 RightExecutionFilter = joinNode.BuildExecutionFilter,
             };
@@ -693,7 +693,7 @@ internal sealed class QueryJoinExecutor
                 {
                     Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(leftQualified, buildRow, rightAlias);
 
-                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
+                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
 
                     yield return new QueryResultRow(default(ObjectIdValue), merged);
@@ -731,7 +731,7 @@ internal sealed class QueryJoinExecutor
                 {
                     Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(leftBuildRow, rightRow.Row, rightAlias);
 
-                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
+                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
 
                     yield return new QueryResultRow(default(ObjectIdValue), merged);
@@ -836,7 +836,7 @@ internal sealed class QueryJoinExecutor
                     Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(
                         leftRows[l].QualifiedRow, rightRows[r].Row, rightAlias);
 
-                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
+                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
 
                     yield return new QueryResultRow(default(ObjectIdValue), merged);
@@ -911,7 +911,7 @@ internal sealed class QueryJoinExecutor
                     Dictionary<string, ColumnValue> merged =
                         QueryRowMerger.MergeRows(leftQualified, rightRow, rightAlias);
 
-                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
+                    if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
 
                     yield return new QueryResultRow(default(ObjectIdValue), merged);

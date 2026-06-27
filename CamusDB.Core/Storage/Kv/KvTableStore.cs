@@ -303,9 +303,12 @@ public sealed class KvTableStore
             if (type == KeyValueResponseType.Locked)
             {
                 tx.TrackRangeLock(bucketPrefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent, mode);
-                Log.LogRangeLockAcquired(
-                    logger, mode.ToString(), bucketPrefix,
-                    startKey ?? "-∞", startInclusive, endKey ?? "+∞", endInclusive, tx.UniqueId);
+                if (logger.IsEnabled(LogLevel.Debug))
+                {
+                    string modeStr = mode.ToString();
+                    Log.LogRangeLockAcquired(logger, modeStr, bucketPrefix,
+                        startKey ?? "-∞", startInclusive, endKey ?? "+∞", endInclusive, tx.UniqueId);
+                }
                 return;
             }
 

@@ -58,6 +58,22 @@ public static class EmbeddedKahunaOptionsBuilder
         };
     }
 
+    /// <summary>Baseline standalone options using RocksDB for both KV and WAL.</summary>
+    public static EmbeddedKahunaOptions StandaloneRocksDbBaseline(string dataPath)
+    {
+        return new EmbeddedKahunaOptions
+        {
+            NodeName = "camusdb-embedded",
+            Storage = "rocksdb",
+            StoragePath = Path.Combine(dataPath, "kv"),
+            StorageRevision = "v1",
+            WalStorage = "rocksdb",
+            WalPath = Path.Combine(dataPath, "wal"),
+            WalRevision = "v1",
+            InitialPartitions = 1,
+        };
+    }
+
     /// <summary>Cluster baseline plus <c>kahuna:</c> overrides.</summary>
     public static EmbeddedKahunaOptions BuildCluster(ConfigDefinition config)
         => ApplyOverrides(ClusterBaseline(config), config.Kahuna);
@@ -65,6 +81,10 @@ public static class EmbeddedKahunaOptionsBuilder
     /// <summary>Standalone baseline plus <c>kahuna:</c> overrides.</summary>
     public static EmbeddedKahunaOptions BuildStandalone(string dataPath, KahunaOptionsConfig kahuna)
         => ApplyOverrides(StandaloneBaseline(dataPath), kahuna);
+
+    /// <summary>Standalone RocksDB baseline plus <c>kahuna:</c> overrides.</summary>
+    public static EmbeddedKahunaOptions BuildStandaloneRocksDb(string dataPath, KahunaOptionsConfig kahuna)
+        => ApplyOverrides(StandaloneRocksDbBaseline(dataPath), kahuna);
 
     /// <summary>
     /// Applies nullable Kahuna overrides. Unset fields keep the baseline value unchanged.

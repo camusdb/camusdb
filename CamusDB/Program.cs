@@ -134,7 +134,9 @@ else
     {
         string dataPath = CamusDBConfig.DataDirectory;
         ILoggerFactory loggerFactory = services.GetRequiredService<ILoggerFactory>();
-        return EmbeddedKahuna.CreateSqlite(dataPath, loggerFactory);
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(dataPath, CamusDBConfig.Kahuna);
+        options.InitialPartitions = config.InitialPartitions;
+        return new EmbeddedKahuna(options, loggerFactory);
     });
 
     builder.Services.AddSingleton<CommandExecutor>(services =>

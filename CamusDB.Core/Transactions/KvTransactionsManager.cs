@@ -385,7 +385,11 @@ public sealed class KvTransactionsManager : IDisposable
         if (result == KeyValueResponseType.Committed)
         {
             tx.Status = KvTransactionStatus.Committed;
-            Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, tx.GetAcquiredLocks().Count);
+            if (logger.IsEnabled(LogLevel.Debug))
+            {
+                int lockCount = tx.GetAcquiredLocks().Count;
+                Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, lockCount);
+            }
             await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
             Untrack(tx);
             return mintLocalT?.Invoke(null) ?? tx.TransactionId;
@@ -437,7 +441,11 @@ public sealed class KvTransactionsManager : IDisposable
         tx.Status = KvTransactionStatus.RolledBack;
         Untrack(tx);
 
-        Log.LogTransactionFinalized(logger, "rolled back", tx.UniqueId, tx.GetAcquiredLocks().Count);
+        if (logger.IsEnabled(LogLevel.Debug))
+        {
+            int lockCount = tx.GetAcquiredLocks().Count;
+            Log.LogTransactionFinalized(logger, "rolled back", tx.UniqueId, lockCount);
+        }
 
         await kahuna.LocateAndRollbackTransaction(
             tx.UniqueId,
@@ -508,9 +516,12 @@ public sealed class KvTransactionsManager : IDisposable
                     tx.TransactionId, bounds.Prefix,
                     bounds.StartKey, bounds.StartInclusive, bounds.EndKey, bounds.EndInclusive,
                     bounds.Durability, cancellationToken).ConfigureAwait(false);
-                Log.LogRangeLockReleased(
-                    logger, bounds.Mode.ToString(), bounds.Prefix,
-                    bounds.StartKey ?? "-∞", bounds.EndKey ?? "+∞", tx.UniqueId);
+                if (logger.IsEnabled(LogLevel.Debug))
+                {
+                    string modeStr = bounds.Mode.ToString();
+                    Log.LogRangeLockReleased(logger, modeStr, bounds.Prefix,
+                        bounds.StartKey ?? "-∞", bounds.EndKey ?? "+∞", tx.UniqueId);
+                }
             }
             catch
             {

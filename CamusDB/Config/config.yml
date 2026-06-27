@@ -9,12 +9,12 @@
 data_dir: /tmp/camusdb/
 
 # ── Server mode ───────────────────────────────────────────────────────────────
-# mode: standalone          # standalone | cluster
+# mode: standalone         # standalone | cluster
 # node_name: camus-node-1  # cluster: unique node name (defaults to machine name)
 # raft_node_id: 1          # cluster: numeric Raft node id (> 0)
 # raft_host: localhost     # cluster: Raft bind/advertise host
 # raft_port: 7070          # cluster: Raft gRPC port (1..65535)
-# initial_partitions: 1    # cluster: Raft partition count (>= 1)
+initial_partitions: 3      # cluster: Raft partition count (>= 1)
 # http_port: 5095          # HTTP API port (1..65535)
 # https_port: 7141         # HTTPS API port when https_certificate is set (1..65535)
 # https_certificate:       # path to PFX for HTTPS; omit to disable HTTPS
@@ -83,6 +83,18 @@ data_dir: /tmp/camusdb/
 # Allow-listed passthrough to EmbeddedKahunaOptions. Omit the section or any key to
 # keep the mode-specific CamusDB baseline (cluster: sqlite + election 2000/4000 ms;
 # standalone: sqlite per-database node). Unknown keys are rejected at startup.
+#
+# Storage backends:
+#   memory   — no persistence; data is lost on restart. Dev/test only.
+#   sqlite   — default; per-partition files {storage_path}/kahuna{N}_{revision}.db
+#   rocksdb  — higher write throughput; directory tree under {storage_path}/{revision}/
+#              Recommended for standalone nodes with write-heavy workloads.
+#
+# To enable RocksDB for both KV and WAL, uncomment:
+# kahuna:
+#   storage: rocksdb
+#   wal_storage: rocksdb
+#
 # kahuna:
 #   storage: sqlite              # memory | sqlite | rocksdb
 #   storage_revision: v1

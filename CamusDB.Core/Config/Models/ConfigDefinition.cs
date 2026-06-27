@@ -23,7 +23,7 @@ public class ConfigDefinition
 
     public int RaftPort { get; set; } = 7070;
 
-    public int InitialPartitions { get; set; } = 1;
+    public int InitialPartitions { get; set; } = 3;
 
     public List<string> Peers { get; set; } = [];
 

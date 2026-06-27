@@ -48,7 +48,7 @@ public sealed class HashJoinNode : PhysicalPlanNode
     public BoundJoinRightSource BuildSource { get; }
 
     /// <summary>Full ON predicate including residual non-equi conjuncts.</summary>
-    public NodeAst OnPredicate { get; }
+    public NodeAst? OnPredicate { get; }
 
     /// <summary>
     /// Qualified left-side (probe) lookup column names, one per equi-key conjunct, e.g. <c>o.id</c>.
@@ -76,7 +76,7 @@ public sealed class HashJoinNode : PhysicalPlanNode
     public HashJoinNode(
         PhysicalPlanNode probe,
         BoundJoinRightSource buildSource,
-        NodeAst onPredicate,
+        NodeAst? onPredicate,
         IReadOnlyList<string> probeKeyColumns,
         IReadOnlyList<string> buildKeyColumns)
     {

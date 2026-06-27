@@ -20,7 +20,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// The methods in this class receive AST (Abstract Syntax Tree) from the SQL parser and transform them into tickets,
 /// which are the representations and attributes of the different types of requests accepted by the command executor.
 /// </summary>
-internal sealed class SqlExecutor(ILogger<ICamusDB> logger)
+internal sealed class SqlExecutor()
 {
     private readonly SQLExecutorQueryCreator sqlExecutorQueryCreator = new();
 
