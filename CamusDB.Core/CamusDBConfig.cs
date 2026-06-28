@@ -44,6 +44,17 @@ public static class CamusDBConfig
     public static int StatsFlushIntervalMs = 5000;
 
     /// <summary>
+    /// Row count threshold below which ANALYZE performs a full scan; above it, rows are
+    /// sampled by reading the first N rows in storage order. 0 = always full scan.
+    /// </summary>
+    public static int StatsAnalyzeSampleRows = 100_000;
+
+    /// <summary>
+    /// Number of equi-depth histogram buckets ANALYZE builds per column.
+    /// </summary>
+    public static int StatsHistogramBuckets = 100;
+
+    /// <summary>
     /// Sliding TTL for the SQL parser AST cache, in seconds (PC1).
     /// A successfully-parsed <c>NodeAst</c> is kept in the cache for this many seconds after
     /// the last hit; each cache hit extends the deadline by the same interval.

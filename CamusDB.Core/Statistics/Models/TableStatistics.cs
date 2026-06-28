@@ -45,37 +45,24 @@ public sealed class TableStatistics
     public Dictionary<string, ColumnMinMax>? ColumnStats { get; set; }
 
     /// <summary>
-    /// Per-column equi-depth histograms built by <c>ANALYZE</c>. Null until the first
-    /// <c>ANALYZE</c> run. Between <c>ANALYZE</c> runs, buckets may drift; that is acceptable
-    /// because statistics are advisory. Old blobs that lack this field deserialize to null
-    /// (backward-compatible: the estimator falls back to min/max when no histogram is present).
-    /// Key = column name (same namespace as <see cref="ColumnStats"/>).
+    /// Per-column equi-depth histograms built by <c>ANALYZE TABLE</c>.
+    /// Key = column name; value = histogram with equi-depth buckets.
+    /// Null when ANALYZE has not been run yet. Not maintained incrementally on DML.
     /// </summary>
     [JsonPropertyName("histograms")]
     public Dictionary<string, ColumnHistogram>? Histograms { get; set; }
 
     /// <summary>
-    /// Approximate distinct-value count (NDV) per column, built by <c>ANALYZE</c>.
-    /// Key = column name. A uniform column reports NDV ≈ <see cref="RowCount"/>; a
-    /// low-cardinality column reports a small NDV. Null until the first <c>ANALYZE</c> run.
-    ///
-    /// v1 method: exact scan-based count (HyperLogLog / sampling deferred to a later release).
-    /// Used by the cardinality estimator for equality selectivity (1/NDV) and join cardinality
-    /// (|A ⋈ B| ≈ |A|·|B| / max(NDV_A, NDV_B)).
+    /// Approximate distinct-value counts per column (NDV), built by <c>ANALYZE TABLE</c>.
+    /// Key = column name; value = approximate NDV. Null when ANALYZE has not been run.
     /// </summary>
-    [JsonPropertyName("colNdv")]
+    [JsonPropertyName("columnNdv")]
     public Dictionary<string, long>? ColumnNdv { get; set; }
 
     /// <summary>
-    /// Approximate distinct-value count for multi-column index/PK key prefixes, built by
-    /// <c>ANALYZE</c>. Key = column-tuple signature produced by
-    /// <see cref="StatisticsManager.KeyTupleSignature"/>: columns joined with <c>","</c>
-    /// in index order (e.g. <c>"city,year"</c> for a composite key on those two columns).
-    /// Null until the first <c>ANALYZE</c> run.
-    ///
-    /// Used by the cardinality estimator when predicate columns form the prefix of a composite
-    /// index — <see cref="KeyNdv"/> is more accurate than the independence product of individual
-    /// <see cref="ColumnNdv"/> values when the columns are correlated.
+    /// Approximate distinct-value counts for multi-column key tuples (composite-index prefixes),
+    /// built by <c>ANALYZE TABLE</c>. Key = comma-joined column names in index-key order
+    /// (see <see cref="StatisticsManager.KeyTupleSignature"/>). Null when not available.
     /// </summary>
     [JsonPropertyName("keyNdv")]
     public Dictionary<string, long>? KeyNdv { get; set; }

@@ -29,7 +29,7 @@
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
-%token TRENAME TTO
+%token TRENAME TTO TANALYZE
 
 %%
 
@@ -53,6 +53,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | commit_stmt { $$.n = $1.n; }
         | rollback_stmt { $$.n = $1.n; }
         | set_transaction_stmt { $$.n = $1.n; }
+        | analyze_stmt { $$.n = $1.n; }
         ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
@@ -64,12 +65,13 @@ select_stmt : TSELECT opt_distinct select_field_list TFROM select_table opt_wher
             ;
 
 /* EXPLAIN [( LOGICAL | PHYSICAL | ANALYZE )] select_stmt
-   LOGICAL, PHYSICAL and ANALYZE are plain identifiers — no new reserved words needed.
-   The grammar action dispatches on the identifier text and rejects anything else
-   with an InvalidInput error so typos (e.g. ANALYZ, VERBOOSE) don't silently
-   degrade to a plain EXPLAIN. */
+   LOGICAL and PHYSICAL are plain identifiers dispatched at runtime.
+   ANALYZE is a reserved keyword (TANALYZE) since ANALYZE TABLE was added, so it
+   gets its own grammar alternative instead of going through the TIDENTIFIER branch. */
 explain_stmt : TEXPLAIN select_stmt
              { $$.n = new(NodeType.Explain, $2.n, null, null, null, null, null, null, null); }
+             | TEXPLAIN LPAREN TANALYZE RPAREN select_stmt
+             { $$.n = new(NodeType.ExplainAnalyze, $5.n, null, null, null, null, null, null, null); }
              | TEXPLAIN LPAREN TIDENTIFIER RPAREN select_stmt
              {
                string opt = $3.s.ToUpperInvariant();
@@ -77,8 +79,6 @@ explain_stmt : TEXPLAIN select_stmt
                    $$.n = new(NodeType.ExplainLogical, $5.n, null, null, null, null, null, null, null);
                else if (opt == "PHYSICAL")
                    $$.n = new(NodeType.ExplainPhysical, $5.n, null, null, null, null, null, null, null);
-               else if (opt == "ANALYZE")
-                   $$.n = new(NodeType.ExplainAnalyze, $5.n, null, null, null, null, null, null, null);
                else
                    throw new CamusDB.Core.CamusDBException(
                        CamusDB.Core.CamusDBErrorCodes.InvalidInput,
@@ -282,6 +282,12 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TINDEXES TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TINDEX TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null, null); }
           ;
+
+analyze_stmt : TANALYZE any_identifier
+             { $$.n = new(NodeType.AnalyzeTable, $2.n, null, null, null, null, null, null, null); }
+             | TANALYZE TTABLE any_identifier
+             { $$.n = new(NodeType.AnalyzeTable, $3.n, null, null, null, null, null, null, null); }
+             ;
 
 identifier_index_list : identifier_index_list TCOMMA identifier_index { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
                       | identifier_index { $$.n = $1.n; $$.s = $1.s; }

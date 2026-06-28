@@ -128,4 +128,5 @@ public enum NodeType
     ExplainLogical,
     ExplainPhysical,
     ExplainAnalyze,
+    AnalyzeTable,
 }

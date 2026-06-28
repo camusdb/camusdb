@@ -24,6 +24,7 @@ public sealed class PingController : CommandsController
 
     [HttpGet]
     [Route("/ping")]
+    [Route("/health")]
     public JsonResult PingServer()
     {        
         return new JsonResult(new PingResponse("ok", DateTime.UtcNow));

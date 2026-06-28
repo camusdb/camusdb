@@ -79,6 +79,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly ExplainExecutor explainExecutor;
 
+    private readonly TableAnalyzer tableAnalyzer;
+
     private readonly SelectQueryCreator selectQueryCreator = new();
 
     private readonly CommandValidator validator;
@@ -157,6 +159,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder);
         semiJoinAnalyzer = new SemiJoinAnalyzer(tableOpener);
         explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor, statisticsManager, semiJoinAnalyzer);
+        tableAnalyzer = new TableAnalyzer(statisticsManager);
 
         sqlParserCache = new SQLParser.SqlParserCache(
             logger,
@@ -1631,6 +1634,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                     return (database, explainExecutor.ExplainAnalyzeQuery(database, ast.leftAst!, ticket));
                 }
 
+            case NodeType.AnalyzeTable:
+                {
+                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
+                    QueryResultRow result = await tableAnalyzer.AnalyzeAsync(database, table, ticket.TxnState).ConfigureAwait(false);
+                    return (database, ToAsyncEnumerable(result));
+                }
+
             case NodeType.SetTransaction:
                 {
                     // yytext holds the isolation level ("Serializable"); leftAst.yytext holds the mode
@@ -1657,6 +1667,12 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     #endregion
+
+    private static async IAsyncEnumerable<QueryResultRow> ToAsyncEnumerable(QueryResultRow row)
+    {
+        await Task.CompletedTask;
+        yield return row;
+    }
 
     private static string? UnquoteLikePattern(string? raw)
     {

@@ -1,0 +1,358 @@
+
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+using NUnit.Framework;
+using Nito.AsyncEx;
+
+using CamusDB.Core;
+using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Statistics.Models;
+using CamusDB.Core.Transactions;
+using CamusDB.Core.Util.ObjectIds;
+
+namespace CamusDB.Tests.CommandsExecutor;
+
+/// <summary>
+/// Integration tests for the ANALYZE TABLE statement.
+///
+/// These tests drive the full stack: SQL parsing → CommandExecutor → TableAnalyzer →
+/// StatisticsManager, against a real in-memory Kahuna node. Each test verifies a distinct
+/// facet of the statistics produced by ANALYZE.
+/// </summary>
+[TestFixture]
+[NonParallelizable]
+public sealed class TestAnalyzeTable : BaseTest
+{
+    // ─────────────────────────────────────────────────────────────────────────
+    // Helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Creates a "robots" table: id (Id PK), name (String), year (Integer64 indexed).
+    /// </summary>
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)>
+        SetupRobotsTable()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "robots",
+            columns: new ColumnInfo[]
+            {
+                new("id",   ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk",      new ColumnIndexInfo[] { new("id",   OrderType.Ascending) }),
+                new(ConstraintType.IndexMulti, "year_idx", new ColumnIndexInfo[] { new("year", OrderType.Ascending) }),
+            },
+            ifNotExists: false
+        ));
+        await database.Transactions.CommitAsync(txn);
+
+        return (dbname, database, executor);
+    }
+
+    private static async Task<TableDescriptor> OpenTableAsync(DatabaseDescriptor db, string tableName)
+    {
+        if (db.TableDescriptors.TryGetValue(tableName, out AsyncLazy<TableDescriptor>? lazy))
+            return await lazy;
+        throw new InvalidOperationException($"Table '{tableName}' not found");
+    }
+
+    private static async Task InsertRobotsAsync(
+        CommandExecutor executor, DatabaseDescriptor database, string dbname,
+        int count, int baseYear = 2000)
+    {
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        for (int i = 0; i < count; i++)
+            await executor.Insert(new InsertTicket(
+                txnState: txn,
+                databaseName: dbname,
+                tableName: "robots",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id",   new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "name", new(ColumnType.String, "Robot" + i) },
+                        { "year", new(ColumnType.Integer64, (long)(baseYear + i)) },
+                    }
+                }));
+        await database.Transactions.CommitAsync(txn);
+    }
+
+    /// <summary>Runs ANALYZE TABLE via ExecuteSQLQuery and consumes the single result row.</summary>
+    private static async Task<QueryResultRow> RunAnalyzeAsync(
+        CommandExecutor executor, DatabaseDescriptor database, string dbname, string tableName)
+    {
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        (_, System.Collections.Generic.IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                txnState: txn,
+                database: dbname,
+                sql: $"ANALYZE {tableName}",
+                parameters: null));
+
+        QueryResultRow? result = null;
+        await foreach (QueryResultRow row in cursor)
+            result = row;
+
+        await database.Transactions.CommitAsync(txn);
+        return result!.Value;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// ANALYZE on a table with N inserted rows must report a row count equal to N.
+    /// </summary>
+    [Test]
+    public async Task AnalyzePopulatesRowCount()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        const int N = 20;
+        await InsertRobotsAsync(executor, database, dbname, N);
+
+        TableDescriptor table = await OpenTableAsync(database, "robots");
+
+        QueryResultRow resultRow = await RunAnalyzeAsync(executor, database, dbname, "robots");
+
+        // The result row carries a "rows" column with the scanned count.
+        Assert.IsTrue(resultRow.Row.TryGetValue("rows", out ColumnValue? rowsVal), "'rows' column missing in result");
+        Assert.AreEqual(N, rowsVal!.LongValue, "ANALYZE must report the correct row count");
+
+        // StatisticsManager must also reflect the exact row count.
+        long? estimate = executor.Statistics.GetRowCountEstimate(database, table);
+        Assert.IsNotNull(estimate, "Row count estimate must be non-null after ANALYZE");
+        Assert.AreEqual(N, estimate!.Value, "StatisticsManager row count must match inserted rows");
+    }
+
+    /// <summary>
+    /// ANALYZE on a table with uniform values must report NDV ≈ N for an indexed column;
+    /// a low-cardinality column (all same value) must report NDV = 1.
+    /// </summary>
+    [Test]
+    public async Task AnalyzePopulatesColumnNdv()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        // Create a table where 'year' is always the same value (low cardinality).
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "robots",
+            columns: new ColumnInfo[]
+            {
+                new("id",   ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk",      new ColumnIndexInfo[] { new("id",   OrderType.Ascending) }),
+                new(ConstraintType.IndexMulti, "year_idx", new ColumnIndexInfo[] { new("year", OrderType.Ascending) }),
+            },
+            ifNotExists: false
+        ));
+        await database.Transactions.CommitAsync(txn);
+
+        // Insert 10 rows, all with the same year (2000).
+        txn = await database.Transactions.BeginAsync();
+        for (int i = 0; i < 10; i++)
+            await executor.Insert(new InsertTicket(
+                txnState: txn,
+                databaseName: dbname,
+                tableName: "robots",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id",   new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "name", new(ColumnType.String, "Robot" + i) },
+                        { "year", new(ColumnType.Integer64, 2000L) },  // all same
+                    }
+                }));
+        await database.Transactions.CommitAsync(txn);
+
+        TableDescriptor table = await OpenTableAsync(database, "robots");
+        await RunAnalyzeAsync(executor, database, dbname, "robots");
+
+        long? ndv = executor.Statistics.GetColumnNdv(database, table, "year");
+        Assert.IsNotNull(ndv, "NDV for 'year' must be populated after ANALYZE");
+        Assert.AreEqual(1L, ndv!.Value, "All-same-value column must have NDV = 1");
+    }
+
+    /// <summary>
+    /// ANALYZE on a skewed distribution must produce a histogram where the low bucket has
+    /// disproportionately more rows than the high bucket.
+    /// </summary>
+    [Test]
+    public async Task AnalyzePopulatesHistogram()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        // Insert 80 rows with year in [2000..2079] and 20 with year in [2080..2099].
+        // With 100 rows and 100 buckets, the default 100-bucket setting collapses to
+        // as many distinct values as there are; verify the histogram covers all rows.
+        await InsertRobotsAsync(executor, database, dbname, count: 80, baseYear: 2000);
+        await InsertRobotsAsync(executor, database, dbname, count: 20, baseYear: 2080);
+
+        TableDescriptor table = await OpenTableAsync(database, "robots");
+        await RunAnalyzeAsync(executor, database, dbname, "robots");
+
+        ColumnHistogram? hist = executor.Statistics.GetColumnHistogram(database, table, "year");
+        Assert.IsNotNull(hist, "Histogram for 'year' must be populated after ANALYZE");
+        Assert.AreEqual(100L, hist!.TotalRows, "TotalRows must equal the number of inserted rows");
+        Assert.Greater(hist.Buckets.Count, 0, "At least one bucket must exist");
+        Assert.AreEqual(100L, hist.Buckets[^1].CumulativeRows, "Last bucket must cover all rows");
+    }
+
+    /// <summary>
+    /// ANALYZE must populate correct min/max bounds for indexed columns.
+    /// </summary>
+    [Test]
+    public async Task AnalyzePopulatesMinMax()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        // Insert rows with year 2000..2009 (10 distinct years).
+        await InsertRobotsAsync(executor, database, dbname, count: 10, baseYear: 2000);
+
+        TableDescriptor table = await OpenTableAsync(database, "robots");
+        await RunAnalyzeAsync(executor, database, dbname, "robots");
+
+        ColumnMinMax? mm = executor.Statistics.GetColumnMinMax(database, table, "year");
+        Assert.IsNotNull(mm, "Min/max for 'year' must be populated after ANALYZE");
+        Assert.IsNotNull(mm!.Min, "Min must not be null");
+        Assert.IsNotNull(mm.Max, "Max must not be null");
+        Assert.AreEqual(2000L, mm.Min!.LongValue, "Min year must be 2000");
+        Assert.AreEqual(2009L, mm.Max!.LongValue, "Max year must be 2009");
+    }
+
+    /// <summary>
+    /// Statistics written by ANALYZE must survive a cache eviction and reload from Kahuna.
+    /// </summary>
+    [Test]
+    public async Task AnalyzeSurvivesReopen()
+    {
+        // Scenario: insert 10 rows (years 2000–2009), then delete the 5 with year < 2005.
+        //
+        // After the deletes, DML tracking believes:
+        //   min = 2000  (min never moves up when a row is deleted — requires a full scan)
+        //   year_idx count ≈ 10 - 5 = 5, but may still be 10 if the decrement hasn't flushed
+        //
+        // ANALYZE recomputes from a fresh scan:
+        //   min = 2005, max = 2009, year_idx count = 5, rowCount = 5
+        //
+        // After evict + reload the persisted values must be ANALYZE's recomputed ones, not the
+        // stale DML-tracked ones.  This test would have failed under Finding 1 (SeedColumnStats
+        // after the flushes) because the reloaded min would be 2000, not 2005.
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        // Insert years 2000–2009.
+        await InsertRobotsAsync(executor, database, dbname, count: 10, baseYear: 2000);
+
+        // Delete the 5 rows with year < 2005, drifting DML-tracked min away from truth.
+        for (long yr = 2000; yr < 2005; yr++)
+        {
+            KvTransaction delTxn = await database.Transactions.BeginAsync();
+            await executor.Delete(new DeleteTicket(
+                txnState: delTxn,
+                databaseName: dbname,
+                tableName: "robots",
+                where: null,
+                filters: [new QueryFilter("year", "=", new ColumnValue(ColumnType.Integer64, yr))]
+            ));
+            await database.Transactions.CommitAsync(delTxn);
+        }
+
+        TableDescriptor table = await OpenTableAsync(database, "robots");
+
+        // ANALYZE must recompute all stats from the 5 surviving rows.
+        QueryResultRow result = await RunAnalyzeAsync(executor, database, dbname, "robots");
+        Assert.AreEqual(5L, result.Row["rows"].LongValue, "ANALYZE must count 5 surviving rows");
+
+        // Evict the in-memory entry and reload from Kahuna so we read only what was persisted.
+        executor.Statistics.EvictForTesting(database, table);
+        await executor.Statistics.LoadByIdAsync(database, table.Id);
+
+        // Row count — ANALYZE's recomputed value, not DML-tracked.
+        long? rowCount = executor.Statistics.GetRowCountEstimate(database, table);
+        Assert.IsNotNull(rowCount, "Row count must survive eviction");
+        Assert.AreEqual(5L, rowCount!.Value, "Reloaded row count must reflect ANALYZE's scan (5 rows)");
+
+        // Min/max — the critical drift assertion: min must be 2005, not the stale 2000.
+        ColumnMinMax? mm = executor.Statistics.GetColumnMinMax(database, table, "year");
+        Assert.IsNotNull(mm, "Min/max must survive eviction");
+        Assert.AreEqual(2005L, mm!.Min!.LongValue, "Reloaded Min must be ANALYZE's recomputed 2005, not DML-tracked 2000");
+        Assert.AreEqual(2009L, mm.Max!.LongValue, "Reloaded Max must be 2009");
+
+        // Index entry count — must reflect the 5 survivors, not the pre-delete count.
+        long? yearIdx = executor.Statistics.GetIndexEntryCount(database, table, "year_idx");
+        Assert.IsNotNull(yearIdx, "Index entry count must survive eviction");
+        Assert.AreEqual(5L, yearIdx!.Value, "Reloaded index entry count must be 5 (survivors)");
+
+        // Histogram and NDV must also survive.
+        ColumnHistogram? hist = executor.Statistics.GetColumnHistogram(database, table, "year");
+        Assert.IsNotNull(hist, "Histogram must survive eviction");
+        Assert.AreEqual(5L, hist!.TotalRows, "Reloaded histogram TotalRows must be 5");
+
+        long? ndv = executor.Statistics.GetColumnNdv(database, table, "year");
+        Assert.IsNotNull(ndv, "NDV must survive eviction");
+        Assert.AreEqual(5L, ndv!.Value, "Reloaded NDV must be 5 (five distinct surviving years)");
+    }
+
+    /// <summary>
+    /// ANALYZE TABLE (with TABLE keyword) must produce the same result as ANALYZE tablename.
+    /// </summary>
+    [Test]
+    public async Task AnalyzeWithTableKeyword()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        const int N = 5;
+        await InsertRobotsAsync(executor, database, dbname, N);
+
+        TableDescriptor table = await OpenTableAsync(database, "robots");
+
+        // Use the "ANALYZE TABLE tablename" form.
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        (_, System.Collections.Generic.IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                txnState: txn,
+                database: dbname,
+                sql: "ANALYZE TABLE robots",
+                parameters: null));
+        QueryResultRow? resultRow = null;
+        await foreach (QueryResultRow row in cursor)
+            resultRow = row;
+        await database.Transactions.CommitAsync(txn);
+
+        Assert.IsNotNull(resultRow, "ANALYZE TABLE must return a result row");
+        Assert.IsTrue(resultRow!.Value.Row.TryGetValue("rows", out ColumnValue? rowsVal));
+        Assert.AreEqual(N, rowsVal!.LongValue, "ANALYZE TABLE must report the correct row count");
+
+        long? estimate = executor.Statistics.GetRowCountEstimate(database, table);
+        Assert.IsNotNull(estimate);
+        Assert.AreEqual(N, estimate!.Value);
+    }
+}

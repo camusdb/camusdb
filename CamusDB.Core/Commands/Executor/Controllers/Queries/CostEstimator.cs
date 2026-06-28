@@ -6,9 +6,11 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Statistics;
 using CamusDB.Core.Statistics.Models;
 
@@ -251,9 +253,14 @@ internal static class CostEstimator
                 });
             }
 
-            case FilterNode:
+            case FilterNode filterNode:
             {
-                long rows = Math.Max(1, (long)(inputCardinality * FilterSelectivity));
+                // B1: use histogram-based selectivity when stats and primary table are available.
+                double filterSel = FilterSelectivity;
+                if (stats is not null && primaryTable is not null)
+                    filterSel = CardinalityEstimator.EstimateFilterSelectivity(filterNode.Predicate, database, primaryTable, stats);
+
+                long rows = Math.Max(1, (long)(inputCardinality * filterSel));
                 return (rows, new PlanCost { EstimatedRows = rows });
             }
 
@@ -297,11 +304,19 @@ internal static class CostEstimator
 
             case NestedLoopJoinNode nlj:
             {
-                // Per-table inner row count: resolve from the right source's stats when available.
-                // Falls back to DefaultTableRowCount if stats are missing for the inner table.
                 long innerRows = ResolveRightTableRowCount(nlj.RightSource.Table, database, stats)
                               ?? DefaultTableRowCount;
-                long rows = Math.Max(1, (long)(inputCardinality * innerRows * FilterSelectivity));
+
+                // B2: extract equi-key columns from the ON predicate so NDV/FK formula applies.
+                (IReadOnlyList<string> nljLeftCols, IReadOnlyList<string> nljRightCols) =
+                    ExtractNljEquiKeyColumns(nlj.OnPredicate, nlj.RightSource.Alias);
+
+                long rows = CardinalityEstimator.EstimateJoinCardinality(
+                    inputCardinality, innerRows,
+                    nljRightCols, nlj.RightSource.Table?.Table,
+                    nljLeftCols, TryResolveLeftTable(node.Input),
+                    database, stats);
+
                 return (rows, new PlanCost
                 {
                     EstimatedRows      = rows,
@@ -331,10 +346,6 @@ internal static class CostEstimator
                 //
                 // Total KV cost ≈ buildRows + probeRows   (vs NLJ's buildRows × probeRows)
                 // In-memory cost = buildRows               (hash table)
-                //
-                // Output cardinality ≈ probeRows × buildRows × FilterSelectivity
-                // (same formula as NLJ; a unique build key implies ≤1 match per probe row,
-                // which FilterSelectivity already approximates for typical equi-joins).
                 long rightRows = ResolveRightTableRowCount(hj.BuildSource.Table, database, stats)
                                  ?? DefaultTableRowCount;
 
@@ -350,7 +361,19 @@ internal static class CostEstimator
                     probeRows = rightRows;
                 }
 
-                long rows = Math.Max(1, (long)(probeRows * buildRows * FilterSelectivity));
+                // B2: NDV/FK-aware cardinality — same formula as NLJ and merge join.
+                // Use the LOGICAL join order (Input=left, BuildSource=right) for cardinality;
+                // the formula is symmetric so the physical build/probe swap only affects cost.
+                // Strip qualifiers from both sides: probe keys are qualified today; build keys
+                // are bare today, but stripping a bare name is a no-op so both are defensive.
+                IReadOnlyList<string> probeKeyCols = StripQualifiers(hj.ProbeKeyColumns);
+                IReadOnlyList<string> buildKeyCols = StripQualifiers(hj.BuildKeyColumns);
+                long rows = CardinalityEstimator.EstimateJoinCardinality(
+                    inputCardinality, rightRows,           // logical left × right
+                    buildKeyCols, hj.BuildSource.Table?.Table,
+                    probeKeyCols, TryResolveLeftTable(node.Input),
+                    database, stats);
+
                 return (rows, new PlanCost
                 {
                     EstimatedRows      = rows,
@@ -372,7 +395,17 @@ internal static class CostEstimator
                 if (!mj.LeftIsOrdered)  sortMemory += inputCardinality;
                 if (!mj.RightIsOrdered) sortMemory += rightRows;
 
-                long rows = Math.Max(1, (long)(inputCardinality * rightRows * FilterSelectivity));
+                // B2: NDV/FK-aware cardinality — same formula as NLJ and hash join.
+                // Strip qualifiers from both sides defensively (right keys are bare today;
+                // left keys are qualified; stripping a bare name is a no-op).
+                IReadOnlyList<string> leftKeyCols  = StripQualifiers(mj.LeftKeyColumns);
+                IReadOnlyList<string> rightKeyCols = StripQualifiers(mj.RightKeyColumns);
+                long rows = CardinalityEstimator.EstimateJoinCardinality(
+                    inputCardinality, rightRows,
+                    rightKeyCols, mj.RightSource.Table?.Table,
+                    leftKeyCols, TryResolveLeftTable(node.Input),
+                    database, stats);
+
                 return (rows, new PlanCost
                 {
                     EstimatedRows      = rows,
@@ -398,6 +431,95 @@ internal static class CostEstimator
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // B2 join-key helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Strips "alias." qualifiers from a list of qualified column names (e.g. "a.id" → "id").
+    /// Returns a new list; input is not modified.
+    /// </summary>
+    private static IReadOnlyList<string> StripQualifiers(IReadOnlyList<string> qualifiedColumns)
+    {
+        string[] result = new string[qualifiedColumns.Count];
+        for (int i = 0; i < qualifiedColumns.Count; i++)
+        {
+            int dot = qualifiedColumns[i].IndexOf('.');
+            result[i] = dot < 0 ? qualifiedColumns[i] : qualifiedColumns[i][(dot + 1)..];
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Walks the left-input subtree looking for a leaf <see cref="TableScanNode"/>.
+    /// Passes through transparent nodes (Filter, Project, Limit, Sort).
+    /// Returns null when the left input is a complex subtree (e.g. a nested join).
+    /// In 3+-way joins the left input is itself a join node, so leftTable is null and the
+    /// FK/NDV check falls back to right-side-only NDV or <see cref="CardinalityEstimator.FallbackSelectivity"/>.
+    /// Phase D (System-R join-order DP) owns multi-table cardinality; acceptable for B2.
+    /// </summary>
+    private static TableDescriptor? TryResolveLeftTable(PhysicalPlanNode? input)
+    {
+        while (input is not null)
+        {
+            if (input is TableScanNode { BoundSource: { } src })
+                return src.Table;
+            if (input is FilterNode or ProjectNode or LimitNode or SortNode)
+            {
+                input = input.Input;
+                continue;
+            }
+            break;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Extracts unqualified column names on both sides of equi-conjuncts in an NLJ ON predicate.
+    /// Only top-level AND conjuncts of the form "X.col = rightAlias.col" (or reversed) are extracted.
+    /// Returns empty lists when the predicate contains no recognizable equi-keys.
+    /// Non-Identifier operands (expressions, subqueries) are skipped, so a complex ON predicate
+    /// yields empty lists → NLJ falls back to <see cref="CardinalityEstimator.FallbackSelectivity"/>
+    /// while hash/merge join (which use explicit node key columns) do not. Spec invariant
+    /// "identical cardinality across hash/merge/NLJ" holds for simple Identifier=Identifier equi-joins.
+    /// </summary>
+    private static (IReadOnlyList<string> LeftCols, IReadOnlyList<string> RightCols)
+        ExtractNljEquiKeyColumns(NodeAst onPredicate, string rightAlias)
+    {
+        var conjuncts = new List<NodeAst>();
+        PredicateAnalyzer.CollectAndConjuncts(onPredicate, conjuncts);
+
+        var leftCols  = new List<string>();
+        var rightCols = new List<string>();
+        string prefix = rightAlias + ".";
+
+        foreach (NodeAst c in conjuncts)
+        {
+            if (c.nodeType != NodeType.ExprEquals) continue;
+            if (c.leftAst?.nodeType  != NodeType.Identifier) continue;
+            if (c.rightAst?.nodeType != NodeType.Identifier) continue;
+            string? leftText  = c.leftAst.yytext;
+            string? rightText = c.rightAst.yytext;
+            if (leftText is null || rightText is null) continue;
+
+            if (rightText.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                // "leftAlias.col = rightAlias.col" — the common orientation
+                rightCols.Add(rightText[prefix.Length..]);
+                int dot = leftText.IndexOf('.');
+                leftCols.Add(dot < 0 ? leftText : leftText[(dot + 1)..]);
+            }
+            else if (leftText.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                // "rightAlias.col = leftAlias.col" — reversed
+                rightCols.Add(leftText[prefix.Length..]);
+                int dot = rightText.IndexOf('.');
+                leftCols.Add(dot < 0 ? rightText : rightText[(dot + 1)..]);
+            }
+        }
+        return (leftCols, rightCols);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -410,6 +532,21 @@ internal static class CostEstimator
     {
         bool hasFrom = node.FromBound is not null;
         bool hasTo   = node.ToBound   is not null;
+
+        // B1: attempt histogram-based selectivity (most accurate; preferred over min/max linear interpolation).
+        if (stats is not null && database is not null && table is not null
+            && node.Index.Columns is { Length: > 0 })
+        {
+            string col = node.Index.Columns[0];
+            ColumnHistogram? hist = stats.GetColumnHistogram(database, table, col);
+            if (hist is not null && hist.TotalRows > 0)
+            {
+                ScalarBound? fromBound = hasFrom ? ScalarBound.FromColumnValue(node.FromBound!.Values[0]) : null;
+                ScalarBound? toBound   = hasTo   ? ScalarBound.FromColumnValue(node.ToBound!.Values[0])   : null;
+                double histSel = CardinalityEstimator.EstimateRangeFraction(fromBound, toBound, col, database, table, stats);
+                return Math.Max(1, (long)(tableRowCount * histSel));
+            }
+        }
 
         // R9b: attempt real selectivity from column min/max when available.
         if (stats is not null && database is not null && table is not null
