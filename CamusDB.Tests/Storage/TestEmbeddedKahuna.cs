@@ -295,7 +295,7 @@ public sealed class TestEmbeddedKahuna
     }
 
     /// <summary>
-    /// E1: the ack gate sources live membership from Raft (<c>GetNodes()</c> + local endpoint)
+    /// The ack gate sources live membership from Raft (<c>GetNodes()</c> + local endpoint)
     /// rather than a manual register set. This test verifies that the gate blocks while at
     /// least one Raft member has not yet acked, and unblocks once all members have acked.
     /// </summary>

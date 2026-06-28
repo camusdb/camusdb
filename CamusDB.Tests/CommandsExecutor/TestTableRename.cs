@@ -26,7 +26,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Acceptance tests for G4: RENAME TABLE, RENAME COLUMN, RENAME INDEX executor entry-points,
+/// Acceptance tests for RENAME TABLE, RENAME COLUMN, RENAME INDEX executor entry-points,
 /// SQL grammar, and data-layer invariants.
 /// </summary>
 [NonParallelizable]

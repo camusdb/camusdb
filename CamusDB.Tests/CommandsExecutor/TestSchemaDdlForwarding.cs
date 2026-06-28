@@ -57,7 +57,7 @@ public sealed class TestSchemaDdlForwarding
         string db = cluster.NextSchemaLogDatabaseName();
 
         // Create on any node first to discover the database Id, then find the schema
-        // leader for that Id (after DB3 the schema partition key is the Id, not the name).
+        // leader for that Id (the schema partition key is the Id, not the name).
         CommandExecutor creatorExecutor = cluster.CreateExecutor(cluster.Nodes[0]);
         DatabaseDescriptor createdDesc = await creatorExecutor
             .CreateDatabase(new CreateDatabaseTicket(db, ifNotExists: false))
@@ -252,7 +252,7 @@ public sealed class TestSchemaDdlForwarding
     // Validates the full key-range data path end-to-end across a 3-node in-memory cluster:
     //   1. CREATE TABLE on the schema leader.
     //   2. INSERT from a non-schema-leader node — this opens the table on that node for the
-    //      first time, calling RegisterKeyRangeAsync, which triggers K1 seed-forwarding to the
+    //      first time, calling RegisterKeyRangeAsync, which triggers seed-forwarding to the
     //      KV meta-partition leader if the inserting node isn't that leader.
     //   3. SELECT from a third node — asserts all rows are visible and no "no range descriptor
     //      covers key" surfaces anywhere in the path.
@@ -273,7 +273,7 @@ public sealed class TestSchemaDdlForwarding
 
             // ── DDL on the schema leader ──────────────────────────────────────────
             // Create on any node first to discover the database Id, then route DDL
-            // to the schema leader for that Id (after DB3 the partition key is the Id).
+            // to the schema leader for that Id (the partition key is the Id).
             CommandExecutor creatorExecutor = cluster.CreateExecutor(cluster.Nodes[0]);
             DatabaseDescriptor createdDesc = await creatorExecutor
                 .CreateDatabase(new CreateDatabaseTicket(db, false))
@@ -282,7 +282,7 @@ public sealed class TestSchemaDdlForwarding
             EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(createdDesc.Id);
             CommandExecutor leaderExecutor = cluster.CreateExecutor(leader);
 
-            // Integer64 PK so the ~pk index is key-range eligible (ASCII-encoding type, C3).
+            // Integer64 PK so the ~pk index is key-range eligible (ASCII-encoding type).
             await leaderExecutor.CreateTable(new CreateTableTicket(
                 databaseName: db,
                 tableName: "readings",
@@ -300,7 +300,7 @@ public sealed class TestSchemaDdlForwarding
             )).WaitAsync(TimeSpan.FromSeconds(15));
 
             // ── INSERT from a non-schema-leader node ──────────────────────────────
-            // Choosing the first non-leader node stresses K1: LoadTable → RegisterKeyRangeAsync
+            // Choosing the first non-leader node stresses: LoadTable → RegisterKeyRangeAsync
             // on a node that may not be the KV meta-partition leader → seed forwarded via RPC.
             EmbeddedKahuna nonLeader = cluster.Nodes.First(n => n != leader);
             CommandExecutor nonLeaderExecutor = cluster.CreateExecutor(nonLeader);

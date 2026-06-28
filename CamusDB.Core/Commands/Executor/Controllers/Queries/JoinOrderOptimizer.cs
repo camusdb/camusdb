@@ -1,4 +1,3 @@
-
 /**
  * This file is part of CamusDB
  *
@@ -41,8 +40,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// the outer side is generally correct (it narrows the outer loop), and
 /// <see cref="JoinEquiJoinAnalyzer"/> independently picks the INL path when the right source's
 /// join column is indexed.  In the uncommon case where the selectively filtered source is also
-/// the ideal INL inner (indexed join key on it), R7 may pull it to the outer side and lose the
-/// INL opportunity.  A future cost-model pass (R9+) can address this by incorporating join-key
+/// the ideal INL inner (indexed join key on it), the optimizer may pull it to the outer side and lose the
+/// INL opportunity.  A future cost-model pass can address this by incorporating join-key
 /// index availability into the scoring function.
 /// </summary>
 internal static class JoinOrderOptimizer

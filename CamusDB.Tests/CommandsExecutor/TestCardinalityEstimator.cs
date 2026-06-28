@@ -30,7 +30,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// B1 — Cardinality estimator tests (selectivity from histograms).
+/// Cardinality estimator tests (selectivity from histograms).
 ///
 /// These tests verify that <see cref="CardinalityEstimator"/> produces accurate
 /// selectivity estimates when histogram statistics are available, and falls back
@@ -140,7 +140,7 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B1.1 — EstimateRangeFraction: full-range = 1.0 with histogram
+    // EstimateRangeFraction: full-range = 1.0 with histogram
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -171,7 +171,7 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B1.2 — EstimateRangeFraction: half-range gives ~0.5
+    // EstimateRangeFraction: half-range gives ~0.5
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -202,7 +202,7 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B1.3 — EstimateRangeFraction: tight range gives low selectivity
+    // EstimateRangeFraction: tight range gives low selectivity
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -235,7 +235,7 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B1.4 — EstimateRangeFraction: fallback when no histogram
+    // EstimateRangeFraction: fallback when no histogram
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -258,14 +258,14 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B1.5 — EstimatePredicateSelectivity: skewed histogram range returns high fraction
+    // EstimatePredicateSelectivity: skewed histogram range returns high fraction
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
     public async Task B1_PredicateSelectivity_SkewedRangeHistogram_ReturnHighFraction()
     {
         // Guards CardinalityEstimator.EstimatePredicateSelectivity logic directly (bypasses
-        // CostEstimator). Does NOT guard CostEstimator's FilterNode wiring — that is B1.9.
+        // CostEstimator). Does NOT guard CostEstimator's FilterNode wiring.
         (_, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableAsync();
         TableDescriptor table = await OpenTableAsync(database);
 
@@ -298,7 +298,7 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B1.6 — Equality selectivity: NDV=100 produces 1/100 = 0.01
+    // Equality selectivity: NDV=100 produces 1/100 = 0.01
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -329,7 +329,7 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B1.7 — EstimateRangeScanRows: skewed histogram exceeds both-bounds fallback (10%)
+    // EstimateRangeScanRows: skewed histogram exceeds both-bounds fallback (10%)
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -380,14 +380,14 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B1.8 — EXPLAIN integration: real ANALYZE histogram beats one-bound heuristic (40%)
+    // EXPLAIN integration: real ANALYZE histogram beats one-bound heuristic (40%)
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
     public async Task B1_Explain_RealAnalyzeHistogram_BeatsSingleBoundHeuristic()
     {
-        // Regression guard: with B1 disabled the code falls back to R9b (linear min/max
-        // interpolation), which gives ~101 rows for this query. The histogram correctly estimates
+        // Regression guard: the code falls back to linear min/max
+        // interpolation, which gives ~101 rows for this query. The histogram correctly estimates
         // ~910 rows. Asserting > 600 passes only with the histogram.
         //
         // Distribution: 90 sparse years (1 row each, years 2000..2089 = 90 rows) plus 10 dense
@@ -395,13 +395,13 @@ public sealed class TestCardinalityEstimator : BaseTest
         //
         // Query "WHERE year > 2089" targets years 2090..2099 = true 910 rows (91%).
         //
-        // B1 histogram: ANALYZE builds 1-row-per-bucket for 2000..2089 then ~10-row/bucket for
+        // Histogram: ANALYZE builds 1-row-per-bucket for 2000..2089 then ~10-row/bucket for
         // 2090..2099. cf(2089) = exact bucket match = 90/1000 = 0.09 → fraction = 0.91 → 910 rows.
         //
-        // R9b linear interpolation: (max−from)/(max−min) × N = (2099−2089)/(2099−2000) × 1000
-        //   = 10/99 × 1000 ≈ 101 rows.  (R9b is available because ANALYZE also seeds min/max.)
+        // Linear interpolation: (max−from)/(max−min) × N = (2099−2089)/(2099−2000) × 1000
+        //   = 10/99 × 1000 ≈ 101 rows.
         //
-        // Threshold 600: B1 (910) passes; R9b (101) and fixed heuristic (400) both fail.
+        // Threshold 600: (910) passes; (101) and fixed heuristic (400) both fail.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableAsync();
 
         KvTransaction txn = await database.Transactions.BeginAsync();
@@ -436,15 +436,15 @@ public sealed class TestCardinalityEstimator : BaseTest
             .Max();
 
         // Histogram: 91% of 1000 ≈ 910 rows.
-        // R9b linear: ~101 rows. Fixed one-bound: 400 rows.
+        // Linear: ~101 rows. Fixed one-bound: 400 rows.
         Assert.That(maxEstimate, Is.GreaterThanOrEqualTo(600L),
             "Histogram-based estimate (~910 rows) must far exceed R9b linear interpolation (~101) and fixed heuristic (400)");
         Assert.That(maxEstimate, Is.LessThanOrEqualTo(1000L));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B1.9 — FilterNode wiring: the histogram path in CostEstimator's FilterNode
-    //        branch is exercised end-to-end (not bypassed via IndexRangeScanNode)
+    // FilterNode wiring: the histogram path in CostEstimator's FilterNode
+    // branch is exercised end-to-end (not bypassed via IndexRangeScanNode)
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -517,7 +517,7 @@ public sealed class TestCardinalityEstimator : BaseTest
             .DefaultIfEmpty(0)
             .Max();
 
-        // With B1: RangeFraction(null, 2004) = cf(2004) = 0.80 → 800 rows.
+        // RangeFraction(null, 2004) = cf(2004) = 0.80 → 800 rows.
         // Fixed FilterSelectivity constant: 0.10 → 100 rows.
         Assert.That(filterEstimate, Is.GreaterThan(500L),
             "FilterNode estimate must use the injected histogram (≈800 rows), " +
@@ -526,10 +526,10 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B2 — Join cardinality from NDV
+    // Join cardinality from NDV
     // ─────────────────────────────────────────────────────────────────────────
 
-    // Shared helpers for B2 tests
+    // Shared helpers for join tests
     private async Task<(DatabaseDescriptor db, TableDescriptor orders, TableDescriptor customers)>
         SetupFkJoinTablesAsync(string dbname, DatabaseDescriptor database, CommandExecutor executor)
     {
@@ -570,11 +570,11 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     /// <summary>
-    /// B2.1 — EstimateJoinCardinality recognises a unique right-side key (PK) and returns
+    /// EstimateJoinCardinality recognises a unique right-side key (PK) and returns
     /// leftRows, not the fallback leftRows × rightRows × 0.10 overestimate.
     ///
-    /// Regression guard: reverting the FK-aware branch in EstimateJoinCardinality to the
-    /// fixed FilterSelectivity formula raises the estimate from 500 to 2500.
+    /// Regression guard: reverting the FK-aware branch in EstimateJoinCardinality raises the
+    /// estimate from 500 to 2500.
     /// </summary>
     [Test]
     public async Task B2_JoinCardinality_UniqueRightKey_ReturnsFkChildRowCount()
@@ -606,7 +606,7 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     /// <summary>
-    /// B2.2 — Low-NDV join key: many-to-many on a column with few distinct values estimates
+    /// Low-NDV join key: many-to-many on a column with few distinct values estimates
     /// a large fan-out using the NDV formula |A|×|B|/NDV.
     ///
     /// Regression guard: reverting to FilterSelectivity (0.10) drops the estimate from
@@ -678,7 +678,7 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     /// <summary>
-    /// B2.3 — High-NDV join key: when both sides have NDV ≈ row count the join is nearly 1:1
+    /// High-NDV join key: when both sides have NDV ≈ row count the join is nearly 1:1
     /// and the NDV estimate is tighter than the fixed 10% heuristic.
     ///
     /// Regression guard: reverting to FilterSelectivity gives 500 × 500 × 0.10 = 25 000,
@@ -722,7 +722,7 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     /// <summary>
-    /// B2.4 — EXPLAIN integration: an FK→PK join shows estimated_rows ≈ child table rows,
+    /// EXPLAIN integration: an FK→PK join shows estimated_rows ≈ child table rows,
     /// not childRows × parentRows × 0.10, for all three join algorithms.
     ///
     /// Regression guard: with the old FilterSelectivity formula the join node would show
@@ -784,7 +784,7 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     /// <summary>
-    /// B2.5 — A join on a proper PREFIX of a composite unique index is NOT unique and must use
+    /// A join on a proper PREFIX of a composite unique index is NOT unique and must use
     /// the many-to-many NDV estimate, not the FK ≤1-match shortcut.
     ///
     /// Regression guard: prefix-matching uniqueness detection wrongly treats join-on-(tenant_id)
@@ -860,11 +860,11 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B3 — Multi-column / correlation handling via KeyNdv
+    // Multi-column / correlation handling via KeyNdv
     // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// B3.1 — Equality conjunction over a composite-index prefix uses KeyNdv, not the
+    /// Equality conjunction over a composite-index prefix uses KeyNdv, not the
     /// column-independence product.
     ///
     /// Independence product over-estimates selectivity when columns are correlated
@@ -929,7 +929,7 @@ public sealed class TestCardinalityEstimator : BaseTest
             database, table, executor.Statistics);
 
         // Independence product: (1/500) × (1/10_000) = 2e-7 → 0.02 rows → rounds to 1.
-        // B3 KeyNdv: 1/8_000 = 0.000125.
+        // KeyNdv: 1/8_000 = 0.000125.
         // The KeyNdv result is strictly GREATER than the independence product for correlated data.
         double independenceProduct = (1.0 / 500) * (1.0 / 10_000);
         Assert.That(sel, Is.GreaterThan(independenceProduct),
@@ -941,11 +941,11 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     /// <summary>
-    /// B3.2 — Three-column composite index, equality on first two columns: ANALYZE emits the
-    /// 2-column KeyNdv prefix (not just the full 3-column tuple) so B3 can look it up.
+    /// Three-column composite index, equality on first two columns: ANALYZE emits the
+    /// 2-column KeyNdv prefix (not just the full 3-column tuple).
     ///
-    /// This is the end-to-end regression guard for the A3 fix: without the prefix-emission loop
-    /// in TableAnalyzer, GetKeyNdv(["region","category"]) returns null and B3 silently falls back
+    /// This is the end-to-end regression guard for the fix: without the prefix-emission loop
+    /// in TableAnalyzer, GetKeyNdv(["region","category"]) returns null and silently falls back
     /// to the independence product.
     ///
     /// Data design: 400 rows where region="r{i%20}" and category="c{i%20}" — perfectly correlated,
@@ -953,7 +953,7 @@ public sealed class TestCardinalityEstimator : BaseTest
     ///   NDV(region)=20, NDV(category)=20, KeyNdv(region,category)=20, KeyNdv(region,category,score)=400.
     ///
     /// WHERE region=… AND category=… AND score>…:
-    ///   B3:          1/20 × FallbackSel(0.10) = 0.005
+    ///              1/20 × FallbackSel(0.10) = 0.005
     ///   Independence: 1/20 × 1/20 × 0.10     = 0.00025  (20× too selective — wrong)
     /// </summary>
     [Test]
@@ -1018,7 +1018,7 @@ public sealed class TestCardinalityEstimator : BaseTest
         TableDescriptor table = await database.TableDescriptors["events"];
 
         // WHERE region = 'r0' AND category = 'c0' AND score > 100
-        // B3:          1/20 × 0.10 = 0.005
+        //              1/20 × 0.10 = 0.005
         // Independence: 1/20 × 1/20 × 0.10 = 0.00025
         var comparisons = new List<AnalyzedComparison>
         {
@@ -1031,32 +1031,31 @@ public sealed class TestCardinalityEstimator : BaseTest
             comparisons, inLists: [],
             database, table, executor.Statistics);
 
-        // B3 result: 1/KeyNdv(region,category) × FallbackSel = 1/20 × 0.10 = 0.005.
+        // 1/KeyNdv(region,category) × FallbackSel = 1/20 × 0.10 = 0.005.
         const double expected = (1.0 / 20) * 0.10;
         Assert.That(sel, Is.EqualTo(expected).Within(1e-9),
             "B3: (region,category) priced via ANALYZE-generated 2-col prefix KeyNdv; score > 100 uses FallbackSelectivity");
 
-        // Independence result (A3 not emitting prefix → B3 falls back): 1/20 × 1/20 × 0.10 = 0.00025.
+        // Independence result (not emitting prefix → falls back): 1/20 × 1/20 × 0.10 = 0.00025.
         double independenceResult = (1.0 / 20) * (1.0 / 20) * 0.10;
         Assert.That(sel, Is.GreaterThan(independenceResult),
             "B3 via ANALYZE-generated prefix KeyNdv must give looser estimate than column independence");
     }
 
     /// <summary>
-    /// B3.3 — Integration: insert correlated (city,zip) data, run ANALYZE, then verify that
+    /// Integration: insert correlated (city,zip) data, run ANALYZE, then verify that
     /// EstimatePredicateSelectivity uses the composite KeyNdv path (selectivity = 1/KeyNdv)
     /// rather than the independence product.
     ///
-    /// This is the end-to-end complement to B3.1 (which hand-injects stats).  It exercises the
-    /// full ANALYZE → StatisticsManager → CardinalityEstimator pipeline and would have caught
-    /// Finding 1 for the partial-prefix case had it existed before A3 was fixed.
+    /// This is the end-to-end complement.  It exercises the
+    /// full ANALYZE → StatisticsManager → CardinalityEstimator pipeline.
     ///
     /// Data design (40 rows, period 8):
     ///   city = "c{i%4}"              → NDV(city) = 4
     ///   zip  = "z{(i%4)*2+(i/4)%2}" → NDV(zip)  = 8, but each city maps to exactly 2 zips
     ///                                   → KeyNdv(city,zip) = 8 (correlated — not 4×8=32)
     ///
-    ///   B3          selectivity: 1/8   = 0.125
+    ///   selectivity: 1/8   = 0.125
     ///   Independence selectivity: 1/32 = 0.031 25  (4× too selective — wrong)
     /// </summary>
     [Test]
@@ -1127,19 +1126,18 @@ public sealed class TestCardinalityEstimator : BaseTest
             comparisons, inLists: [],
             database, table, executor.Statistics);
 
-        // B3 result: 1/KeyNdv(city,zip) = 1/8 = 0.125.
+        // 1/KeyNdv(city,zip) = 1/8 = 0.125.
         Assert.That(sel, Is.EqualTo(1.0 / 8).Within(1e-9),
             "B3 integration: selectivity must equal 1/ANALYZE-generated KeyNdv(city,zip)");
 
-        // Independence product (no B3): 1/NDV(city) × 1/NDV(zip) = 1/4 × 1/8 = 1/32 = 0.03125.
+        // Independence product: 1/NDV(city) × 1/NDV(zip) = 1/4 × 1/8 = 1/32 = 0.03125.
         double independenceProduct = (1.0 / 4) * (1.0 / 8);
         Assert.That(sel, Is.GreaterThan(independenceProduct),
             "B3 integration: composite KeyNdv must give looser estimate than column independence for correlated data");
     }
 
     /// <summary>
-    /// B3.4 — Unindexed correlated columns fall back to column independence (known limitation).
-    /// Documents that B3 only corrects correlation when a composite index exists.
+    /// Unindexed correlated columns fall back to column independence (known limitation).
     /// </summary>
     [Test]
     public async Task B3_UnindexedColumns_KeepsIndependenceProduct()

@@ -13,7 +13,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 namespace CamusDB.Core.Statistics.Models;
 
 /// <summary>
-/// JSON-serializable typed scalar value used to persist column min/max bounds (R9b).
+/// JSON-serializable typed scalar value used to persist column min/max bounds.
 ///
 /// <see cref="CamusDB.Core.CommandsExecutor.Models.ColumnValue"/> is a runtime type whose
 /// constructor enforces invariants and is not directly JSON-deserializable. <see cref="ScalarBound"/>

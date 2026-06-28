@@ -1,4 +1,3 @@
-
 /**
  * This file is part of CamusDB
  *
@@ -7,13 +6,13 @@
  */
 
 /**
- * SU8 — Storage Instance Unification regression tests.
+ * Storage Instance Unification regression tests.
  *
  * Covers:
- *   SU2  open/close many databases → node count stays at 1 (single shared node)
- *   SU3  compact-id allocation is monotonic and never reused
- *   SU4  key-prefix isolation — two dbs with the same table name share no rows/indexes
- *   SU6  DROP DATABASE purge completeness — rows/indexes under {dbId}: are deleted
+ *   open/close many databases → node count stays at 1 (single shared node)
+ *   compact-id allocation is monotonic and never reused
+ *   key-prefix isolation — two dbs with the same table name share no rows/indexes
+ *   DROP DATABASE purge completeness — rows/indexes under {dbId}: are deleted
  */
 
 using NUnit.Framework;
@@ -45,7 +44,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 internal sealed class TestStorageUnification : BaseTest
 {
     // -----------------------------------------------------------------------
-    // SU2 — open many databases → exactly one Kahuna node
+    // Open many databases → exactly one Kahuna node
     // -----------------------------------------------------------------------
 
     [Test]
@@ -74,7 +73,7 @@ internal sealed class TestStorageUnification : BaseTest
     }
 
     // -----------------------------------------------------------------------
-    // SU3 — compact-id allocation: no id is ever reused
+    // Compact-id allocation: no id is ever reused
     // -----------------------------------------------------------------------
 
     [Test]
@@ -99,7 +98,7 @@ internal sealed class TestStorageUnification : BaseTest
     }
 
     // -----------------------------------------------------------------------
-    // SU4 — key-prefix isolation
+    // Key-prefix isolation
     //        Two databases with the same-named table must not bleed rows.
     // -----------------------------------------------------------------------
 
@@ -152,7 +151,7 @@ internal sealed class TestStorageUnification : BaseTest
     }
 
     // -----------------------------------------------------------------------
-    // SU6 — DROP DATABASE purge completeness
+    // DROP DATABASE purge completeness
     //        After drop, the raw KV scan under {dbId}: returns no results.
     // -----------------------------------------------------------------------
 

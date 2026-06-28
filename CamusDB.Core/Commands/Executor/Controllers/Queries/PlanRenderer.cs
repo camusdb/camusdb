@@ -29,7 +29,7 @@ public static class PlanRenderer
     /// <param name="plan">The query plan to render.</param>
     /// <param name="includeRequiredColumns">Append <c>cols=[...]</c> from column pushdown.</param>
     /// <param name="includeDistributedProperties">
-    /// Append R4 distributed-plan metadata: <c>order=[...]</c> when <see cref="PhysicalPlanNode.OutputOrdering"/>
+    /// Append distributed-plan metadata: <c>order=[...]</c> when <see cref="PhysicalPlanNode.OutputOrdering"/>
     /// is set, and <c>decomposable=true/false</c> from <see cref="PhysicalPlanNode.CanDecomposeToLocalPlusMerge"/>.
     /// </param>
     /// <param name="includeShapeMetadata">

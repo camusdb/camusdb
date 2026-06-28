@@ -1072,7 +1072,7 @@ public sealed class CatalogsManager
         if (schema.Tables.ContainsKey(payload.NewName))
             throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{payload.NewName}' already exists");
 
-        // G3a: coordinator jobs are keyed by table name. If any child column or index is
+        // Coordinator jobs are keyed by table name. If any child column or index is
         // mid-ladder (non-terminal state), renaming the table would orphan the job because
         // ResumeJobsAsync resolves Schema.Tables[oldName] → gone after the rename.
         if (tableSchema.Columns is not null)
@@ -1771,7 +1771,7 @@ public sealed class CatalogsManager
     }
 
     /// <summary>
-    /// B1 migration: for every table whose <see cref="TableSchema.Indexes"/> is still null
+    /// For every table whose <see cref="TableSchema.Indexes"/> is still null
     /// (i.e. stored only in the legacy <c>SystemSchema</c> blob), populate it in-memory from
     /// <c>database.SystemSchema.Indexes</c>. The result is used immediately by
     /// <c>TableOpener</c> so the table opens correctly; the next index DDL write will persist

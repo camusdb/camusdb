@@ -27,7 +27,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// R4 acceptance tests for distributed-ready plan properties:
+/// Tests for distributed-ready plan properties:
 ///   - CanDecomposeToLocalPlusMerge per node type
 ///   - OutputOrdering populated on scan nodes that satisfy ORDER BY (sort elision)
 ///   - OutputOrdering populated on SortNode when explicit sort is needed
@@ -356,7 +356,7 @@ public class TestPlanDistributedProperties
         Assert.AreEqual(OrderType.Ascending, sort.OutputOrdering[1].Type);
     }
 
-    // ── Placeholder properties + E1 Distribution ─────────────────────────────
+    // ── Placeholder properties + Distribution ────────────────────────────────
 
     [Test]
     public void EstimatedCardinality_IsPopulatedByR9CostModel()
@@ -371,7 +371,7 @@ public class TestPlanDistributedProperties
     }
 
     /// <summary>
-    /// E1 acceptance: with key-range sharding OFF (the test default), every scan leaf
+    /// With key-range sharding OFF (the test default), every scan leaf
     /// reports <see cref="DataDistributionKind.Gathered"/>; non-leaf nodes (filter, sort,
     /// limit, …) have no distribution set (null).
     /// </summary>
@@ -388,7 +388,7 @@ public class TestPlanDistributedProperties
     }
 
     /// <summary>
-    /// E1 acceptance: with key-range sharding ON an index range scan reports
+    /// With key-range sharding ON an index range scan reports
     /// <see cref="DataDistributionKind.Partitioned"/> with the index key columns.
     /// </summary>
     [Test]
@@ -415,7 +415,7 @@ public class TestPlanDistributedProperties
     }
 
     /// <summary>
-    /// E1: unique point-lookup always reports Gathered regardless of sharding flag —
+    /// Unique point-lookup always reports Gathered regardless of sharding flag —
     /// a lookup returns ≤ 1 row and is always pulled to the coordinator.
     /// </summary>
     [Test]
@@ -438,7 +438,7 @@ public class TestPlanDistributedProperties
     }
 
     /// <summary>
-    /// E1: non-leaf nodes (filter, sort, limit, …) never have Distribution set.
+    /// Non-leaf nodes (filter, sort, limit, …) never have Distribution set.
     /// </summary>
     [Test]
     public void Distribution_NonLeafNodes_AreNull()
@@ -551,10 +551,10 @@ public class TestPlanDistributedProperties
         StringAssert.Contains("decomposable=true", aggLine);
     }
 
-    // ── E2: NetworkFactor ─────────────────────────────────────────────────────
+    // ── NetworkFactor ─────────────────────────────────────────────────────────
 
     /// <summary>
-    /// E2 acceptance: with sharding OFF (the default), NetworkFactor is 0 on all nodes.
+    /// With sharding OFF (the default), NetworkFactor is 0 on all nodes.
     /// Single-node cost is unchanged — no existing cost comparisons are disrupted.
     /// </summary>
     [Test]
@@ -568,7 +568,7 @@ public class TestPlanDistributedProperties
     }
 
     /// <summary>
-    /// E2 acceptance: with sharding ON and N > 1 partitions, scan leaves have NetworkFactor > 0.
+    /// With sharding ON and N > 1 partitions, scan leaves have NetworkFactor > 0.
     /// A full table scan (touches all N partitions) has higher NetworkFactor than a selective
     /// index range scan (touches ≈1 partition's worth of rows).
     /// </summary>
@@ -610,7 +610,7 @@ public class TestPlanDistributedProperties
     }
 
     /// <summary>
-    /// E2: with sharding on but only 1 partition, remoteFraction = 0 → NetworkFactor stays 0.
+    /// With sharding on but only 1 partition, remoteFraction = 0 → NetworkFactor stays 0.
     /// This covers the single-node key-range-mode case (flag on, N=1).
     /// </summary>
     [Test]
@@ -636,11 +636,11 @@ public class TestPlanDistributedProperties
     }
 
     /// <summary>
-    /// E2: point lookup (PK equality → IndexLookupNode) also has NetworkFactor when sharding on,
-    /// but it is tiny (≤ 1 remote row) and must be &lt; full scan NetworkFactor.
+    /// A PK point lookup is classified Gathered (always pulled to coordinator from exactly one
+    /// partition). Gathered nodes pay zero network cost regardless of partition count.
     /// </summary>
     [Test]
-    public void NetworkFactor_PointLookup_LessThanFullScan()
+    public void NetworkFactor_GatheredLookup_IsZeroEvenWithShardingOn()
     {
         bool origSharding   = CamusDBConfig.KeyRangeShardingEnabled;
         int  origPartitions = CamusDBConfig.ClusterPartitionCount;
@@ -652,15 +652,16 @@ public class TestPlanDistributedProperties
             QueryPlan lookupPlan = Plan("SELECT * FROM robots WHERE id = 'abc'");
             IndexLookupNode? lookup = AllNodes(lookupPlan).OfType<IndexLookupNode>().FirstOrDefault();
             Assert.IsNotNull(lookup, "Expected IndexLookupNode for PK equality");
+            Assert.AreEqual(DataDistributionKind.Gathered, lookup!.Distribution?.Kind,
+                "PK lookup must be classified Gathered by PlacementReader");
+            Assert.AreEqual(0.0, lookup.Cost?.NetworkFactor ?? 0.0,
+                "Gathered lookup must have NetworkFactor = 0 (local, no bytes shipped)");
 
+            // Partitioned full scan on same table must still carry cost — confirms the gate works.
             QueryPlan fullScanPlan = Plan("SELECT * FROM robots");
             TableScanNode? fullScan = AllNodes(fullScanPlan).OfType<TableScanNode>().FirstOrDefault();
-
-            double lookupNF   = lookup!.Cost?.NetworkFactor  ?? 0.0;
-            double fullScanNF = fullScan?.Cost?.NetworkFactor ?? 0.0;
-
-            Assert.Less(lookupNF, fullScanNF,
-                "Point-lookup NetworkFactor (1 row) must be less than full-scan NetworkFactor (all rows)");
+            Assert.Greater(fullScan?.Cost?.NetworkFactor ?? 0.0, 0.0,
+                "Partitioned full scan must have NetworkFactor > 0 when sharding is on with N=3");
         }
         finally
         {
@@ -677,7 +678,7 @@ public class TestPlanDistributedProperties
 ///   - join-side TableScanNodes have OutputOrdering = null (order is undefined)
 ///   - join nodes (NestedLoopJoinNode, IndexNestedLoopJoinNode) inherit CanDecomposeToLocalPlusMerge = false
 ///
-/// These tests are intentionally negative assertions. When R7 join-order heuristics or a
+/// These tests are intentionally negative assertions. When join-order heuristics or a
 /// future distributed sharding pass begins populating these properties for join plans, these
 /// tests must be updated to reflect the new contract.
 /// </summary>
@@ -780,7 +781,7 @@ public class TestPlanJoinDistributedPropertiesLimitation : SharedNodeBaseTest
         // for ORDER BY matching. The test is written as a documentation assertion via the
         // EXPLAIN node names (table-scan appears, no order= in the verbose-rendered plan).
         //
-        // When R7 or a distributed-sharding pass begins setting OutputOrdering for join-side
+        // When a distributed-sharding pass begins setting OutputOrdering for join-side
         // scans, this test must be updated.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTwoTables();
 
@@ -809,7 +810,7 @@ public class TestPlanJoinDistributedPropertiesLimitation : SharedNodeBaseTest
     [NonParallelizable]
     public async Task JoinNode_CanDecomposeToLocalPlusMerge_IsFalse()
     {
-        // Documents that join nodes are not decomposable (R4 base class default = false,
+        // Documents that join nodes are not decomposable (base class default = false,
         // NestedLoopJoinNode and IndexNestedLoopJoinNode do not override it).
         // This is correct: a nested-loop join cannot be split into per-partition local +
         // coordinator merge without a full hash-join or repartition step (not implemented).

@@ -20,7 +20,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// Assigns <see cref="PlanCost"/> and <see cref="PhysicalPlanNode.EstimatedCardinality"/> to every
 /// node in a physical plan tree.
 ///
-/// Selectivity assumptions (fixed defaults; R9b will supply per-column stats once implemented):
+/// Selectivity assumptions (fixed defaults; per-column stats not yet available):
 /// <list type="bullet">
 ///   <item>Unique index lookup → 1 row.</item>
 ///   <item>Range scan with both bounds → <see cref="BothBoundsSelectivity"/> (10 %) of table rows.</item>
@@ -44,7 +44,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///   Prefer full scan when <c>estimated_index_entries ≥ tableRowCount × BreakevenFraction</c>.
 ///
 /// Join cost accuracy:
-///   For single-table plans, the primary table's R8 row count is resolved once and threaded
+///   For single-table plans, the primary table's row count is resolved once and threaded
 ///   through the tree. For join plans (called with <paramref name="table"/> = null), each
 ///   <see cref="TableScanNode"/> resolves its own table's stats via
 ///   <see cref="TableScanNode.BoundSource"/>, and each <see cref="NestedLoopJoinNode"/> /
@@ -52,20 +52,20 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///   <see cref="NestedLoopJoinNode.RightSource"/>. This avoids the previous fallback to a
 ///   single global default, giving each join source a meaningful cardinality estimate.
 ///
-/// Cost-driven decisions in R9 (scope note):
+/// Cost-driven decisions (scope note):
 ///   Only <see cref="ShouldPreferFullScan"/> drives an actual plan change (low-selectivity
 ///   index range → full table scan). All other annotated costs are computed and surfaced in
 ///   EXPLAIN output but do not yet alter plan shape — unique-index lookup vs. multi-index,
-///   NLJ vs. INLJ, and sort placement remain rule-based. R9b will extend cost-based selection
+///   NLJ vs. INLJ, and sort placement remain rule-based. Cost-based selection will extend
 ///   to those choices once per-column histograms make the estimates reliable enough.
 /// </summary>
 internal static class CostEstimator
 {
-    // Fallback selectivities used when R9b min/max is unavailable for the column.
+    // Fallback selectivities used when min/max is unavailable for the column.
     private const double BothBoundsSelectivity = 0.10;
 
-    // R9b: when column min/max is available, real selectivity replaces this constant.
-    // Without R9b stats the pessimistic 0.40 (= BreakevenFraction) ensures every half-open
+    // When column min/max is available, real selectivity replaces this constant.
+    // Without stats the pessimistic 0.40 (= BreakevenFraction) ensures every half-open
     // range flips to a full table scan, which is safe but sub-optimal.
     private const double OneBoundSelectivity   = 0.40;
     private const double FilterSelectivity     = 0.10;
@@ -75,8 +75,8 @@ internal static class CostEstimator
     // Index scan breaks even with a full table scan when it touches this fraction of rows.
     // A non-covering secondary index scan costs 2 × estimated_entries (index read + row fetch);
     // a full scan costs tableRowCount × 1. Prefer full scan when entries / N ≥ 0.5, i.e.
-    // BreakevenFraction = 0.50. With R9b real selectivities the false-positive flip rate drops
-    // significantly compared to the pre-R9b value of 0.40.
+    // BreakevenFraction = 0.50. With real selectivities the false-positive flip rate drops
+    // significantly compared to the previous value of 0.40.
     private const double BreakevenFraction = 0.50;
 
     internal const long DefaultTableRowCount = 10_000;
@@ -87,7 +87,7 @@ internal static class CostEstimator
 
     /// <summary>
     /// Walks <paramref name="root"/> top-down, assigning <see cref="PhysicalPlanNode.EstimatedCardinality"/>
-    /// and <see cref="PhysicalPlanNode.Cost"/> to every node using R8 row-count statistics.
+    /// and <see cref="PhysicalPlanNode.Cost"/> to every node using row-count statistics.
     ///
     /// <para>
     /// For single-table plans pass <paramref name="table"/> as the primary table; the planner has
@@ -118,7 +118,7 @@ internal static class CostEstimator
     /// primary table scan would be cheaper under the cost model.
     ///
     /// <para>
-    /// When R9b <paramref name="stats"/> and <paramref name="table"/> are supplied, uses real
+    /// When <paramref name="stats"/> and <paramref name="table"/> are supplied, uses real
     /// column min/max to compute selectivity (replacing the fixed fallback constants).
     /// Without stats, falls back to <see cref="OneBoundSelectivity"/> / <see cref="BothBoundsSelectivity"/>.
     /// </para>
@@ -212,18 +212,18 @@ internal static class CostEstimator
     }
 
     /// <summary>
-    /// E2: computes the network shipping cost for a scan leaf.
+    /// Computes the network shipping cost for a scan leaf.
     ///
     /// <c>NetworkFactor ≈ remoteRows × rowWidthBytes × NetWeight</c>
     ///   where <c>remoteRows = rows × remoteFraction</c>
     ///   and   <c>remoteFraction = (N-1)/N</c> when key-range sharding is on with N > 1 partitions.
     ///
-    /// Returns 0 when sharding is off, when N ≤ 1, or when NetWeight is 0.
-    /// Only applied to scan leaves that have a <see cref="DataDistribution"/> set.
+    /// Only <see cref="DataDistributionKind.Partitioned"/> nodes incur remote cost.
+    /// Gathered (point lookups, coordinator-local) and Replicated nodes pay 0.
     /// </summary>
     private static double ComputeNetworkFactor(PhysicalPlanNode node, long rows, TableDescriptor? resolvedTable)
     {
-        if (node.Distribution is null)
+        if (node.Distribution is not { Kind: DataDistributionKind.Partitioned })
             return 0.0;
 
         double remoteFraction = PlacementReader.GetRemoteFraction();
@@ -298,7 +298,7 @@ internal static class CostEstimator
 
             case FilterNode filterNode:
             {
-                // B1: use histogram-based selectivity when stats and primary table are available.
+                // Use histogram-based selectivity when stats and primary table are available.
                 double filterSel = FilterSelectivity;
                 if (stats is not null && primaryTable is not null)
                     filterSel = CardinalityEstimator.EstimateFilterSelectivity(filterNode.Predicate, database, primaryTable, stats);
@@ -350,7 +350,7 @@ internal static class CostEstimator
                 long innerRows = ResolveRightTableRowCount(nlj.RightSource.Table, database, stats)
                               ?? DefaultTableRowCount;
 
-                // B2: extract equi-key columns from the ON predicate so NDV/FK formula applies.
+                // Extract equi-key columns from the ON predicate so NDV/FK formula applies.
                 (IReadOnlyList<string> nljLeftCols, IReadOnlyList<string> nljRightCols) =
                     ExtractNljEquiKeyColumns(nlj.OnPredicate, nlj.RightSource.Alias);
 
@@ -404,7 +404,7 @@ internal static class CostEstimator
                     probeRows = rightRows;
                 }
 
-                // B2: NDV/FK-aware cardinality — same formula as NLJ and merge join.
+                // NDV/FK-aware cardinality — same formula as NLJ and merge join.
                 // Use the LOGICAL join order (Input=left, BuildSource=right) for cardinality;
                 // the formula is symmetric so the physical build/probe swap only affects cost.
                 // Strip qualifiers from both sides: probe keys are qualified today; build keys
@@ -438,7 +438,7 @@ internal static class CostEstimator
                 if (!mj.LeftIsOrdered)  sortMemory += inputCardinality;
                 if (!mj.RightIsOrdered) sortMemory += rightRows;
 
-                // B2: NDV/FK-aware cardinality — same formula as NLJ and hash join.
+                // NDV/FK-aware cardinality — same formula as NLJ and hash join.
                 // Strip qualifiers from both sides defensively (right keys are bare today;
                 // left keys are qualified; stripping a bare name is a no-op).
                 IReadOnlyList<string> leftKeyCols  = StripQualifiers(mj.LeftKeyColumns);
@@ -474,7 +474,7 @@ internal static class CostEstimator
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B2 join-key helpers
+    // Join-key helpers
     // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -498,7 +498,7 @@ internal static class CostEstimator
     /// Returns null when the left input is a complex subtree (e.g. a nested join).
     /// In 3+-way joins the left input is itself a join node, so leftTable is null and the
     /// FK/NDV check falls back to right-side-only NDV or <see cref="CardinalityEstimator.FallbackSelectivity"/>.
-    /// Phase D (System-R join-order DP) owns multi-table cardinality; acceptable for B2.
+    /// System-R join-order DP owns multi-table cardinality.
     /// </summary>
     private static TableDescriptor? TryResolveLeftTable(PhysicalPlanNode? input)
     {
@@ -576,7 +576,7 @@ internal static class CostEstimator
         bool hasFrom = node.FromBound is not null;
         bool hasTo   = node.ToBound   is not null;
 
-        // B1: attempt histogram-based selectivity (most accurate; preferred over min/max linear interpolation).
+        // Attempt histogram-based selectivity (most accurate; preferred over min/max linear interpolation).
         if (stats is not null && database is not null && table is not null
             && node.Index.Columns is { Length: > 0 })
         {
@@ -591,7 +591,7 @@ internal static class CostEstimator
             }
         }
 
-        // R9b: attempt real selectivity from column min/max when available.
+        // Attempt real selectivity from column min/max when available.
         if (stats is not null && database is not null && table is not null
             && node.Index.Columns is { Length: > 0 })
         {

@@ -409,7 +409,7 @@ public class TestExecuteSqlCreateTable : SharedNodeBaseTest
         // does when an AddIndex Raft entry is applied on any node.
         database.TableDescriptors.TryRemove("orders", out _);
 
-        // Rebuild from tableSchema.Indexes (the persisted B1 source of truth).
+        // Rebuild from tableSchema.Indexes (the persisted source of truth).
         OpenTableTicket openTableTicket = new(databaseName: dbname, tableName: "orders");
         TableDescriptor table = await executor.OpenTable(openTableTicket);
 

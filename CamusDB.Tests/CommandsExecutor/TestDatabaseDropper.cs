@@ -32,7 +32,7 @@ internal sealed class TestDatabaseDropper : BaseTest
 
         await executor.DropDatabase(dropTicket);
 
-        // After drop, opening the same name throws DatabaseDoesntExist (no magic-create, DB2).
+        // After drop, opening the same name throws DatabaseDoesntExist (no magic-create).
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             async () => await executor.OpenDatabase(dbname));
         Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex!.Code);
@@ -131,7 +131,7 @@ internal sealed class TestDatabaseDropper : BaseTest
     }
 
     /// <summary>
-    /// Drop-vs-concurrent-Open ordering (DB6.1b).
+    /// Drop-vs-concurrent-Open ordering.
     /// Fires DropDatabase and a large fan of concurrent OpenDatabase calls at the same time.
     /// Every racing Open must either succeed (if it beat UnregisterAsync) or throw
     /// DatabaseDoesntExist.  Neither SystemSpaceCorrupt nor any other exception is acceptable

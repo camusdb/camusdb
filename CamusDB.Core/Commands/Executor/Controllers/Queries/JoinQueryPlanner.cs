@@ -19,10 +19,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <summary>
 /// Builds a physical join plan tree for bound multi-source SELECT queries.
 ///
-/// R4/E1 LIMITATION — distributed-ready properties on join leaves:
-/// The R4 distributed-ready properties (<see cref="PhysicalPlanNode.OutputOrdering"/>,
+/// Distributed-ready properties on join leaves:
+/// The distributed-ready properties (<see cref="PhysicalPlanNode.OutputOrdering"/>,
 /// <see cref="PhysicalPlanNode.CanDecomposeToLocalPlusMerge"/>, <see cref="PhysicalPlanNode.EstimatedCardinality"/>)
-/// and the E1 property (<see cref="PhysicalPlanNode.Distribution"/>) are set on scan leaves
+/// and the <see cref="PhysicalPlanNode.Distribution"/> property are set on scan leaves
 /// by this planner. However, this planner does not set <c>OutputOrdering</c>
 /// on child scan nodes (join-side scans are never index-selected for ORDER BY here), so join
 /// plans always have <c>null</c> <c>OutputOrdering</c> on their leaves.
@@ -33,7 +33,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// implementation.
 /// </para>
 /// <para>
-/// This is intentional for the current single-partition deployment. The R7 join-order
+/// This is intentional for the current single-partition deployment. The join-order
 /// heuristics pass (<see cref="JoinOrderOptimizer"/>) reorders sources but does not yet
 /// populate these distributed properties on join-side scan nodes. Any distributed sharding
 /// work must extend this planner to set them when join-side scans are index-selected.

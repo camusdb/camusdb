@@ -22,7 +22,7 @@ using CamusDB.Core.CommandsExecutor.Models.Results;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Acceptance tests for RENAME DATABASE (DB7).
+/// Acceptance tests for RENAME DATABASE.
 /// Rename is a registry-only operation: the id-based directory, Kahuna keys,
 /// and table ids are untouched; only the registry entry's Name field changes.
 /// </summary>

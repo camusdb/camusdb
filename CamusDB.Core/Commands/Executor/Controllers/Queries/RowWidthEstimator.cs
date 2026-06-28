@@ -85,6 +85,9 @@ internal static class RowWidthEstimator
 
     private static int EstimateBytesWidth(int? maxLength)
     {
+        // Cap at BytesAvgBytes regardless of MaxLength — a 10 MB column and a 128-byte column
+        // are indistinguishable here. When TOAST out-of-line storage lands the in-row cost
+        // drops to a fixed pointer size; update this estimate at that point.
         if (maxLength is null or <= 0)
             return BytesAvgBytes;
         return Math.Min((int)Math.Ceiling(maxLength.Value * 0.25), BytesAvgBytes);

@@ -27,8 +27,8 @@ using NUnit.Framework;
 namespace CamusDB.Tests.Catalogs;
 
 /// <summary>
-/// G3 — draining the old name across the two-version window.
-/// Tests cover: apply behavior, error cases, G3a mid-ladder rejection,
+/// Draining the old name across the two-version window.
+/// Tests cover: apply behavior, error cases, mid-ladder rejection,
 /// idempotency/re-delivery, old-name reuse after convergence, payload
 /// round-trip, and descriptor eviction via SchemaReplicator.
 /// </summary>
@@ -404,7 +404,7 @@ public sealed class TestSchemaRename
         Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.TableAlreadyExists));
     }
 
-    // ─── RenameTable — G3a mid-ladder child elements ─────────────────────────
+    // ─── RenameTable — mid-ladder child elements ─────────────────────────────
 
     [Test]
     public void ApplySchemaDelta_RenameTable_ChildColumnMidLadder_Throws()
@@ -581,8 +581,8 @@ public sealed class TestSchemaRename
         // DuplicateColumn: FindIndex locates the column by old name, then
         // Any(c.Name == NewName) matches that same column — so the "already exists"
         // guard fires before the replacement. This is a quirk, not the intended error;
-        // the correct "same name" rejection belongs in RenameValidator (wired in G4).
-        // This test pins the current apply-layer behaviour so the G4 validator wiring
+        // the correct "same name" rejection belongs in RenameValidator.
+        // This test pins the current apply-layer behaviour so the validator wiring
         // doesn't accidentally become the only guard — the apply path still rejects it.
         Schema schema = SchemaWithTable();
 
@@ -595,7 +595,7 @@ public sealed class TestSchemaRename
         Assert.True(schema.Tables["robots"].Columns!.Any(c => c.Name == "name"));
     }
 
-    // ─── RenameColumn — G3a mid-ladder ────────────────────────────────────────
+    // ─── RenameColumn — mid-ladder ────────────────────────────────────────────
 
     [Test]
     [TestCase(SchemaElementState.DeleteOnly)]
@@ -710,7 +710,7 @@ public sealed class TestSchemaRename
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
     }
 
-    // ─── RenameIndex — G3a mid-ladder ─────────────────────────────────────────
+    // ─── RenameIndex — mid-ladder ─────────────────────────────────────────────
 
     [Test]
     [TestCase(SchemaElementState.DeleteOnly)]

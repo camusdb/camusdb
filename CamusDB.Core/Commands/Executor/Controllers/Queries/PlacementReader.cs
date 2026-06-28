@@ -16,15 +16,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <summary>
 /// Returns <see cref="DataDistribution"/> values for plan scan leaves.
 ///
-/// <b>E1 scope — schema-derived stub only.</b>
 /// Answers are derived from <see cref="CamusDBConfig.KeyRangeShardingEnabled"/> and the
 /// index/table key-column schema. This tells the cost model WHICH COLUMNS partition the data,
 /// but NOT how many partitions a given key range spans or whether those partitions are remote.
 ///
 /// The live Kahuna range-map read ("for range R, how many partitions, is any remote?") is
-/// deferred to <b>E2</b>, where it is actually consumed to produce a real
-/// <c>NetworkFactor</c> in <see cref="PlanCost"/>. There is no point reading the range map
-/// in E1 if the cost model cannot yet act on it.
+/// deferred, to produce a real <c>NetworkFactor</c> in <see cref="PlanCost"/>. There is no
+/// point reading the range map if the cost model cannot yet act on it.
 ///
 /// Staleness contract: reflects the sharding flag at plan-build time. Raft leadership
 /// changes are NOT tracked; the planner re-plans on schema changes, not on leader elections
@@ -73,7 +71,7 @@ internal sealed class PlacementReader
     /// </summary>
     public static DataDistribution GetLookupDistribution() => DataDistribution.Gathered;
 
-    // ── E2: remote-fraction for NetworkFactor computation ─────────────────
+    // ── Remote-fraction for NetworkFactor computation ────────────────────
 
     /// <summary>
     /// Returns the fraction of a scan's output rows that cross a network boundary.
@@ -86,7 +84,7 @@ internal sealed class PlacementReader
     ///     approximation; precise per-range partition assignment requires reading Kahuna's
     ///     internal range-map (deferred to a future Kahuna API).
     ///
-    /// Staleness contract: same as E1 — reflects the startup partition count, not live Raft state.
+    /// Staleness contract: reflects the startup partition count, not live Raft state.
     /// </summary>
     public static double GetRemoteFraction()
     {

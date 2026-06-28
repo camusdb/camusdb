@@ -113,7 +113,7 @@ public static class CamusDBConfig
     ///
     /// Second slice: secondary indexes whose key columns are all non-String ASCII-encoding
     /// types (Integer64/Float64/Bool/Id/Null) are also registered and range-locked. String-keyed
-    /// indexes stay hash-routed until the persistence comparator is aligned (C3b). Kahuna
+    /// indexes stay hash-routed until the persistence comparator is aligned. Kahuna
     /// auto-split/merge is not wired (logical range routing + per-range locks work without it).
     ///
     /// <b>Operational requirement:</b> key-range routing requires <c>InitialPartitions ≥ 2</c>
@@ -139,7 +139,7 @@ public static class CamusDBConfig
     public static int ClusterPartitionCount = 1;
 
     /// <summary>
-    /// Weight applied to bytes shipped over the network in the E2 network cost model.
+    /// Weight applied to bytes shipped over the network in the network cost model.
     /// <c>NetworkFactor ≈ remoteRows × rowWidthBytes × NetWeight</c>.
     ///
     /// Calibrated so that one remote row fetch (≈ 100 bytes) costs ≈ 1.0 cost unit —

@@ -19,10 +19,10 @@ using Microsoft.Extensions.Logging;
 namespace CamusDB.Core.Statistics;
 
 /// <summary>
-/// Manages lightweight advisory table statistics (R8 + R9b).
+/// Manages lightweight advisory table statistics.
 ///
 /// Row count per table.
-/// R9b: per-index entry counts and per-column (indexed columns only) running min/max.
+/// Per-index entry counts and per-column (indexed columns only) running min/max.
 ///
 /// All values are best-effort estimates — the planner uses them as hints and never relies
 /// on them for correctness.
@@ -60,11 +60,11 @@ public sealed class StatisticsManager
         // 1 while a flush cycle owns this table; 0 otherwise.
         public int FlushPending;
 
-        // Per-index entry counts (R9b). Same Loaded/delta semantics as RowCount.
+        // Per-index entry counts. Same Loaded/delta semantics as RowCount.
         // Key = index name; value = entry count (or pending delta if !Loaded).
         public readonly ConcurrentDictionary<string, long> IndexEntries = new(StringComparer.Ordinal);
 
-        // Per-column min/max (R9b). Only indexed columns are tracked.
+        // Per-column min/max. Only indexed columns are tracked.
         // Key = column name; value = running min/max.
         public readonly Dictionary<string, ColumnMinMax> ColumnStats = new(StringComparer.Ordinal);
         public readonly object ColumnStatsLock = new();
@@ -105,7 +105,7 @@ public sealed class StatisticsManager
 
     /// <summary>
     /// Returns the estimated entry count for <paramref name="indexName"/> in <paramref name="table"/>,
-    /// or null if no statistics have been collected yet (R9b).
+    /// or null if no statistics have been collected yet.
     /// </summary>
     public long? GetIndexEntryCount(DatabaseDescriptor database, TableDescriptor table, string indexName)
     {
@@ -118,7 +118,7 @@ public sealed class StatisticsManager
 
     /// <summary>
     /// Returns the persisted min/max bounds for <paramref name="columnName"/> in <paramref name="table"/>,
-    /// or null if no statistics have been observed for that column (R9b).
+    /// or null if no statistics have been observed for that column.
     /// </summary>
     public ColumnMinMax? GetColumnMinMax(DatabaseDescriptor database, TableDescriptor table, string columnName)
     {
@@ -251,7 +251,7 @@ public sealed class StatisticsManager
 
     /// <summary>
     /// Records that <paramref name="delta"/> rows were inserted and fires a background flush.
-    /// No index/column tracking — use the overload with <paramref name="rowValues"/> for R9b stats.
+    /// No index/column tracking — use the overload with <paramref name="rowValues"/> for additional stats.
     /// </summary>
     public void TrackInsert(DatabaseDescriptor database, TableDescriptor table, int delta)
     {
@@ -262,7 +262,7 @@ public sealed class StatisticsManager
 
     /// <summary>
     /// Records that <paramref name="delta"/> rows were inserted, tracking per-index entry
-    /// counts and per-column min/max for all indexed columns (R9b).
+    /// counts and per-column min/max for all indexed columns.
     /// </summary>
     public void TrackInsert(
         DatabaseDescriptor database,

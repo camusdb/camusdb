@@ -137,7 +137,7 @@ internal sealed class TestPersistentIndexSchema : BaseTest
 
     /// <summary>
     /// Even with SystemSchema.Indexes cleared in memory, reopening the table descriptor
-    /// must load the index from TableSchema.Indexes alone — the new B1 path.
+    /// must load the index from TableSchema.Indexes alone — the new path.
     /// </summary>
     [Test]
     [NonParallelizable]

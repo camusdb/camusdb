@@ -31,7 +31,7 @@ public sealed class TableIndexSchema
 {
     /// <summary>
     /// Immutable unique identifier of the index. Null only for entries built from legacy code
-    /// paths that predate B1; all new entries carry an Id.
+    /// paths; all new entries carry an Id.
     /// </summary>
     public string? Id { get; }
 

@@ -27,8 +27,8 @@ public sealed class TableSchema
     /// interpreted. Index DDL deliberately does NOT bump this: indexes are not part of
     /// the row encoding, so changing them requires no re-decoding of existing rows.
     /// Index changes ride the table blob (via <c>PersistSchemaTableAsync</c> /
-    /// <c>TableSchema.Indexes</c>) but stay invisible to other cluster nodes until B2
-    /// routes them through <c>SchemaChangeLogEntry</c>.
+    /// <c>TableSchema.Indexes</c>) but stay invisible to other cluster nodes until routed
+    /// through <c>SchemaChangeLogEntry</c>.
     /// </summary>
     public int Version { get; set; }
 
@@ -47,7 +47,7 @@ public sealed class TableSchema
     /// immutable <c>Id</c> and <c>ColumnIds</c>; column names are resolved at table-open
     /// time. Null for tables that have not yet been migrated from the legacy
     /// <c>SystemSchema.Indexes</c> storage; <c>LoadMetaAsync</c> populates this in-memory
-    /// on load and B1 persists it on the next DDL write.
+    /// on load and persists it on the next DDL write.
     /// </summary>
     public List<TableIndexSchema>? Indexes { get; set; }
 

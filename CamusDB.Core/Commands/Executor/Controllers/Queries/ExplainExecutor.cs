@@ -23,7 +23,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// Executes EXPLAIN statements by running parse→bind→plan (without execution) and
 /// returning one result row per physical plan node.
 ///
-/// KNOWN LIMITATION — subquery materialization during EXPLAIN (R3 conscious decision):
+/// KNOWN LIMITATION — subquery materialization during EXPLAIN:
 /// The prepare pipeline calls SubqueryRewriter.RewriteSelectQueryAsync (which executes
 /// scalar and IN/NOT-IN subqueries against storage to fold them into literals) and
 /// ExistsSubqueryPreparer.PrepareAsync (which may run uncorrelated EXISTS checks).
@@ -32,7 +32,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// This is reads-only (no mutation) and affects only queries that contain subqueries.
 /// A plan-only mode that leaves subquery nodes symbolic is deferred until the subquery
-/// infrastructure grows a dry-run flag (candidate for R6 documentation and a future task).
+/// infrastructure grows a dry-run flag (candidate for a future task).
 /// </summary>
 internal sealed class ExplainExecutor
 {
@@ -84,7 +84,7 @@ internal sealed class ExplainExecutor
     {
         QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket).ConfigureAwait(false);
 
-        // Zip rendered (name, detail) pairs with plan nodes so we can emit R9 cost estimates.
+        // Zip rendered (name, detail) pairs with plan nodes so we can emit cost estimates.
         List<PhysicalPlanNode> orderedNodes = WalkNodesOrdered(plan.Root);
         List<(string Name, string Detail)> rendered = PlanRenderer.WalkNodes(plan.Root, plan).ToList();
 
@@ -137,13 +137,13 @@ internal sealed class ExplainExecutor
     /// <c>kv_scan_entries INT64</c>. <c>actual_time_ms</c> is the total wall-clock milliseconds
     /// for the whole plan (reported on the root node only; zero for inner nodes).
     ///
-    /// KNOWN LIMITATION — join plans are not supported (R5 conscious decision):
+    /// KNOWN LIMITATION — join plans are not supported:
     /// <see cref="QueryExecutor.ExecuteQueryPlan"/> runs only the linear <see cref="QueryPlan.Steps"/>
     /// pipeline. <see cref="QueryPlanStepAdapter"/> emits no step for join nodes
     /// (NestedLoopJoinNode, IndexNestedLoopJoinNode, DerivedTableScanNode), so executing a join
     /// plan through this path silently runs only the left-side scan and reports wrong counts.
     /// Rather than produce misleading stats, this method throws for join queries.
-    /// Full join instrumentation requires carrying stats through QueryJoinExecutor (deferred to R7).
+    /// Full join instrumentation requires carrying stats through QueryJoinExecutor (deferred).
     /// </summary>
     public async IAsyncEnumerable<QueryResultRow> ExplainAnalyzeQuery(
         DatabaseDescriptor database,
@@ -156,7 +156,7 @@ internal sealed class ExplainExecutor
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 "EXPLAIN (ANALYZE) is not yet supported for JOIN queries. " +
-                "Use plain EXPLAIN to inspect the join plan (R7 will add join instrumentation).");
+                "Use plain EXPLAIN to inspect the join plan.");
 
         plan.CollectRuntimeStats = true;
 

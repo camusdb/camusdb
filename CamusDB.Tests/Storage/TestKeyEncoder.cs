@@ -134,7 +134,7 @@ public class TestKeyEncoder
     // before +0.0, so a half-open scan starting at +0.0 (e.g. `x >= 0`) would not see a -0.0 row. This
     // test PINS that divergence so it is visible and intentional rather than a silent surprise; closing
     // it would require normalising -0.0 -> +0.0 in KeyEncoder (a separate encoding change affecting all
-    // indexes, not part of C3's routing/lock work).
+    // indexes, not part of the routing/lock work).
     [Test]
     public void SignedZeroEncodesDistinctlyDespiteCompareToEquality()
     {
@@ -177,7 +177,7 @@ public class TestKeyEncoder
         AssertSorted(samples, v => Single(new ColumnValue(ColumnType.String, v)));
     }
 
-    // C3b — the load-bearing invariant for ranged String indexes: an encoded String key is PURE
+    // The load-bearing invariant for ranged String indexes: an encoded String key is PURE
     // ASCII, so its UTF-8 byte order (how the RocksDB/SQLite persistence backends compare keys)
     // equals its UTF-16-ordinal order (how the in-memory B-tree / range routing / scan merge compare
     // keys) AND equals ColumnValue.CompareTo. Without the hex encoding these diverge for

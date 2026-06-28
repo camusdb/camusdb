@@ -421,7 +421,7 @@ public sealed class TestErrorMatrix : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // DB2.3 — Unknown-database rejection
+    // Unknown-database rejection
     //
     // Every entry point funnels through DatabaseOpener.Open which resolves the name
     // via DatabaseRegistry.  If the name is absent from the registry the engine throws

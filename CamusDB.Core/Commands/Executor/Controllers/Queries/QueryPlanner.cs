@@ -30,7 +30,7 @@ public sealed class QueryPlanner
         _stats = stats;
     }
 
-    // E1: tag a scan leaf with its DataDistribution and return it (fluent helper).
+    // Tag a scan leaf with its DataDistribution and return it (fluent helper).
     private static PhysicalPlanNode WithDistribution(PhysicalPlanNode node, TableDescriptor table)
     {
         node.Distribution = node switch
@@ -230,7 +230,7 @@ public sealed class QueryPlanner
         QueryPlanStepAdapter.PopulateLinearSteps(plan);
         ProjectionPushdownPlanner.Apply(plan);
 
-        // Annotate every node with EstimatedCardinality and PlanCost using R8 statistics.
+        // Annotate every node with EstimatedCardinality and PlanCost.
         CostEstimator.AnnotatePlan(plan.Root, database, table, _stats);
 
         // Record the plan's query-shape ID and schema-version dependencies.
@@ -307,7 +307,7 @@ public sealed class QueryPlanner
     {
         QueryPlanStep? scanStep = IndexScanSelector.TrySelectScan(table, analysis, ticket.OrderBy);
 
-        // R9 cost-model override: if a predicate-driven range scan is selected but the cost model
+        // Cost-model override: if a predicate-driven range scan is selected but the cost model
         // estimates it would touch more rows than the breakeven fraction of the table, prefer a full
         // primary table scan instead. Only apply when:
         //   1. Stats are available (row count known).
@@ -331,7 +331,7 @@ public sealed class QueryPlanner
             }
         }
 
-        // R15b finding #1: if a predicate-driven range scan was selected, check whether a unique
+        // If a predicate-driven range scan was selected, check whether a unique
         // single-column IN-list on another column would be cheaper. Unique point-lookups have a
         // deterministic cost of 2·N (N index reads + N row fetches), making them a safe bet against
         // range scans of unknown cardinality. Guard: never switch when the range scan was chosen
@@ -411,7 +411,7 @@ public sealed class QueryPlanner
     /// (Integer64, Float64, Bool) use <c>[v, successor(v))</c>; String and Id use an
     /// exact-match scan <c>[v, v]</c> inclusive — <see cref="KvTableStore.ScanIndex"/> appends
     /// a high sentinel for non-unique, so all <c>encode(v)+rowIdHex</c> entries are captured
-    /// and the decoded-key bounds filter keeps only rows where key == v (R15b).
+    /// and the decoded-key bounds filter keeps only rows where key == v.
     /// </summary>
     private IndexInListScanNode? TryBuildInListScanNode(
         DatabaseDescriptor database,
@@ -589,7 +589,7 @@ public sealed class QueryPlanner
     }
 
     /// <summary>
-    /// Extracts a flat list of bare column names from the projection list for R12 streaming-distinct
+    /// Extracts a flat list of bare column names from the projection list for streaming-distinct
     /// eligibility. Returns null if any projection item is a non-identifier expression (aggregate,
     /// arithmetic, alias over expression, wildcard) — those block streaming.
     /// </summary>
@@ -644,7 +644,7 @@ public sealed class QueryPlanner
 
     /// <summary>
     /// Returns true when the streaming-distinct ordering (ascending by the index prefix) is a
-    /// prefix of the requested ORDER BY, allowing the SortNode to be elided (R12 sort elision).
+    /// prefix of the requested ORDER BY, allowing the SortNode to be elided.
     /// </summary>
     private static bool StreamingOrderSatisfiesOrderBy(
         IReadOnlyList<QueryOrderBy> streamingOrdering,

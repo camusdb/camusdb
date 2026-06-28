@@ -1,4 +1,3 @@
-
 /**
  * This file is part of CamusDB
  *
@@ -549,16 +548,16 @@ internal sealed class TestDatabaseRegistry
     }
 
     // -----------------------------------------------------------------------
-    // DB2.4 — Cross-node concurrent CREATE serialisation (SetIfNotExists CAS)
+    // Cross-node concurrent CREATE serialisation (SetIfNotExists CAS)
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// DB2.4 — Cross-node stale-cache race: Node A creates a database; Node B's in-memory
+    /// Cross-node stale-cache race: Node A creates a database; Node B's in-memory
     /// cache is stale (misses A's write) but when it tries to register the same name its
     /// SetIfNotExists write hits a KV entry that A already committed, so B is rejected with
     /// DatabaseAlreadyExists rather than silently overwriting A's id.
     ///
-    /// This is the primary correctness scenario for DB2.4: the CAS protects the namespace
+    /// This is the primary correctness scenario: the CAS protects the namespace
     /// split that would occur if B's blind write overwrote A's entry (both sides then believe
     /// they own the database but write to different key-space prefixes id_A/… vs id_B/…).
     /// </summary>
@@ -608,7 +607,7 @@ internal sealed class TestDatabaseRegistry
     }
 
     /// <summary>
-    /// DB2.4 — RenameAsync CAS guard: Node A renames "alpha" to a target name; Node B's cache
+    /// RenameAsync CAS guard: Node A renames "alpha" to a target name; Node B's cache
     /// is stale (doesn't know the target name is taken) and passes the in-memory
     /// <c>byName.ContainsKey(newName)</c> check, but the SetIfNotExists KV write is rejected
     /// because A already committed the target key.  B's "delta" registration is preserved.

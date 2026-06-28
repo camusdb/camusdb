@@ -106,7 +106,7 @@ public sealed class KvTransaction
     /// </summary>
     private readonly Stopwatch? lifetimeWatch;
 
-    // Mutation budget (ML2). guarded by trackSync.
+    // Mutation budget, guarded by trackSync.
     private int mutationCount;
     private readonly int mutationLimit; // 0 or negative = unlimited (DDL, read-only, disabled)
 

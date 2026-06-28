@@ -21,7 +21,7 @@ public abstract class PhysicalPlanNode
     /// <summary>Columns that must be present in rows produced by this subtree. Null means all table columns.</summary>
     public IReadOnlySet<string>? RequiredColumns { get; set; }
 
-    // ── R4: Distributed-ready plan properties ──────────────────────────────
+    // ── Distributed-ready plan properties ──────────────────────────────
 
     /// <summary>
     /// The ordering this node guarantees on its output rows.
@@ -51,7 +51,7 @@ public abstract class PhysicalPlanNode
     /// </summary>
     public virtual bool CanDecomposeToLocalPlusMerge => false;
 
-    // ── R5: EXPLAIN ANALYZE runtime counters ───────────────────────────────
+    // ── EXPLAIN ANALYZE runtime counters ───────────────────────────────
 
     /// <summary>
     /// Cost estimate assigned by the cost model after plan construction.

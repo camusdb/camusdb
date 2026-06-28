@@ -73,7 +73,7 @@ internal sealed class TableAnalyzer
         {
             // Initialize a distinct-set for every composite prefix of length 2..N.
             // A WHERE col1=… AND col2=… query needs KeyNdv["col1,col2"] even when the index
-            // has a third column — ANALYZE must emit all prefix lengths so B3 can look them up.
+            // has a third column — ANALYZE must emit all prefix lengths so the optimizer can look them up.
             for (int len = 2; len <= keyCols.Length; len++)
             {
                 string sig = StatisticsManager.KeyTupleSignature(keyCols[..len]);

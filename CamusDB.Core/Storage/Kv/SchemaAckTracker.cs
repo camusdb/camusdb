@@ -37,10 +37,10 @@ internal enum SchemaAckOutcome
 /// not from a manual register set. This closes the gap where a deregistered-but-up node still
 /// counted as live. A finite <c>liveNodeLease</c> additionally drops a live member from the gate
 /// once its last ack is older than the lease (interim apply-derived liveness); the default lease
-/// is infinite, so production blocks on every member until E2 supplies a real heartbeat.
+/// is infinite, so production blocks on every member until a real heartbeat is supplied.
 ///
 /// <para>
-/// <b>H5 quorum backstop:</b> when <c>quorumBackstopDelay</c> is finite, the gate also accepts
+/// <b>Quorum backstop:</b> when <c>quorumBackstopDelay</c> is finite, the gate also accepts
 /// once a majority (⌊N/2⌋+1) of live members have acked and the backstop delay has elapsed.
 /// This bounds DDL latency to <c>quorumBackstopDelay</c> even when minority followers are slow
 /// or unreachable — the committed Raft log already guarantees durability on the majority, so DDL
@@ -67,8 +67,8 @@ internal sealed class SchemaAckTracker
                 : schemaVersion;
 
             // Always refresh LastSeen — every RecordApplied (even an idempotent re-apply of the
-            // same version) is a liveness signal for the interim lease (E1). E2 replaces this
-            // apply-derived signal with a real heartbeat.
+            // same version) is a liveness signal for the interim lease. A real heartbeat replaces
+            // this apply-derived signal when one is available.
             acks.Nodes[node] = new NodeAck(version, DateTime.UtcNow);
         }
     }
@@ -155,8 +155,8 @@ internal sealed class SchemaAckTracker
     {
         // A finite lease lets a live Raft member that has gone silent (no ack within the lease)
         // be treated as down, so it stops blocking the gate. The default lease is infinite, so
-        // production keeps the strict "wait for every member" behaviour until E2 supplies a real
-        // heartbeat; only an explicit finite lease (tests / operators accepting the limitation)
+        // production keeps the strict "wait for every member" behaviour until a real heartbeat is
+        // supplied; only an explicit finite lease (tests / operators accepting the limitation)
         // activates apply-derived expiry.
         bool leaseFinite = liveNodeLease != Timeout.InfiniteTimeSpan;
 

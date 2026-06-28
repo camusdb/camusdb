@@ -86,7 +86,7 @@ public sealed class ColumnHistogram
 
     /// <summary>
     /// Returns the estimated fraction of rows satisfying <c>column &gt; lo AND column ≤ hi</c>
-    /// (half-open on the low side: <c>(lo, hi]</c>). B1 should account for the inclusive low
+    /// (half-open on the low side: <c>(lo, hi]</c>). Should account for the inclusive low
     /// bound <c>lo ≤ col</c> (SQL BETWEEN / <c>≥</c>) by subtracting an equality-selectivity
     /// term for <c>lo</c> if needed.
     /// Falls back to 0.5 on an empty histogram.

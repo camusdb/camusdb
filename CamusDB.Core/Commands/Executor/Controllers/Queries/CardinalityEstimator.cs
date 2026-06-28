@@ -19,7 +19,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <summary>
 /// Per-predicate selectivity estimator using equi-depth histograms and NDV counts from
 /// StatisticsManager. Replaces the fixed FilterSelectivity = 0.10 constant in CostEstimator
-/// when stats are available (B1).
+/// when stats are available.
 ///
 /// Selectivity strategy:
 ///   1. Run <see cref="PredicateAnalyzer.Analyze"/> to get indexable comparisons and IN-list predicates.
@@ -62,7 +62,7 @@ internal static class CardinalityEstimator
     /// <summary>
     /// Estimates selectivity for a pre-analyzed set of comparisons and IN-list predicates.
     ///
-    /// B3: for equality comparisons whose columns form a prefix of a composite index, uses
+    /// For equality comparisons whose columns form a prefix of a composite index, uses
     /// <c>KeyNdv</c> for that tuple instead of the column-independence product — corrects
     /// the common over-selectivity from correlated columns (e.g. city+zip, tenant+user).
     /// For unindexed correlated columns, column independence is kept (see <see cref="TryApplyCompositeKeyNdv"/>).
@@ -76,7 +76,7 @@ internal static class CardinalityEstimator
     {
         double sel = 1.0;
 
-        // B3: try composite-key NDV for correlated equality columns before independence loop.
+        // Try composite-key NDV for correlated equality columns before independence loop.
         HashSet<string>? compositeHandled = TryApplyCompositeKeyNdv(
             comparisons, database, table, stats, ref sel);
 
@@ -176,7 +176,7 @@ internal static class CardinalityEstimator
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Join cardinality estimation (B2)
+    // Join cardinality estimation
     // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>

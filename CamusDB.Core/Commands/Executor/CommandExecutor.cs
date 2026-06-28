@@ -270,7 +270,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Do NOT evict the descriptor: evicting without flushing/disposing the node would orphan
         // the running SQLite+Raft process (standalone) or leak the schema-replication subscription
         // (cluster), and a second Load would open a second node on the same storage (double-writer).
-        // Name is display-only after DB5 (logs, error messages) and never a storage or routing key,
+        // Name is display-only (logs, error messages) and never a storage or routing key,
         // so a stale Name on the cached descriptor is functionally harmless.
 
     }
@@ -337,7 +337,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             if (isClusterMode)
                 database.SchemaDdlSemaphore.Release();
-            // F1a: fire after CommitAsync (or RollbackIfNotCompletedAsync on error) so the
+            // Fire after CommitAsync (or RollbackIfNotCompletedAsync on error) so the
             // KV transaction is settled before schema-partition leadership changes.
             await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
         }
@@ -638,7 +638,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 // Compensate: if the index was partially committed to the schema (in DeleteOnly
                 // or WriteOnly state) but did not reach Public, emit DropIndex on all nodes and
                 // delete the persisted coordinator job, leaving the cluster in a clean state.
-                // Note: if this node is now degraded (F1a), compensation may be skipped by the
+                // Note: if this node is now degraded, compensation may be skipped by the
                 // degraded gate in ReplicateDropIndexAsync; a healthy peer's ResumeJobsAsync
                 // will reconcile the state after the step-down below.
                 await CompensateClusterAddIndexAsync(database, table.Id, ticket.TableName, ticket.IndexName).ConfigureAwait(false);
@@ -652,7 +652,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
     }
 
-    // F1a: shared helper — delegates to DatabaseDescriptor.FireDeferredSchemaStepDownAsync,
+    // Shared helper — delegates to DatabaseDescriptor.FireDeferredSchemaStepDownAsync,
     // adding the caller's logger for the step-down failure case. Called from the finally blocks
     // of ExecuteDdlInTransaction, ExecuteClusterAddColumnAsync, ExecuteClusterAddIndexAsync, and
     // ExecuteClusteredIndexDdlAsync so all DDL paths release leadership on degradation.
@@ -959,7 +959,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (!isClusterMode)
             return null;
 
-        // F1a: degraded nodes must not propose or forward DDL — reject immediately so the
+        // Degraded nodes must not propose or forward DDL — reject immediately so the
         // caller gets a typed "degraded" error rather than a generic "not leader" error.
         if (database.SchemaSubsystemDegraded)
             throw new CamusDBException(
@@ -979,7 +979,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             );
         }
 
-        // One stable id for all retry attempts so a C3 dedup receiver can
+        // One stable id for all retry attempts so a dedup receiver can
         // recognise retransmissions of the same logical operation.
         string operationId = Guid.NewGuid().ToString("N");
 

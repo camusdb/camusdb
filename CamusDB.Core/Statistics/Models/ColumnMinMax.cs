@@ -1,4 +1,3 @@
-
 /**
  * This file is part of CamusDB
  *
@@ -11,7 +10,7 @@ using System.Text.Json.Serialization;
 namespace CamusDB.Core.Statistics.Models;
 
 /// <summary>
-/// Persisted per-column min/max statistics (R9b).
+/// Persisted per-column min/max statistics.
 ///
 /// Maintained as a running estimate: inserts expand the range; deletes and updates to indexed
 /// columns may let the range drift upward (stale min/max are acceptable — they produce conservative

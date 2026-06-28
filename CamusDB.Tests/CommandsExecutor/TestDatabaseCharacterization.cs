@@ -9,10 +9,10 @@
 /**
  * Explicit-database invariants: opening or operating on an unknown database is rejected
  * (no magic-create), the descriptor cache is keyed by the opaque id, and every storage
- * key uses the id for rename-safety (DB2 + DB3). The name is kept for display only.
+ * key uses the id for rename-safety. The name is kept for display only.
  *
  * ┌──────────────────────────────────────────────────────────────────────────┐
- * │ ID-vs-NAME AUDIT (post-DB3, 2026-06-17)                                 │
+ * │ ID-vs-NAME AUDIT (2026-06-17)                                           │
  * │                                                                          │
  * │ USES Id  (storage / routing — rename-safe)                               │
  * │   No per-database directory: shared store at DataDirectory/kv, /wal     │
@@ -128,7 +128,7 @@ internal sealed class TestDatabaseCharacterization : BaseTest
     }
 
     /// <summary>
-    /// The unified model uses one shared Kahuna node for all databases (Task 1/SU1).
+    /// The unified model uses one shared Kahuna node for all databases.
     /// CREATE DATABASE must NOT create a per-database directory — all data lives in the
     /// shared store. The database id is an opaque value distinct from the name.
     /// </summary>

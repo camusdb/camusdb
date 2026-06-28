@@ -30,12 +30,12 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Cost Model tests.
 ///
 /// Validates:
-///   1. EXPLAIN rows carry non-null estimated_rows and estimated_cost after R9 wiring.
-///   2. CostEstimator annotates plan nodes with EstimatedCardinality from R8 stats.
+///   1. EXPLAIN rows carry non-null estimated_rows and estimated_cost after wiring.
+///   2. CostEstimator annotates plan nodes with EstimatedCardinality from stats.
 ///   3. A low-selectivity (half-open range, 40 % default) non-covering secondary index
 ///      loses to a full table scan under the cost model when a row-count estimate is known.
 ///   4. Simple heuristic choices (unique-index lookup, tight both-bounds range) are unchanged
-///      from the pre-R9 behaviour — cost model is additive, not disruptive.
+///      from the pre-existing behaviour — cost model is additive, not disruptive.
 /// </summary>
 [TestFixture]
 public sealed class TestCostEstimator : BaseTest
@@ -197,7 +197,7 @@ public sealed class TestCostEstimator : BaseTest
     public void R9_CostModelKeepsIndexForHalfOpenRange()
     {
         // Half-open range (one bound, 40 % default selectivity via OneBoundSelectivity).
-        // R9b raised BreakevenFraction from 0.40 → 0.50, so 40 % of 10,000 = 4,000 entries
+        // BreakevenFraction raised from 0.40 → 0.50, so 40 % of 10,000 = 4,000 entries
         // is below the breakeven of ceil(10,000 × 0.50) = 5,000 → index scan wins.
         var node = new IndexRangeScanNode(
             index: new TableIndexSchema("year_idx", ["year"], IndexType.Multi),
@@ -293,7 +293,7 @@ public sealed class TestCostEstimator : BaseTest
     {
         // A half-open range (year > X, no upper bound) has 40 % default selectivity
         // when no column min/max stats are available (OneBoundSelectivity heuristic).
-        // R9b raised BreakevenFraction to 0.50, so 40 % of 10,000 = 4,000 entries is
+        // BreakevenFraction raised to 0.50, so 40 % of 10,000 = 4,000 entries is
         // below the 5,000 breakeven → index scan is retained (full table scan is NOT chosen).
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableAsync();
 

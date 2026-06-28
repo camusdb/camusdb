@@ -592,7 +592,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
             "filter node kv_scan_entries must be 0 — KV work is charged to the scan");
     }
 
-    // ── join not-yet-supported guard (R5 conscious decision) ──────────────────
+    // ── join not-yet-supported guard ──────────────────────────────────────────
 
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupTwoTables()
     {
@@ -642,7 +642,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
         // PINNING TEST: EXPLAIN ANALYZE on join queries must throw rather than silently execute
         // only the left scan and return misleading NULL stats for join/right nodes.
         // QueryPlanStepAdapter emits no step for join nodes; the join path (QueryJoinExecutor)
-        // is bypassed entirely by ExecuteQueryPlanInternal. Fix in R7.
+        // is bypassed entirely by ExecuteQueryPlanInternal.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTwoTables();
 
         Assert.ThrowsAsync<CamusDBException>(async () =>

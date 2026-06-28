@@ -244,7 +244,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
     public async Task R7_PointLookupSourceGoesFirst_WhenDeclaredSecond()
     {
         // posts declared first, app_users second — but users has a unique PK WHERE predicate.
-        // After R7 reordering, users (score 0) must be on the outer (left) side.
+        // After reordering, users (score 0) must be on the outer (left) side.
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
             "SELECT p.title, u.email FROM posts p JOIN app_users u ON p.user_id = u.id WHERE u.id = '507f1f77bcf86cd799439011'",
             indexPostsUserId: true);

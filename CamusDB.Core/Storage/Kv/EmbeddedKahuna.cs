@@ -47,7 +47,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     private readonly List<SchemaApplySubscription> schemaSubscriptions = new();
     private ISchemaReplicationForwarder? schemaReplicationForwarder;
 
-    // F1b late-subscriber buffer: WAL restore events (OnLogRestored / OnRestoreFinished) fire
+    // Late-subscriber buffer: WAL restore events (OnLogRestored / OnRestoreFinished) fire
     // during Raft.StartAsync() — before any OpenDatabase → RegisterSchemaApply call registers
     // a subscriber. To deliver those events to late subscribers, we buffer schema-log entries
     // per-partition until the first RegisterSchemaApply call for that partition consumes them.
@@ -342,7 +342,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// <summary>
     /// Voluntarily steps down from schema-partition leadership for <paramref name="db"/>.
     /// The node remains online as a follower and can vote in the next election.
-    /// Called on F1a persist exhaustion so a healthy peer can take over.
+    /// Called on persist exhaustion so a healthy peer can take over.
     /// </summary>
     public async Task StepDownSchemaPartitionAsync(string db, CancellationToken cancellationToken = default)
     {
@@ -541,20 +541,17 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     }
 
     /// <summary>
-    /// Returns the live schema membership as a set of endpoint strings.
-    /// In cluster mode: local endpoint plus every peer from <c>Raft.GetNodes()</c>.
-    /// In standalone mode: only the local endpoint — <c>GetNodes()</c> returns phantom witness
-    /// nodes used by the embedded Raft for quorum and must not appear in the ack gate.
-    /// </summary>
-    /// <summary>
     /// The set of nodes the schema ack gate must wait on. Always includes the local node.
+    /// In cluster mode: local endpoint plus every active peer. In standalone mode: only the
+    /// local endpoint — <c>GetNodes()</c> returns phantom witness nodes used by the embedded
+    /// Raft for quorum and must not appear in the ack gate.
     /// <para>
-    /// <b>E1 (infinite lease, opt-in via config <c>-1</c>):</b> every configured Raft peer — the
+    /// <b>Infinite lease (opt-in via config <c>-1</c>):</b> every configured Raft peer — the
     /// gate waits for every member, so a crashed-but-configured node freezes DDL until the ack
     /// timeout. Strictest (never false-evicts) but not live under a node failure.
     /// </para>
     /// <para>
-    /// <b>E2 (finite lease, the default — 30 s):</b> live peers are sourced from the leader's real Raft activity view
+    /// <b>Finite lease (the default — 30 s):</b> live peers are sourced from the leader's real Raft activity view
     /// (<see cref="Kommander.IRaft.GetActiveNodes"/>) within the lease window. A peer the leader
     /// has not heard from within the lease is presumed dead and excluded from the gate, so DDL
     /// completes without it; a slow-but-alive peer (still answering Raft, even if not applying
@@ -623,7 +620,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             timeout,
             GetLiveSchemaNodes,
             // Liveness is carried by membership (GetLiveSchemaNodes filters dead peers out of
-            // the set via Raft activity, E2). The tracker must NOT also expire members on its
+            // the set via Raft activity). The tracker must NOT also expire members on its
             // apply-derived LastSeen — that would false-evict a Raft-alive node that is merely slow
             // to apply a schema delta. So the tracker waits for every live member to ack, with the
             // quorum backstop as the liveness escape hatch (post-commit gate only).
@@ -778,7 +775,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         lock (schemaSubscriptionsSync)
             schemaSubscriptions.Add(subscription);
 
-        // F1b late-subscriber replay (case B): if the schema partition's WAL restore already
+        // Late-subscriber replay (case B): if the schema partition's WAL restore already
         // completed before this subscriber registered (the common cluster startup order where
         // OpenDatabase runs after WaitForLeaderAsync), drain the buffer and fire onRestoreFinished
         // so the subscriber catches up to the WAL head.

@@ -19,7 +19,7 @@ using CamusDB.Core.Statistics.Models;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Validates the A1 per-column equi-depth histogram model:
+/// Validates the per-column equi-depth histogram model:
 ///   1. ColumnHistogram and ColumnHistogramBucket JSON round-trip via MetaJsonContext.
 ///   2. TableStatistics.Histograms persists alongside existing fields without breaking them.
 ///   3. A histogram with known skew reports cumulativeRows that reflect the skew.

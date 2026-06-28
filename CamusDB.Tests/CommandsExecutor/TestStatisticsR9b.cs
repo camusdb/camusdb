@@ -28,7 +28,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// R9b — Index Entry Counts and Column Min/Max tests.
+/// Index Entry Counts and Column Min/Max tests.
 ///
 /// Validates:
 ///   1. Insert tracking: per-index entry counts increment and per-column min/max expand correctly.
@@ -37,7 +37,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   4. Persistence: stats survive database reopen.
 ///   5. Backfill compatibility: entry counts are not corrupted by a newly added index.
 ///   6. CostEstimator uses real min/max selectivity when available (replacing fixed 40 % fallback).
-///   7. Existing R8 row-count behavior remains green.
+///   7. Existing row-count behavior remains green.
 /// </summary>
 [TestFixture]
 public sealed class TestStatisticsR9b : BaseTest
@@ -426,7 +426,7 @@ public sealed class TestStatisticsR9b : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Tests — R8 regression (row counts unaffected)
+    // Tests — regression (row counts unaffected)
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]

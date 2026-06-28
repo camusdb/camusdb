@@ -16,7 +16,6 @@ namespace CamusDB.Core.Statistics.Models;
 /// treat them as hints and never rely on them for correctness.
 ///
 /// <see cref="RowCount"/> tracked and persisted.
-/// R9b: <see cref="IndexEntryCounts"/> and <see cref="ColumnStats"/> fully populated.
 /// </summary>
 public sealed class TableStatistics
 {
@@ -36,7 +35,7 @@ public sealed class TableStatistics
     public Dictionary<string, long>? IndexEntryCounts { get; set; }
 
     /// <summary>
-    /// Per-column running min/max observed across inserts and updates (R9b).
+    /// Per-column running min/max observed across inserts and updates.
     /// Key = column name; value = <see cref="ColumnMinMax"/> with typed <see cref="ScalarBound"/>
     /// fields. Only indexed columns are tracked; unindexed columns are absent from this dict.
     /// May drift stale on deletes (drift is acceptable — conservative estimates are safe).
