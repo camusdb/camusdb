@@ -299,12 +299,111 @@ public sealed class QueryPlanner
         return scanLimit;
     }
 
+    /// <summary>
+    /// Enumerates all viable predicate-driven index steps, costs each against the full-scan
+    /// baseline, and returns the cheapest. When all index candidates are more expensive than a
+    /// full table scan, returns the full table scan node (step = null).
+    ///
+    /// Called only when per-table stats are available. The full-scan cost is:
+    ///   tableRowCount × 1 unit (sequential KV scan, no row fetch overhead).
+    /// An index scan costs:
+    ///   estimatedRows × 2 units (index entry + primary-store row fetch, non-covering).
+    /// Unique-index lookups always cost 2 units regardless of table size.
+    /// NetworkFactor is included when key-range sharding is on.
+    /// </summary>
+    private (PhysicalPlanNode Node, QueryPlanStep? Step) PickCheapestIndexOrFullScan(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        PredicateAnalysis analysis,
+        long tableRowCount)
+    {
+        PhysicalPlanNode fullScanNode = WithDistribution(new TableScanNode(TableScanSource.PrimaryRows), table);
+        double bestCost = CostEstimator.EstimateScanLeafCost(fullScanNode, tableRowCount, _stats, database, table);
+        PhysicalPlanNode bestNode = fullScanNode;
+        QueryPlanStep? bestStep = null;
+
+        foreach (QueryPlanStep step in IndexScanSelector.EnumerateViableSteps(table, analysis))
+        {
+            PhysicalPlanNode candidateNode = WithDistribution(ToScanNode(step), table);
+            double cost = CostEstimator.EstimateScanLeafCost(candidateNode, tableRowCount, _stats, database, table);
+            if (cost < bestCost)
+            {
+                bestCost = cost;
+                bestNode = candidateNode;
+                bestStep = step;
+            }
+        }
+
+        return (bestNode, bestStep);
+    }
+
     private (PhysicalPlanNode ScanNode, QueryPlanStep? ScanStep, NodeAst? AbsorbedInListConjunct) BuildScanNode(
         DatabaseDescriptor database,
         TableDescriptor table,
         QueryTicket ticket,
         PredicateAnalysis analysis)
     {
+        // Cost-based access-path selection: when the feature flag is on AND stats are available
+        // and the predicate drives an index, enumerate all viable steps, cost each against the
+        // full-scan baseline, and pick the cheapest rather than the heuristic-best.
+        // Falls back to the rule-based path when the flag is off, stats are absent, or no
+        // row-count estimate is available — plans are byte-identical to the rule-based path.
+        // Skipped for UPDATE/DELETE paths (ExclusivePredicateLocks) to avoid widening exclusive
+        // row-range locks from a narrow range to the full table.
+        // ORDER BY needs no special handling here: sort-elision is applied downstream from the
+        // chosen scan node's own ordering, so a cost-picked order-satisfying index still elides
+        // the sort, and a non-satisfying pick correctly retains it. (Folding sort cost into the
+        // candidate comparison — "interesting orders" — is a future enhancement, not a correctness need.)
+        if (CamusDBConfig.CostBasedAccessPathEnabled
+            && _stats is not null
+            && analysis.IndexableComparisons.Count > 0
+            && !ticket.ExclusivePredicateLocks)
+        {
+            long? trc = _stats.GetRowCountEstimate(database, table);
+            if (trc is { } tableRowCount && tableRowCount > 0)
+            {
+                (PhysicalPlanNode bestNode, QueryPlanStep? bestStep) =
+                    PickCheapestIndexOrFullScan(database, table, analysis, tableRowCount);
+
+                // If the chosen path is a predicate-driven range scan, still check whether an
+                // IN-list scan would be even cheaper (same competition as the rule-based path).
+                if (bestStep is { Type: QueryPlanStepType.RangeScanFromIndex } chosenRange
+                    && (chosenRange.FromBound is not null || chosenRange.ToBound is not null)
+                    && analysis.InListComparisons is { Count: > 0 })
+                {
+                    bool rangeSatisfiesOrder = ticket.OrderBy is { Count: > 0 }
+                        && IndexScanSelector.ScanSatisfiesOrderBy(table, chosenRange, ticket.OrderBy);
+                    if (!rangeSatisfiesOrder)
+                    {
+                        IndexInListScanNode? competitor = TryBuildCompetingInListScanNode(
+                            database, table, analysis.InListComparisons, chosenRange);
+                        if (competitor is not null)
+                        {
+                            NodeAst? absorbed = analysis.InListComparisons
+                                .FirstOrDefault(il => string.Equals(il.ColumnName, competitor.ColumnName, StringComparison.Ordinal))
+                                ?.Conjunct;
+                            return (WithDistribution(competitor, table), null, absorbed);
+                        }
+                    }
+                }
+
+                // If cost-based chose the full scan, check whether an IN-list is even cheaper.
+                if (bestStep is null && analysis.InListComparisons is { Count: > 0 })
+                {
+                    IndexInListScanNode? inListNode = TryBuildInListScanNode(database, table, analysis.InListComparisons);
+                    if (inListNode is not null)
+                    {
+                        NodeAst? absorbed = analysis.InListComparisons
+                            .FirstOrDefault(il => string.Equals(il.ColumnName, inListNode.ColumnName, StringComparison.Ordinal))
+                            ?.Conjunct;
+                        return (WithDistribution(inListNode, table), null, absorbed);
+                    }
+                }
+
+                return (bestNode, bestStep, null);
+            }
+        }
+
         QueryPlanStep? scanStep = IndexScanSelector.TrySelectScan(table, analysis, ticket.OrderBy);
 
         // Cost-model override: if a predicate-driven range scan is selected but the cost model

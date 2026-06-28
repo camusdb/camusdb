@@ -53,13 +53,13 @@ internal sealed class ParsedSqlCacheEntry
 /// documented on <see cref="NodeAst"/> and <see cref="SQLParserProcessor"/>.
 /// </para>
 /// <para>
-/// <b>Max-entries cap policy (PC2):</b> when the dictionary already holds <see cref="_maxEntries"/>
+/// <b>Max-entries cap policy:</b> when the dictionary already holds <see cref="_maxEntries"/>
 /// entries, new statements are <em>not</em> cached until the background sweep reclaims expired entries.
 /// This is intentionally the simplest possible policy — allocation-free, contention-free, and sufficient
 /// to bound memory against floods of unique ad-hoc SQL.
 /// </para>
 /// <para>
-/// <b>Lifecycle (PC2):</b> the background sweep task starts lazily on the first <see cref="Store"/>
+/// <b>Lifecycle:</b> the background sweep task starts lazily on the first <see cref="Store"/>
 /// call and is stopped cleanly via <see cref="DisposeAsync"/>, which is called from
 /// <see cref="CommandsExecutor.CommandExecutor.DisposeAsync"/>.
 /// </para>

@@ -22,14 +22,14 @@ public static class SQLParserProcessor
     /// before the tree is returned, so identifiers are already lower-cased. Any transformation of
     /// the tree downstream must construct new <see cref="NodeAst"/> nodes; it must not assign into
     /// the fields of a node that was returned by this method. This invariant is the prerequisite
-    /// for the SQL parser AST cache (PC1+): a single cached instance may be shared across many
+    /// for the SQL parser AST cache: a single cached instance may be shared across many
     /// concurrent query executions of the same SQL text.
     /// <para>
     /// When <see cref="CamusDBConfig.SqlParserCacheTtlSeconds"/> is positive the result of a
     /// successful parse is stored in <see cref="SqlParserCache"/>. Subsequent calls with the same
     /// SQL text return the <b>same <see cref="NodeAst"/> reference</b> (cache hit) and extend the
     /// sliding TTL. A parse that throws is never cached; the exception propagates unchanged.
-    /// When TTL is zero or negative the cache is bypassed and behaviour is identical to pre-PC1.
+    /// When TTL is zero or negative the cache is bypassed.
     /// </para>
     /// </remarks>
     /// <summary>

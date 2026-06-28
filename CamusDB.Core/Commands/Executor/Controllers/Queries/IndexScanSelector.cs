@@ -56,6 +56,35 @@ internal static class IndexScanSelector
         return TrySelectOrderByScan(table, orderBy);
     }
 
+    /// <summary>
+    /// Returns one viable step per matching index — the best usage of each individual index
+    /// given the predicate. Unlike <see cref="TrySelectScan"/>, which returns only the single
+    /// highest-scored step across all indexes, this returns all candidates so the caller can
+    /// cost them independently and pick the cheapest rather than the highest-scored.
+    ///
+    /// Does not include the full-table-scan baseline (always the caller's implicit option) or
+    /// ORDER BY-only scans (those remain rule-based in the planner).
+    /// </summary>
+    internal static IReadOnlyList<QueryPlanStep> EnumerateViableSteps(
+        TableDescriptor table,
+        PredicateAnalysis analysis)
+    {
+        Dictionary<string, List<AnalyzedComparison>> byColumn = BuildColumnMap(analysis);
+        if (byColumn.Count == 0)
+            return [];
+
+        var steps = new List<QueryPlanStep>();
+        foreach (TableIndexSchema index in table.Indexes.Values)
+        {
+            if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+                continue;
+
+            if (TryMatchPredicateIndex(table, index, byColumn, out QueryPlanStep step, out _))
+                steps.Add(step);
+        }
+        return steps;
+    }
+
     private static Dictionary<string, List<AnalyzedComparison>> BuildColumnMap(PredicateAnalysis analysis)
     {
         Dictionary<string, List<AnalyzedComparison>> byColumn = new(StringComparer.Ordinal);

@@ -55,37 +55,34 @@ public static class CamusDBConfig
     public static int StatsHistogramBuckets = 100;
 
     /// <summary>
-    /// Sliding TTL for the SQL parser AST cache, in seconds (PC1).
+    /// Sliding TTL for the SQL parser AST cache, in seconds.
     /// A successfully-parsed <c>NodeAst</c> is kept in the cache for this many seconds after
     /// the last hit; each cache hit extends the deadline by the same interval.
     /// <para>
     /// Special values:
     ///   <c>&lt;= 0</c> — cache is disabled; every call to <c>SQLParserProcessor.Parse</c>
-    ///                    lexes and parses from scratch (pre-PC1 behaviour).
+    ///                    lexes and parses from scratch.
     /// </para>
     /// Default: <c>300</c> (5 minutes), matching Kahuna's script-cache TTL.
-    /// Wired to <c>config.yml</c> in PC3.
     /// </summary>
     public static int SqlParserCacheTtlSeconds = 300;
 
     /// <summary>
-    /// Maximum number of entries the SQL parser AST cache may hold at any moment (PC2).
+    /// Maximum number of entries the SQL parser AST cache may hold at any moment.
     /// When the cache is at capacity new statements are silently dropped until the background
     /// sweep reclaims expired entries. This is a safety bound against floods of unique ad-hoc
     /// SQL, not a precise LRU.
     /// <para>
     ///   <c>0</c> — no cap (unbounded, same risk as Kahuna's pure-TTL cache).
     /// </para>
-    /// Default: <c>10_000</c>.
-    /// Wired to <c>config.yml</c> in PC3.
+    /// Default: <c>2048</c>.
     /// </summary>
     public static int SqlParserCacheMaxEntries = 2048;
 
     /// <summary>
-    /// How often, in seconds, the background sweep task removes expired SQL parser cache entries (PC2).
+    /// How often, in seconds, the background sweep task removes expired SQL parser cache entries.
     /// Must be &gt; 0.
     /// Default: <c>60</c> seconds.
-    /// Wired to <c>config.yml</c> in PC3.
     /// </summary>
     public static int SqlParserCacheSweepSeconds = 60;
 
@@ -149,6 +146,16 @@ public static class CamusDBConfig
     /// Default: 0.01 (100 bytes × 0.01 = 1.0 cost unit per remote row).
     /// </summary>
     public static double NetWeight = 0.01;
+
+    /// <summary>
+    /// Enables cost-based access-path selection in the query planner. When <c>true</c>, the
+    /// planner enumerates all viable index steps, costs each against the full-scan baseline,
+    /// and picks the cheapest. When <c>false</c> (default), the rule-based (score-based) path
+    /// is used unchanged, so plans are byte-identical to the heuristic planner regardless of
+    /// whether statistics have been collected. Set via <c>cost_based_access_path_enabled</c>
+    /// in <c>config.yml</c>.
+    /// </summary>
+    public static bool CostBasedAccessPathEnabled = false;
 
     /// <summary>
     /// Cluster-wide default isolation level applied when a transaction is begun without an

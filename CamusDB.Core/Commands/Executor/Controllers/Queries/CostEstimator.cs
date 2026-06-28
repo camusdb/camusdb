@@ -114,6 +114,32 @@ internal static class CostEstimator
     }
 
     /// <summary>
+    /// Estimates the isolated scan cost of a single leaf node, used by the access-path enumerator
+    /// to compare candidates before committing to one.
+    ///
+    /// Equivalent to one <see cref="EstimateNodeCost"/> call where the input cardinality equals
+    /// the table row count (leaf nodes have no children). The result is used only for candidate
+    /// comparison; nodes are annotated with full costs later via <see cref="AnnotatePlan"/>.
+    /// </summary>
+    public static double EstimateScanLeafCost(
+        PhysicalPlanNode scanNode,
+        long tableRowCount,
+        StatisticsManager? stats,
+        DatabaseDescriptor database,
+        TableDescriptor table)
+    {
+        (_, PlanCost cost) = EstimateNodeCost(
+            scanNode,
+            inputCardinality: tableRowCount,
+            tableRowCount: tableRowCount,
+            database: database,
+            stats: stats,
+            primaryTable: table,
+            resolvedTable: table);
+        return cost.Total;
+    }
+
+    /// <summary>
     /// Returns true when replacing a predicate-driven <see cref="IndexRangeScanNode"/> with a full
     /// primary table scan would be cheaper under the cost model.
     ///

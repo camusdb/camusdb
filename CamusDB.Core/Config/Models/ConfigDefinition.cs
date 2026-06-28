@@ -62,7 +62,7 @@ public class ConfigDefinition
     public int StatsFlushIntervalMs { get; set; } = 5000;
 
     /// <summary>
-    /// Sliding TTL for the SQL parser AST cache, in seconds (PC1/PC3).
+    /// Sliding TTL for the SQL parser AST cache, in seconds.
     /// Each cache hit extends the deadline by this interval.
     /// <c>0</c> disables the cache entirely (every parse re-lexes from scratch).
     /// Must be <c>&gt;= 0</c>.
@@ -71,7 +71,7 @@ public class ConfigDefinition
     public int SqlParserCacheTtlSeconds { get; set; } = 300;
 
     /// <summary>
-    /// Maximum number of distinct SQL texts the parser AST cache may hold (PC2/PC3).
+    /// Maximum number of distinct SQL texts the parser AST cache may hold.
     /// When the cap is reached, new statements are silently skipped until the background
     /// sweep reclaims expired entries. <c>0</c> = unbounded (no cap).
     /// Must be <c>&gt;= 0</c>.
@@ -81,10 +81,18 @@ public class ConfigDefinition
 
     /// <summary>
     /// How often, in seconds, the background sweep task removes expired SQL parser cache
-    /// entries (PC2/PC3). Must be <c>&gt; 0</c>.
+    /// entries. Must be <c>&gt; 0</c>.
     /// Maps to <c>CamusDBConfig.SqlParserCacheSweepSeconds</c>.
     /// </summary>
     public int SqlParserCacheSweepSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Enables cost-based access-path selection in the query planner.
+    /// When <c>true</c>, the planner costs all viable index steps and picks the cheapest.
+    /// When <c>false</c> (default), the rule-based (score-based) path is used unchanged.
+    /// Maps to <c>CamusDBConfig.CostBasedAccessPathEnabled</c>.
+    /// </summary>
+    public bool CostBasedAccessPathEnabled { get; set; } = false;
 
     /// <summary>Numeric Raft node id for cluster mode. Maps to <c>EmbeddedKahunaOptions.NodeId</c>.</summary>
     public int RaftNodeId { get; set; } = 1;
