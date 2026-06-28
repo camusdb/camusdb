@@ -708,7 +708,7 @@ public sealed class QueryPlanner
         return null;
     }
 
-    private static PhysicalPlanNode ToScanNode(QueryPlanStep step)
+    internal static PhysicalPlanNode ToScanNode(QueryPlanStep step)
     {
         switch (step.Type)
         {

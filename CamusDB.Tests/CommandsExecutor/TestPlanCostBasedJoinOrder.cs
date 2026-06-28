@@ -515,6 +515,467 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
+    // ─── AF2 helpers ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Two-table join: orders (10k rows, WHERE status='urgent') → products (2k rows, indexed PK).
+    /// Used to verify that a pushed-down filter on the left leaf is accounted for correctly by
+    /// both the cost annotator (EstimatedCardinality) and the hash-vs-INLJ decision.
+    /// </summary>
+    private async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)>
+        BindOrdersProductsJoin()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        CatalogsManager catalogs = executor.Catalogs;
+
+        string dbname = $"af2_{Guid.NewGuid():n}";
+        TrackDatabase(dbname, executor);
+
+        DatabaseDescriptor database = await executor.CreateDatabase(
+            new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        // orders: large table, secondary index on status (for WHERE push-down) + product_id (join key).
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "orders",
+            columns:
+            [
+                new("id",         ColumnType.Id),
+                new("status",     ColumnType.String, notNull: true),
+                new("product_id", ColumnType.Id,     notNull: true),
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk",                [new("id",         OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "orders_status_idx",  [new("status",     OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "orders_pid_idx",     [new("product_id", OrderType.Ascending)]),
+            ],
+            ifNotExists: false));
+
+        // products: medium table, PK on id (INLJ target when orders.product_id = products.id).
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "products",
+            columns:
+            [
+                new("id",   ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+            ],
+            ifNotExists: false));
+
+        await database.Transactions.CommitAsync(txn);
+
+        TableDescriptor ordersTable   = await database.TableDescriptors["orders"];
+        TableDescriptor productsTable = await database.TableDescriptors["products"];
+
+        // orders = 10 000 rows; products = 2 000 rows.
+        // With the 10 % default selectivity for WHERE status = 'urgent' (no histograms seeded):
+        //   filtered orders = 1 000 rows.
+        // INLJ cost = 1 000 × 2 = 2 000; hash cost = (1 000 + 2 000) + min(1 000, 2 000) × 0.1 = 3 100.
+        // → INLJ is cheaper once the filter is accounted for.
+        // Without the AF2 fix, EstimatePhysicalNodeRows returns 10 000 (unfiltered):
+        //   INLJ = 20 000; hash = (10 000 + 2 000) + 2 000 × 0.1 = 12 200 → hash wins.
+        executor.Statistics.SeedRowCountForTesting(database, ordersTable,   10_000);
+        executor.Statistics.SeedRowCountForTesting(database, productsTable,  2_000);
+
+        const string sql =
+            "SELECT o.id, p.name " +
+            "FROM orders o " +
+            "JOIN products p ON o.product_id = p.id " +
+            "WHERE o.status = \"urgent\"";
+
+        ExecuteSQLTicket executeTicket = new(
+            txnState: await database.Transactions.BeginAsync(),
+            database: dbname,
+            sql: sql,
+            parameters: null);
+
+        SelectQuery selectQuery = new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(sql));
+        BoundSelectQuery bound  = await new QueryBinder(new TableOpener(catalogs, logger))
+            .BindAsync(database, selectQuery);
+
+        QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(bound, executeTicket);
+
+        return (database, bound, ticket, executor);
+    }
+
+    // ─── AF2 tests ──────────────────────────────────────────────────────────
+
+    [Test]
+    public async Task AF2_FilteredLeaf_EstimatedCardinalityReflectsFilter()
+    {
+        // After fix: the orders leaf (10 000 rows, status='urgent' → 10% → 1 000)
+        // must have EstimatedCardinality = 1 000, not 10 000.
+        // Before the fix, CostEstimator.EstimateNodeCost's TableScanNode case ignored
+        // ExecutionFilter, so EstimatedCardinality was always the full table count.
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
+            = await BindOrdersProductsJoin();
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        // Find the orders leaf scan node — the leftmost TableScanNode with an ExecutionFilter.
+        TableScanNode? ordersLeaf = FindLeafWithFilter(plan.Root, "o");
+
+        Assert.IsNotNull(ordersLeaf, "Expected a filtered orders scan leaf in the join plan");
+        Assert.IsNotNull(ordersLeaf!.EstimatedCardinality,
+            "EstimatedCardinality must be set by CostEstimator.AnnotatePlan");
+
+        // 10 % default selectivity × 10 000 = 1 000.
+        // Assert range [500, 2000] to tolerate rounding and any future selectivity changes.
+        long card = ordersLeaf.EstimatedCardinality!.Value;
+        Assert.Less(card, 10_000,
+            $"FilteredLeaf cardinality ({card}) must be less than the full table count (10 000)");
+        Assert.Greater(card, 0,
+            "FilteredLeaf cardinality must be positive");
+    }
+
+    [Test]
+    public async Task AF2_HashVsINLJ_FlipsWhenFilterMakesLeftSmall()
+    {
+        // Before AF2: ShouldPreferHashOverIndexNestedLoop used the full 10 000-row orders table
+        // as the outer side → hash cost (12 200) < INLJ (20 000) → HashJoinNode.
+        // After AF2:  EstimatePhysicalNodeRows sees the ExecutionFilter and returns 1 000
+        // filtered rows → INLJ cost (2 000) < hash (3 100) → IndexNestedLoopJoinNode.
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
+            = await BindOrdersProductsJoin();
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root,
+            "After AF2 fix: selective filter on outer side must make INLJ cheaper than hash join");
+    }
+
+    [Test]
+    public async Task AF2_JoinRoot_CardinalityBelowUnfilteredTableProduct()
+    {
+        // Regression guard: the join output cardinality must be well below the raw cross-product
+        // (10 000 × 2 000 = 20M) because the filter on orders shrinks its contribution.
+        // Without the AF2 fix the annotator would still report a sensible join cardinality, but
+        // this confirms the full-pipeline annotation remains coherent after the fix.
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
+            = await BindOrdersProductsJoin();
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        long? joinCard = plan.Root.EstimatedCardinality;
+        Assert.IsNotNull(joinCard, "Join root EstimatedCardinality must be populated by CostEstimator");
+        Assert.Less(joinCard!.Value, 10_000L * 2_000L,
+            "Join cardinality must be below the raw cross-product");
+        Assert.Greater(joinCard.Value, 0L, "Join cardinality must be positive");
+    }
+
+    /// <summary>
+    /// Walks the full plan tree and returns the first <see cref="TableScanNode"/> with the given
+    /// alias that has an <c>ExecutionFilter</c> set (i.e., a pushed-down WHERE predicate).
+    /// </summary>
+    private static TableScanNode? FindLeafWithFilter(PhysicalPlanNode node, string alias)
+    {
+        if (node is TableScanNode scan
+            && scan.BoundSource?.Alias == alias
+            && scan.ExecutionFilter is not null)
+            return scan;
+
+        if (node.Input is not null)
+        {
+            TableScanNode? fromInput = FindLeafWithFilter(node.Input, alias);
+            if (fromInput is not null) return fromInput;
+        }
+
+        return null;
+    }
+
+    // ─── AF3 helpers ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Creates an orders/products database, seeds stats to favour INLJ (same as AF2),
+    /// and seeds column-level NDV so the breakeven-veto doesn't block the index scan:
+    ///   - orders.status NDV = 100  → selectivity = 1/100 = 1 %; far below the 50 % veto.
+    ///   - orders table count = 10 000  → estimated index entries = 100.
+    ///
+    /// With <c>CostBasedAccessPathEnabled = true</c> the planner should emit an
+    /// <see cref="IndexRangeScanNode"/> for the orders leaf instead of the default
+    /// full-scan <see cref="TableScanNode"/>.
+    /// </summary>
+    private async Task<(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)>
+        BindAF3Join()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        CatalogsManager catalogs = executor.Catalogs;
+
+        string dbname = $"af3_{Guid.NewGuid():n}";
+        TrackDatabase(dbname, executor);
+
+        DatabaseDescriptor database = await executor.CreateDatabase(
+            new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "orders",
+            columns:
+            [
+                new("id",         ColumnType.Id),
+                new("status",     ColumnType.String, notNull: true),
+                new("product_id", ColumnType.Id,     notNull: true),
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk",               [new("id",         OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "orders_status_idx", [new("status",     OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "orders_pid_idx",    [new("product_id", OrderType.Ascending)]),
+            ],
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "products",
+            columns:
+            [
+                new("id",   ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+            ],
+            ifNotExists: false));
+
+        await database.Transactions.CommitAsync(txn);
+
+        TableDescriptor ordersTable   = await database.TableDescriptors["orders"];
+        TableDescriptor productsTable = await database.TableDescriptors["products"];
+
+        executor.Statistics.SeedRowCountForTesting(database, ordersTable,  10_000);
+        executor.Statistics.SeedRowCountForTesting(database, productsTable,  2_000);
+        // No NDV seeded: the String equality step emits a degenerate [v,v] range whose
+        // estimated row count ≈ 1, which is well below the 50 % breakeven veto (5 000).
+        // The index scan is therefore chosen without needing histogram data.
+
+        const string sql =
+            "SELECT o.id, p.name " +
+            "FROM orders o " +
+            "JOIN products p ON o.product_id = p.id " +
+            "WHERE o.status = \"urgent\"";
+
+        ExecuteSQLTicket executeTicket = new(
+            txnState: await database.Transactions.BeginAsync(),
+            database: dbname, sql: sql, parameters: null);
+
+        SelectQuery selectQuery = new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(sql));
+        BoundSelectQuery bound  = await new QueryBinder(new TableOpener(catalogs, logger))
+            .BindAsync(database, selectQuery);
+
+        QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(bound, executeTicket);
+
+        return (database, bound, ticket, executor);
+    }
+
+    // ─── AF3 tests ──────────────────────────────────────────────────────────
+
+    [Test]
+    public async Task AF3_FlagOn_FilteredJoinLeafBecomesIndexRangeScan()
+    {
+        // Validates that BuildJoinTree emits IndexRangeScanNode for the orders leaf when
+        // CostBasedAccessPathEnabled is true and status has a usable index with low NDV.
+        // Without AF3 the leaf is always TableScanNode(PrimaryRows) regardless of indexes.
+        CamusDBConfig.CostBasedAccessPathEnabled = true;
+        try
+        {
+            (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
+                = await BindAF3Join();
+
+            QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+            // Walk the plan to find the orders leaf.
+            IndexRangeScanNode? rangeLeaf = FindIndexRangeLeaf(plan.Root, "o");
+            Assert.IsNotNull(rangeLeaf,
+                "With CostBasedAccessPathEnabled=true and a usable status index, " +
+                "the orders join leaf must be an IndexRangeScanNode, not a TableScanNode.");
+
+            Assert.IsNotNull(rangeLeaf!.BoundSource, "IndexRangeScanNode in join must have BoundSource set");
+            Assert.AreEqual("o", rangeLeaf.BoundSource!.Alias);
+            Assert.AreEqual("orders_status_idx", rangeLeaf.Index.Name);
+        }
+        finally
+        {
+            CamusDBConfig.CostBasedAccessPathEnabled = false;
+        }
+    }
+
+    [Test]
+    public async Task AF3_FlagOff_FilteredJoinLeafRemainsTableScan()
+    {
+        // Regression guard: when CostBasedAccessPathEnabled=false the behaviour is unchanged —
+        // join leaves remain TableScanNode(PrimaryRows) with a residual ExecutionFilter.
+        CamusDBConfig.CostBasedAccessPathEnabled = false;
+
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
+            = await BindAF3Join();
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        IndexRangeScanNode? rangeLeaf = FindIndexRangeLeaf(plan.Root, "o");
+        Assert.IsNull(rangeLeaf,
+            "With CostBasedAccessPathEnabled=false the orders leaf must remain a TableScanNode.");
+    }
+
+    [Test]
+    public async Task AF3_IndexLeafPlan_ResultsMatchFullScanPlan()
+    {
+        // Proof-by-execution: the AF3 index-scan leaf must produce the same result rows as
+        // the default full-scan plan — any dropped predicate, wrong range, or missing row fetch
+        // would diverge here.
+        string dbname = await CreateAF3Database();
+        CommandExecutor executor = CreateCommandExecutor();
+        TrackDatabase(dbname, executor);
+
+        List<(string id, string name)> rowsOff = await ExecuteAF3Join(executor, dbname, accessPathOn: false);
+        List<(string id, string name)> rowsOn  = await ExecuteAF3Join(executor, dbname, accessPathOn: true);
+
+        rowsOff.Sort((a, b) => string.Compare(a.id, b.id, StringComparison.Ordinal));
+        rowsOn .Sort((a, b) => string.Compare(a.id, b.id, StringComparison.Ordinal));
+
+        Assert.AreEqual(rowsOff.Count, rowsOn.Count,
+            "AF3: index-scan leaf plan and full-scan leaf plan must return the same number of rows.");
+
+        for (int i = 0; i < rowsOff.Count; i++)
+        {
+            Assert.AreEqual(rowsOff[i].id,   rowsOn[i].id,   $"Row {i}: id mismatch.");
+            Assert.AreEqual(rowsOff[i].name, rowsOn[i].name, $"Row {i}: name mismatch.");
+        }
+    }
+
+    private async Task<string> CreateAF3Database()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        string dbname = $"af3exec_{Guid.NewGuid():n}";
+        TrackDatabase(dbname, executor);
+
+        DatabaseDescriptor database = await executor.CreateDatabase(
+            new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "orders",
+            columns:
+            [
+                new("id",         ColumnType.Id),
+                new("status",     ColumnType.String, notNull: true),
+                new("product_id", ColumnType.Id,     notNull: true),
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk",               [new("id",         OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "orders_status_idx", [new("status",     OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "orders_pid_idx",    [new("product_id", OrderType.Ascending)]),
+            ],
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "products",
+            columns:
+            [
+                new("id",   ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+            ],
+            ifNotExists: false));
+
+        string pid1 = "aaaa00000000000000000001";
+        string pid2 = "aaaa00000000000000000002";
+        string pid3 = "aaaa00000000000000000003";
+
+        await executor.Insert(new InsertTicket(txnState: txn, databaseName: dbname, tableName: "products",
+            values: new()
+            {
+                new() { { "id", new(ColumnType.Id, pid1) }, { "name", new(ColumnType.String, "Widget") } },
+                new() { { "id", new(ColumnType.Id, pid2) }, { "name", new(ColumnType.String, "Gadget") } },
+                new() { { "id", new(ColumnType.Id, pid3) }, { "name", new(ColumnType.String, "Doohickey") } },
+            }));
+
+        await executor.Insert(new InsertTicket(txnState: txn, databaseName: dbname, tableName: "orders",
+            values: new()
+            {
+                // status=urgent — should be returned
+                new() { { "id", new(ColumnType.Id, "bbbb00000000000000000001") }, { "status", new(ColumnType.String, "urgent")  }, { "product_id", new(ColumnType.Id, pid1) } },
+                new() { { "id", new(ColumnType.Id, "bbbb00000000000000000002") }, { "status", new(ColumnType.String, "urgent")  }, { "product_id", new(ColumnType.Id, pid2) } },
+                // status=normal — must be excluded
+                new() { { "id", new(ColumnType.Id, "bbbb00000000000000000003") }, { "status", new(ColumnType.String, "normal")  }, { "product_id", new(ColumnType.Id, pid3) } },
+                new() { { "id", new(ColumnType.Id, "bbbb00000000000000000004") }, { "status", new(ColumnType.String, "pending") }, { "product_id", new(ColumnType.Id, pid1) } },
+            }));
+
+        await database.Transactions.CommitAsync(txn);
+
+        TableDescriptor ordersTable   = await database.TableDescriptors["orders"];
+        TableDescriptor productsTable = await database.TableDescriptors["products"];
+
+        executor.Statistics.SeedRowCountForTesting(database, ordersTable,  10_000);
+        executor.Statistics.SeedRowCountForTesting(database, productsTable,  2_000);
+
+        return dbname;
+    }
+
+    private async Task<List<(string id, string name)>> ExecuteAF3Join(
+        CommandExecutor executor, string dbname, bool accessPathOn)
+    {
+        CamusDBConfig.CostBasedAccessPathEnabled = accessPathOn;
+        try
+        {
+            KvTransaction txn = await (await executor.OpenDatabase(dbname)).Transactions.BeginAsync();
+
+            const string sql =
+                "SELECT o.id, p.name " +
+                "FROM orders o " +
+                "JOIN products p ON o.product_id = p.id " +
+                "WHERE o.status = \"urgent\"";
+
+            ExecuteSQLTicket ticket = new(
+                txnState: txn, database: dbname, sql: sql, parameters: null);
+
+            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)
+                = await executor.ExecuteSQLQuery(ticket);
+
+            List<(string id, string name)> rows = [];
+            await foreach (QueryResultRow row in cursor)
+                rows.Add((row.Row["id"].StrValue ?? "", row.Row["name"].StrValue ?? ""));
+
+            await database.Transactions.CommitAsync(txn);
+            return rows;
+        }
+        finally
+        {
+            CamusDBConfig.CostBasedAccessPathEnabled = false;
+        }
+    }
+
+    /// <summary>
+    /// Walks the physical plan tree (left spine and join left inputs) looking for an
+    /// <see cref="IndexRangeScanNode"/> with <c>BoundSource.Alias == alias</c>.
+    /// </summary>
+    private static IndexRangeScanNode? FindIndexRangeLeaf(PhysicalPlanNode node, string alias)
+    {
+        if (node is IndexRangeScanNode { BoundSource: not null } rsn
+            && rsn.BoundSource!.Alias == alias)
+            return rsn;
+
+        if (node.Input is not null)
+        {
+            IndexRangeScanNode? fromInput = FindIndexRangeLeaf(node.Input, alias);
+            if (fromInput is not null) return fromInput;
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// Walks the full left spine and returns the join ordering as a list of table aliases
     /// in outer-to-inner order: e.g. ["e", "s", "u"] for a plan where events drives the

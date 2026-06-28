@@ -66,6 +66,19 @@ public class TestNonUniqueStringIndexScan : BaseTest
             operation: AlterIndexOperation.AddIndex);
         await executor.AlterIndex(addCategoryIdx);
 
+        // Composite (String, Int64) index for Case-2 half-open range tests.
+        AlterIndexTicket addCategoryPriceIdx = new(
+            databaseName: dbname,
+            tableName: "products",
+            indexName: "category_price_idx",
+            columns: new ColumnIndexInfo[]
+            {
+                new("category", OrderType.Ascending),
+                new("price", OrderType.Ascending),
+            },
+            operation: AlterIndexOperation.AddIndex);
+        await executor.AlterIndex(addCategoryPriceIdx);
+
         return (dbname, database, executor);
     }
 
@@ -273,5 +286,203 @@ public class TestNonUniqueStringIndexScan : BaseTest
         foreach (QueryResultRow row in rows)
             Assert.IsTrue(row.Row["name"].StrValue!.StartsWith("device-"),
                 "All returned rows must be electronics products");
+    }
+
+    // ── AF1 Case 2: String equality prefix + half-open trailing range ─────────
+
+    [Test]
+    public async Task StringPrefixPlusOpenUpperRange_ReturnsOnlyMatchingRows()
+    {
+        // category_price_idx covers (category String, price Int64).
+        // WHERE category='electronics' AND price > 300 — open upper side.
+        // Before the fix the scan would have run to the end of the index (furniture, clothing…).
+        // After fix, toBound is capped at [electronics] inclusive, so only electronics rows
+        // can appear; the residual filter on category guards any off-prefix candidates.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupCatalogTable();
+
+        await InsertProducts(executor, database, dbname, new[]
+        {
+            ("electronics", "laptop",  999L),
+            ("electronics", "phone",   599L),
+            ("electronics", "cable",    19L),
+            ("furniture",   "chair",   199L),
+            ("furniture",   "desk",    349L),
+        });
+
+        List<QueryResultRow> rows = await RunSql(executor, database, dbname,
+            "SELECT name, price FROM products WHERE category = 'electronics' AND price > 300");
+
+        Assert.AreEqual(2, rows.Count,
+            "Only electronics rows with price > 300 should be returned");
+
+        HashSet<string> names = rows.Select(r => r.Row["name"].StrValue!).ToHashSet();
+        Assert.That(names, Does.Contain("laptop"));
+        Assert.That(names, Does.Contain("phone"));
+
+        foreach (QueryResultRow row in rows)
+            Assert.Greater(row.Row["price"].LongValue, 300L,
+                "All returned rows must satisfy price > 300");
+    }
+
+    [Test]
+    public async Task StringPrefixPlusOpenLowerRange_ReturnsOnlyMatchingRows()
+    {
+        // WHERE category='electronics' AND price < 200 — open lower side.
+        // Before the fix fromBound was null → scan from start of index (includes
+        // any category that sorts before 'electronics', e.g. 'clothing').
+        // After fix, fromBound is floored at [electronics] inclusive.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupCatalogTable();
+
+        await InsertProducts(executor, database, dbname, new[]
+        {
+            ("clothing",    "shirt",    29L),
+            ("electronics", "cable",    19L),
+            ("electronics", "phone",   599L),
+            ("furniture",   "chair",   199L),
+        });
+
+        List<QueryResultRow> rows = await RunSql(executor, database, dbname,
+            "SELECT name FROM products WHERE category = 'electronics' AND price < 200");
+
+        Assert.AreEqual(1, rows.Count,
+            "Only electronics rows with price < 200 should be returned");
+        Assert.AreEqual("cable", rows[0].Row["name"].StrValue);
+    }
+
+    // ── AF1 Path 2 — both sides bounded ──────────────────────────────────────
+
+    [Test]
+    public async Task StringPrefixPlusBothBoundedRange_ReturnsOnlyMatchingRows()
+    {
+        // WHERE category='electronics' AND price > 100 AND price < 500 — both sides bounded.
+        // The scan is already confined (fromBound=[electronics,100], toBound=[electronics,500])
+        // so neither open-side sentinel fix applies. Verify correctness: no off-category
+        // and no out-of-range rows must appear.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupCatalogTable();
+
+        await InsertProducts(executor, database, dbname, new[]
+        {
+            ("clothing",    "shirt",     29L),
+            ("electronics", "cable",     19L),
+            ("electronics", "phone",    599L),
+            ("electronics", "tablet",   349L),
+            ("furniture",   "chair",    199L),
+            ("furniture",   "desk",     349L),
+        });
+
+        List<QueryResultRow> rows = await RunSql(executor, database, dbname,
+            "SELECT name, price FROM products WHERE category = 'electronics' AND price > 100 AND price < 500");
+
+        Assert.AreEqual(1, rows.Count,
+            "Only electronics rows with 100 < price < 500 should be returned");
+        Assert.AreEqual("tablet", rows[0].Row["name"].StrValue);
+        Assert.Greater(rows[0].Row["price"].LongValue, 100L);
+        Assert.Less(rows[0].Row["price"].LongValue, 500L);
+    }
+
+    // ── AF1 Path 3 — String equality prefix on composite index (no range col) ─
+
+    /// <summary>
+    /// Sets up a products table whose ONLY index is the composite (category, price) index.
+    /// Forces the planner to use Path 3 (partial-equality prefix) rather than a single-col
+    /// index (Path 1) which would otherwise win on score.
+    /// </summary>
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)>
+        SetupCompositeOnlyTable()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        CreateTableTicket tableTicket = new(
+            databaseName: dbname,
+            tableName: "products",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("category", ColumnType.String, notNull: true),
+                new("name", ColumnType.String, notNull: true),
+                new("price", ColumnType.Integer64),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false);
+
+        await executor.CreateTable(tableTicket);
+
+        // Composite index ONLY — no single-col category_idx.  The planner must use Path 3
+        // (partial equality prefix) for WHERE category = '...'.
+        AlterIndexTicket addIdx = new(
+            databaseName: dbname,
+            tableName: "products",
+            indexName: "category_price_idx",
+            columns: new ColumnIndexInfo[]
+            {
+                new("category", OrderType.Ascending),
+                new("price", OrderType.Ascending),
+            },
+            operation: AlterIndexOperation.AddIndex);
+        await executor.AlterIndex(addIdx);
+
+        return (dbname, database, executor);
+    }
+
+    [Test]
+    public async Task CompositeOnlyIndex_StringPrefixOnly_ReturnsAllMatchingRows()
+    {
+        // Path 3 correctness: WHERE category='electronics' with only category_price_idx available.
+        // The planner emits a RangeScanFromIndex with inclusive [electronics, electronics] prefix
+        // bounds.  All electronics rows must be returned regardless of price.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupCompositeOnlyTable();
+
+        await InsertProducts(executor, database, dbname, new[]
+        {
+            ("electronics", "laptop",     999L),
+            ("electronics", "cable",       19L),
+            ("electronics", "headphones", 149L),
+            ("furniture",   "chair",      199L),
+            ("clothing",    "shirt",       29L),
+        });
+
+        List<QueryResultRow> rows = await RunSql(executor, database, dbname,
+            "SELECT name FROM products WHERE category = 'electronics'");
+
+        Assert.AreEqual(3, rows.Count,
+            "All 3 electronics rows must be returned via composite-index Path-3 scan");
+
+        HashSet<string> names = rows.Select(r => r.Row["name"].StrValue!).ToHashSet();
+        Assert.That(names, Does.Contain("laptop"));
+        Assert.That(names, Does.Contain("cable"));
+        Assert.That(names, Does.Contain("headphones"));
+    }
+
+    [Test]
+    public async Task CompositeOnlyIndex_StringPrefixOnly_ExcludesOtherCategories()
+    {
+        // Result-equivalence proof for Path 3: index scan result must match a full-scan baseline.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupCompositeOnlyTable();
+
+        await InsertProducts(executor, database, dbname, new[]
+        {
+            ("electronics", "laptop",  999L),
+            ("electronics", "phone",   599L),
+            ("furniture",   "chair",   199L),
+            ("clothing",    "shirt",    29L),
+        });
+
+        // Index-scan path (Path 3 via composite-only index).
+        List<QueryResultRow> indexRows = await RunSql(executor, database, dbname,
+            "SELECT name FROM products WHERE category = 'electronics' ORDER BY name");
+
+        // Full-scan baseline: OR trick forces the planner off the index.
+        List<QueryResultRow> fullScanRows = await RunSql(executor, database, dbname,
+            "SELECT name FROM products WHERE category = 'electronics' OR category = 'electronics' ORDER BY name");
+
+        Assert.AreEqual(fullScanRows.Count, indexRows.Count,
+            "Path-3 index scan and full-scan baseline must return the same row count");
+
+        for (int i = 0; i < fullScanRows.Count; i++)
+            Assert.AreEqual(fullScanRows[i].Row["name"].StrValue, indexRows[i].Row["name"].StrValue,
+                $"Row {i} must match between Path-3 index scan and full-scan baseline");
     }
 }

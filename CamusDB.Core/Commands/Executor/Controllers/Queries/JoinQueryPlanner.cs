@@ -8,6 +8,7 @@
 
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
+using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
@@ -165,6 +166,17 @@ internal sealed class JoinQueryPlanner
             {
                 BoundTableSource boundSource = BoundSourceCatalog.FindTableSource(bound, tableSource);
                 pushdown.ScanFiltersByAlias.TryGetValue(boundSource.Alias, out NodeAst? scanFilter);
+
+                // When CBO access-path selection is enabled, attempt an index scan on this join leaf.
+                if (CamusDBConfig.CostBasedAccessPathEnabled
+                    && stats is not null
+                    && scanFilter is not null)
+                {
+                    PhysicalPlanNode? indexLeaf = TryBuildIndexLeaf(
+                        scanFilter, boundSource, database, stats);
+                    if (indexLeaf is not null)
+                        return indexLeaf;
+                }
 
                 return new TableScanNode(TableScanSource.PrimaryRows)
                 {
@@ -608,18 +620,41 @@ internal sealed class JoinQueryPlanner
     {
         switch (node)
         {
-            case TableScanNode { BoundSource: { } boundSource }:
-                return stats?.GetRowCountEstimate(database, boundSource.Table)
-                       ?? CostEstimator.DefaultTableRowCount;
+            case TableScanNode { BoundSource: { } boundSource } tsn:
+            {
+                long tableRows = stats?.GetRowCountEstimate(database, boundSource.Table)
+                                 ?? CostEstimator.DefaultTableRowCount;
+                if (tsn.ExecutionFilter is not null && stats is not null)
+                {
+                    double sel = CardinalityEstimator.EstimateFilterSelectivity(
+                        tsn.ExecutionFilter, database, boundSource.Table, stats);
+                    return Math.Max(1L, (long)(tableRows * sel));
+                }
+                return tableRows;
+            }
 
             case IndexLookupNode:
                 return 1;
 
+            case IndexRangeScanNode { BoundSource: { } rangeBound } rsn:
+            {
+                long tableRows = stats?.GetRowCountEstimate(database, rangeBound.Table)
+                                 ?? CostEstimator.DefaultTableRowCount;
+                // Estimate index range selectivity via the cost model.
+                long rangeRows = CostEstimator.EstimateRangeScanRows(rsn, tableRows, stats, database, rangeBound.Table);
+                // Add residual filter on top if present.
+                if (rsn.ExecutionFilter is not null && stats is not null)
+                {
+                    double sel = CardinalityEstimator.EstimateFilterSelectivity(
+                        rsn.ExecutionFilter, database, rangeBound.Table, stats);
+                    rangeRows = Math.Max(1L, (long)(rangeRows * sel));
+                }
+                return rangeRows;
+            }
+
             case IndexRangeScanNode:
-                // Range scans are typically selective; use the default. MUST NOT recurse here:
-                // IndexRangeScanNode.Input is always null, so a `node.Input ?? node` fallback would
-                // re-enter this case and infinite-loop → StackOverflow (uncatchable). Defensive —
-                // BuildJoinTree never emits an IndexRangeScanNode into a join subtree today.
+                // Defensive: IndexRangeScanNode without BoundSource is a single-table leaf —
+                // BuildJoinTree does not emit these; use the default rather than recursing.
                 return CostEstimator.DefaultTableRowCount;
 
             default:
@@ -658,6 +693,77 @@ internal sealed class JoinQueryPlanner
                 CollectAliasOrderInto(js.Right, aliases);
                 break;
         }
+    }
+
+    /// <summary>
+    /// Attempts to build an index-range-scan leaf for a join table source that has a
+    /// pushed-down filter, replacing the default full primary-row scan.
+    ///
+    /// Gated on <see cref="CamusDBConfig.CostBasedAccessPathEnabled"/>. Falls back
+    /// (returns null) when no usable index is found, the chosen step is a full scan,
+    /// or the range-scan cost exceeds the full-scan breakeven threshold.
+    /// </summary>
+    private static PhysicalPlanNode? TryBuildIndexLeaf(
+        NodeAst scanFilter,
+        BoundTableSource boundSource,
+        DatabaseDescriptor database,
+        StatisticsManager stats)
+    {
+        PredicateAnalysis raw = PredicateAnalyzer.Analyze(scanFilter, null);
+        // Strip "alias." prefix so bare index column names match (e.g. "o.status" → "status").
+        PredicateAnalysis analysis = JoinEnumerator.StripAliasPrefix(raw, boundSource.Alias);
+
+        if (analysis.IndexableComparisons.Count == 0 && analysis.InListComparisons.Count == 0)
+            return null;
+
+        QueryPlanStep? step = IndexScanSelector.TrySelectScan(boundSource.Table, analysis);
+        if (step is null || step.Value.Type == QueryPlanStepType.FullScanFromTableIndex)
+            return null;
+
+        // Breakeven veto: fall back to full scan when the range scan touches too many rows.
+        if (step.Value.Type == QueryPlanStepType.RangeScanFromIndex
+            && (step.Value.FromBound is not null || step.Value.ToBound is not null))
+        {
+            long? tableRows = stats.GetRowCountEstimate(database, boundSource.Table);
+            if (tableRows is { } trc && trc > 0)
+            {
+                var candidate = (IndexRangeScanNode)QueryPlanner.ToScanNode(step.Value);
+                if (CostEstimator.ShouldPreferFullScan(candidate, trc, stats, database, boundSource.Table))
+                    return null;
+            }
+        }
+
+        PhysicalPlanNode indexNode = QueryPlanner.ToScanNode(step.Value);
+
+        // Residual conjuncts not absorbed by the index step become the ExecutionFilter.
+        // These ASTs still use qualified names (e.g. "o.status") — the executor qualifies
+        // rows before evaluation, so qualified residual filters are correct.
+        NodeAst? residual = PredicateAnalyzer.BuildExecutionFilter(analysis, step, boundSource.Table, null);
+
+        // Wire BoundSource and residual filter onto the node.
+        switch (indexNode)
+        {
+            case IndexRangeScanNode rsn:
+                indexNode = new IndexRangeScanNode(
+                    rsn.Index, rsn.FromBound, rsn.FromInclusive, rsn.ToBound, rsn.ToInclusive)
+                {
+                    BoundSource = boundSource,
+                    ExecutionFilter = residual,
+                };
+                indexNode.Distribution = PlacementReader.Instance.GetIndexScanDistribution(rsn.Index);
+                break;
+
+            case IndexLookupNode:
+                // Unique point lookup in a join leaf: fall back to full scan for now.
+                // (The executor's INLJ path already handles indexed right sides; the left
+                // side as a lookup node is unusual and not worth a separate path.)
+                return null;
+
+            default:
+                return null;
+        }
+
+        return indexNode;
     }
 
     private static TableDescriptor ResolvePlanTable(BoundSelectQuery bound)

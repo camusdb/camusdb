@@ -79,6 +79,9 @@ internal sealed class QueryPlannerTestContext : IAsyncDisposable
         table.Indexes.Add(
             "name_idx",
             new TableIndexSchema("name_idx", ["name"], IndexType.Multi));
+        table.Indexes.Add(
+            "name_year_idx",
+            new TableIndexSchema("name_year_idx", ["name", "year"], IndexType.Multi));
 
         DatabaseDescriptor database = new(
             id: "planner-test-id",

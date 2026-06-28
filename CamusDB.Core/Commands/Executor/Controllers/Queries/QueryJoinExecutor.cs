@@ -123,6 +123,14 @@ internal sealed class QueryJoinExecutor
                 yield break;
             }
 
+            case IndexRangeScanNode { BoundSource: not null } rangeLeaf:
+            {
+                await foreach (QueryResultRow row in ScanBoundTableByIndexRange(rangeLeaf, plan).ConfigureAwait(false))
+                    yield return row;
+
+                yield break;
+            }
+
             case TableScanNode { BoundSource: not null, Source: TableScanSource.ForcedIndex, Index: not null } indexScanNode:
             {
                 await foreach (QueryResultRow row in ScanBoundTableByIndex(
@@ -339,6 +347,9 @@ internal sealed class QueryJoinExecutor
             case TableScanNode { BoundSource: not null } scanNode:
                 return scanNode.BoundSource.Alias;
 
+            case IndexRangeScanNode { BoundSource: not null } rangeScanNode:
+                return rangeScanNode.BoundSource.Alias;
+
             case DerivedTableScanNode { BoundSource: not null } derivedScanNode:
                 return derivedScanNode.BoundSource.Alias;
 
@@ -459,6 +470,58 @@ internal sealed class QueryJoinExecutor
                 Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
 
                 if (!await queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
+                    continue;
+            }
+
+            yield return new QueryResultRow(rowId, row);
+        }
+    }
+
+    /// <summary>
+    /// Executes a bounded index range scan for a join leaf node, fetching the primary row for
+    /// each matching index entry and applying the residual execution filter (if any).
+    /// Used when <see cref="JoinQueryPlanner"/> chose an index range scan for this leaf.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> ScanBoundTableByIndexRange(
+        IndexRangeScanNode rangeNode,
+        QueryPlan plan,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        BoundTableSource source = rangeNode.BoundSource!;
+        TableDescriptor table = source.Table;
+        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
+        ColumnType[] keyTypes = GetIndexColumnTypes(table, rangeNode.Index);
+        IReadOnlySet<string>? required = GetRequiredColumnsForAlias(plan, source.Alias);
+
+        bool unique = rangeNode.Index.Type == IndexType.Unique;
+
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+            plan.Ticket.TxnState,
+            rangeNode.Index.Name,
+            keyTypes,
+            from: rangeNode.FromBound,
+            to: rangeNode.ToBound,
+            fromInclusive: rangeNode.FromInclusive,
+            toInclusive: rangeNode.ToInclusive,
+            unique: unique).ConfigureAwait(false))
+        {
+            byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
+
+            if (data is null || data.Length == 0)
+                continue;
+
+            Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                table.Schema,
+                txId,
+                rowId,
+                data,
+                required,
+                GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
+
+            if (rangeNode.ExecutionFilter is not null)
+            {
+                Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
+                if (!await queryFilterer.MeetWhereAsync(rangeNode.ExecutionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
                     continue;
             }
 

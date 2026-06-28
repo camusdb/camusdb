@@ -77,7 +77,7 @@ internal static class CostEstimator
     // a full scan costs tableRowCount × 1. Prefer full scan when entries / N ≥ 0.5, i.e.
     // BreakevenFraction = 0.50. With real selectivities the false-positive flip rate drops
     // significantly compared to the previous value of 0.40.
-    private const double BreakevenFraction = 0.50;
+    internal const double BreakevenFraction = 0.50;
 
     internal const long DefaultTableRowCount = 10_000;
 
@@ -205,9 +205,12 @@ internal static class CostEstimator
         if (rowCountHint.HasValue)
             return rowCountHint;
 
-        // Join-plan leaf: each TableScanNode carries its own BoundSource with a TableDescriptor.
+        // Join-plan leaf: scan nodes carry BoundSource with a TableDescriptor.
         if (node is TableScanNode { BoundSource: { } boundSource })
             return stats?.GetRowCountEstimate(database, boundSource.Table);
+
+        if (node is IndexRangeScanNode { BoundSource: { } rangeBoundSource })
+            return stats?.GetRowCountEstimate(database, rangeBoundSource.Table);
 
         return null;
     }
@@ -233,8 +236,12 @@ internal static class CostEstimator
         if (primaryTable is not null)
             return primaryTable;
 
-        // Join-plan leaf: TableScanNode carries BoundSource → Table.
-        return node is TableScanNode { BoundSource: { } boundSource } ? boundSource.Table : null;
+        // Join-plan leaf: scan nodes carry BoundSource → Table.
+        if (node is TableScanNode { BoundSource: { } tsBound })
+            return tsBound.Table;
+        if (node is IndexRangeScanNode { BoundSource: { } irsBound })
+            return irsBound.Table;
+        return null;
     }
 
     /// <summary>
@@ -311,12 +318,24 @@ internal static class CostEstimator
                 });
             }
 
-            case TableScanNode:
+            case TableScanNode tsn:
             {
                 long rows = trc;
-                return (rows, new PlanCost
+
+                // Output cardinality reflects the pushed-down ExecutionFilter (if any).
+                // The scan cost stays at the full table count — we still read every row;
+                // the filter just reduces what flows to the parent node.
+                long outputCard = rows;
+                if (tsn.ExecutionFilter is not null && stats is not null && resolvedTable is not null)
                 {
-                    EstimatedRows      = rows,
+                    double sel = CardinalityEstimator.EstimateFilterSelectivity(
+                        tsn.ExecutionFilter, database, resolvedTable, stats);
+                    outputCard = Math.Max(1L, (long)(rows * sel));
+                }
+
+                return (outputCard, new PlanCost
+                {
+                    EstimatedRows      = outputCard,
                     KvRangeScanEntries = rows,
                     NetworkFactor      = ComputeNetworkFactor(node, rows, resolvedTable),
                 });
@@ -602,36 +621,95 @@ internal static class CostEstimator
         bool hasFrom = node.FromBound is not null;
         bool hasTo   = node.ToBound   is not null;
 
-        // Attempt histogram-based selectivity (most accurate; preferred over min/max linear interpolation).
         if (stats is not null && database is not null && table is not null
             && node.Index.Columns is { Length: > 0 })
         {
-            string col = node.Index.Columns[0];
-            ColumnHistogram? hist = stats.GetColumnHistogram(database, table, col);
-            if (hist is not null && hist.TotalRows > 0)
+            int fromLen = node.FromBound?.Values.Length ?? 0;
+            int toLen   = node.ToBound?.Values.Length   ?? 0;
+
+            // String/Id equality is represented as a degenerate [v, v] inclusive range, for which
+            // RangeFraction(v, v) ≈ 0 → ~1 row, over-ranking these steps. Use 1/NDV instead.
+            if (fromLen == 1 && toLen == 1 && node.FromInclusive && node.ToInclusive
+                && IndexScanSelector.IsStringOrIdType(table, node.Index.Columns[0]))
             {
-                ScalarBound? fromBound = hasFrom ? ScalarBound.FromColumnValue(node.FromBound!.Values[0]) : null;
-                ScalarBound? toBound   = hasTo   ? ScalarBound.FromColumnValue(node.ToBound!.Values[0])   : null;
-                double histSel = CardinalityEstimator.EstimateRangeFraction(fromBound, toBound, col, database, table, stats);
-                return Math.Max(1, (long)(tableRowCount * histSel));
+                long? colNdv = stats.GetColumnNdv(database, table, node.Index.Columns[0]);
+                if (colNdv is { } ndv && ndv > 0)
+                    return Math.Max(1, (long)(tableRowCount / (double)ndv));
+                // Fall through to general path when NDV is absent.
             }
-        }
 
-        // Attempt real selectivity from column min/max when available.
-        if (stats is not null && database is not null && table is not null
-            && node.Index.Columns is { Length: > 0 })
-        {
-            string col = node.Index.Columns[0];
-            ColumnMinMax? mm = stats.GetColumnMinMax(database, table, col);
-            if (mm?.Min is not null && mm.Max is not null)
+            // For composite-index steps (equality prefix + trailing range), price the equality
+            // prefix via key NDV and the range column via its histogram / min-max. The range column
+            // sits at the last position of whichever bound carries it — max(fromLen, toLen) − 1 — so
+            // an upper-open range (range value only in ToBound, FromBound null/short prefix) still
+            // finds the range column. The columns before it are the equality prefix. When both
+            // bounds have length 1 this reduces to the single-column case.
+            int rangeColIdx      = Math.Max(0, Math.Max(fromLen, toLen) - 1);
+            int equalityPrefixLen = rangeColIdx; // number of columns BEFORE the range column
+
+            double prefixSel = 1.0;
+            if (equalityPrefixLen > 0 && rangeColIdx < node.Index.Columns.Length)
             {
-                double? realSel = ComputeSelectivityFromMinMax(
-                    mm.Min, mm.Max,
-                    hasFrom ? node.FromBound!.Values[0] : null,
-                    hasTo   ? node.ToBound!.Values[0]   : null);
+                string[] prefixCols = node.Index.Columns[..equalityPrefixLen];
+                if (equalityPrefixLen == 1)
+                {
+                    long? colNdv = stats.GetColumnNdv(database, table, prefixCols[0]);
+                    if (colNdv is { } ndv && ndv > 0)
+                        prefixSel = 1.0 / ndv;
+                }
+                else
+                {
+                    long? keyNdv = stats.GetKeyNdv(database, table, prefixCols);
+                    if (keyNdv is { } ndv && ndv > 0)
+                        prefixSel = 1.0 / ndv;
+                    else
+                    {
+                        // Independence fallback: multiply per-column NDV inverses.
+                        foreach (string pc in prefixCols)
+                        {
+                            long? pNdv = stats.GetColumnNdv(database, table, pc);
+                            if (pNdv is { } pn && pn > 0)
+                                prefixSel /= pn;
+                        }
+                    }
+                }
+            }
 
-                if (realSel.HasValue)
-                    return Math.Max(1, (long)(tableRowCount * realSel.Value));
+            // Range column bounds (null = open on that side).
+            ColumnValue? rangeFrom = (hasFrom && rangeColIdx < fromLen) ? node.FromBound!.Values[rangeColIdx] : null;
+            ColumnValue? rangeTo   = (hasTo   && rangeColIdx < toLen)   ? node.ToBound!.Values[rangeColIdx]   : null;
+
+            if (rangeColIdx < node.Index.Columns.Length)
+            {
+                string rangeCol = node.Index.Columns[rangeColIdx];
+
+                // Histogram-based (most accurate).
+                ColumnHistogram? hist = stats.GetColumnHistogram(database, table, rangeCol);
+                if (hist is not null && hist.TotalRows > 0)
+                {
+                    ScalarBound? fb = rangeFrom is not null ? ScalarBound.FromColumnValue(rangeFrom) : null;
+                    ScalarBound? tb = rangeTo   is not null ? ScalarBound.FromColumnValue(rangeTo)   : null;
+                    double histSel = CardinalityEstimator.EstimateRangeFraction(fb, tb, rangeCol, database, table, stats);
+                    return Math.Max(1, (long)(tableRowCount * prefixSel * histSel));
+                }
+
+                // Min/max linear interpolation.
+                ColumnMinMax? mm = stats.GetColumnMinMax(database, table, rangeCol);
+                if (mm?.Min is not null && mm.Max is not null)
+                {
+                    double? realSel = ComputeSelectivityFromMinMax(mm.Min, mm.Max, rangeFrom, rangeTo);
+                    if (realSel.HasValue)
+                        return Math.Max(1, (long)(tableRowCount * prefixSel * realSel.Value));
+                }
+            }
+
+            // If a prefix selectivity was derived but no range-column stats exist, apply prefix alone.
+            if (equalityPrefixLen > 0 && prefixSel < 1.0)
+            {
+                double fallbackRangeSel = (hasFrom && hasTo) ? BothBoundsSelectivity
+                                        : (hasFrom || hasTo) ? OneBoundSelectivity
+                                        : 1.0;
+                return Math.Max(1, (long)(tableRowCount * prefixSel * fallbackRangeSel));
             }
         }
 

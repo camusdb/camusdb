@@ -69,6 +69,35 @@ public class TestQueryPlanner
         return QueryTicketAdapter.ToQueryTicket(query, executeTicket);
     }
 
+    /// <summary>
+    /// Creates a ticket from <paramref name="sql"/> but overrides the index selection with
+    /// <paramref name="indexName"/>, exercising <see cref="QueryPlanner.BuildForcedScanNode"/>
+    /// and thereby <see cref="IndexScanSelector.TrySelectScanForForcedIndex"/> for the named index.
+    /// Internal fields (ExistsSubqueries, SelectQuery, SemiJoinSpecs) are omitted — they are null
+    /// for simple SELECT queries and unused by the planner in basic path tests.
+    /// </summary>
+    private static QueryTicket CreateQueryTicketWithForcedIndex(string sql, string indexName)
+    {
+        QueryTicket base_ = CreateQueryTicketFromSelectSql(sql);
+        return new QueryTicket(
+            txnState:      base_.TxnState,
+            databaseName:  base_.DatabaseName,
+            tableName:     base_.TableName,
+            index:         indexName,
+            projection:    base_.Projection,
+            filters:       base_.Filters,
+            where:         base_.Where,
+            orderBy:       base_.OrderBy,
+            limit:         base_.Limit,
+            offset:        base_.Offset,
+            parameters:    base_.Parameters,
+            groupBy:       base_.GroupBy,
+            having:        base_.Having,
+            rowNameResolver: base_.RowNameResolver,
+            analyzedWhere: base_.AnalyzedWhere,
+            isDistinct:    base_.IsDistinct);
+    }
+
     private static QueryPlanStepType[] StepTypes(QueryPlan plan) =>
         plan.Steps.Select(step => step.Type).ToArray();
 
@@ -934,5 +963,108 @@ public class TestQueryPlanner
         Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type,
             "Unique Id index must still use a point lookup, not a range scan");
         Assert.IsInstanceOf<IndexLookupNode>(ScanRoot(plan));
+    }
+
+    // ── AF1 Case 2: String equality prefix + half-open trailing range ─────────
+
+    [Test]
+    public void StringPrefixPlusOpenUpperRange_BoundsToPrefix()
+    {
+        // name_year_idx covers (name String, year Int64). WHERE name='alice' AND year > 2000
+        // has a half-open upper side (no upper year bound). Before the fix: toBound was null
+        // → the scan ran to the end of the entire index. After fix: toBound is capped at
+        // [alice] inclusive (ScanIndex appends U+FFFF sentinel), so the scan stays within alice.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE name = 'alice' AND year > 2000");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+
+        QueryPlanStep step = plan.Steps[0];
+        Assert.IsNotNull(step.ToBound,
+            "Half-open upper range with String prefix must cap toBound at prefix sentinel");
+        Assert.IsTrue(step.ToInclusive, "Prefix sentinel bound must be inclusive");
+        Assert.AreEqual("alice", step.ToBound!.Values[0].StrValue);
+    }
+
+    [Test]
+    public void StringPrefixPlusOpenLowerRange_BoundsToPrefix()
+    {
+        // WHERE name='alice' AND year < 2020 → half-open lower side (no lower year bound).
+        // Before fix: fromBound was null → scan from start of index. After fix: fromBound
+        // is floored at [alice] inclusive, so the scan starts at the alice prefix.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE name = 'alice' AND year < 2020");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+
+        QueryPlanStep step = plan.Steps[0];
+        Assert.IsNotNull(step.FromBound,
+            "Half-open lower range with String prefix must floor fromBound at prefix sentinel");
+        Assert.IsTrue(step.FromInclusive, "Prefix sentinel bound must be inclusive");
+        Assert.AreEqual("alice", step.FromBound!.Values[0].StrValue);
+    }
+
+    [Test]
+    public void StringPrefixPlusBothSidedRange_BothBoundsPresent()
+    {
+        // WHERE name='alice' AND year > 2000 AND year < 2020 → both sides bounded.
+        // The prefix-sentinel fix must NOT override an already-present range bound.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE name = 'alice' AND year > 2000 AND year < 2020");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+
+        QueryPlanStep step = plan.Steps[0];
+        Assert.IsNotNull(step.FromBound);
+        Assert.IsNotNull(step.ToBound);
+        Assert.AreEqual("alice", step.FromBound!.Values[0].StrValue);
+        Assert.AreEqual(2000L, step.FromBound!.Values[1].LongValue);
+        Assert.AreEqual("alice", step.ToBound!.Values[0].StrValue);
+        Assert.AreEqual(2020L, step.ToBound!.Values[1].LongValue);
+    }
+
+    // ── AF1 Path 3 — String equality prefix on composite index (no range col) ─
+
+    [Test]
+    public void StringEqualityPrefix_CompositeIndex_EmitsInclusiveRangeScanStep()
+    {
+        // name_year_idx is (name String, year Int64). A WHERE with only name='alice'
+        // (no year predicate) hits Path 3: partial equality prefix, no range column.
+        // The single-col name_idx wins GetPlan on the normal table (score 5010 > 5001),
+        // so we build a variant TableDescriptor with ONLY the composite index, forcing
+        // GetPlan to exercise Path 3 rather than Path 1.
+        TableDescriptor compositeOnly = new(
+            context!.Table.Id,
+            context.Table.Name,
+            context.Table.Schema,
+            context.Table.Store);
+        compositeOnly.Indexes.Add(
+            CamusDBConfig.PrimaryKeyInternalName,
+            context.Table.Indexes[CamusDBConfig.PrimaryKeyInternalName]);
+        compositeOnly.Indexes.Add(
+            "name_year_idx",
+            context.Table.Indexes["name_year_idx"]);
+
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE name = 'alice'");
+        QueryPlan plan = queryPlanner.GetPlan(context.Database, compositeOnly, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type,
+            "Path 3: partial String equality prefix must emit a RangeScanFromIndex");
+        Assert.AreEqual("name_year_idx", plan.Steps[0].Index!.Name);
+
+        QueryPlanStep step = plan.Steps[0];
+        Assert.IsNotNull(step.FromBound, "FromBound must be set for [alice, alice] range");
+        Assert.IsNotNull(step.ToBound,   "ToBound must be set for [alice, alice] range");
+        Assert.IsTrue(step.FromInclusive, "From must be inclusive");
+        Assert.IsTrue(step.ToInclusive,   "To must be inclusive");
+        Assert.AreEqual("alice", step.FromBound!.Values[0].StrValue,
+            "FromBound prefix column must equal the equality value");
+        Assert.AreEqual("alice", step.ToBound!.Values[0].StrValue,
+            "ToBound prefix column must equal the equality value (inclusive sentinel)");
+        Assert.AreEqual(1, step.FromBound!.Values.Length,
+            "Path 3 bounds have only the prefix column (no trailing range value)");
     }
 }

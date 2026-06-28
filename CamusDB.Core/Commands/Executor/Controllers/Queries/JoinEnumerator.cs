@@ -8,6 +8,8 @@
 using System.Numerics;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Plans;
+using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Statistics;
@@ -169,21 +171,46 @@ internal static class JoinEnumerator
             return;
         }
 
+        // When CBO access-path selection is enabled, BuildJoinTree may emit an IndexRangeScanNode
+        // instead of a TableScanNode. Mirror that decision here so the DP costs what is actually built.
+        if (CamusDBConfig.CostBasedAccessPathEnabled)
+        {
+            PredicateAnalysis raw = PredicateAnalyzer.Analyze(filter, null);
+            PredicateAnalysis analysis = JoinEnumerator.StripAliasPrefix(raw, alias);
+
+            if (analysis.IndexableComparisons.Count > 0 || analysis.InListComparisons.Count > 0)
+            {
+                QueryPlanStep? step = IndexScanSelector.TrySelectScan(table, analysis);
+                if (step is { Type: QueryPlanStepType.RangeScanFromIndex } rStep
+                    && (rStep.FromBound is not null || rStep.ToBound is not null))
+                {
+                    var candidate = (IndexRangeScanNode)QueryPlanner.ToScanNode(step.Value);
+                    long rangeRows = CostEstimator.EstimateRangeScanRows(candidate, tableRows, stats, database, table);
+
+                    // Breakeven veto: if the cost model would fall back to a full scan, price as full scan.
+                    long breakeven = (long)Math.Ceiling(tableRows * CostEstimator.BreakevenFraction);
+                    if (rangeRows < breakeven)
+                    {
+                        cost = rangeRows * 2.0; // index entry + row fetch
+                        card = rangeRows;
+                        return;
+                    }
+                }
+            }
+        }
+
         double selectivity = CardinalityEstimator.EstimateFilterSelectivity(filter, database, table, stats);
         long estimatedRows = Math.Max(1L, (long)(tableRows * selectivity));
 
-        if (HasIndexedFilter(filter, table))
-        {
-            cost = estimatedRows * 2.0;
-            card = estimatedRows;
-        }
-        else
-        {
-            cost = tableRows;
-            card = estimatedRows;
-        }
+        // Full scan + residual ExecutionFilter (the physical plan BuildJoinTree produces when no
+        // selective index scan is chosen).
+        cost = tableRows;
+        card = estimatedRows;
     }
 
+    // No longer used for cost: BuildJoinTree never builds an index scan for a join leaf (always
+    // TableScanNode), so pricing estimatedRows×2 modelled a plan that does not exist. Kept for
+    // reference until join-leaf index-scan support lands (a documented follow-up).
     private static bool HasIndexedFilter(NodeAst filter, TableDescriptor table)
     {
         List<NodeAst> conjuncts = [];
@@ -373,6 +400,44 @@ internal static class JoinEnumerator
             int r = mask + c;
             mask = (((r ^ mask) >> 2) / c) | r;
         }
+    }
+
+    // ─── Shared utilities ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns a <see cref="PredicateAnalysis"/> where each comparison's column name has the
+    /// <c>alias.</c> qualifier removed if present. The original <c>Conjunct</c> ASTs are
+    /// preserved so residual evaluation still uses the original (possibly qualified) node text.
+    /// </summary>
+    internal static PredicateAnalysis StripAliasPrefix(PredicateAnalysis analysis, string alias)
+    {
+        string prefix = alias + ".";
+
+        bool anyQualified =
+            analysis.IndexableComparisons.Any(c => c.ColumnName.StartsWith(prefix, StringComparison.Ordinal))
+            || analysis.InListComparisons.Any(c => c.ColumnName.StartsWith(prefix, StringComparison.Ordinal));
+
+        if (!anyQualified)
+            return analysis;
+
+        List<AnalyzedComparison> stripped = new(analysis.IndexableComparisons.Count);
+        foreach (AnalyzedComparison c in analysis.IndexableComparisons)
+        {
+            string col = c.ColumnName.StartsWith(prefix, StringComparison.Ordinal)
+                ? c.ColumnName[prefix.Length..] : c.ColumnName;
+            stripped.Add(col == c.ColumnName
+                ? c : new AnalyzedComparison(col, c.Operator, c.Constant, c.Conjunct));
+        }
+
+        List<AnalyzedInList> strippedIn = new(analysis.InListComparisons.Count);
+        foreach (AnalyzedInList il in analysis.InListComparisons)
+        {
+            string col = il.ColumnName.StartsWith(prefix, StringComparison.Ordinal)
+                ? il.ColumnName[prefix.Length..] : il.ColumnName;
+            strippedIn.Add(col == il.ColumnName ? il : il with { ColumnName = col });
+        }
+
+        return new PredicateAnalysis(stripped, analysis.ColumnComparisons, analysis.ResidualConjuncts, strippedIn);
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────

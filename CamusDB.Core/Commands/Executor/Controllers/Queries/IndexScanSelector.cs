@@ -219,12 +219,22 @@ internal static class IndexScanSelector
 
                     (toBound, toInclusive) = TightenUpperBound(toBound, toInclusive, prefixUpperBound);
                 }
-                else if (!IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
+                else if (IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
                 {
-                    return false;
+                    // String/Id equality prefix: no computable successor, so cap any open side
+                    // with an inclusive prefix sentinel. ScanIndex appends U+FFFF for non-unique
+                    // indexes, so [prefix] inclusive bounds the scan to the prefix's rows exactly.
+                    ColumnValue[] prefixVals = new ColumnValue[equalityPrefixLength];
+                    Array.Copy(equalityValues, prefixVals, equalityPrefixLength);
+                    CompositeColumnValue prefixSentinel = new(prefixVals);
+                    if (toBound is null)
+                        (toBound, toInclusive) = (prefixSentinel, true);
+                    if (fromBound is null)
+                        (fromBound, fromInclusive) = (prefixSentinel, true);
+                    // Residual filter on the equality column guards against off-prefix rows.
                 }
-                // String/Id equality prefix: no computable successor, so no prefix upper bound.
-                // The equality predicate remains in the execution filter as a residual guard.
+                else
+                    return false;
             }
 
             step = new QueryPlanStep(
@@ -504,25 +514,54 @@ internal static class IndexScanSelector
             switch (comparison.Operator)
             {
                 case ">":
-                    fromBound = BoundWithPrefix(equalityPrefixValues, rangeColumnIndex, comparison.Constant);
-                    fromInclusive = false;
-                    hasRange = true;
-                    break;
                 case ">=":
-                    fromBound = BoundWithPrefix(equalityPrefixValues, rangeColumnIndex, comparison.Constant);
-                    fromInclusive = true;
+                {
+                    // Keep the tightest (highest) lower bound. When values encode identically,
+                    // exclusive (>) is tighter than inclusive (>=).
+                    bool isInclusive = comparison.Operator == ">=";
+                    CompositeColumnValue candidate = BoundWithPrefix(equalityPrefixValues, rangeColumnIndex, comparison.Constant);
+                    if (fromBound is null)
+                    {
+                        fromBound = candidate;
+                        fromInclusive = isInclusive;
+                    }
+                    else
+                    {
+                        int cmp = string.CompareOrdinal(KeyEncoder.Encode(candidate), KeyEncoder.Encode(fromBound));
+                        if (cmp > 0 || (cmp == 0 && fromInclusive && !isInclusive))
+                        {
+                            fromBound = candidate;
+                            fromInclusive = isInclusive;
+                        }
+                    }
                     hasRange = true;
                     break;
+                }
+
                 case "<":
-                    toBound = BoundWithPrefix(equalityPrefixValues, rangeColumnIndex, comparison.Constant);
-                    toInclusive = false;
-                    hasRange = true;
-                    break;
                 case "<=":
-                    toBound = BoundWithPrefix(equalityPrefixValues, rangeColumnIndex, comparison.Constant);
-                    toInclusive = true;
+                {
+                    // Keep the tightest (lowest) upper bound. When values encode identically,
+                    // exclusive (<) is tighter than inclusive (<=).
+                    bool isInclusive = comparison.Operator == "<=";
+                    CompositeColumnValue candidate = BoundWithPrefix(equalityPrefixValues, rangeColumnIndex, comparison.Constant);
+                    if (toBound is null)
+                    {
+                        toBound = candidate;
+                        toInclusive = isInclusive;
+                    }
+                    else
+                    {
+                        int cmp = string.CompareOrdinal(KeyEncoder.Encode(candidate), KeyEncoder.Encode(toBound));
+                        if (cmp < 0 || (cmp == 0 && toInclusive && !isInclusive))
+                        {
+                            toBound = candidate;
+                            toInclusive = isInclusive;
+                        }
+                    }
                     hasRange = true;
                     break;
+                }
             }
         }
 
@@ -602,7 +641,7 @@ internal static class IndexScanSelector
         return column?.Type ?? ColumnType.String;
     }
 
-    private static bool IsStringOrIdType(TableDescriptor table, string columnName)
+    internal static bool IsStringOrIdType(TableDescriptor table, string columnName)
     {
         ColumnType columnType = GetColumnType(table, columnName);
         return columnType is ColumnType.String or ColumnType.Id;
