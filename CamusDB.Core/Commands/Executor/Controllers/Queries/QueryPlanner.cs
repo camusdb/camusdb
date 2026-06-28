@@ -30,6 +30,21 @@ public sealed class QueryPlanner
         _stats = stats;
     }
 
+    // E1: tag a scan leaf with its DataDistribution and return it (fluent helper).
+    private static PhysicalPlanNode WithDistribution(PhysicalPlanNode node, TableDescriptor table)
+    {
+        node.Distribution = node switch
+        {
+            IndexLookupNode                                                   => PlacementReader.GetLookupDistribution(),
+            IndexInListScanNode                                               => PlacementReader.GetLookupDistribution(),
+            IndexRangeScanNode rangeScan                                      => PlacementReader.Instance.GetIndexScanDistribution(rangeScan.Index),
+            TableScanNode { Source: TableScanSource.ForcedIndex, Index: { } forcedIdx } => PlacementReader.Instance.GetIndexScanDistribution(forcedIdx),
+            TableScanNode                                                     => PlacementReader.Instance.GetPrimaryRowScanDistribution(table),
+            _                                                                 => DataDistribution.Gathered,
+        };
+        return node;
+    }
+
     public QueryPlan GetPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
         QueryPlan plan = new(database, table, ticket);
@@ -336,13 +351,13 @@ public sealed class QueryPlanner
                     NodeAst? absorbed = analysis.InListComparisons
                         .FirstOrDefault(il => string.Equals(il.ColumnName, competitor.ColumnName, StringComparison.Ordinal))
                         ?.Conjunct;
-                    return (competitor, null, absorbed);
+                    return (WithDistribution(competitor, table), null, absorbed);
                 }
             }
         }
 
         if (scanStep is not null)
-            return (ToScanNode(scanStep.Value), scanStep, null);
+            return (WithDistribution(ToScanNode(scanStep.Value), table), scanStep, null);
 
         // When no regular index scan was chosen, try an index-driven IN-list scan.
         // Only attempted when there are IN-list comparisons in the predicate analysis.
@@ -354,7 +369,7 @@ public sealed class QueryPlanner
                 NodeAst? absorbed = analysis.InListComparisons
                     .FirstOrDefault(il => string.Equals(il.ColumnName, inListNode.ColumnName, StringComparison.Ordinal))
                     ?.Conjunct;
-                return (inListNode, null, absorbed);
+                return (WithDistribution(inListNode, table), null, absorbed);
             }
         }
 
@@ -375,11 +390,11 @@ public sealed class QueryPlanner
             }
 
             QueryPlanStep forcedIndexStep = new(QueryPlanStepType.FullScanFromIndex, index);
-            return (new TableScanNode(TableScanSource.ForcedIndex, index), forcedIndexStep, null);
+            return (WithDistribution(new TableScanNode(TableScanSource.ForcedIndex, index), table), forcedIndexStep, null);
         }
 
         QueryPlanStep tableScanStep = new(QueryPlanStepType.FullScanFromTableIndex);
-        return (new TableScanNode(TableScanSource.PrimaryRows), tableScanStep, null);
+        return (WithDistribution(new TableScanNode(TableScanSource.PrimaryRows), table), tableScanStep, null);
     }
 
     /// <summary>

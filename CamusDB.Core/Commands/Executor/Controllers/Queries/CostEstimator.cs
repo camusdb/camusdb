@@ -158,7 +158,8 @@ internal static class CostEstimator
             ? AnnotateNode(node.Input, database, stats, rowCountHint, primaryTable)
             : effectiveRowCount ?? DefaultTableRowCount;
 
-        (long cardinality, PlanCost cost) = EstimateNodeCost(node, inputCardinality, effectiveRowCount, database, stats, primaryTable);
+        TableDescriptor? resolvedTable = ResolveNodeTable(node, primaryTable);
+        (long cardinality, PlanCost cost) = EstimateNodeCost(node, inputCardinality, effectiveRowCount, database, stats, primaryTable, resolvedTable);
 
         node.EstimatedCardinality = cardinality;
         node.Cost = cost;
@@ -196,13 +197,51 @@ internal static class CostEstimator
         StatisticsManager? stats)
         => rightTable is not null ? stats?.GetRowCountEstimate(database, rightTable.Table) : null;
 
+    /// <summary>
+    /// Resolves the table descriptor for a scan node.
+    /// Single-table plans pass <paramref name="primaryTable"/> directly.
+    /// Join plans pass null and each leaf resolves its own table from <c>BoundSource</c>.
+    /// </summary>
+    private static TableDescriptor? ResolveNodeTable(PhysicalPlanNode node, TableDescriptor? primaryTable)
+    {
+        if (primaryTable is not null)
+            return primaryTable;
+
+        // Join-plan leaf: TableScanNode carries BoundSource → Table.
+        return node is TableScanNode { BoundSource: { } boundSource } ? boundSource.Table : null;
+    }
+
+    /// <summary>
+    /// E2: computes the network shipping cost for a scan leaf.
+    ///
+    /// <c>NetworkFactor ≈ remoteRows × rowWidthBytes × NetWeight</c>
+    ///   where <c>remoteRows = rows × remoteFraction</c>
+    ///   and   <c>remoteFraction = (N-1)/N</c> when key-range sharding is on with N > 1 partitions.
+    ///
+    /// Returns 0 when sharding is off, when N ≤ 1, or when NetWeight is 0.
+    /// Only applied to scan leaves that have a <see cref="DataDistribution"/> set.
+    /// </summary>
+    private static double ComputeNetworkFactor(PhysicalPlanNode node, long rows, TableDescriptor? resolvedTable)
+    {
+        if (node.Distribution is null)
+            return 0.0;
+
+        double remoteFraction = PlacementReader.GetRemoteFraction();
+        if (remoteFraction <= 0.0 || CamusDBConfig.NetWeight <= 0.0)
+            return 0.0;
+
+        int rowWidth = RowWidthEstimator.Estimate(resolvedTable);
+        return rows * remoteFraction * rowWidth * CamusDBConfig.NetWeight;
+    }
+
     private static (long Cardinality, PlanCost Cost) EstimateNodeCost(
         PhysicalPlanNode node,
         long inputCardinality,
         long? tableRowCount,
         DatabaseDescriptor database,
         StatisticsManager? stats,
-        TableDescriptor? primaryTable = null)
+        TableDescriptor? primaryTable = null,
+        TableDescriptor? resolvedTable = null)
     {
         long trc = tableRowCount ?? DefaultTableRowCount;
 
@@ -216,6 +255,7 @@ internal static class CostEstimator
                     EstimatedRows        = rows,
                     KvPointLookups       = 1,
                     RowFetchesAfterIndex = 1,
+                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable),
                 });
             }
 
@@ -229,6 +269,7 @@ internal static class CostEstimator
                     KvPointLookups       = isUnique ? n : 0,
                     KvRangeScanEntries   = isUnique ? 0 : n,
                     RowFetchesAfterIndex = n,
+                    NetworkFactor        = ComputeNetworkFactor(node, n, resolvedTable),
                 });
             }
 
@@ -240,6 +281,7 @@ internal static class CostEstimator
                     EstimatedRows        = rows,
                     KvRangeScanEntries   = rows,
                     RowFetchesAfterIndex = rows,
+                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable),
                 });
             }
 
@@ -250,6 +292,7 @@ internal static class CostEstimator
                 {
                     EstimatedRows      = rows,
                     KvRangeScanEntries = rows,
+                    NetworkFactor      = ComputeNetworkFactor(node, rows, resolvedTable),
                 });
             }
 

@@ -19,11 +19,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <summary>
 /// Builds a physical join plan tree for bound multi-source SELECT queries.
 ///
-/// R4 LIMITATION — distributed-ready properties are single-table only:
+/// R4/E1 LIMITATION — distributed-ready properties on join leaves:
 /// The R4 distributed-ready properties (<see cref="PhysicalPlanNode.OutputOrdering"/>,
-/// <see cref="PhysicalPlanNode.CanDecomposeToLocalPlusMerge"/>, <see cref="PhysicalPlanNode.EstimatedCardinality"/>,
-/// <see cref="PhysicalPlanNode.PartitionLocality"/>) are populated by
-/// <see cref="QueryPlanner.GetPlan"/> only. This planner does not set <c>OutputOrdering</c>
+/// <see cref="PhysicalPlanNode.CanDecomposeToLocalPlusMerge"/>, <see cref="PhysicalPlanNode.EstimatedCardinality"/>)
+/// and the E1 property (<see cref="PhysicalPlanNode.Distribution"/>) are set on scan leaves
+/// by this planner. However, this planner does not set <c>OutputOrdering</c>
 /// on child scan nodes (join-side scans are never index-selected for ORDER BY here), so join
 /// plans always have <c>null</c> <c>OutputOrdering</c> on their leaves.
 /// <para>
@@ -141,6 +141,7 @@ internal sealed class JoinQueryPlanner
                 {
                     BoundSource = boundSource,
                     ExecutionFilter = scanFilter,
+                    Distribution = PlacementReader.Instance.GetPrimaryRowScanDistribution(boundSource.Table),
                 };
             }
 
@@ -304,6 +305,7 @@ internal sealed class JoinQueryPlanner
                 BoundSource = ls,
                 ExecutionFilter = left is TableScanNode lsn ? lsn.ExecutionFilter : null,
                 OutputOrdering = leftKeyOrdering,
+                Distribution = PlacementReader.Instance.GetIndexScanDistribution(leftIndex),
             };
         }
         else
@@ -326,6 +328,7 @@ internal sealed class JoinQueryPlanner
                     BoundSource = rightBound,
                     ExecutionFilter = rightFilter,
                     OutputOrdering = rightKeyOrdering,
+                    Distribution = PlacementReader.Instance.GetIndexScanDistribution(rightIndex),
                 };
                 rightIsOrdered = true;
             }
@@ -336,6 +339,7 @@ internal sealed class JoinQueryPlanner
                 {
                     BoundSource = rightBound,
                     ExecutionFilter = rightFilter,
+                    Distribution = PlacementReader.Instance.GetPrimaryRowScanDistribution(rightBound.Table),
                 };
                 rightPhysicalNode = new SortNode(rightScan)
                 {

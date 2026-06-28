@@ -356,7 +356,7 @@ public class TestPlanDistributedProperties
         Assert.AreEqual(OrderType.Ascending, sort.OutputOrdering[1].Type);
     }
 
-    // ── Placeholder properties (EstimatedCardinality, PartitionLocality) ──────
+    // ── Placeholder properties + E1 Distribution ─────────────────────────────
 
     [Test]
     public void EstimatedCardinality_IsPopulatedByR9CostModel()
@@ -370,16 +370,90 @@ public class TestPlanDistributedProperties
                 $"{node.GetType().Name}.EstimatedCardinality must be non-null after R9 cost model");
     }
 
+    /// <summary>
+    /// E1 acceptance: with key-range sharding OFF (the test default), every scan leaf
+    /// reports <see cref="DataDistributionKind.Gathered"/>; non-leaf nodes (filter, sort,
+    /// limit, …) have no distribution set (null).
+    /// </summary>
     [Test]
-    public void PartitionLocality_IsNullByDefault()
+    public void Distribution_ScanLeaf_IsGatheredWhenShardingOff()
     {
+        // KeyRangeShardingEnabled is false in the test environment.
         QueryPlan plan = Plan("SELECT * FROM robots");
-        foreach (PhysicalPlanNode node in AllNodes(plan))
-            Assert.IsNull(node.PartitionLocality,
-                $"{node.GetType().Name}.PartitionLocality must be null (single-partition placeholder)");
+        var scanLeaves = AllNodes(plan).OfType<TableScanNode>().ToList();
+        Assert.IsTrue(scanLeaves.Count > 0, "Expected at least one TableScanNode in plan");
+        foreach (TableScanNode node in scanLeaves)
+            Assert.AreEqual(DataDistributionKind.Gathered, node.Distribution?.Kind,
+                $"TableScanNode.Distribution should be Gathered when sharding is off");
     }
 
-    // ── PlanRenderer verbose mode: order= and decomposable= ──────────────────
+    /// <summary>
+    /// E1 acceptance: with key-range sharding ON an index range scan reports
+    /// <see cref="DataDistributionKind.Partitioned"/> with the index key columns.
+    /// </summary>
+    [Test]
+    public void Distribution_IndexRangeScan_IsPartitionedWhenShardingOn()
+    {
+        bool original = CamusDBConfig.KeyRangeShardingEnabled;
+        try
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = true;
+
+            // year_idx is a multi-column index on [year]; a range on year selects it.
+            QueryPlan plan = Plan("SELECT * FROM robots WHERE year > 2020");
+            IndexRangeScanNode? rangeScan = AllNodes(plan).OfType<IndexRangeScanNode>().FirstOrDefault();
+            Assert.IsNotNull(rangeScan, "Expected IndexRangeScanNode for year > 2020");
+            Assert.AreEqual(DataDistributionKind.Partitioned, rangeScan!.Distribution?.Kind,
+                "IndexRangeScanNode.Distribution should be Partitioned when sharding is on");
+            CollectionAssert.AreEqual(new[] { "year" }, rangeScan.Distribution!.KeyColumns,
+                "Partitioned key columns should match the index columns");
+        }
+        finally
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = original;
+        }
+    }
+
+    /// <summary>
+    /// E1: unique point-lookup always reports Gathered regardless of sharding flag —
+    /// a lookup returns ≤ 1 row and is always pulled to the coordinator.
+    /// </summary>
+    [Test]
+    public void Distribution_UniqueLookup_IsAlwaysGathered()
+    {
+        bool original = CamusDBConfig.KeyRangeShardingEnabled;
+        try
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = true;
+            QueryPlan plan = Plan("SELECT * FROM robots WHERE id = 'abc'");
+            IndexLookupNode? lookup = AllNodes(plan).OfType<IndexLookupNode>().FirstOrDefault();
+            Assert.IsNotNull(lookup, "Expected IndexLookupNode for PK equality");
+            Assert.AreEqual(DataDistributionKind.Gathered, lookup!.Distribution?.Kind,
+                "IndexLookupNode.Distribution must be Gathered even when sharding is on");
+        }
+        finally
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = original;
+        }
+    }
+
+    /// <summary>
+    /// E1: non-leaf nodes (filter, sort, limit, …) never have Distribution set.
+    /// </summary>
+    [Test]
+    public void Distribution_NonLeafNodes_AreNull()
+    {
+        // A query with a WHERE clause that can't use an index → FilterNode wraps a TableScanNode.
+        // ORDER BY name → SortNode.
+        QueryPlan plan = Plan("SELECT * FROM robots ORDER BY name");
+        var nonLeaves = AllNodes(plan).Where(n => n is not TableScanNode and not IndexRangeScanNode
+            and not IndexLookupNode and not IndexInListScanNode).ToList();
+        foreach (PhysicalPlanNode node in nonLeaves)
+            Assert.IsNull(node.Distribution,
+                $"{node.GetType().Name}.Distribution must be null on non-leaf nodes");
+    }
+
+    // ── PlanRenderer verbose mode: order=, decomposable=, dist= ─────────────
 
     [Test]
     public void Renderer_Verbose_ShowsDecomposableSuffix()
@@ -387,6 +461,24 @@ public class TestPlanDistributedProperties
         QueryPlan plan = Plan("SELECT * FROM robots");
         string rendered = PlanRenderer.Render(plan, includeDistributedProperties: true);
         StringAssert.Contains("decomposable=", rendered);
+    }
+
+    [Test]
+    public void Renderer_Verbose_ShowsDistSuffix()
+    {
+        QueryPlan plan = Plan("SELECT * FROM robots");
+        string rendered = PlanRenderer.Render(plan, includeDistributedProperties: true);
+        StringAssert.Contains("dist=", rendered);
+    }
+
+    [Test]
+    public void Renderer_Verbose_TableScan_ShowsDistGathered()
+    {
+        QueryPlan plan = Plan("SELECT * FROM robots");
+        string rendered = PlanRenderer.Render(plan, includeDistributedProperties: true);
+        string? scanLine = rendered.Split('\n').FirstOrDefault(l => l.TrimStart().StartsWith("table-scan"));
+        Assert.IsNotNull(scanLine, "No table-scan line found in rendered plan");
+        StringAssert.Contains("dist=gathered", scanLine);
     }
 
     [Test]
@@ -457,6 +549,124 @@ public class TestPlanDistributedProperties
         string? aggLine = rendered.Split('\n').FirstOrDefault(l => l.TrimStart().StartsWith("aggregate"));
         Assert.IsNotNull(aggLine, "No aggregate line in rendered plan");
         StringAssert.Contains("decomposable=true", aggLine);
+    }
+
+    // ── E2: NetworkFactor ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// E2 acceptance: with sharding OFF (the default), NetworkFactor is 0 on all nodes.
+    /// Single-node cost is unchanged — no existing cost comparisons are disrupted.
+    /// </summary>
+    [Test]
+    public void NetworkFactor_IsZeroWhenShardingOff()
+    {
+        // KeyRangeShardingEnabled=false and ClusterPartitionCount=1 in test defaults.
+        QueryPlan plan = Plan("SELECT * FROM robots");
+        foreach (PhysicalPlanNode node in AllNodes(plan))
+            Assert.AreEqual(0.0, node.Cost?.NetworkFactor ?? 0.0,
+                $"{node.GetType().Name}.Cost.NetworkFactor must be 0 when sharding is off");
+    }
+
+    /// <summary>
+    /// E2 acceptance: with sharding ON and N > 1 partitions, scan leaves have NetworkFactor > 0.
+    /// A full table scan (touches all N partitions) has higher NetworkFactor than a selective
+    /// index range scan (touches ≈1 partition's worth of rows).
+    /// </summary>
+    [Test]
+    public void NetworkFactor_IsPositiveForScansWhenShardingOn_AndFullScanBeatsRangeScan()
+    {
+        bool origSharding   = CamusDBConfig.KeyRangeShardingEnabled;
+        int  origPartitions = CamusDBConfig.ClusterPartitionCount;
+        try
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = true;
+            CamusDBConfig.ClusterPartitionCount   = 3;
+
+            // Full table scan.
+            QueryPlan fullScanPlan = Plan("SELECT * FROM robots");
+            TableScanNode? fullScan = AllNodes(fullScanPlan).OfType<TableScanNode>().FirstOrDefault();
+            Assert.IsNotNull(fullScan, "Expected TableScanNode");
+            double fullScanNF = fullScan!.Cost?.NetworkFactor ?? 0.0;
+            Assert.Greater(fullScanNF, 0.0,
+                "Full table scan must have NetworkFactor > 0 when sharding is on with N=3");
+
+            // Selective index range scan on year (uses year_idx).
+            QueryPlan rangePlan = Plan("SELECT * FROM robots WHERE year > 2020");
+            IndexRangeScanNode? rangeScan = AllNodes(rangePlan).OfType<IndexRangeScanNode>().FirstOrDefault();
+            Assert.IsNotNull(rangeScan, "Expected IndexRangeScanNode for year > 2020");
+            double rangeScanNF = rangeScan!.Cost?.NetworkFactor ?? 0.0;
+            Assert.Greater(rangeScanNF, 0.0,
+                "Index range scan must have NetworkFactor > 0 when sharding is on with N=3");
+
+            // Full scan ships more rows → higher NetworkFactor than the selective range scan.
+            Assert.Greater(fullScanNF, rangeScanNF,
+                "Full table scan NetworkFactor must exceed selective range scan NetworkFactor");
+        }
+        finally
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = origSharding;
+            CamusDBConfig.ClusterPartitionCount   = origPartitions;
+        }
+    }
+
+    /// <summary>
+    /// E2: with sharding on but only 1 partition, remoteFraction = 0 → NetworkFactor stays 0.
+    /// This covers the single-node key-range-mode case (flag on, N=1).
+    /// </summary>
+    [Test]
+    public void NetworkFactor_IsZeroWhenShardingOnButSinglePartition()
+    {
+        bool origSharding   = CamusDBConfig.KeyRangeShardingEnabled;
+        int  origPartitions = CamusDBConfig.ClusterPartitionCount;
+        try
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = true;
+            CamusDBConfig.ClusterPartitionCount   = 1;
+
+            QueryPlan plan = Plan("SELECT * FROM robots");
+            foreach (PhysicalPlanNode node in AllNodes(plan))
+                Assert.AreEqual(0.0, node.Cost?.NetworkFactor ?? 0.0,
+                    $"{node.GetType().Name}.Cost.NetworkFactor must be 0 when partition count = 1");
+        }
+        finally
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = origSharding;
+            CamusDBConfig.ClusterPartitionCount   = origPartitions;
+        }
+    }
+
+    /// <summary>
+    /// E2: point lookup (PK equality → IndexLookupNode) also has NetworkFactor when sharding on,
+    /// but it is tiny (≤ 1 remote row) and must be &lt; full scan NetworkFactor.
+    /// </summary>
+    [Test]
+    public void NetworkFactor_PointLookup_LessThanFullScan()
+    {
+        bool origSharding   = CamusDBConfig.KeyRangeShardingEnabled;
+        int  origPartitions = CamusDBConfig.ClusterPartitionCount;
+        try
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = true;
+            CamusDBConfig.ClusterPartitionCount   = 3;
+
+            QueryPlan lookupPlan = Plan("SELECT * FROM robots WHERE id = 'abc'");
+            IndexLookupNode? lookup = AllNodes(lookupPlan).OfType<IndexLookupNode>().FirstOrDefault();
+            Assert.IsNotNull(lookup, "Expected IndexLookupNode for PK equality");
+
+            QueryPlan fullScanPlan = Plan("SELECT * FROM robots");
+            TableScanNode? fullScan = AllNodes(fullScanPlan).OfType<TableScanNode>().FirstOrDefault();
+
+            double lookupNF   = lookup!.Cost?.NetworkFactor  ?? 0.0;
+            double fullScanNF = fullScan?.Cost?.NetworkFactor ?? 0.0;
+
+            Assert.Less(lookupNF, fullScanNF,
+                "Point-lookup NetworkFactor (1 row) must be less than full-scan NetworkFactor (all rows)");
+        }
+        finally
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = origSharding;
+            CamusDBConfig.ClusterPartitionCount   = origPartitions;
+        }
     }
 }
 

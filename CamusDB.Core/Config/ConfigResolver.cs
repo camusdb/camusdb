@@ -101,6 +101,7 @@ public static class ConfigResolver
         }
 
         CamusDBConfig.KeyRangeShardingEnabled = keyRangeSharding;
+        CamusDBConfig.ClusterPartitionCount = config.InitialPartitions;
 
         CamusDBConfig.MaxIdentifierLength = config.MaxIdentifierLength;
         CamusDBConfig.MaxColumnsPerTable = config.MaxColumnsPerTable;

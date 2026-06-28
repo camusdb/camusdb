@@ -34,10 +34,15 @@ public abstract class PhysicalPlanNode
     public long? EstimatedCardinality { get; internal set; }
 
     /// <summary>
-    /// Partition affinity hint for distributed execution; always null in the current
-    /// single-partition deployment. Reserved for future sharding (R4 placeholder).
+    /// Distribution of this node's output data across the cluster.
+    /// Populated on scan leaves by <see cref="Controllers.Queries.QueryPlanner"/> /
+    /// <see cref="Controllers.Queries.JoinQueryPlanner"/> from the table/index sharding scheme.
+    /// Null on all non-leaf nodes (filter, sort, join, …).
+    ///
+    /// Staleness contract: reflects <see cref="CamusDB.Core.CamusDBConfig.KeyRangeShardingEnabled"/>
+    /// at plan-build time; leadership transitions are not tracked (approximate cost-estimation snapshot).
     /// </summary>
-    public string? PartitionLocality { get; internal set; }
+    public DataDistribution? Distribution { get; internal set; }
 
     /// <summary>
     /// True when this node's work can be split into per-partition local execution plus a

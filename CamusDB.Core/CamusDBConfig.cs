@@ -129,6 +129,28 @@ public static class CamusDBConfig
     public static bool KeyRangeShardingEnabled;
 
     /// <summary>
+    /// Number of Raft data partitions active in this cluster. Populated from the
+    /// <c>initial_partitions</c> config key at startup. Used by <see cref="PlacementReader"/>
+    /// to approximate the remote-data fraction for <c>NetworkFactor</c> cost estimates.
+    ///
+    /// Default: 1 (single-partition / single-node). Tests that do not set this explicitly
+    /// keep the single-node behaviour (NetworkFactor = 0).
+    /// </summary>
+    public static int ClusterPartitionCount = 1;
+
+    /// <summary>
+    /// Weight applied to bytes shipped over the network in the E2 network cost model.
+    /// <c>NetworkFactor ≈ remoteRows × rowWidthBytes × NetWeight</c>.
+    ///
+    /// Calibrated so that one remote row fetch (≈ 100 bytes) costs ≈ 1.0 cost unit —
+    /// matching one local KV point lookup. Set to 0.0 to disable network cost entirely
+    /// (equivalent to single-node behaviour).
+    ///
+    /// Default: 0.01 (100 bytes × 0.01 = 1.0 cost unit per remote row).
+    /// </summary>
+    public static double NetWeight = 0.01;
+
+    /// <summary>
     /// Cluster-wide default isolation level applied when a transaction is begun without an
     /// explicit level. Individual transactions may override this via the begin-request field
     /// or via <c>SET TRANSACTION ISOLATION LEVEL …</c>.

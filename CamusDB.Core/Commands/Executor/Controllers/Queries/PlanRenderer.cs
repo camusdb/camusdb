@@ -133,6 +133,8 @@ public static class PlanRenderer
                 line += $" order=[{order}]";
             }
             line += $" decomposable={node.CanDecomposeToLocalPlusMerge.ToString().ToLowerInvariant()}";
+            if (node.Distribution is { } dist)
+                line += $" dist={dist}";
         }
 
         sb.Append(prefix + line).Append('\n');

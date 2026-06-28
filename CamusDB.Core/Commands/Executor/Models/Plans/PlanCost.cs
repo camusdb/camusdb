@@ -17,8 +17,8 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 /// random vs. sequential I/O once real access-pattern data is available). In-memory rows
 /// (sort, group, distinct) are cheap at 0.1 unit each.
 ///
-/// <c>NetworkFactor</c> is always 0 in the current single-partition deployment; reserved for
-/// distributed sharding.
+/// <c>NetworkFactor</c> (E2) is the estimated bytes-shipped cost for remote partitions.
+/// Non-zero only when key-range sharding is on and <c>ClusterPartitionCount &gt; 1</c>.
 ///
 /// <c>Total</c> is the weighted sum used by <see cref="Controllers.Queries.CostEstimator"/>
 /// to compare competing physical alternatives.
@@ -40,7 +40,11 @@ public readonly struct PlanCost
     /// <summary>Rows materialised in memory (sort buffer, hash-group, distinct hash set).</summary>
     public long InMemoryRows { get; init; }
 
-    /// <summary>Reserved for distributed plans; always 0.0 today.</summary>
+    /// <summary>
+    /// E2 network shipping cost: <c>remoteRows × rowWidthBytes × NetWeight</c>.
+    /// Non-zero only when key-range sharding is on and <see cref="CamusDBConfig.ClusterPartitionCount"/>
+    /// &gt; 1. Zero for single-node deployments and for non-scan (pipeline) nodes.
+    /// </summary>
     public double NetworkFactor { get; init; }
 
     // Weight rationale:
