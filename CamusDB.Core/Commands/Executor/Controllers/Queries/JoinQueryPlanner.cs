@@ -46,10 +46,14 @@ internal sealed class JoinQueryPlanner
     private const long MergeJoinPreferenceThreshold = 100;
 
     private readonly StatisticsManager? _stats;
+    private readonly PlanCache? _cache;
 
-    public JoinQueryPlanner(StatisticsManager? stats = null)
+    public JoinQueryPlanner(StatisticsManager? stats = null) : this(stats, null) { }
+
+    internal JoinQueryPlanner(StatisticsManager? stats, PlanCache? cache)
     {
         _stats = stats;
+        _cache = cache;
     }
 
     public QueryPlan GetPlan(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket)
@@ -70,8 +74,30 @@ internal sealed class JoinQueryPlanner
 
         JoinPredicatePushdown.Result pushdown = JoinPredicatePushdown.Analyze(bound, ticket.Where);
 
-        // Apply heuristic join-order rewriting before building the physical plan tree.
-        QuerySource orderedSource = JoinOrderOptimizer.Reorder(bound.Query.Source, bound, pushdown);
+        // Compute shape ID and schema deps early so the cache can be checked before
+        // the potentially-expensive join-order enumeration / DP.
+        string shapeId = QueryShapeComputer.Compute(bound.Query);
+        IReadOnlyList<(string, int)> schemaDeps = CollectSchemaDeps(bound);
+
+        QuerySource orderedSource;
+        bool fromCache = false;
+
+        if (_cache is not null
+            && CamusDBConfig.PlanCacheEnabled
+            && _cache.TryGet(database.Id, shapeId, schemaDeps, out PlanCacheEntry? cached)
+            && cached!.JoinAliasOrder is { } cachedAliasOrder)
+        {
+            // Re-apply the cached ordering to the CURRENT bound.Query.Source so that ON-predicate
+            // literals from this query are used (not frozen from the first query of this shape).
+            orderedSource = JoinOrderOptimizer.ReorderByAliases(bound.Query.Source, cachedAliasOrder, bound);
+            fromCache = true;
+        }
+        else
+        {
+            orderedSource = CamusDBConfig.CostBasedJoinOrderEnabled && _stats is not null
+                ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats)
+                : JoinOrderOptimizer.Reorder(bound.Query.Source, bound, pushdown);
+        }
 
         QueryPlan plan = new(database, ResolvePlanTable(bound), ticket)
         {
@@ -88,16 +114,19 @@ internal sealed class JoinQueryPlanner
         ProjectionPushdownPlanner.Apply(plan);
 
         // Annotate the join plan tree with cardinality and cost estimates.
-        // Join plans use null for the primary table (multi-source); each scan node is
-        // independently costed inside CostEstimator.AnnotatePlan.
         CostEstimator.AnnotatePlan(plan.Root, database, table: null, _stats);
 
         // Record the plan's query-shape ID and schema-version dependencies.
-        // CollectSchemaDeps walks the full BoundSelectQuery tree recursively so that tables
-        // referenced only inside derived-table subqueries are included — a schema change to
-        // any of them must invalidate a future cached plan.
-        plan.QueryShapeId = QueryShapeComputer.Compute(bound.Query);
-        plan.SchemaDeps = CollectSchemaDeps(bound);
+        plan.QueryShapeId = shapeId;
+        plan.SchemaDeps = schemaDeps;
+
+        // On a cache miss, store the optimized alias ordering (not the source AST) so that
+        // subsequent queries with the same shape re-apply the order to their own source tree,
+        // preserving their current ON-predicate literals.
+        if (!fromCache && _cache is not null && CamusDBConfig.PlanCacheEnabled)
+            _cache.Put(database.Id, shapeId,
+                new PlanCacheEntry(schemaDeps, SingleTable: null,
+                    JoinAliasOrder: CollectAliasOrder(orderedSource)));
 
         return plan;
     }
@@ -598,6 +627,36 @@ internal sealed class JoinQueryPlanner
                 // unknown node, fall back to the engine default.  The caller will then default
                 // to build=right, which is always correct.
                 return CostEstimator.DefaultTableRowCount;
+        }
+    }
+
+    /// <summary>
+    /// Returns the table/derived-table aliases from <paramref name="source"/> in left-deep order:
+    /// leftmost leaf first, then each right-side leaf in join depth order.
+    /// Used to extract the ordering fingerprint after enumeration, so the cache stores
+    /// an alias list rather than a frozen AST.
+    /// </summary>
+    private static List<string> CollectAliasOrder(QuerySource source)
+    {
+        List<string> aliases = [];
+        CollectAliasOrderInto(source, aliases);
+        return aliases;
+    }
+
+    private static void CollectAliasOrderInto(QuerySource source, List<string> aliases)
+    {
+        switch (source)
+        {
+            case TableSource ts:
+                aliases.Add(ts.Alias ?? ts.TableName);
+                break;
+            case DerivedTableSource ds:
+                aliases.Add(ds.Alias!);
+                break;
+            case JoinSource js:
+                CollectAliasOrderInto(js.Left, aliases);
+                CollectAliasOrderInto(js.Right, aliases);
+                break;
         }
     }
 

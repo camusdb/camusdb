@@ -94,6 +94,28 @@ public class ConfigDefinition
     /// </summary>
     public bool CostBasedAccessPathEnabled { get; set; } = false;
 
+    /// <summary>
+    /// Enables cost-based join-order enumeration (System-R–style DP).
+    /// When <c>true</c>, the planner prices all left-deep orderings and picks the cheapest.
+    /// When <c>false</c> (default), the rule-based heuristic is used unchanged.
+    /// Maps to <c>CamusDBConfig.CostBasedJoinOrderEnabled</c>.
+    /// </summary>
+    public bool CostBasedJoinOrderEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Enables the query plan cache.
+    /// When <c>false</c> (default), the cache is built but never consulted —
+    /// consistent with the opt-in convention for all cost-based optimizer features.
+    /// Maps to <c>CamusDBConfig.PlanCacheEnabled</c>.
+    /// </summary>
+    public bool PlanCacheEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Maximum LRU entries in the plan cache (0 = effectively disabled even when
+    /// <c>plan_cache_enabled</c> is true). Maps to <c>CamusDBConfig.PlanCacheMaxEntries</c>.
+    /// </summary>
+    public int PlanCacheMaxEntries { get; set; } = 512;
+
     /// <summary>Numeric Raft node id for cluster mode. Maps to <c>EmbeddedKahunaOptions.NodeId</c>.</summary>
     public int RaftNodeId { get; set; } = 1;
 

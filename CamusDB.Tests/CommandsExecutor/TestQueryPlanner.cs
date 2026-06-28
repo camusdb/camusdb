@@ -444,13 +444,17 @@ public class TestQueryPlanner
     }
 
     [Test]
-    public void PlanUsesFullScanWhenNonUniqueStringEqualityCannotBeBoundedExactly()
+    public void PlanUsesIndexRangeScanForNonUniqueStringEquality()
     {
+        // Previously fell back to a full table scan because SupportsExactEqualityPrefixUpperBound
+        // returned false for String columns.  After AF1 the planner uses an inclusive [v, v] range
+        // scan — the same strategy the IN-list path already used — so the index is exploited.
         QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE name = 'bob'");
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
-        Assert.AreEqual(QueryPlanStepType.FullScanFromTableIndex, plan.Steps[0].Type);
-        Assert.IsNotNull(plan.ExecutionFilter);
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("name_idx", plan.Steps[0].Index!.Name);
+        Assert.IsNull(plan.ExecutionFilter, "Predicate absorbed by inclusive [v,v] range scan");
     }
 
     [Test]
@@ -868,5 +872,67 @@ public class TestQueryPlanner
             where: existsNode, filters: null, exprValues: null);
 
         Assert.IsNull(cols, "EXISTS subquery WHERE should trigger full-decode fallback");
+    }
+
+    // ── AF1: non-unique String/Id equality index scans ────────────────────────
+
+    [Test]
+    public void StringEqualityOnNonUniqueIndexUsesRangeScan()
+    {
+        // name_idx is a Multi (non-unique) index on the String column `name`.
+        // Before AF1 fix: SupportsExactEqualityPrefixUpperBound returned false for String,
+        // so the planner fell through to a FullScanFromTableIndex.
+        // After fix: emits RangeScanFromIndex with inclusive [v, v] bounds.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE name = 'alice'");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type,
+            "String equality on a non-unique index must use index-range-scan");
+        Assert.AreEqual("name_idx", plan.Steps[0].Index!.Name);
+        Assert.IsInstanceOf<IndexRangeScanNode>(ScanRoot(plan));
+    }
+
+    [Test]
+    public void StringEqualityRangeScanHasInclusiveEqualityBounds()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE name = 'alice'");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+        QueryPlanStep step = plan.Steps[0];
+
+        // Both from and to must be the same value with inclusive bounds (the [v, v] pattern).
+        Assert.IsNotNull(step.FromBound, "FromBound must be set");
+        Assert.IsNotNull(step.ToBound, "ToBound must be set");
+        Assert.IsTrue(step.FromInclusive, "From must be inclusive");
+        Assert.IsTrue(step.ToInclusive, "To must be inclusive");
+        Assert.AreEqual("alice", step.FromBound!.Values[0].StrValue);
+        Assert.AreEqual("alice", step.ToBound!.Values[0].StrValue);
+    }
+
+    [Test]
+    public void StringEqualityPredicateAbsorbedByRangeScan_NoExecutionFilter()
+    {
+        // The [v, v] inclusive range satisfies IsPointComparisonAbsorbed for String/Id,
+        // so the equality predicate must be absorbed and the execution filter must be null.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE name = 'alice'");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsNull(plan.ExecutionFilter,
+            "Absorbed String equality predicate must not appear in the execution filter");
+    }
+
+    [Test]
+    public void IdEqualityOnUniqueIndexStillUsesPointLookup()
+    {
+        // AF1 only changes the non-unique path; unique Id lookups must remain QueryFromIndex.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE id = @id",
+            new() { { "@id", new ColumnValue(ColumnType.Id, QueryPlannerTestContext.SampleRowId) } });
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type,
+            "Unique Id index must still use a point lookup, not a range scan");
+        Assert.IsInstanceOf<IndexLookupNode>(ScanRoot(plan));
     }
 }

@@ -2,9 +2,11 @@
 
 This document explains how CamusDB turns a SQL `SELECT` string into result rows. It is written to be
 read top to bottom by someone new to the project: **Part I** builds the mental model and vocabulary,
-**Part II** walks the pipeline stage by stage, **Parts III–V** cover plan inspection, distributed-ready
-metadata, and optimizations, and **Part VI** is an honest map of what is *not* built yet so you know
-where to contribute. Parts VII–IX are reference material (file map, extension checklist, glossary).
+**Part II** walks the pipeline stage by stage, **Parts III–IV** cover plan inspection and
+distributed-ready metadata, **Part V** is the cost-based optimizer (statistics → cardinality estimation →
+cost model → cost-based access-path and join-order search), and **Part VI** is an honest map of what is
+*not* built yet so you know where to contribute. Parts VII–IX are reference material (file map, extension
+checklist, glossary).
 
 If you only want to *use* `EXPLAIN`, see [`docs/explain.md`](./explain.md). This document is about how
 the planner works internally and how to change it.
@@ -80,14 +82,28 @@ There are two ways to choose a plan:
 - **Cost-based (CBO):** estimate the cost of several candidate plans using table statistics (row counts,
   selectivity) and pick the cheapest. More powerful, but needs statistics and a cost model.
 
-**CamusDB is primarily heuristic-based, with a small cost model bolted on.** This is intentional: the
-project follows the "heuristics before CBO" path. A first cost model now exists — `CostEstimator`
-annotates every plan node with an estimated row count and a `PlanCost`, fed by row-count statistics —
-but it currently drives exactly **one** decision: whether a predicate-driven index range scan should be
-replaced by a full table scan. Everything else (which index, join algorithm, operator order) is still
-decided by deterministic rules. So the accurate mental model is: *rules choose the plan; the cost model
-vetoes one specific index-vs-scan choice.* See [Part V](#part-v--optimization-passes) for the cost model
-and [Part VI](#part-vi--current-capabilities--roadmap) for what remains.
+**CamusDB has a heuristic planner with a real cost-based optimizer layered on top, gated behind
+config flags.** The project followed the "heuristics before CBO" path, and the heuristic planner is
+still the default. But a full cost-based optimizer now exists and, when enabled, drives the two biggest
+plan decisions — **which access path** to use per table and **what order** to join tables — by costing
+alternatives against statistics rather than applying rules.
+
+The mental model has three layers:
+
+1. **Always on:** the cost model annotates every node with an estimated cardinality and a `PlanCost`,
+   and a handful of decisions are cost-driven regardless of flags — the range-scan-vs-full-scan veto,
+   join-algorithm choice (INLJ vs hash vs merge), and the unique-`IN` vs range-scan comparison.
+2. **`cost_based_access_path_enabled` (default off):** the planner enumerates *all* viable index access
+   paths per table and picks the cheapest by cost, instead of the rule-scored "first viable index" pick.
+3. **`cost_based_join_order_enabled` (default off):** a System-R-style dynamic program enumerates join
+   orders and picks the cheapest left-deep tree, instead of the scan-selectivity heuristic.
+
+Both flags degrade to the exact heuristic path when off (or when statistics are absent), so plans are
+byte-identical to the rule-based planner until you opt in. The cost model is fed by a full statistics
+stack — equi-depth histograms, distinct-value counts (NDV), per-column min/max — built by `ANALYZE`,
+plus a network-cost dimension for sharded deployments. See
+[Part V — The cost-based optimizer](#part-v--the-cost-based-optimizer) for the whole stack and
+[Part VI](#part-vi--current-capabilities--roadmap) for what remains.
 
 ## The core data structures and how they flow
 
@@ -464,8 +480,9 @@ verbose `includeDistributedProperties` flag appends distributed-ready metadata (
 `EXPLAIN [(LOGICAL|PHYSICAL)] SELECT …` runs **parse → bind → plan but not execution**, then returns one
 result row per plan node with columns: `stage`, `node`, `detail`, `estimated_rows`
 (`PhysicalPlanNode.EstimatedCardinality` from the cost model), and `estimated_cost`
-(`PhysicalPlanNode.Cost.Total`). These are now populated for single-table plans; for join plans they are
-rough placeholders (see the cost-model caveats in Part V). `(LOGICAL)` and `(PHYSICAL)` currently render the same physical tree
+(`PhysicalPlanNode.Cost.Total`). These are populated for single-table plans, and for join plans too when
+the cost-based join-order flag is on (otherwise join-node estimates remain heuristic; see Part V).
+`(LOGICAL)` and `(PHYSICAL)` currently render the same physical tree
 (there is no separate logical-plan representation yet); they differ only in the `stage` label.
 An unknown option word (e.g. `EXPLAIN (VERBOSE)`) is rejected with `InvalidInput` rather than silently
 treated as a plain explain.
@@ -501,22 +518,73 @@ blocked. On `PhysicalPlanNode`:
 | Property | Meaning | Status today |
 |----------|---------|--------------|
 | `OutputOrdering` | The ordering this node guarantees on its output | Set on index scans that satisfy ORDER BY and on `SortNode`; drives sort elision |
-| `EstimatedCardinality` | Estimated output rows | Populated by the `CostEstimator` (single-table accurate; join estimates are placeholders) |
-| `Cost` (`PlanCost?`) | Weighted cost estimate for the node | Populated by the `CostEstimator`; `null` if the plan was not costed |
-| `PartitionLocality` | Partition affinity hint | `null` (single-partition placeholder) |
+| `EstimatedCardinality` | Estimated output rows | Populated by the `CostEstimator` (single-table accurate; join estimates real when the cost flags are on) |
+| `Cost` (`PlanCost?`) | Weighted cost estimate for the node | Populated by the `CostEstimator`; `null` if the plan was not costed. Carries a real `NetworkFactor` (see below) |
+| `Distribution` (`DataDistribution?`) | How the node's output rows are spread across the cluster | Set on scan leaves: `Gathered` (single-node/unsharded), `Partitioned(keyColumns)` (range-sharded by these columns), or `Replicated`. `null` on non-leaf nodes |
 | `CanDecomposeToLocalPlusMerge` | Whether the operator splits into per-partition local work + a merge | `true` for scan/filter/project; `AggregateNode` only for `COUNT`/`SUM`/`MIN`/`MAX` (not `AVG`); `false` for sort/limit/distinct/all join operators |
 
 `OutputOrdering` is set by the single-table `QueryPlanner` on index scans and sort nodes, and by
 `JoinQueryPlanner` on `MergeJoinNode` (ascending on the left key columns — a downstream `ORDER BY`
 on those columns can be elided). `HashJoinNode` leaves `OutputOrdering` null (hash does not preserve order).
 All join nodes set `CanDecomposeToLocalPlusMerge = false`.
-All other join-plan properties (`EstimatedCardinality`, `Cost`, `PartitionLocality`) use default values today.
-They are descriptive metadata — no execution behavior depends on them yet except sort elision (which uses
-`OutputOrdering`).
+
+**`Distribution` is a real physical property, not a stub.** It replaces the old `PartitionLocality`
+placeholder. `PlacementReader` derives it from the table/index sharding scheme: when
+`KeyRangeShardingEnabled` is on, a primary-row scan reports `Partitioned(pkColumns)` and a
+secondary-index scan reports `Partitioned(indexColumns)`; a point lookup is always `Gathered` (it
+returns ≤1 row, pulled to the coordinator). With sharding off, everything is `Gathered`. It is a
+schema-derived snapshot — it encodes *which columns* partition the data, not the live Kahuna range map
+(partition count, which node is remote). The network **cost** that consumes it lives in
+`PlanCost.NetworkFactor` (see [Part V — Network & distribution cost](#network--distribution-cost)).
+Distribution and `NetworkFactor` are the only distributed-execution scaffolding wired today; actual
+remote operator execution is future work.
 
 ---
 
-# Part V — Optimization passes
+# Part V — The cost-based optimizer
+
+CamusDB's optimizer is built as a stack: **statistics** feed a **cardinality estimator**, which feeds a
+**cost model**, which drives **plan choices**. Each layer is usable on its own and degrades gracefully
+when the layer below it has no data. This part documents the whole stack, then the individual
+optimization passes.
+
+```
+                          ┌─────────────────────────────────────────────────────────┐
+   ANALYZE <table>  ───►  │  StatisticsManager   (persisted to Kahuna {db}:stats:id) │
+                          │   • RowCount / per-index entry counts                    │
+                          │   • per-column min/max         (ColumnMinMax)            │
+                          │   • equi-depth histograms      (ColumnHistogram)         │
+                          │   • distinct-value counts      (ColumnNdv / KeyNdv)      │
+                          └───────────────────────────────┬─────────────────────────┘
+                                                          │  hints (advisory, never throw)
+                                                          ▼
+                          ┌─────────────────────────────────────────────────────────┐
+                          │  CardinalityEstimator                                    │
+                          │   • filter selectivity  (histogram / NDV / IN-list)      │
+                          │   • join cardinality    |A⋈B| ≈ |A||B| / max(NDV)        │
+                          │   • FK-aware ≤1-match, composite-key correlation         │
+                          └───────────────────────────────┬─────────────────────────┘
+                                                          │  estimated rows
+                                                          ▼
+                          ┌─────────────────────────────────────────────────────────┐
+                          │  CostEstimator → PlanCost.Total                          │
+                          │   = kvLookups + rangeEntries + rowFetches                │
+                          │     + 0.1·inMemoryRows + NetworkFactor                   │
+                          │   NetworkFactor = remoteRows · rowWidth · NetWeight      │
+                          └───────────────┬─────────────────────────┬───────────────┘
+                                          │                         │
+                       always-on veto     │   flag: access-path     │   flag: join-order
+                                          ▼                         ▼
+                   range-scan-vs-full-scan,     pick cheapest        System-R DP over
+                   join-algorithm (INLJ/         index/scan per       table subsets
+                   hash/merge)                   table                (JoinEnumerator)
+```
+
+Everything in the bottom row consumes the cost. The two flagged choices (`cost_based_access_path_enabled`,
+`cost_based_join_order_enabled`) are off by default and fall back to the heuristic when off or when stats
+are missing, so the optimizer is strictly additive.
+
+## Optimization passes
 
 | Pass | Where | What it does |
 |------|-------|--------------|
@@ -525,67 +593,222 @@ They are descriptive metadata — no execution behavior depends on them yet exce
 | **Limit pushdown** | `QueryPlanner.TryComputeScanRowLimit` | Push `LIMIT`+`OFFSET` into the scan (`ScanRowLimit`) when no filter/aggregation/GROUP BY/HAVING/DISTINCT and ORDER BY is scan-satisfied. Scans stop reading early. |
 | **Filter absorption** | `IndexScanBoundAnalysis` | Drop residual comparisons already implied by the scan's key bounds (e.g. `col >= 3` when the scan seeks from `5`). |
 | **Join predicate pushdown** | `JoinPredicatePushdown` | Single-source WHERE predicates run during that table's scan; cross-source predicates become the post-join filter. |
-| **Join-order heuristics** | `JoinOrderOptimizer` | Reorder inner-join sources before tree construction. |
-| **Cost-based scan choice** | `CostEstimator` | Annotate every node with `EstimatedCardinality` + `PlanCost`; replace a predicate-driven index range scan with a full table scan when it would touch too much of the table. Range selectivity uses real per-column min/max when available, else fixed defaults. |
+| **Join-order heuristics** | `JoinOrderOptimizer` | Reorder inner-join sources before tree construction (scan-selectivity scoring, left-deep). The default when the join-order flag is off. |
+| **Cost-based scan veto** | `CostEstimator.ShouldPreferFullScan` | Always-on: replace a predicate-driven index range scan with a full table scan when it would touch too much of the table. Selectivity is histogram → min/max → fixed-constant. |
+| **Cost-based access-path selection** | `IndexScanSelector.EnumerateViableSteps` + `QueryPlanner.PickCheapestIndexOrFullScan` | Flag `cost_based_access_path_enabled`: enumerate *every* viable index for the predicate plus the full-scan baseline, cost each, pick the cheapest — subsuming the rule-scored "first viable index" pick and the veto above. |
+| **Cost-based join-order enumeration** | `JoinEnumerator` (System-R DP) | Flag `cost_based_join_order_enabled`: bottom-up dynamic program over table subsets that memoizes the cheapest left-deep sub-plan, replacing the scan-selectivity heuristic. Falls back to the heuristic for outer joins or >12 tables. |
 | **Semi-/anti-join rewrite** | `SemiJoinAnalyzer` + `SemiJoinExecutor` | Rewrite eligible uncorrelated `IN`/`NOT IN` into an index-probing semi/anti/null-aware-anti join (instead of materializing), but only when the inner column is indexed; otherwise fall back to materialization. |
 | **DISTINCT streaming** | `QueryDistincter` + `IndexScanSelector` | When the `DISTINCT` columns form an index set-prefix and are all NOT NULL, scan in index order and dedup by comparing adjacent rows (O(1) memory) instead of a hash set. |
 | **Value-list `IN` → index seeks** | `PredicateAnalyzer` + `QueryPlanner` + `IndexInListScanNode` | Turn `x IN (v1, v2, …)` on an indexed column into one index seek per value (point lookup for a unique index, equality range for a non-unique one), unioned and row-id-deduped, instead of a full scan + residual membership filter. Cost-gated, and cost-compared against a competing range scan so a selective unique `IN` wins. Falls back to a residual filter when the column is unindexed or the list is too large. |
 | **UPDATE/DELETE locate partial decode** | `RowUpdater` / `RowDeleter` + `RequiredColumnAnalyzer.ComputeForLocate` | The row-locating scan for `UPDATE`/`DELETE` decodes only the columns the `WHERE` (and SET expressions) reference, not the whole row. The write phase still does one full decode per matched row to re-encode it and maintain indexes. |
 
-## Cost model in detail
+## The cost model in detail
 
-**Files:** `Models/Plans/PlanCost.cs`, `Controllers/Queries/CostEstimator.cs`. This is CamusDB's first
-(deliberately small) cost model. It does two things:
+**Files:** `Models/Plans/PlanCost.cs`, `Controllers/Queries/CostEstimator.cs`.
 
-1. **Annotates the plan.** `CostEstimator.AnnotatePlan(root, db, table, stats)` walks the tree bottom-up
-   and assigns each node an `EstimatedCardinality` and a `PlanCost`. Row counts come from the table statistics
-   (`StatisticsManager.GetRowCountEstimate`); when stats are absent it degrades to a fixed
-   `DefaultTableRowCount` (10 000) and fixed selectivity constants (range with both bounds → 10 %, one
-   bound → 40 %, filter → 10 %, group-by → 20 %, distinct → 70 %). `PlanCost.Total` is a weighted sum of
-   KV point lookups, range-scan entries, post-index row fetches (all weight 1.0) and in-memory rows
-   (0.1); `NetworkFactor` is reserved for sharding and always 0. These annotations feed `EXPLAIN`'s
-   `estimated_rows` / `estimated_cost`.
-2. **Vetoes one plan choice.** In `QueryPlanner`, after `IndexScanSelector` picks a predicate-driven
-   `RangeScanFromIndex`, `CostEstimator.ShouldPreferFullScan` replaces it with a full table scan when the
-   estimated index entries reach the breakeven fraction (40 %) of the table. It only fires when row-count
-   stats exist, never touches unique point lookups, and skips ORDER-BY-driven unbounded scans (so sort
-   elision is preserved). Results are always identical — only the access path (and speed) changes.
+`CostEstimator.AnnotatePlan(root, db, table, stats)` walks the tree bottom-up and assigns each node an
+`EstimatedCardinality` and a `PlanCost`. The single source of truth for one node's cost is
+`EstimateNodeCost`; `EstimateScanLeafCost` is a thin public wrapper used during candidate enumeration so
+a leaf can be costed without building a whole plan tree (the cost-based passes rely on this).
 
-**Important limitations to know before relying on it:**
+`PlanCost` is a `readonly struct` of logical-I/O counters plus a network term, with `Total` the weighted
+sum the optimizer compares:
 
-- **One-bound range selectivity now uses real min/max when available.** `EstimateRangeScanRows`
-  reads the column's persisted min/max (`StatisticsManager.GetColumnMinMax`) to compute actual range
-  selectivity, so a genuinely selective bound (`id > <near-max>`) keeps its index while a non-selective one
-  (`year > <near-min>`) flips to full scan. The fixed-40 % assumption is now only the **fallback** when
-  min/max is unavailable (no stats yet, or non-numeric columns — strings/ids fall back to fixed).
-- **Join costs are placeholders.** `JoinQueryPlanner` calls `AnnotatePlan` with `table: null`, so every
-  source in a join is costed with the default 10 000 row count — `EstimatedCardinality`/`estimated_cost`
-  for join plans are not meaningful yet. Join-order and algorithm choice do not consume the cost
-  model; they remain heuristic.
-- **The cost model is advisory and drives a few decisions.** It computes costs for all nodes; the
-  range-scan-vs-full-scan choice and **join-algorithm selection** (index-nested-loop vs hash vs merge)
-  consume them. Unique-lookup-vs-scan and join *ordering* remain rule-based.
+```
+Total = 1.0·KvPointLookups          // random read to the primary store
+      + 1.0·KvRangeScanEntries      // sequential index-leaf read
+      + 1.0·RowFetchesAfterIndex    // primary fetch after a non-covering index hit
+      + 0.1·InMemoryRows            // sort/group/distinct buffer row (cheap)
+      + NetworkFactor               // bytes shipped from remote partitions (see below)
+```
 
-## Join-order heuristics in detail
+Row counts come from `StatisticsManager.GetRowCountEstimate`. When stats are absent the model degrades to
+`DefaultTableRowCount` (10 000) and fixed selectivity constants (range both-bounds → 10 %, one-bound → 40 %,
+filter → 10 %, group-by → 20 %, distinct → 70 %). These annotations feed `EXPLAIN`'s `estimated_rows` /
+`estimated_cost`.
 
-**File:** `Controllers/Queries/JoinOrderOptimizer.cs`. A deterministic, rule-based reorder applied to
-**inner joins only** (it bails to the declared order if any `JoinSource.Kind != Inner`, since outer joins
-are not commutative). It flattens the join tree into leaves plus a pool of `ON` predicates, scores each
-leaf, and rebuilds a left-deep tree:
+**Always-on cost decisions** (no flag): the range-scan-vs-full-scan veto (`ShouldPreferFullScan` — replace
+a predicate range scan with a full scan when estimated entries reach the 40 % breakeven), join-algorithm
+selection (INLJ vs hash vs merge), and the unique-`IN` vs range-scan comparison. These existed before the
+flagged passes and remain on by default.
 
-| Score | Source has… | Effect |
-|-------|-------------|--------|
-| 0 | equality predicate on a **unique-indexed** column (point lookup, ≤1 row) | placed outermost (drives the loop fewest times) |
-| 1 | any predicate on an indexed column | next |
-| 2 | no pushable predicate | last |
+> **KV cost note.** There are no index-only (covering) scans in the KV storage model — every secondary
+> index hit pays a `RowFetchesAfterIndex` to read the primary row. So a non-covering index scan costs
+> `≈ 2·matchedRows` and the cost model never assumes a "free" covering read.
 
-A stable secondary sort on declared position keeps results deterministic. Two safety properties: a
-**feasibility guard** ensures every rebuilt join edge still has a connecting predicate (a chain join with
-no connecting predicate after reordering falls back to the declared order), and reordering is semantics-
-preserving because all `ON` predicates are kept and re-applied where their referenced aliases are in
-scope. Scoring is by *scan selectivity*, not by which side holds the indexed join key — INL-join
-placement is left to `JoinEquiJoinAnalyzer` and the declared order; a future cost model can unify
-the two.
+## Statistics foundation
+
+**Files:** `Statistics/StatisticsManager.cs`, `Statistics/Models/*`, `Controllers/TableAnalyzer.cs`.
+Persisted to Kahuna meta KV at `{dbId}:stats:{tableId}` via `MetaJsonContext`; advisory — a missing or
+stale value never throws, it just falls back. Statistics come in two flavours:
+
+- **Incrementally maintained on DML** (cheap, always current-ish): `RowCount`, per-index entry counts,
+  per-column min/max (`ColumnMinMax` of typed `ScalarBound`). Flushed on a debounced cadence
+  (`stats_flush_interval_ms`) and on database close.
+- **Built by `ANALYZE` only** (a one-pass scan; drift between runs is acceptable): equi-depth
+  **histograms** and **distinct-value counts**.
+
+`ANALYZE [TABLE] <name>` (`TableAnalyzer`) scans the table once (or samples the first
+`stats_analyze_sample_rows` rows for large tables) and rebuilds every statistic in a single pass, then
+persists. The histogram is **equi-depth** — each bucket holds roughly the same number of rows, so bucket
+*widths* vary and dense value ranges get more buckets:
+
+```
+  value:   1   2   3 .. 8   9 .. 40        90 .. 99
+  rows:   ▉▉▉▉▉▉▉▉▉▉▉▉   ▏ ▏ ▏ ▏ ▏ ▏        ▉▉▉▉▉▉▉   (skewed: dense at the ends)
+  buckets:[ b0 ][ b1 ]  [ b2 ][ b3 ]  ...  [ bN ]    (≈ equal row counts, unequal widths)
+           each ColumnHistogramBucket = { UpperBound, CumulativeRows, DistinctInBucket }
+```
+
+`ColumnHistogram` exposes `CumulativeFraction(v)` (fraction of rows ≤ v, interpolating within the boundary
+bucket) and `RangeFraction(lo, hi)`. Distinct-value counts are stored as `ColumnNdv` (per column) and
+`KeyNdv` (per composite-index prefix, keyed by a comma-joined column signature — `ANALYZE` emits an entry
+for *every* prefix length 2…N of each composite index, so a `WHERE a=? AND b=?` over a 3-column index can
+look up `KeyNdv["a,b"]`).
+
+## Cardinality estimation
+
+**File:** `Controllers/Queries/CardinalityEstimator.cs`. Turns a predicate (or a join) + statistics into
+an estimated row fraction/count. Falls back to the fixed constants above when no stat is available.
+
+**Filter selectivity** (`EstimateFilterSelectivity` → per-predicate):
+
+| Predicate | Estimate |
+|-----------|----------|
+| `col = v` | `1/NDV` (preferred) → else histogram bucket `rows/total/distinct` → else fixed |
+| `col <> v` | `1 − equality(v)` |
+| `col > v` / `>= v` | histogram `RangeFraction(v, ∞)` |
+| `col < v` / `<= v` | histogram `RangeFraction(−∞, v)` |
+| `col IN (a,b,…)` | sum of per-value equality selectivities, capped at 1.0 |
+| `p AND q` | product (independence) — **unless** the equality columns form a composite-index prefix, then `1/KeyNdv` for that tuple (corrects correlated columns like `city`+`zip`) |
+
+**Join cardinality** (`EstimateJoinCardinality`): the textbook estimate
+
+```
+|A ⋈ B| ≈ |A| · |B| / max(NDV_A.key, NDV_B.key)
+```
+
+with one refinement — **FK-aware uniqueness**: if the join key *contains every column* of a unique index
+on one side (`IsJoinKeyUnique`, set-containment, **not** prefix-match — a join on `tenant_id` alone of a
+`UNIQUE(tenant_id, email)` is *not* unique), that side contributes ≤1 match per row and the result is the
+other side's row count. Multi-column join keys use `KeyNdv`; single-column keys use `ColumnNdv`.
+
+## Network & distribution cost
+
+**Files:** `Controllers/Queries/PlacementReader.cs`, `RowWidthEstimator.cs`, `Models/Plans/DataDistribution.cs`.
+Tier-1 network cost is fully computable on today's pull-to-coordinator engine: a scan against a remote
+partition ships its result to the executing node, so the cost is *bytes shipped*.
+
+- **`DataDistribution`** (set on scan leaves) records *which columns* partition the data — `Gathered`,
+  `Partitioned(keyColumns)`, or `Replicated` (see [Part IV](#part-iv--distributed-ready-plan-properties)).
+- **`NetworkFactor`** in `PlanCost` is `remoteRows · rowWidthBytes · NetWeight`, charged **only to
+  `Partitioned` leaves** (a `Gathered` point lookup pays 0 — it is local by definition). `remoteRows =
+  rows · (N−1)/N` where `N = ClusterPartitionCount` (a uniform-placement approximation; the live Kahuna
+  range map is not read yet). `rowWidthBytes` comes from `RowWidthEstimator` (per-column type sizes).
+  `NetWeight` (default `0.01`) is calibrated so one remote 100-byte row ≈ one local KV lookup.
+
+With sharding off or a single partition, `NetworkFactor` is 0 and the cost reduces to the single-node
+model — so enabling the network dimension never changes single-node plans. Once on, it rewards selective
+remote access and filter pushdown automatically, because both ship fewer bytes.
+
+## Cost-based access-path selection
+
+**Flag:** `cost_based_access_path_enabled` (default off). **Files:** `IndexScanSelector.EnumerateViableSteps`,
+`QueryPlanner.PickCheapestIndexOrFullScan`.
+
+The heuristic `IndexScanSelector.TrySelectScan` picks the *first viable* index by a rule score (longest
+equality prefix). The cost-based path instead **enumerates all candidates** — one step per index that
+matches the predicate, plus the implicit full-scan baseline — costs each with `EstimateScanLeafCost`, and
+keeps the cheapest. So a higher-scored index loses to a lower-scored one that is genuinely cheaper, and the
+range-vs-full-scan veto becomes a true cost comparison rather than a fixed-threshold flip.
+
+It engages only when the flag is on, stats and a row count exist, and the query is not an `UPDATE`/`DELETE`
+(those keep the heuristic to avoid widening exclusive row-range locks). ORDER BY needs no special handling:
+sort-elision is applied downstream from the *chosen* scan node's own ordering, so a cost-picked
+order-satisfying index still elides the sort. IN-list competition runs after the cost pick, exactly as in
+the heuristic path.
+
+## Cost-based join-order enumeration
+
+**Flag:** `cost_based_join_order_enabled` (default off). **File:** `Controllers/Queries/JoinEnumerator.cs`.
+
+When off, join order is the heuristic `JoinOrderOptimizer.Reorder` — a deterministic, inner-joins-only
+reorder that flattens the tree into leaves + a pool of `ON` predicates, scores each leaf (0 = equality on a
+unique index → outermost; 1 = any indexed predicate; 2 = no pushable predicate → last), and rebuilds a
+left-deep tree, with a feasibility guard that every rebuilt edge still has a connecting predicate.
+
+When on, `JoinEnumerator` runs a **System-R-style bottom-up dynamic program** over table subsets (the
+classic textbook algorithm). `dp[mask]` is the cheapest left-deep sub-plan joining exactly the tables in
+the bitmask `mask`:
+
+```
+  dp[{A}] dp[{B}] dp[{C}]                         singletons = per-table scan cost
+        \   |   /
+  dp[{A,B}] dp[{A,C}] dp[{B,C}]                   size 2: best of (sub ⋈ leaf) over connected splits
+            \    |    /
+          dp[{A,B,C}]                             size N: the answer (cheapest full join)
+
+  extend dp[leftMask] with leaf `bit`:
+     cost = INLJ (leftCard·2, if `bit` has an index on the join key)  vs  hash (rightScanCost) → min
+     only across a CONNECTING predicate (no cross products)
+```
+
+Subsets of each size are walked with **Gosper's hack** (next integer with the same popcount). Only splits
+joined by a connecting predicate are considered, so cross products are never enumerated; the N−1 tree-edge
+`ON` predicates are each attached exactly once, and cycle/extra predicates ride in the post-join filter
+(`pushdown.PostJoinFilter`) — so reordering is result-preserving. The search is **capped at 12 tables**
+(`MaxTablesForEnumeration`); wider joins, and any outer join, fall back to the heuristic.
+
+The classic win this unlocks: a star join `events ⋈ sessions ⋈ users` where the heuristic keeps the large
+declared-first `events` outermost (paying a full `events` scan), while the DP drives the tiny filtered
+`sessions` into `events`'s `session_id` index via INLJ — orders of magnitude cheaper.
+
+> **Not yet modeled (documented gaps):** "interesting orders/distributions" (keeping a costlier sub-plan
+> that provides an ordering a parent needs) — `SubplanEntry` tracks cost + cardinality but not output
+> ordering; bushy plans (left-deep only); and comma-join / `WHERE`-clause join predicates (only `JOIN … ON`
+> predicates are pooled — others fall back to the heuristic).
+
+## Config flags summary
+
+| Flag (`config.yml`) | `CamusDBConfig` field | Default | Effect when on |
+|---|---|---|---|
+| `cost_based_access_path_enabled` | `CostBasedAccessPathEnabled` | `false` | Cost-based per-table access-path selection |
+| `cost_based_join_order_enabled` | `CostBasedJoinOrderEnabled` | `false` | System-R join-order DP |
+| `plan_cache_enabled` | `PlanCacheEnabled` | `false` | Per-process LRU plan cache (see below) |
+| `plan_cache_max_entries` | `PlanCacheMaxEntries` | `512` | LRU capacity; 0 = effectively disabled |
+| `key_range_sharding` | `KeyRangeShardingEnabled` | `false` | Enables `Partitioned` distributions + non-zero `NetworkFactor` |
+| `initial_partitions` | `ClusterPartitionCount` | `1` | `N` in the `(N−1)/N` remote-fraction estimate |
+
+All cost flags are **off by default and additive**: off (or with no stats) → the planner is byte-identical
+to the heuristic. This is a hard invariant — a bad histogram or stale row count cannot silently regress a
+production plan until an operator opts in.
+
+### Plan cache (`plan_cache_enabled`)
+
+When enabled, the cache stores the *optimization decision* — which index or join ordering was chosen —
+keyed by `QueryShapeId`, a SHA-256 fingerprint of the query structure with literal values stripped out.
+On a hit, the planner re-binds the current query's predicates into the cached structural choice and skips
+cost enumeration.
+
+**Plan-stability tradeoff.** Because the cache key ignores literal values, the access-path decision is
+shared across all queries of the same shape regardless of the filter value:
+
+```sql
+-- Q1 seeds the cache with, say, an index scan on `status_idx`
+SELECT * FROM orders WHERE status = 'pending'
+
+-- Q2 is a cache hit → inherits the index-scan decision even though 'all' might be non-selective
+SELECT * FROM orders WHERE status = 'all'
+```
+
+Both decisions are *correct* — the planner would choose the same index for either literal — but if
+ANALYZE updates statistics that would change the choice (e.g. `status = 'all'` is now cheaper as a
+full scan), the cache will not re-score until the next schema change (DDL) invalidates the entry.
+ANALYZE alone does not invalidate the cache.
+
+**Recovery.** To force a cache flush without a schema change: restart the process, or set
+`plan_cache_enabled: false` and reload config. In the field, the cache is fully transparent:
+disabling it degrades to the uncached code path with no correctness risk.
 
 ---
 
@@ -600,11 +823,19 @@ aggregates (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `SELECT DISTINCT` (hash or index-o
 (nested-loop, index-nested-loop, hash, and merge join — chosen cost-based), derived tables,
 scalar/`IN`/`NOT IN`/`EXISTS` subqueries with
 semi/anti-join rewrite for indexed `IN`/`NOT IN`, index-driven value-list `IN` (`x IN (v1, v2, …)`),
-projection pushdown (including partial-decode locate for `UPDATE`/`DELETE`), join-order heuristics, advisory
-statistics (row counts, per-index counts, per-column min/max — persisted, configurable flush cadence), a
-small min/max-driven cost model that vetoes low-selectivity index range scans (and cost-compares a unique
-value-list `IN` against a competing range scan), an error/semantics matrix, and full plan inspection via
-`EXPLAIN` / `EXPLAIN ANALYZE`.
+projection pushdown (including partial-decode locate for `UPDATE`/`DELETE`), an error/semantics matrix,
+and full plan inspection via `EXPLAIN` / `EXPLAIN ANALYZE`.
+
+**The cost-based optimizer stack** (see [Part V](#part-v--the-cost-based-optimizer)): a full statistics
+foundation (`ANALYZE`-built equi-depth histograms and distinct-value counts, plus DML-maintained row
+counts / index counts / min/max, all persisted), a cardinality estimator (histogram/NDV selectivity,
+FK-aware join cardinality, composite-key correlation), a cost model with a real network/distribution
+dimension (`DataDistribution` + `NetworkFactor`), two opt-in cost-based search passes —
+per-table **access-path selection** (`cost_based_access_path_enabled`) and **join-order enumeration**
+via a System-R dynamic program (`cost_based_join_order_enabled`) — and an opt-in **plan cache**
+(`plan_cache_enabled`) that memoizes the access-path and join-order decision by query shape,
+skipping re-enumeration on repeated queries. All three flags default off and degrade to the
+heuristic planner with byte-identical plans.
 
 ## Gaps and where to contribute
 
@@ -613,9 +844,14 @@ These are the meaningful missing pieces and where new work fits.
 | Area | State | Notes |
 |------|-------|-------|
 | **Table statistics — row counts** | **Done** | `StatisticsManager` tracks/persists `RowCount` per table (Kahuna meta KV `{db}:stats:{tableId}`), with a configurable flush cadence (`stats_flush_interval_ms`) and a close-hook flush. |
-| **Index counts & column min/max** | **Done** | `StatisticsManager` tracks/persists per-index entry counts and per-column min/max (`ColumnMinMax`/`ScalarBound`), respecting index element-state. Consumed by the cost model for real range selectivity. |
-| **Cost model** | **Done (small)** | `PlanCost` + `CostEstimator` populate `EstimatedCardinality`/`Cost`, veto low-selectivity index range scans, and drive **join-algorithm selection** (index-nested-loop vs hash vs merge). Range selectivity is min/max-driven; join *ordering* is still heuristic (`JoinOrderOptimizer`), but join *algorithm* choice is cost-based. |
-| **Plan-cache hooks** | **Partial** | Plans record `TableSchemaVersion`; no stable query-shape identifier yet. No plan reuse. |
+| **Index counts & column min/max** | **Done** | `StatisticsManager` tracks/persists per-index entry counts and per-column min/max (`ColumnMinMax`/`ScalarBound`), respecting index element-state. |
+| **Histograms, NDV & `ANALYZE`** | **Done** | `ANALYZE [TABLE] <name>` (`TableAnalyzer`) one-pass-builds equi-depth `ColumnHistogram`s and distinct-value counts (`ColumnNdv`/`KeyNdv`, including every composite prefix), persisted. Sampling above `stats_analyze_sample_rows`. |
+| **Cardinality estimator** | **Done** | `CardinalityEstimator`: histogram/NDV filter selectivity, IN-list, composite-key correlation, and FK-aware join cardinality (`|A||B|/max(NDV)`). |
+| **Cost model + network** | **Done** | `PlanCost`/`CostEstimator` populate `EstimatedCardinality`/`Cost` incl. a real `NetworkFactor` (`DataDistribution` + `PlacementReader` + `RowWidthEstimator`); always-on vetoes (range-vs-scan, join algorithm) plus the two flagged passes below. |
+| **Cost-based access-path selection** | **Done (opt-in)** | `cost_based_access_path_enabled`: enumerate + cost all index candidates per table, pick cheapest. Off by default → heuristic. |
+| **Cost-based join-order enumeration** | **Done (opt-in)** | `cost_based_join_order_enabled`: System-R DP over table subsets (`JoinEnumerator`), capped at 12 tables, inner-joins-only, falls back to heuristic. Off by default → heuristic. |
+| **Plan-cache hooks** | **Partial** | Plans record `TableSchemaVersion`; no stable query-shape identifier yet. No plan reuse. The next phase — caching optimized plans keyed by query shape — is unbuilt. |
+| **Interesting orders in the join DP** | **Missing** | The DP costs by scan/join cost only; it does not keep a costlier sub-plan that supplies an ordering/distribution a parent needs (would avoid a later sort/exchange). |
 | **Semi-/anti-join rewrite** | **Done** | Eligible uncorrelated `IN`/`NOT IN` over an **indexed** inner column rewrite to semi / anti / null-aware-anti join (`SemiJoinAnalyzer`/`SemiJoinExecutor`); non-indexed falls back to materialization. Three-valued `NOT IN` semantics preserved. |
 | **DISTINCT streaming** | **Done** | `SELECT DISTINCT` over a NOT-NULL index set-prefix streams (adjacent-row dedup, O(1) memory); otherwise hash dedup. |
 | **EXPLAIN ANALYZE for joins** | **Missing** | Throws today; needs the join executor instrumented with `PlanNodeStats`. |
@@ -625,8 +861,9 @@ These are the meaningful missing pieces and where new work fits.
 | **Query microbenchmarks** | **Missing** | No benchmarks for grouped aggregation, join algorithms, or subquery materialization. The last item from the original optimizer backlog (R14). |
 
 Explicitly deferred (by design): OUTER joins, window functions, CTEs, quantified predicates beyond
-`IN`/`NOT IN` (`ANY`/`ALL`/`SOME`), `COUNT(DISTINCT …)`, full cost-based join reordering, and distributed
-execution.
+`IN`/`NOT IN` (`ANY`/`ALL`/`SOME`), `COUNT(DISTINCT …)`, the optimized-plan cache, bushy join plans,
+"interesting orders" in the join DP, and distributed *execution* (the distribution property and network
+cost are modeled; remote operator execution is not).
 
 ---
 
@@ -648,6 +885,9 @@ execution.
 | Single-table planner | `Commands/Executor/Controllers/Queries/QueryPlanner.cs` |
 | Join planner | `Commands/Executor/Controllers/Queries/JoinQueryPlanner.cs` |
 | Join-order heuristics | `Commands/Executor/Controllers/Queries/JoinOrderOptimizer.cs` |
+| Cost-based join-order DP | `Commands/Executor/Controllers/Queries/JoinEnumerator.cs` |
+| Cost model & cardinality estimator | `Commands/Executor/Controllers/Queries/CostEstimator.cs`, `CardinalityEstimator.cs`, `Models/Plans/PlanCost.cs` |
+| Network / distribution cost | `Commands/Executor/Controllers/Queries/PlacementReader.cs`, `RowWidthEstimator.cs`, `Models/Plans/DataDistribution.cs` |
 | Predicate classification | `Commands/Executor/Controllers/Queries/PredicateAnalyzer.cs` |
 | Index scan selection / bound absorption | `IndexScanSelector.cs`, `IndexScanBoundAnalysis.cs` |
 | Join predicate pushdown / equi-join analysis | `JoinPredicatePushdown.cs`, `JoinEquiJoinAnalyzer.cs` |
@@ -664,11 +904,13 @@ execution.
 | Scan / filter / sort / aggregate / project / distinct / having / limit | `QueryScanner.cs`, `QueryFilterer.cs`, `QuerySorter.cs`, `QueryAggregator.cs`, `QueryProjector.cs`, `QueryDistincter.cs`, `QueryHavingEvaluator.cs`, `QueryLimiter.cs` |
 | Row merge for joins | `Commands/Executor/Controllers/Queries/QueryRowMerger.cs` |
 | Expression evaluator | `Commands/Executor/Controllers/SqlExecutor.cs` |
-| Table statistics (row counts, index counts, column min/max) | `Statistics/StatisticsManager.cs`, `Statistics/Models/TableStatistics.cs`, `ColumnMinMax.cs`, `ScalarBound.cs`; flush cadence `CamusDBConfig.StatsFlushIntervalMs` / `stats_flush_interval_ms` |
+| Table statistics (row counts, index counts, min/max, histograms, NDV) | `Statistics/StatisticsManager.cs`, `Statistics/Models/TableStatistics.cs`, `ColumnMinMax.cs`, `ScalarBound.cs`, `ColumnHistogram.cs`, `ColumnHistogramBucket.cs`; flush cadence `CamusDBConfig.StatsFlushIntervalMs` / `stats_flush_interval_ms` |
+| `ANALYZE` (stats builder) | `Commands/Executor/Controllers/TableAnalyzer.cs` |
 | KV table access | `Storage/Kv/KvTableStore.cs` |
 | Row encoding / decoding | `CommandsExecutor/Models/RowEncoder.cs` |
 | Query plan model | `Commands/Executor/Models/QueryPlan.cs`, `QueryPlanStep.cs`, `QueryPlanStepType.cs` |
 | Planner / EXPLAIN tests | `TestQueryPlanner.cs`, `TestPredicateAnalyzer.cs`, `TestJoinQueryPlanner.cs`, `TestPlanRenderer.cs`, `TestPlanDistributedProperties.cs`, `TestExplainExecutor.cs`, `TestExplainAnalyzeExecutor.cs`, `TestCostEstimator.cs`, `TestStatisticsManager.cs` |
+| Cost-optimizer tests | `TestStatisticsHistogram.cs`, `TestStatisticsNdv.cs`, `TestAnalyzeTable.cs`, `TestCardinalityEstimator.cs`, `TestPlanCostBasedAccessPath.cs`, `TestPlanCostBasedJoinOrder.cs` (+ `…Persistence.cs` variants) |
 | Integration tests | `CamusDB.Tests/CommandsExecutor/TestExecuteSqlSelect.cs` |
 
 ---
@@ -708,11 +950,18 @@ execution.
 - **Sort elision** — skipping a sort because an index already yields rows in the requested order.
 - **Nested-loop join / index-nested-loop join** — for each left row, scan the right source / probe the
   right index.
-- **Heuristic vs cost-based** — rule-driven plan choice vs statistics-driven cost comparison. CamusDB is
-  mostly heuristic, with a small cost model that vetoes one index-vs-scan choice.
-- **`PlanCost` / cost model** — per-node estimated cardinality + weighted I/O cost (`CostEstimator`), fed
-  by row-count stats; surfaced in `EXPLAIN` and used to prefer a full scan over a low-selectivity index
-  range scan.
+- **Heuristic vs cost-based** — rule-driven plan choice vs statistics-driven cost comparison. CamusDB
+  defaults to the heuristic planner with a real cost-based optimizer layered on top behind config flags
+  (cost-based access-path selection and join-order enumeration).
+- **`PlanCost` / cost model** — per-node estimated cardinality + weighted I/O cost plus a `NetworkFactor`
+  (`CostEstimator`), fed by histograms / NDV / min/max / row counts; surfaced in `EXPLAIN` and consumed
+  by the access-path, join-algorithm, and join-order choices.
+- **Cardinality estimator** — `CardinalityEstimator`: turns a predicate or join + statistics into an
+  estimated row count (histogram/NDV selectivity, FK-aware join cardinality).
+- **Histogram / NDV** — equi-depth per-column row distribution (`ColumnHistogram`) and distinct-value
+  counts (`ColumnNdv`/`KeyNdv`), built by `ANALYZE`; the inputs that make selectivity estimates accurate.
+- **`DataDistribution` / `NetworkFactor`** — how a scan leaf's rows are spread across partitions
+  (`Gathered`/`Partitioned`/`Replicated`) and the modeled cost of shipping remote rows to the coordinator.
 - **Streaming (`IAsyncEnumerable`)** — pulling rows one at a time without materializing the whole result.
 - **SQL-over-KV** — the architectural boundary where relational operations become Kahuna key/value reads.
 

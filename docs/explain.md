@@ -45,11 +45,16 @@ than silently treated as a plain `EXPLAIN`.
 | `estimated_rows` | `INT64`   | Cost-model estimate of the node's output cardinality. `NULL` when the plan was not costed. |
 | `estimated_cost` | `FLOAT64` | Cost-model weighted cost for the node (unitless; lower is cheaper). `NULL` when not costed. |
 
-`estimated_rows` / `estimated_cost` come from the cost model. Estimates use table statistics
-(row counts, per-column min/max) when available and fall back to fixed defaults otherwise, so
-the exact numbers depend on what statistics have been collected and will differ between
-deployments. Join-plan estimates are presently rough. `(LOGICAL)` and `(PHYSICAL)` currently
-render the same physical tree, differing only in the `stage` label.
+`estimated_rows` / `estimated_cost` come from the cost model. Estimates use table statistics —
+row counts, per-column min/max, and (after `ANALYZE`) equi-depth histograms and distinct-value
+counts — when available, and fall back to fixed defaults otherwise, so the exact numbers depend
+on what statistics have been collected and will differ between deployments. `estimated_cost` also
+includes a network term (`NetworkFactor`) for range-sharded deployments; it is 0 on a single node.
+Single-table estimates are accurate; join-node estimates are accurate when the cost-based
+join-order flag is on and otherwise remain heuristic. `(LOGICAL)` and `(PHYSICAL)` currently
+render the same physical tree, differing only in the `stage` label. See
+[`docs/query-planner.md` → Part V](./query-planner.md#part-v--the-cost-based-optimizer) for the
+cost model itself.
 
 ### EXPLAIN ANALYZE
 
@@ -105,6 +110,14 @@ Notes:
   planner picks the smaller estimated side as the build side to minimise memory.
 - `merge-join` streams both inputs when both arrive pre-ordered (ForcedIndex scan or an upstream
   sort); only the current equal-key run is buffered — O(run size) memory, not O(n+m).
+
+> **The plan reflects the active planner config.** Which access path a table uses, and the order
+> of join nodes, depend on whether the cost-based optimizer is enabled. By default the planner is
+> rule-based, so `EXPLAIN` shows the heuristic plan. With `cost_based_access_path_enabled` and/or
+> `cost_based_join_order_enabled` turned on **and** statistics collected (run `ANALYZE <table>`),
+> the same query may show a different (cheaper) index or join order — the output is correct for
+> whatever configuration produced it. See
+> [`docs/query-planner.md` → Part V](./query-planner.md#part-v--the-cost-based-optimizer).
 
 The examples below focus on the `stage` / `node` / `detail` columns (the stable part of the
 output). Every row also carries `estimated_rows` / `estimated_cost` as described above; the
@@ -359,13 +372,14 @@ analyze  index-range-scan   index=year_idx, from>=2022, to<2023   ...           
 metadata to each node line:
 
 ```
-table-scan(table=robots) order=[year ASC] decomposable=true
+table-scan(table=robots) order=[year ASC] decomposable=true dist=partitioned(id)
 ```
 
 | Suffix            | Meaning |
 |-------------------|---------|
 | `order=[...]`     | The ordering this node guarantees on its output (e.g. an index scan that satisfies `ORDER BY`). Absent when ordering is undefined. |
 | `decomposable=true/false` | Whether the node's work can be split into per-partition local computation plus a coordinator-side merge. Always `false` for sort and limit nodes. `aggregate` is `true` only for `COUNT`/`SUM`/`MIN`/`MAX`; `AVG` is `false`. |
+| `dist=...`        | How this node's output rows are distributed across the cluster: `gathered` (single-node / point lookup / sharding off), `partitioned(col1,col2)` (range-sharded by these key columns), or `replicated`. Set only on scan leaves; absent on pipeline nodes. With key-range sharding off, every scan is `gathered`. |
 
 This mode is used by internal tooling and tests; it is not exposed through the SQL `EXPLAIN`
 statement.

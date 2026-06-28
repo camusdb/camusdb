@@ -158,6 +158,45 @@ public static class CamusDBConfig
     public static bool CostBasedAccessPathEnabled = false;
 
     /// <summary>
+    /// Enables cost-based join-order enumeration (System-R–style DP) in the query planner.
+    /// When <c>true</c>, the planner costs all left-deep orderings and picks the cheapest
+    /// using INLJ vs hash-join cost asymmetry. When <c>false</c> (default), the rule-based
+    /// heuristic (<see cref="JoinOrderOptimizer"/>) is used and plans are byte-identical
+    /// to today's output. Joins wider than <c>JoinEnumerator.MaxTablesForEnumeration</c>
+    /// always fall back to the heuristic regardless of this flag. Set via
+    /// <c>cost_based_join_order_enabled</c> in <c>config.yml</c>.
+    /// </summary>
+    public static bool CostBasedJoinOrderEnabled = false;
+
+    /// <summary>
+    /// Enables the per-process query plan cache.
+    ///
+    /// When <c>true</c>, the planner caches its access-path decision (which index or full scan)
+    /// and join ordering keyed by <see cref="QueryShapeId"/> (a literal-independent fingerprint).
+    /// A cache hit skips cost enumeration and re-binds the current query's predicates into the
+    /// cached structural decision.
+    ///
+    /// Plan-stability tradeoff: because the cache key ignores literal values, a non-selective
+    /// query (e.g. <c>WHERE status = 'all'</c>) can inherit the access path cached by a
+    /// selective query of the same shape (e.g. <c>WHERE status = 'rare'</c>). Both decisions
+    /// are correct — the planner would have chosen the same index for both — but the cache
+    /// prevents re-scoring when ANALYZE produces new statistics that would change the choice.
+    /// Schema changes (DDL) do invalidate the cache; ANALYZE alone does not.
+    ///
+    /// Disabled by default following the project convention that all cost-based optimizations
+    /// are opt-in (<c>cost_based_access_path_enabled</c>, <c>cost_based_join_order_enabled</c>).
+    /// Set via <c>plan_cache_enabled</c> in <c>config.yml</c>. The cache size is bounded by
+    /// <see cref="PlanCacheMaxEntries"/>; set either to 0 to disable.
+    /// </summary>
+    public static bool PlanCacheEnabled = false;
+
+    /// <summary>
+    /// Maximum number of entries held by the per-process plan cache (LRU eviction when the
+    /// limit is exceeded). Set via <c>plan_cache_max_entries</c> in <c>config.yml</c>.
+    /// </summary>
+    public static int PlanCacheMaxEntries = 512;
+
+    /// <summary>
     /// Cluster-wide default isolation level applied when a transaction is begun without an
     /// explicit level. Individual transactions may override this via the begin-request field
     /// or via <c>SET TRANSACTION ISOLATION LEVEL …</c>.

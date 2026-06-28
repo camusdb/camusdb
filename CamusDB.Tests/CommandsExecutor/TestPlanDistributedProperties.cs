@@ -109,8 +109,8 @@ public class TestPlanDistributedProperties
     [Test]
     public void FilterNode_IsDecomposable()
     {
-        // WHERE on a non-indexed column forces a filter node above the scan.
-        QueryPlan plan = Plan("SELECT * FROM robots WHERE name = 'alice'");
+        // A LIKE predicate is not indexable, so the planner emits a FilterNode above the scan.
+        QueryPlan plan = Plan("SELECT * FROM robots WHERE name LIKE 'alice%'");
         FilterNode filter = AllNodes(plan).OfType<FilterNode>().First();
         Assert.IsTrue(filter.CanDecomposeToLocalPlusMerge, "filter must be decomposable");
     }

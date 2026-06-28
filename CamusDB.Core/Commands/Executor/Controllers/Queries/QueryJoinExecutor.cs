@@ -40,11 +40,13 @@ internal sealed class QueryJoinExecutor
     private readonly QueryDistincter queryDistincter = new();
 
     private readonly StatisticsManager? _stats;
+    private readonly PlanCache? _planCache;
 
-    public QueryJoinExecutor(QueryExecutor queryExecutor, StatisticsManager? stats = null)
+    public QueryJoinExecutor(QueryExecutor queryExecutor, StatisticsManager? stats = null, PlanCache? planCache = null)
     {
         this.queryExecutor = queryExecutor;
         _stats = stats;
+        _planCache = planCache;
         derivedTableExecutor = new DerivedTableExecutor(queryExecutor, this);
     }
 
@@ -53,7 +55,7 @@ internal sealed class QueryJoinExecutor
         BoundSelectQuery bound,
         QueryTicket ticket)
     {
-        JoinQueryPlanner planner = new(_stats);
+        JoinQueryPlanner planner = new(_stats, _planCache);
         QueryPlan plan = planner.GetPlan(database, bound, ticket);
 
         IAsyncEnumerable<QueryResultRow> cursor = ExecuteJoinTree(plan.Root, plan);

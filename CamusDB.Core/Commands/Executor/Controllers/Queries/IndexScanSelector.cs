@@ -85,6 +85,30 @@ internal static class IndexScanSelector
         return steps;
     }
 
+    /// <summary>
+    /// Re-binds the current query's predicate literals into a step for a specific pre-chosen
+    /// index (identified by name), without re-running the index-scoring or cost-enumeration loop.
+    /// Used on a plan-cache hit.
+    /// Returns null when the index cannot be found or its predicates are no longer compatible.
+    /// </summary>
+    internal static QueryPlanStep? TrySelectScanForForcedIndex(
+        TableDescriptor table,
+        PredicateAnalysis analysis,
+        string indexName)
+    {
+        if (!table.Indexes.TryGetValue(indexName, out TableIndexSchema? index))
+            return null;
+
+        if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+            return null;
+
+        Dictionary<string, List<AnalyzedComparison>> byColumn = BuildColumnMap(analysis);
+        if (byColumn.Count == 0)
+            return null;
+
+        return TryMatchPredicateIndex(table, index, byColumn, out QueryPlanStep step, out _) ? step : null;
+    }
+
     private static Dictionary<string, List<AnalyzedComparison>> BuildColumnMap(PredicateAnalysis analysis)
     {
         Dictionary<string, List<AnalyzedComparison>> byColumn = new(StringComparer.Ordinal);
@@ -137,12 +161,25 @@ internal static class IndexScanSelector
                 return true;
             }
 
-            if (!SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
-                return false;
-
-            CompositeColumnValue? upperBound = BuildPrefixScanUpperBound(table, columns, equalityValues, equalityPrefixLength);
-
-            if (upperBound is null)
+            CompositeColumnValue? upperBound;
+            bool equalityToInclusive;
+            if (SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
+            {
+                upperBound = BuildPrefixScanUpperBound(table, columns, equalityValues, equalityPrefixLength);
+                if (upperBound is null)
+                    return false;
+                equalityToInclusive = false;
+            }
+            else if (IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
+            {
+                // String/Id has no computable successor value. Use an inclusive [v, v] equality
+                // range instead — the same approach the IN-list path uses. ScanIndex appends a
+                // high sentinel for non-unique indexes so all {encode(v)+rowIdHex} entries are
+                // captured by the raw scan; the decoded-key bounds filter trims to key == v.
+                upperBound = lookupKey;
+                equalityToInclusive = true;
+            }
+            else
                 return false;
 
             step = new QueryPlanStep(
@@ -151,7 +188,7 @@ internal static class IndexScanSelector
                 lookupKey,
                 fromInclusive: true,
                 upperBound,
-                toInclusive: false);
+                equalityToInclusive);
             score = RangeScanScore + columns.Length * 10;
             return true;
         }
@@ -169,19 +206,25 @@ internal static class IndexScanSelector
         {
             if (equalityPrefixLength > 0)
             {
-                if (!SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
+                if (SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
+                {
+                    CompositeColumnValue? prefixUpperBound = BuildPrefixScanUpperBound(
+                        table,
+                        columns,
+                        equalityValues,
+                        equalityPrefixLength);
+
+                    if (prefixUpperBound is null)
+                        return false;
+
+                    (toBound, toInclusive) = TightenUpperBound(toBound, toInclusive, prefixUpperBound);
+                }
+                else if (!IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
+                {
                     return false;
-
-                CompositeColumnValue? prefixUpperBound = BuildPrefixScanUpperBound(
-                    table,
-                    columns,
-                    equalityValues,
-                    equalityPrefixLength);
-
-                if (prefixUpperBound is null)
-                    return false;
-
-                (toBound, toInclusive) = TightenUpperBound(toBound, toInclusive, prefixUpperBound);
+                }
+                // String/Id equality prefix: no computable successor, so no prefix upper bound.
+                // The equality predicate remains in the execution filter as a residual guard.
             }
 
             step = new QueryPlanStep(
@@ -200,12 +243,23 @@ internal static class IndexScanSelector
             ColumnValue[] prefixValues = new ColumnValue[equalityPrefixLength];
             Array.Copy(equalityValues, prefixValues, equalityPrefixLength);
             CompositeColumnValue prefixBound = new(prefixValues);
-            if (!SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
-                return false;
 
-            CompositeColumnValue? upperBound = BuildPrefixScanUpperBound(table, columns, equalityValues, equalityPrefixLength);
-
-            if (upperBound is null)
+            CompositeColumnValue? upperBound;
+            bool prefixToInclusive;
+            if (SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
+            {
+                upperBound = BuildPrefixScanUpperBound(table, columns, equalityValues, equalityPrefixLength);
+                if (upperBound is null)
+                    return false;
+                prefixToInclusive = false;
+            }
+            else if (IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
+            {
+                // String/Id prefix: use inclusive [v, v] equality range.
+                upperBound = prefixBound;
+                prefixToInclusive = true;
+            }
+            else
                 return false;
 
             step = new QueryPlanStep(
@@ -214,7 +268,7 @@ internal static class IndexScanSelector
                 prefixBound,
                 fromInclusive: true,
                 upperBound,
-                toInclusive: false);
+                prefixToInclusive);
             score = RangeScanScore + equalityPrefixLength;
             return true;
         }
@@ -546,6 +600,12 @@ internal static class IndexScanSelector
     {
         TableColumnSchema? column = table.Schema.Columns?.Find(c => c.Name == columnName);
         return column?.Type ?? ColumnType.String;
+    }
+
+    private static bool IsStringOrIdType(TableDescriptor table, string columnName)
+    {
+        ColumnType columnType = GetColumnType(table, columnName);
+        return columnType is ColumnType.String or ColumnType.Id;
     }
 
     internal static bool SupportsExactEqualityPrefixUpperBound(

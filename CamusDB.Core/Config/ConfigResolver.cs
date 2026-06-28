@@ -103,6 +103,9 @@ public static class ConfigResolver
         CamusDBConfig.KeyRangeShardingEnabled = keyRangeSharding;
         CamusDBConfig.ClusterPartitionCount = config.InitialPartitions;
         CamusDBConfig.CostBasedAccessPathEnabled = config.CostBasedAccessPathEnabled;
+        CamusDBConfig.CostBasedJoinOrderEnabled = config.CostBasedJoinOrderEnabled;
+        CamusDBConfig.PlanCacheEnabled = config.PlanCacheEnabled;
+        CamusDBConfig.PlanCacheMaxEntries = config.PlanCacheMaxEntries;
 
         CamusDBConfig.MaxIdentifierLength = config.MaxIdentifierLength;
         CamusDBConfig.MaxColumnsPerTable = config.MaxColumnsPerTable;

@@ -1,0 +1,462 @@
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
+using System.Numerics;
+using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
+using CamusDB.Core.SQLParser;
+using CamusDB.Core.Statistics;
+
+namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
+
+/// <summary>
+/// System-R–style bottom-up DP join-order enumerator.
+///
+/// Replaces <see cref="JoinOrderOptimizer"/>'s heuristic reordering with a cost-based
+/// dynamic program: for each subset of joined tables, memoize the cheapest left-deep
+/// plan (cost + estimated output cardinality). Build subsets bottom-up from singletons
+/// to the full N-table join.
+///
+/// Cost model:
+/// <list type="bullet">
+///   <item>Single-table scan: if a pushed-down filter hits an indexed leading column →
+///     cost = estimatedRows × 2 (index entry + row fetch); otherwise → cost = tableRowCount
+///     (full scan with in-memory filter).</item>
+///   <item>Extending plan(leftMask) with rightTable via INLJ (right side has index on join
+///     key leading column): cost = leftCard × 2 (one index lookup + row fetch per left row).</item>
+///   <item>Extending plan(leftMask) with rightTable via hash join:
+///     cost = rightScanCost (build phase dominates).</item>
+///   <item>Pick INLJ when available and cheaper; otherwise hash.</item>
+/// </list>
+///
+/// Scope:
+/// <list type="bullet">
+///   <item>Left-deep plans only (bushy plans are a future extension).</item>
+///   <item>Inner joins only — same outer-join guard as <see cref="JoinOrderOptimizer"/>.</item>
+///   <item>Capped at <see cref="MaxTablesForEnumeration"/> tables; wider joins fall back to
+///     the heuristic.</item>
+///   <item>Interesting orders (folding sort cost into candidate comparison) are a future
+///     enhancement.</item>
+/// </list>
+///
+/// Gated by <see cref="CamusDBConfig.CostBasedJoinOrderEnabled"/> (default false). With the
+/// flag off plans are byte-identical to the heuristic output.
+/// </summary>
+internal static class JoinEnumerator
+{
+    internal const int MaxTablesForEnumeration = 12;
+
+    private sealed record LeafEntry(QuerySource AstNode, string Alias);
+
+    private sealed record SubplanEntry(
+        QuerySource AstTree,
+        double TotalCost,
+        long OutputCardinality);
+
+    /// <summary>
+    /// Returns the cheapest left-deep join ordering for <paramref name="root"/> (inner joins only),
+    /// or falls back to <see cref="JoinOrderOptimizer.Reorder"/> for outer joins or when the table
+    /// count exceeds <see cref="MaxTablesForEnumeration"/>.
+    /// </summary>
+    public static QuerySource Enumerate(
+        QuerySource root,
+        BoundSelectQuery bound,
+        JoinPredicatePushdown.Result pushdown,
+        DatabaseDescriptor database,
+        StatisticsManager stats)
+    {
+        List<LeafEntry> leaves = [];
+        List<NodeAst> predicatePool = [];
+
+        if (!CollectLeaves(root, leaves, predicatePool))
+            return JoinOrderOptimizer.Reorder(root, bound, pushdown);
+
+        if (leaves.Count <= 1)
+            return root;
+
+        if (leaves.Count > MaxTablesForEnumeration)
+            return JoinOrderOptimizer.Reorder(root, bound, pushdown);
+
+        int n = leaves.Count;
+
+        double[] scanCost = new double[n];
+        long[] scanCard = new long[n];
+
+        for (int i = 0; i < n; i++)
+            EstimateLeaf(i, leaves, pushdown, bound, database, stats, out scanCost[i], out scanCard[i]);
+
+        SubplanEntry?[] dp = new SubplanEntry?[1 << n];
+
+        for (int i = 0; i < n; i++)
+            dp[1 << i] = new SubplanEntry(leaves[i].AstNode, scanCost[i], scanCard[i]);
+
+        for (int size = 2; size <= n; size++)
+        {
+            foreach (int mask in SubsetsOfSize(n, size))
+            {
+                for (int bit = 0; bit < n; bit++)
+                {
+                    if ((mask & (1 << bit)) == 0)
+                        continue;
+
+                    int leftMask = mask ^ (1 << bit);
+                    if (dp[leftMask] is not { } leftPlan)
+                        continue;
+
+                    NodeAst? pred = FindConnectingPredicate(bit, leftMask, leaves, predicatePool, bound);
+                    if (pred is null)
+                        continue;
+
+                    TableDescriptor? rightTable = FindTableDescriptor(leaves[bit].Alias, bound);
+                    double joinCost = EstimateJoinCost(
+                        leftPlan.OutputCardinality,
+                        scanCost[bit],
+                        rightTable,
+                        pred,
+                        leaves[bit].Alias);
+
+                    double totalCost = leftPlan.TotalCost + joinCost;
+
+                    long outputCard = EstimateJoinCard(
+                        leftPlan.OutputCardinality,
+                        scanCard[bit],
+                        leftMask, bit, leaves, pred, bound, database, stats);
+
+                    if (dp[mask] is null || totalCost < dp[mask]!.TotalCost)
+                    {
+                        QuerySource joinTree = new JoinSource(
+                            leftPlan.AstTree, leaves[bit].AstNode, JoinKind.Inner, pred);
+                        dp[mask] = new SubplanEntry(joinTree, totalCost, outputCard);
+                    }
+                }
+            }
+        }
+
+        int fullMask = (1 << n) - 1;
+        return dp[fullMask] is { } best ? best.AstTree : JoinOrderOptimizer.Reorder(root, bound, pushdown);
+    }
+
+    // ─── Leaf cost ───────────────────────────────────────────────────────────
+
+    private static void EstimateLeaf(
+        int idx,
+        List<LeafEntry> leaves,
+        JoinPredicatePushdown.Result pushdown,
+        BoundSelectQuery bound,
+        DatabaseDescriptor database,
+        StatisticsManager stats,
+        out double cost,
+        out long card)
+    {
+        string alias = leaves[idx].Alias;
+        TableDescriptor? table = FindTableDescriptor(alias, bound);
+
+        long tableRows = (table is not null
+            ? stats.GetRowCountEstimate(database, table)
+            : null) ?? CostEstimator.DefaultTableRowCount;
+
+        pushdown.ScanFiltersByAlias.TryGetValue(alias, out NodeAst? filter);
+
+        if (filter is null || table is null)
+        {
+            cost = tableRows;
+            card = tableRows;
+            return;
+        }
+
+        double selectivity = CardinalityEstimator.EstimateFilterSelectivity(filter, database, table, stats);
+        long estimatedRows = Math.Max(1L, (long)(tableRows * selectivity));
+
+        if (HasIndexedFilter(filter, table))
+        {
+            cost = estimatedRows * 2.0;
+            card = estimatedRows;
+        }
+        else
+        {
+            cost = tableRows;
+            card = estimatedRows;
+        }
+    }
+
+    private static bool HasIndexedFilter(NodeAst filter, TableDescriptor table)
+    {
+        List<NodeAst> conjuncts = [];
+        PredicateAnalyzer.CollectAndConjuncts(filter, conjuncts);
+
+        HashSet<string> indexedLeadingCols = new(StringComparer.Ordinal);
+        foreach (TableIndexSchema idx in table.Indexes.Values)
+        {
+            if (!SchemaElementStateRules.IsReadable(idx)) continue;
+            if (idx.Columns is { Length: > 0 })
+                indexedLeadingCols.Add(idx.Columns[0]);
+        }
+
+        foreach (NodeAst conjunct in conjuncts)
+        {
+            string? col = ExtractUnqualifiedColumn(conjunct.leftAst)
+                       ?? ExtractUnqualifiedColumn(conjunct.rightAst);
+            if (col is not null && indexedLeadingCols.Contains(col))
+                return true;
+        }
+
+        return false;
+    }
+
+    // ─── Join cost ───────────────────────────────────────────────────────────
+
+    private static double EstimateJoinCost(
+        long leftCard,
+        double rightScanCost,
+        TableDescriptor? rightTable,
+        NodeAst pred,
+        string rightAlias)
+    {
+        if (rightTable is not null)
+        {
+            string? rightJoinKey = ExtractRightJoinKey(pred, rightAlias);
+            if (rightJoinKey is not null && TableHasIndexOnLeadingColumn(rightTable, rightJoinKey))
+            {
+                double inljCost = leftCard * 2.0;
+                return Math.Min(inljCost, rightScanCost);
+            }
+        }
+
+        return rightScanCost;
+    }
+
+    private static bool TableHasIndexOnLeadingColumn(TableDescriptor table, string columnName)
+    {
+        foreach (TableIndexSchema idx in table.Indexes.Values)
+        {
+            if (!SchemaElementStateRules.IsReadable(idx)) continue;
+            if (idx.Columns is { Length: > 0 } && idx.Columns[0] == columnName)
+                return true;
+        }
+        return false;
+    }
+
+    private static string? ExtractRightJoinKey(NodeAst pred, string rightAlias)
+    {
+        if (pred.nodeType != NodeType.ExprEquals) return null;
+
+        if (pred.leftAst?.yytext is { } lt && TrySplitQualified(lt, out string la, out string lc) && la == rightAlias)
+            return lc;
+
+        if (pred.rightAst?.yytext is { } rt && TrySplitQualified(rt, out string ra, out string rc) && ra == rightAlias)
+            return rc;
+
+        return null;
+    }
+
+    private static long EstimateJoinCard(
+        long leftCard,
+        long rightCard,
+        int leftMask,
+        int rightBit,
+        List<LeafEntry> leaves,
+        NodeAst pred,
+        BoundSelectQuery bound,
+        DatabaseDescriptor database,
+        StatisticsManager stats)
+    {
+        string rightAlias = leaves[rightBit].Alias;
+        string? rightKey = ExtractRightJoinKey(pred, rightAlias);
+        string? leftKey = ExtractLeftJoinKey(pred, rightAlias);
+
+        string[] rightKeyColumns = rightKey is null ? [] : [rightKey];
+        string[] leftKeyColumns = leftKey is null ? [] : [leftKey];
+
+        TableDescriptor? rightTable = FindTableDescriptor(rightAlias, bound);
+        TableDescriptor? leftTable = leftMask != 0 && (leftMask & (leftMask - 1)) == 0
+            ? FindTableDescriptor(leaves[BitOperations.TrailingZeroCount((uint)leftMask)].Alias, bound)
+            : null;
+
+        return CardinalityEstimator.EstimateJoinCardinality(
+            leftCard, rightCard,
+            rightKeyColumns, rightTable,
+            leftKeyColumns, leftTable,
+            database, stats);
+    }
+
+    private static string? ExtractLeftJoinKey(NodeAst pred, string rightAlias)
+    {
+        if (pred.nodeType != NodeType.ExprEquals) return null;
+
+        if (pred.leftAst?.yytext is { } lt && TrySplitQualified(lt, out string la, out string lc) && la != rightAlias)
+            return lc;
+
+        if (pred.rightAst?.yytext is { } rt && TrySplitQualified(rt, out string ra, out string rc) && ra != rightAlias)
+            return rc;
+
+        return null;
+    }
+
+    // ─── Predicate matching ──────────────────────────────────────────────────
+
+    private static NodeAst? FindConnectingPredicate(
+        int rightBit,
+        int leftMask,
+        List<LeafEntry> leaves,
+        List<NodeAst> predicatePool,
+        BoundSelectQuery bound)
+    {
+        int combined = leftMask | (1 << rightBit);
+        string rightAlias = leaves[rightBit].Alias;
+
+        HashSet<string> allowed = new(StringComparer.Ordinal);
+        for (int i = 0; i < leaves.Count; i++)
+            if ((combined & (1 << i)) != 0)
+                allowed.Add(leaves[i].Alias);
+
+        foreach (NodeAst pred in predicatePool)
+        {
+            HashSet<string> refs = CollectReferencedAliases(pred, bound);
+            if (refs.Contains(rightAlias) && refs.IsSubsetOf(allowed))
+                return pred;
+        }
+
+        return null;
+    }
+
+    // ─── Tree flattening ─────────────────────────────────────────────────────
+
+    private static bool CollectLeaves(
+        QuerySource node,
+        List<LeafEntry> leaves,
+        List<NodeAst> predicatePool)
+    {
+        switch (node)
+        {
+            case TableSource ts:
+                leaves.Add(new(ts, ts.Alias ?? ts.TableName));
+                return true;
+
+            case DerivedTableSource ds:
+                leaves.Add(new(ds, ds.Alias!));
+                return true;
+
+            case JoinSource js:
+                if (js.Kind != JoinKind.Inner)
+                    return false;
+
+                if (!CollectLeaves(js.Left, leaves, predicatePool))
+                    return false;
+
+                if (!CollectLeaves(js.Right, leaves, predicatePool))
+                    return false;
+
+                predicatePool.Add(js.OnPredicate);
+                return true;
+
+            default:
+                return true;
+        }
+    }
+
+    // ─── Subset enumeration ──────────────────────────────────────────────────
+
+    private static IEnumerable<int> SubsetsOfSize(int n, int size)
+    {
+        int mask = (1 << size) - 1;
+        int limit = 1 << n;
+        while (mask < limit)
+        {
+            yield return mask;
+            // Gosper's hack: next integer with the same popcount.
+            int c = mask & -mask;
+            int r = mask + c;
+            mask = (((r ^ mask) >> 2) / c) | r;
+        }
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    private static HashSet<string> CollectReferencedAliases(NodeAst node, BoundSelectQuery bound)
+    {
+        HashSet<string> aliases = new(StringComparer.Ordinal);
+        WalkIdentifiers(node, bound, aliases);
+        return aliases;
+    }
+
+    private static void WalkIdentifiers(NodeAst? node, BoundSelectQuery bound, HashSet<string> aliases)
+    {
+        if (node is null) return;
+
+        if (node.nodeType == NodeType.Identifier && node.yytext is not null)
+        {
+            AddIdentifierAlias(node.yytext, bound, aliases);
+            return;
+        }
+
+        WalkIdentifiers(node.leftAst, bound, aliases);
+        WalkIdentifiers(node.rightAst, bound, aliases);
+        WalkIdentifiers(node.extendedOne, bound, aliases);
+        WalkIdentifiers(node.extendedTwo, bound, aliases);
+        WalkIdentifiers(node.extendedThree, bound, aliases);
+        WalkIdentifiers(node.extendedFour, bound, aliases);
+        WalkIdentifiers(node.extendedFive, bound, aliases);
+    }
+
+    private static void AddIdentifierAlias(string identifier, BoundSelectQuery bound, HashSet<string> aliases)
+    {
+        int dot = identifier.IndexOf('.');
+
+        if (dot > 0 && dot < identifier.Length - 1)
+        {
+            aliases.Add(identifier[..dot]);
+            return;
+        }
+
+        List<string> owners = [];
+
+        foreach (BoundTableSource src in bound.Sources)
+            if (BoundSourceCatalog.TableHasColumn(src, identifier))
+                owners.Add(src.Alias);
+
+        foreach (BoundDerivedTableSource src in bound.DerivedSources)
+            if (src.HasColumn(identifier))
+                owners.Add(src.Alias);
+
+        if (owners.Count == 1)
+            aliases.Add(owners[0]);
+    }
+
+    private static string? ExtractUnqualifiedColumn(NodeAst? node)
+    {
+        if (node is null || node.nodeType != NodeType.Identifier || node.yytext is null)
+            return null;
+
+        string text = node.yytext;
+        int dot = text.IndexOf('.');
+        return dot >= 0 ? text[(dot + 1)..] : text;
+    }
+
+    private static bool TrySplitQualified(string id, out string alias, out string column)
+    {
+        int dot = id.IndexOf('.');
+        if (dot > 0 && dot < id.Length - 1)
+        {
+            alias = id[..dot];
+            column = id[(dot + 1)..];
+            return true;
+        }
+
+        alias = column = "";
+        return false;
+    }
+
+    private static TableDescriptor? FindTableDescriptor(string alias, BoundSelectQuery bound)
+    {
+        foreach (BoundTableSource src in bound.Sources)
+            if (src.Alias == alias)
+                return src.Table;
+
+        return null;
+    }
+}

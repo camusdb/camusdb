@@ -65,6 +65,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     public StatisticsManager Statistics => statisticsManager;
 
+    internal PlanCache PlanCache => queryExecutor.PlanCache;
+
     private readonly QueryExecutor queryExecutor;
 
     private readonly SqlExecutor sqlExecutor;

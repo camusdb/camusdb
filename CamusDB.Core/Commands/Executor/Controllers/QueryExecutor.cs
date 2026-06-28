@@ -44,11 +44,14 @@ internal sealed class QueryExecutor
 
     private readonly QueryScanner queryScanner;
 
+    internal readonly PlanCache PlanCache;
+
     public QueryExecutor(ILogger<ICamusDB> logger, StatisticsManager? stats = null)
     {
         this.logger = logger;
-        queryPlanner = new QueryPlanner(stats);
-        queryJoinExecutor = new QueryJoinExecutor(this, stats);
+        PlanCache = new PlanCache(CamusDBConfig.PlanCacheMaxEntries);
+        queryPlanner = new QueryPlanner(stats, PlanCache);
+        queryJoinExecutor = new QueryJoinExecutor(this, stats, PlanCache);
         this.queryScanner = new(logger);
     }
 

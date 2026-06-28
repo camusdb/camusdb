@@ -24,10 +24,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 public sealed class QueryPlanner
 {
     private readonly StatisticsManager? _stats;
+    private readonly PlanCache? _cache;
 
-    public QueryPlanner(StatisticsManager? stats = null)
+    public QueryPlanner(StatisticsManager? stats = null) : this(stats, null) { }
+
+    internal QueryPlanner(StatisticsManager? stats, PlanCache? cache)
     {
         _stats = stats;
+        _cache = cache;
     }
 
     // Tag a scan leaf with its DataDistribution and return it (fluent helper).
@@ -54,7 +58,40 @@ public sealed class QueryPlanner
             : PredicateAnalyzer.AnalyzeTicket(ticket);
         plan.PredicateAnalysis = analysis;
 
-        (PhysicalPlanNode scanNode, QueryPlanStep? scanStep, NodeAst? absorbedInListConjunct) = BuildScanNode(database, table, ticket, analysis);
+        // Compute the shape ID and schema deps up-front so the cache can be checked
+        // before the (potentially expensive) cost-based access-path selection.
+        string? shapeId = ticket.SelectQuery is not null
+            ? QueryShapeComputer.Compute(ticket.SelectQuery)
+            : null;
+
+        List<(string, int)> schemaDeps = [(table.Name, table.Schema.Version)];
+        if (ticket.SemiJoinSpecs is { Count: > 0 })
+            foreach (SemiJoinSpec spec in ticket.SemiJoinSpecs)
+                schemaDeps.Add((spec.InnerTable.Name, spec.InnerTable.Schema.Version));
+
+        plan.QueryShapeId = shapeId;
+        plan.SchemaDeps = schemaDeps;
+
+        // Cache lookup: skip access-path selection on a valid hit.
+        bool fromCache = false;
+        PhysicalPlanNode scanNode;
+        QueryPlanStep? scanStep;
+        NodeAst? absorbedInListConjunct;
+
+        if (shapeId is not null
+            && _cache is not null
+            && CamusDBConfig.PlanCacheEnabled
+            && _cache.TryGet(database.Id, shapeId, schemaDeps, out PlanCacheEntry? cached)
+            && cached!.SingleTable is { } cachedDecision)
+        {
+            (scanNode, scanStep, absorbedInListConjunct) =
+                BuildScanNodeFromCachedDecision(database, table, ticket, analysis, cachedDecision);
+            fromCache = true;
+        }
+        else
+        {
+            (scanNode, scanStep, absorbedInListConjunct) = BuildScanNode(database, table, ticket, analysis);
+        }
         plan.ExecutionFilter = PredicateAnalyzer.BuildExecutionFilter(analysis, scanStep, table, absorbedInListConjunct);
 
         // Populate OutputOrdering on the scan node when the chosen index scan guarantees the
@@ -233,17 +270,19 @@ public sealed class QueryPlanner
         // Annotate every node with EstimatedCardinality and PlanCost.
         CostEstimator.AnnotatePlan(plan.Root, database, table, _stats);
 
-        // Record the plan's query-shape ID and schema-version dependencies.
-        if (ticket.SelectQuery is not null)
-            plan.QueryShapeId = QueryShapeComputer.Compute(ticket.SelectQuery);
-
-        List<(string, int)> schemaDeps = [(table.Name, table.Schema.Version)];
-        if (ticket.SemiJoinSpecs is { Count: > 0 })
+        // On a cache miss, store the access-path decision so the next identical-shape query
+        // can skip the expensive cost enumeration.  In-list scans are excluded: they have no
+        // QueryPlanStep (the step slot is null) and their choice is IN-list-value-count-dependent.
+        if (!fromCache && _cache is not null && CamusDBConfig.PlanCacheEnabled
+            && shapeId is not null
+            && plan.Steps is [{ } s0, ..]
+            && s0.Type != QueryPlanStepType.InListScanFromIndex)
         {
-            foreach (SemiJoinSpec spec in ticket.SemiJoinSpecs)
-                schemaDeps.Add((spec.InnerTable.Name, spec.InnerTable.Schema.Version));
+            _cache.Put(database.Id, shapeId,
+                new PlanCacheEntry(schemaDeps,
+                    SingleTable: new SingleTableDecision(s0.Type, s0.Index?.Name),
+                    JoinAliasOrder: null));
         }
-        plan.SchemaDeps = schemaDeps;
 
         return plan;
     }
@@ -335,6 +374,35 @@ public sealed class QueryPlanner
         }
 
         return (bestNode, bestStep);
+    }
+
+    /// <summary>
+    /// Cache-hit path: re-binds the current query's predicate literals into the pre-chosen
+    /// access path recorded in <paramref name="decision"/>, skipping cost enumeration entirely.
+    /// Falls back to <see cref="BuildScanNode"/> if the cached index name is no longer usable
+    /// (defensive; should not occur when <see cref="PlanCacheEntry.SchemaDeps"/> are valid).
+    /// </summary>
+    private (PhysicalPlanNode ScanNode, QueryPlanStep? ScanStep, NodeAst? AbsorbedInListConjunct)
+    BuildScanNodeFromCachedDecision(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        QueryTicket ticket,
+        PredicateAnalysis analysis,
+        SingleTableDecision decision)
+    {
+        if (decision.IndexName is null)
+        {
+            return (
+                WithDistribution(new TableScanNode(TableScanSource.PrimaryRows), table),
+                new QueryPlanStep(QueryPlanStepType.FullScanFromTableIndex),
+                null);
+        }
+
+        QueryPlanStep? step = IndexScanSelector.TrySelectScanForForcedIndex(table, analysis, decision.IndexName);
+        if (step is null)
+            return BuildScanNode(database, table, ticket, analysis);
+
+        return (WithDistribution(ToScanNode(step.Value), table), step, null);
     }
 
     private (PhysicalPlanNode ScanNode, QueryPlanStep? ScanStep, NodeAst? AbsorbedInListConjunct) BuildScanNode(

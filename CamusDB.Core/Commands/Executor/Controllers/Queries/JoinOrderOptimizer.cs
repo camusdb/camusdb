@@ -49,6 +49,62 @@ internal static class JoinOrderOptimizer
     private sealed record LeafEntry(QuerySource AstNode, string Alias);
 
     /// <summary>
+    /// Applies a previously-computed alias ordering (e.g. from the plan cache) to
+    /// <paramref name="root"/>, using the <em>current</em> query's ON predicates.
+    ///
+    /// Unlike <see cref="Reorder"/> (which scores sources to determine the order),
+    /// this overload forces the leaf order to match <paramref name="targetOrder"/>.
+    /// The ON predicates are always taken from <paramref name="root"/> so that literal
+    /// values inside <c>JOIN … ON …</c> clauses are never frozen from a cached plan.
+    ///
+    /// Falls back to <paramref name="root"/> unchanged when:
+    /// <list type="bullet">
+    ///   <item>any join has a kind other than <see cref="JoinKind.Inner"/> (outer joins are not commutative);</item>
+    ///   <item>any alias in <paramref name="targetOrder"/> is not found in the current tree (stale cache, defensive);</item>
+    ///   <item>no feasible predicate assignment exists for the given ordering.</item>
+    /// </list>
+    /// </summary>
+    public static QuerySource ReorderByAliases(
+        QuerySource root,
+        IReadOnlyList<string> targetOrder,
+        BoundSelectQuery bound)
+    {
+        List<LeafEntry> leaves = [];
+        List<NodeAst> predicatePool = [];
+
+        if (!CollectLeaves(root, leaves, predicatePool))
+            return root; // outer joins — not commutative, bail
+
+        if (leaves.Count <= 1 || leaves.Count != targetOrder.Count)
+            return root;
+
+        // Build alias → leaf map from the current source tree.
+        Dictionary<string, LeafEntry> leafMap = new(StringComparer.Ordinal);
+        foreach (LeafEntry leaf in leaves)
+            leafMap[leaf.Alias] = leaf;
+
+        // Reconstruct the leaf list in the target order, using CURRENT source nodes.
+        List<LeafEntry> reordered = new(leaves.Count);
+        foreach (string alias in targetOrder)
+        {
+            if (!leafMap.TryGetValue(alias, out LeafEntry? entry))
+                return root; // unknown alias (stale cache), bail safely
+            reordered.Add(entry);
+        }
+
+        // Skip the rebuild when the target order matches the current order already.
+        bool changed = reordered.Zip(leaves).Any(p => p.First.Alias != p.Second.Alias);
+        if (!changed)
+            return root;
+
+        // Feasibility guard: verify a predicate exists for every join edge in this ordering.
+        if (!IsFeasible(reordered, predicatePool, bound))
+            return root; // can't re-apply this order with current predicates, fall back
+
+        return RebuildTree(reordered, predicatePool, bound);
+    }
+
+    /// <summary>
     /// Returns a (potentially reordered) <see cref="QuerySource"/> tree root. The tree structure
     /// is always left-deep. If the heuristic produces no improvement or the reordering is not
     /// feasible, returns <paramref name="root"/> unchanged.
