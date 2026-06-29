@@ -146,6 +146,16 @@ internal sealed class QueryFilterer
                 return ColumnValue.FromBool(exists);
             }
 
+            case NodeType.ExprInMembership:
+            {
+                if (ticket.PreparedInSets is not null && ticket.PreparedInSets.TryGetValue(expr, out PreparedInSet? prepared))
+                {
+                    ColumnValue lhs = SqlExecutor.EvalExpr(expr.leftAst!, row, ticket.Parameters, ticket.RowNameResolver);
+                    return ColumnValue.FromBool(prepared.Contains(lhs));
+                }
+                goto default;
+            }
+
             case NodeType.ExprAnd:
             {
                 ColumnValue leftValue = await EvaluatePredicateAsync(expr.leftAst!, row, ticket, database).ConfigureAwait(false);

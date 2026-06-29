@@ -155,9 +155,13 @@ stage     node               detail
 physical  index-range-scan   index=year_idx, from>=2023, to<2024
 ```
 
-For a **non-unique** index, an equality predicate is rewritten as a half-open range scan
-(`>= value`, `< successor(value)`). The `index-lookup` node only appears for **unique**
-index equality (primary key or `UNIQUE` constraint), where at most one row can match.
+For a **non-unique** index, an equality predicate is rewritten as a range scan. For numeric/ordinal
+types it is half-open (`>= value`, `< successor(value)`), as shown above. For **`String`/`Id`** columns
+there is no computable successor, so it uses an **inclusive `[value, value]`** range instead
+(`from>=value, to<=value`); the scan engine appends a high sentinel internally to capture every
+`encode(value)+rowId` index entry and then trims to exact-key matches. Either way the result is the same
+set of rows — only the bound rendering differs. The `index-lookup` node only appears for **unique** index
+equality (primary key or `UNIQUE` constraint), where at most one row can match.
 
 ---
 

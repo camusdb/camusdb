@@ -55,6 +55,13 @@ public sealed class QueryTicket
     internal ExistsSubqueryRegistry? ExistsSubqueries { get; }
 
     /// <summary>
+    /// Pre-materialized IN-list sets keyed by the ExprInMembership AST node (by reference).
+    /// Populated at ticket creation for literal/parameter IN lists extracted by PredicateAnalyzer.
+    /// Null when no qualifying IN predicates exist.
+    /// </summary>
+    internal IReadOnlyDictionary<NodeAst, PreparedInSet>? PreparedInSets { get; }
+
+    /// <summary>
     /// The logical SELECT query this ticket was derived from. Retained so that
     /// <see cref="Controllers.Queries.QueryPlanner"/> can compute the query-shape ID without
     /// re-parsing. Null for tickets created via the legacy (non-SQL) execution path.
@@ -102,7 +109,8 @@ public sealed class QueryTicket
         SelectQuery? selectQuery = null,
         IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null,
         IReadOnlySet<string>? locateColumns = null,
-        bool exclusivePredicateLocks = false)
+        bool exclusivePredicateLocks = false,
+        IReadOnlyDictionary<NodeAst, PreparedInSet>? preparedInSets = null)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -125,5 +133,6 @@ public sealed class QueryTicket
         SemiJoinSpecs = semiJoinSpecs;
         LocateColumns = locateColumns;
         ExclusivePredicateLocks = exclusivePredicateLocks;
+        PreparedInSets = preparedInSets;
     }
 }

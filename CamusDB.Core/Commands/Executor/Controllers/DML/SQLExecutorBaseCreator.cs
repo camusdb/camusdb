@@ -389,23 +389,104 @@ internal abstract class SQLExecutorBaseCreator
 
     private static bool Like(string text, string pattern)
     {
-        // Escape all regex special characters
+        // Fast paths: only '%' is a wildcard ('_' is literal, matching current semantics).
+        // Use ordinal comparison to avoid culture-dependent results for non-ASCII input.
+        int percentCount = CountChar(pattern, '%');
+
+        if (percentCount == 0)
+            return text.Equals(pattern, StringComparison.Ordinal);
+
+        if (percentCount == 1)
+        {
+            if (pattern[^1] == '%')
+                return text.AsSpan().StartsWith(pattern.AsSpan(0, pattern.Length - 1), StringComparison.Ordinal);
+            if (pattern[0] == '%')
+                return text.AsSpan().EndsWith(pattern.AsSpan(1), StringComparison.Ordinal);
+        }
+
+        if (percentCount == 2 && pattern[0] == '%' && pattern[^1] == '%')
+        {
+            ReadOnlySpan<char> inner = pattern.AsSpan(1, pattern.Length - 2);
+            if (!inner.Contains('%'))
+                return text.Contains(inner, StringComparison.Ordinal);
+        }
+
+        // Fallback: regex for multi-wildcard patterns (e.g. 'a%b%c').
         string escapedPattern = Regex.Escape(pattern);
-
-        // Replace the escaped '%' with '.*' to simulate SQL LIKE wildcard
         string regexPattern = string.Concat("^", escapedPattern.Replace("%", ".*"), "$");
-
         return Regex.IsMatch(text, regexPattern);
     }
 
     private static bool ILike(string text, string pattern)
     {
-        // Escape all regex special characters
-        string escapedPattern = Regex.Escape(pattern);
+        int percentCount = CountChar(pattern, '%');
 
-        // Replace the escaped '%' with '.*' to simulate SQL LIKE wildcard
-        string regexPattern = string.Concat("^", escapedPattern.Replace("%", ".*"), "$");
+        if (percentCount == 0)
+            return text.Equals(pattern, StringComparison.OrdinalIgnoreCase);
 
-        return Regex.IsMatch(text, regexPattern, RegexOptions.IgnoreCase);
+        if (percentCount == 1)
+        {
+            if (pattern[^1] == '%')
+                return text.AsSpan().StartsWith(pattern.AsSpan(0, pattern.Length - 1), StringComparison.OrdinalIgnoreCase);
+            if (pattern[0] == '%')
+                return text.AsSpan().EndsWith(pattern.AsSpan(1), StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (percentCount == 2 && pattern[0] == '%' && pattern[^1] == '%')
+        {
+            ReadOnlySpan<char> inner = pattern.AsSpan(1, pattern.Length - 2);
+            if (!inner.Contains('%'))
+                return text.Contains(inner, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Multi-wildcard fallback: sequential ordinal-ignore-case segment scan.
+        // Keeps ILIKE fully ordinal — culture-default regex would diverge for non-ASCII.
+        return ILikeMultiWildcard(text, pattern);
+    }
+
+    private static bool ILikeMultiWildcard(string text, string pattern)
+    {
+        // Split pattern on '%' and match each segment in sequence with OrdinalIgnoreCase.
+        // Leading segment anchors to the start; trailing segment anchors to the end;
+        // interior segments advance a left-to-right scan cursor.
+        string[] segments = pattern.Split('%');
+        ReadOnlySpan<char> span = text.AsSpan();
+        int pos = 0;
+
+        string first = segments[0];
+        if (first.Length > 0)
+        {
+            if (!span.StartsWith(first.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                return false;
+            pos += first.Length;
+        }
+
+        for (int i = 1; i < segments.Length - 1; i++)
+        {
+            string seg = segments[i];
+            if (seg.Length == 0) continue;
+            int found = span[pos..].IndexOf(seg.AsSpan(), StringComparison.OrdinalIgnoreCase);
+            if (found < 0) return false;
+            pos += found + seg.Length;
+        }
+
+        string last = segments[^1];
+        if (last.Length > 0)
+        {
+            int lastStart = text.Length - last.Length;
+            if (lastStart < pos) return false;
+            if (!span[lastStart..].StartsWith(last.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static int CountChar(string s, char c)
+    {
+        int count = 0;
+        foreach (char ch in s)
+            if (ch == c) count++;
+        return count;
     }
 }

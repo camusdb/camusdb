@@ -11,6 +11,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="CamusDB.Tests" />
     <InternalsVisibleTo Include="CamusDB.Cluster.Tests" />
+    <InternalsVisibleTo Include="CamusDB.MicroBenchmarks" />
   </ItemGroup>
 
   <ItemGroup>

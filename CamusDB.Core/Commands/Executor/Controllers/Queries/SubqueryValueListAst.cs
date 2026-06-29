@@ -73,8 +73,19 @@ internal static class SubqueryValueListAst
             if (candidate.Type == ColumnType.Null)
                 continue;
 
-            if (lhs.CompareTo(candidate) == 0)
-                return true;
+            // x IN (a, b, c) is defined as x = a OR x = b OR x = c. A cross-type element
+            // (e.g. 5 IN (1, 'foo')) is a non-match for that element, not a hard error, so a
+            // homogeneous list still matches normally while a malformed element is skipped.
+            // CompareTo throws ArgumentException across incomparable types; treat that as a
+            // non-match so this reference path stays identical to the prepared PreparedInSet path.
+            try
+            {
+                if (lhs.CompareTo(candidate) == 0)
+                    return true;
+            }
+            catch (ArgumentException)
+            {
+            }
         }
 
         return false;
@@ -103,8 +114,19 @@ internal static class SubqueryValueListAst
                 continue;
             }
 
-            if (lhs.Type != ColumnType.Null && lhs.CompareTo(candidate) == 0)
-                return false;
+            // Cross-type elements are non-matches (see ContainsValue): a malformed element
+            // never makes the lhs "found", so NOT IN keeps the same cross-type semantics as IN.
+            if (lhs.Type != ColumnType.Null)
+            {
+                try
+                {
+                    if (lhs.CompareTo(candidate) == 0)
+                        return false;
+                }
+                catch (ArgumentException)
+                {
+                }
+            }
         }
 
         if (containsNull || sawNull)

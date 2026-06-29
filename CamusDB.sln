@@ -13,6 +13,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB.Sandbox", "CamusDB.
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB.Cluster.Tests", "CamusDB.Cluster.Tests\CamusDB.Cluster.Tests.csproj", "{B32F0510-C32A-4CFA-923D-70B6AC5B3D94}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CamusDB.MicroBenchmarks", "CamusDB.MicroBenchmarks\CamusDB.MicroBenchmarks.csproj", "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -39,6 +41,10 @@ Global
 		{B32F0510-C32A-4CFA-923D-70B6AC5B3D94}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B32F0510-C32A-4CFA-923D-70B6AC5B3D94}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B32F0510-C32A-4CFA-923D-70B6AC5B3D94}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

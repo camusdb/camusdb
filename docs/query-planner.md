@@ -359,12 +359,20 @@ best (ties → fewer columns = more selective):
 | ORDER BY prefix match (no predicate) | `1000` |
 
 **Composite matching:** walk index columns left to right, accumulate the equality prefix; if fully
-covered, emit `QueryFromIndex` (unique) or a prefix-bounded `RangeScanFromIndex` (non-unique, upper bound
-via `BuildPrefixScanUpperBound`). Note **equality on a non-unique index is a single-value range scan**,
-not a point lookup — `WHERE year = 2000` on a multi index renders as
-`index-range-scan(... from>=2000, to<2001)`, while `WHERE id = …` on the unique PK renders as
-`index-lookup`. If a partial prefix is followed by a range predicate on the next column, both bounds are
-combined.
+covered, emit `QueryFromIndex` (unique) or a prefix-bounded `RangeScanFromIndex` (non-unique). Note
+**equality on a non-unique index is a single-value range scan**, not a point lookup — `WHERE year = 2000`
+on a multi index renders as `index-range-scan(... from>=2000, to<2001)`, while `WHERE id = …` on the
+unique PK renders as `index-lookup`. If a partial prefix is followed by a range predicate on the next
+column, both bounds are combined.
+
+**String/Id equality on a non-unique index** has no computable "next value" for an exclusive upper bound,
+so it uses an **inclusive `[v, v]`** range instead — `ScanIndex` appends a high (U+FFFF) sentinel so all
+`encode(v) + rowId` entries are captured, then the decoded-key bounds filter trims to `key == v` (the same
+mechanism the value-list `IN` path uses). This covers all three shapes — full equality, an equality prefix
+only, and an equality prefix before a trailing range. For a string-prefix + a *half-open* trailing range
+(`name = 'a' AND year > 2000`), the open side is capped at the inclusive prefix so the scan stays within
+the prefix rather than running to the end of the index. (Before this, non-unique `String`/`Id` equality
+fell back to a full table scan.)
 
 **ORDER BY scan elision:** if no predicate matches, `TrySelectOrderByScan` looks for an index whose
 leading columns equal the ORDER BY columns (ascending only) and returns an unbounded range scan;

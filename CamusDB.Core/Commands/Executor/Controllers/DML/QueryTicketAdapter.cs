@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Generic;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -45,6 +46,8 @@ internal static class QueryTicketAdapter
         NodeAst? where = query.Where?.Expression;
         PredicateAnalysis analyzedWhere = PredicateAnalyzer.Analyze(where, ticket.Parameters);
 
+        IReadOnlyDictionary<NodeAst, PreparedInSet>? preparedInSets = BuildPreparedInSets(analyzedWhere);
+
         return new QueryTicket(
             txnState: ticket.TxnState,
             databaseName: ticket.DatabaseName,
@@ -68,7 +71,25 @@ internal static class QueryTicketAdapter
             existsSubqueries: existsSubqueries,
             isDistinct: query.IsDistinct,
             selectQuery: query,
-            semiJoinSpecs: semiJoinSpecs);
+            semiJoinSpecs: semiJoinSpecs,
+            preparedInSets: preparedInSets);
+    }
+
+    private static IReadOnlyDictionary<NodeAst, PreparedInSet>? BuildPreparedInSets(PredicateAnalysis analysis)
+    {
+        if (analysis.InListComparisons.Count == 0)
+            return null;
+
+        // Key by node reference — the same NodeAst object appears in both the WHERE tree
+        // (traversed by QueryFilterer) and in AnalyzedInList.Conjunct.
+        Dictionary<NodeAst, PreparedInSet> sets = new(
+            analysis.InListComparisons.Count,
+            ReferenceEqualityComparer.Instance);
+
+        foreach (AnalyzedInList inList in analysis.InListComparisons)
+            sets[inList.Conjunct] = new PreparedInSet(inList.Values);
+
+        return sets;
     }
 
     /// <summary>

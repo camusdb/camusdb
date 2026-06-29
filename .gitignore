@@ -12,8 +12,12 @@ CamusDB.Generators/obj
 CamusDB.Sandbox/bin
 CamusDB.Sandbox/obj
 CamusDB.Sandbox/Data
+CamusDB.MicroBenchmarks/bin
+CamusDB.MicroBenchmarks/obj
+CamusDB.MicroBenchmarks/*.md
 CamusDB.Core\SQLParser.Language.analyzer.lst
 CamusDB.Core\sqlParser.Language.grammar.lst
+BenchmarkDotNet.Artifacts/
 .vs/
 .idea/
 specs/
