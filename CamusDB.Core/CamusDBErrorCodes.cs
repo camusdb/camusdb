@@ -91,6 +91,18 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string TransactionMutationLimitExceeded = "CADB0506";
 
+    /// <summary>
+    /// Spill-to-disk is required (the operator exceeded the in-memory row threshold) but the
+    /// temp store is unavailable — either the spill root directory could not be created or a
+    /// spill file could not be opened. The query cannot proceed without spill storage; the
+    /// caller must either free disk space / fix permissions and retry, or run the query on a
+    /// node where spill storage is accessible.
+    ///
+    /// This error is non-retryable by <see cref="SerializableRetryHelper"/>: disk-space /
+    /// permission failures do not resolve on their own.
+    /// </summary>
+    public const string SpillStorageUnavailable = "CADB0507";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>

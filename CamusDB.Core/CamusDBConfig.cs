@@ -310,6 +310,61 @@ public static class CamusDBConfig
     /// </summary>
     public static int MaxColumnsPerTable = 512;
 
+    // ──────────────────────────────────────────────────────────────────────────
+    // Spill-to-disk
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Gates all spill-to-disk behaviour. When <c>false</c> (default), blocking query operators
+    /// keep today's unbounded in-memory buffers — callers accept the OOM risk on large inputs.
+    /// When <c>true</c>, each blocking operator spills sorted runs to temp files once its buffer
+    /// exceeds <see cref="SpillThresholdRows"/>. If the temp store is unwritable and spill is
+    /// required, <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> is thrown instead of
+    /// silently buffering unbounded memory.
+    ///
+    /// Default: <c>false</c>.
+    /// </summary>
+    public static bool SpillEnabled = false;
+
+    /// <summary>
+    /// Per-operator in-memory row cap before the operator begins spilling to disk.
+    /// Applies independently to each blocking operator (sort, hash-join build, GROUP BY, …).
+    /// The operator accumulates up to this many rows in memory; when the next row would exceed
+    /// the cap, the current in-memory buffer is sorted/serialised and written as a spill run.
+    ///
+    /// Ignored when <see cref="SpillEnabled"/> is <c>false</c>.
+    ///
+    /// Default: <c>500_000</c>.
+    /// </summary>
+    public static int SpillThresholdRows = 500_000;
+
+    /// <summary>
+    /// Maximum number of simultaneously-open spill-run readers during a k-way merge pass.
+    /// When the number of spilled runs exceeds this value, a multi-pass merge is performed:
+    /// runs are merged in groups of <c>SpillMergeFanIn</c> until a single merged output remains.
+    ///
+    /// Ignored when <see cref="SpillEnabled"/> is <c>false</c>.
+    ///
+    /// Default: <c>16</c>.
+    /// </summary>
+    public static int SpillMergeFanIn = 16;
+
+    /// <summary>
+    /// <b>Test-only override.</b> When non-null, replaces <see cref="SpillThresholdRows"/> with
+    /// this value for every operator, forcing spill on tiny inputs so the spill code path runs
+    /// deterministically in unit tests without large data sets. Has no production use.
+    ///
+    /// Operators read this via <see cref="SpillEffectiveThreshold"/>.
+    /// </summary>
+    public static int? ForceSpillThresholdRows = null;
+
+    /// <summary>
+    /// Returns the effective spill-row threshold: <see cref="ForceSpillThresholdRows"/> when set
+    /// (test override), otherwise <see cref="SpillThresholdRows"/>.
+    /// </summary>
+    public static int SpillEffectiveThreshold =>
+        ForceSpillThresholdRows ?? SpillThresholdRows;
+
     /// <summary>
     /// Maximum number of user-visible secondary indexes allowed per table. The implicit primary-key
     /// index (<c>~pk</c>) and any internal <c>~</c>-prefixed indexes are exempt and do not count.
