@@ -716,4 +716,198 @@ public class TestIndexInListScan : BaseTest
         Assert.That(years, Does.Contain(2022L));
         Assert.That(years, Does.Contain(2024L));
     }
+
+    // ── Non-unique IN-list costing tests ──────────────────────────────────────
+
+    /// <summary>
+    /// Creates a table with a non-unique index on <paramref name="colName"/> (Integer64).
+    /// Seeds <paramref name="trc"/> as the row count and <paramref name="ndv"/> as the column NDV.
+    /// Returns (database, table, executor, dbname).
+    /// </summary>
+    private async Task<(DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)>
+        CreateStatusTable(long trc, long? ndv)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "items",
+            columns: new ColumnInfo[]
+            {
+                new("id",     ColumnType.Id),
+                new("status", ColumnType.Integer64, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk",        new ColumnIndexInfo[] { new("id",     OrderType.Ascending) }),
+                new(ConstraintType.IndexMulti, "status_idx", new ColumnIndexInfo[] { new("status", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        await database.Transactions.CommitAsync(txn);
+
+        TableDescriptor table = await database.TableDescriptors["items"];
+
+        executor.Statistics.SeedRowCountForTesting(database, table, trc);
+
+        if (ndv.HasValue)
+        {
+            await executor.Statistics.SetNdvAsync(database, table,
+                columnNdv: new Dictionary<string, long> { ["status"] = ndv.Value },
+                keyNdv: null);
+        }
+
+        return (database, table, executor, dbname);
+    }
+
+    [Test]
+    public async Task LowNdv_NonUniqueInList_FallsBackToTableScan()
+    {
+        // NDV=2, trc=10000, n=2 values → estimatedRows = trc*(2/2) = 10000
+        // Cost gate: 2 * 10000 >= 10000 → full scan.
+        // Negative proof: without NDV-based costing, 2 * n=2 >= 10000 = false → index scan.
+        (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
+            = await CreateStatusTable(trc: 10_000, ndv: 2);
+
+        QueryPlanner planner = new(executor.Statistics);
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
+            sql: "SELECT id FROM items WHERE status IN (1, 2)", parameters: null);
+        QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(
+            new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(execTicket.Sql)),
+            execTicket);
+
+        QueryPlan plan = planner.GetPlan(database, table, ticket);
+
+        Assert.IsInstanceOf<TableScanNode>(ScanRoot(plan),
+            "Low-NDV non-unique IN-list (NDV=2, n=2) must fall back to table scan — estimated rows = trc.");
+
+        await database.Transactions.CommitAsync(txn);
+    }
+
+    [Test]
+    public async Task LowNdv_NonUniqueInList_WithoutNdvSeeded_UsesIndexScan()
+    {
+        // Companion to LowNdv_NonUniqueInList_FallsBackToTableScan.
+        // Without NDV the old code path fires: gate = 2*n >= trc → 4 >= 10000 = false → index scan.
+        // This proves that the table-scan outcome above is caused by the NDV-driven estimate.
+        (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
+            = await CreateStatusTable(trc: 10_000, ndv: null);
+
+        QueryPlanner planner = new(executor.Statistics);
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
+            sql: "SELECT id FROM items WHERE status IN (1, 2)", parameters: null);
+        QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(
+            new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(execTicket.Sql)),
+            execTicket);
+
+        QueryPlan plan = planner.GetPlan(database, table, ticket);
+
+        Assert.IsInstanceOf<IndexInListScanNode>(ScanRoot(plan),
+            "Without NDV, the heuristic gate (2*n < trc) passes and index scan is chosen.");
+
+        await database.Transactions.CommitAsync(txn);
+    }
+
+    [Test]
+    public async Task HighNdv_SelectiveInList_UsesIndexScan()
+    {
+        // NDV=5000, trc=10000, n=2 values → estimatedRows = trc*(2/5000) = 4
+        // Cost gate: 2*4=8 << 10000 → index scan remains.
+        (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
+            = await CreateStatusTable(trc: 10_000, ndv: 5_000);
+
+        QueryPlanner planner = new(executor.Statistics);
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
+            sql: "SELECT id FROM items WHERE status IN (1, 2)", parameters: null);
+        QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(
+            new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(execTicket.Sql)),
+            execTicket);
+
+        QueryPlan plan = planner.GetPlan(database, table, ticket);
+
+        Assert.IsInstanceOf<IndexInListScanNode>(ScanRoot(plan),
+            "High-NDV selective IN-list (NDV=5000, n=2) must stay as IndexInListScanNode.");
+
+        await database.Transactions.CommitAsync(txn);
+    }
+
+    [Test]
+    public async Task NonUniqueInList_EstimatedCardinality_ReflectsNdv()
+    {
+        // NDV=5, trc=10000, n=2 values → per-value selectivity = 1/5 → total = 0.4
+        // EstimatedCardinality must be trc*0.4 = 4000, not n=2 (the literal count).
+        // Negative proof: reverting EstimateInListRows usage in CostEstimator restores
+        // EstimatedCardinality = n = 2.
+        (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
+            = await CreateStatusTable(trc: 10_000, ndv: 5);
+
+        QueryPlanner planner = new(executor.Statistics);
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
+            sql: "SELECT id FROM items WHERE status IN (1, 2)", parameters: null);
+        QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(
+            new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(execTicket.Sql)),
+            execTicket);
+
+        QueryPlan plan = planner.GetPlan(database, table, ticket);
+
+        // The plan must be an index scan (NDV=5, n=2 → 2*4000 < 10000).
+        Assert.IsInstanceOf<IndexInListScanNode>(ScanRoot(plan),
+            "NDV=5, n=2: estimatedRows=4000, gate passes (2*4000 < 10000).");
+
+        CostEstimator.AnnotatePlan(plan.Root, database, table, executor.Statistics);
+
+        long? card = ScanRoot(plan).EstimatedCardinality;
+        Assert.IsNotNull(card, "EstimatedCardinality must be populated by AnnotatePlan.");
+        Assert.AreNotEqual(2L, card,
+            "EstimatedCardinality must not equal the literal count — NDV-based estimate must win.");
+        Assert.Greater(card!.Value, 2L,
+            "NDV-driven estimate (10000*(2/5)=4000) must exceed the literal count (2).");
+
+        await database.Transactions.CommitAsync(txn);
+    }
+
+    [Test]
+    public async Task UniqueInList_EstimatedCardinality_IsMinNTrc()
+    {
+        // Parity test: unique-index IN-list behavior must be unchanged.
+        // n=3, trc=10000 → estimatedRows = min(3, 10000) = 3 (same as before).
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> ids)
+            = await SetupRobotsTable();
+
+        executor.Statistics.SeedRowCountForTesting(database,
+            await database.TableDescriptors["robots"], 10_000);
+
+        QueryPlanner planner = new(executor.Statistics);
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        string id0 = ids[0], id1 = ids[1], id2 = ids[2];
+        ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
+            sql: $"SELECT id FROM robots WHERE id IN ('{id0}', '{id1}', '{id2}')",
+            parameters: null);
+        QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(
+            new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(execTicket.Sql)),
+            execTicket);
+
+        TableDescriptor table = await database.TableDescriptors["robots"];
+        QueryPlan plan = planner.GetPlan(database, table, ticket);
+
+        Assert.IsInstanceOf<IndexInListScanNode>(ScanRoot(plan));
+        CostEstimator.AnnotatePlan(plan.Root, database, table, executor.Statistics);
+
+        long? card = ScanRoot(plan).EstimatedCardinality;
+        Assert.IsNotNull(card, "EstimatedCardinality must be set for unique IN-list scan.");
+        Assert.AreEqual(3L, card,
+            "Unique IN-list: EstimatedCardinality = min(n=3, trc=10000) = 3 (parity with previous behavior).");
+
+        await database.Transactions.CommitAsync(txn);
+    }
 }

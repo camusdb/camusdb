@@ -368,4 +368,60 @@ public sealed class TestPlanCache : BaseTest
         Assert.GreaterOrEqual(executor.PlanCache.Hits, 1L,
             "Q2 must have been a cache hit (same shape as Q1).");
     }
+
+    [Test]
+    public async Task ChosenIndexPolicy_ForcedIndexCacheHitReplaysWithCurrentPredicate()
+    {
+        // Chosen-index replay: SingleTableDecision stores only IndexName (no ScanType).
+        //
+        // Q1 uses FORCE_INDEX with a WHERE predicate.  The first-run planner takes the
+        // forced-index early-return path and creates a FullScanFromIndex step — predicates
+        // are NOT absorbed by the index step; they go into ExecutionFilter (full scan +
+        // post-filter).  The cache stores SingleTableDecision(IndexName="products_cat").
+        //
+        // Q2 same SQL shape (same FORCE_INDEX, different literal).  Cache hit →
+        // BuildScanNodeFromCachedDecision → TrySelectScanForForcedIndex("products_cat") →
+        // predicates match → returns RangeScanFromIndex bounded to the current literal.
+        // The plan is more selective than Q1's full scan; the result must be Q2's rows, not Q1's.
+        //
+        // Assertion: Q2 returns only the "books" row (29), not the electronics rows (999, 499).
+        // This would fail if the cache honoured a hypothetical stored ScanType=FullScanFromIndex
+        // (strict replay) and forgot to re-bind the predicate.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
+
+        long hitsBefore = executor.PlanCache.Hits;
+
+        async Task<List<long>> ExecuteWithForcedIndex(string category)
+        {
+            string sql = $"SELECT id, price FROM products@{{FORCE_INDEX=products_cat}} WHERE category = \"{category}\"";
+            KvTransaction txn = await database.Transactions.BeginAsync();
+            ExecuteSQLTicket ticket = new(txnState: txn, database: dbname, sql: sql, parameters: null);
+            (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+            List<long> prices = [];
+            await foreach (QueryResultRow row in cursor)
+                prices.Add(row.Row["price"].LongValue);
+            await database.Transactions.CommitAsync(txn);
+            return prices;
+        }
+
+        // Q1: cold miss; planner takes forced-index path → FullScanFromIndex step.
+        // Cache stores SingleTableDecision(IndexName="products_cat").
+        List<long> electronicsRows = await ExecuteWithForcedIndex("electronics");
+
+        // Q2: cache hit; TrySelectScanForForcedIndex re-matches predicate → RangeScanFromIndex.
+        List<long> booksRows = await ExecuteWithForcedIndex("books");
+
+        Assert.AreEqual(hitsBefore + 1, executor.PlanCache.Hits,
+            "Q2 must be a cache hit (same FORCE_INDEX + same WHERE structure).");
+
+        // Q1 correctness: both electronics rows must be returned.
+        Assert.AreEqual(2, electronicsRows.Count, "Q1 must return both electronics rows.");
+        CollectionAssert.AreEquivalent(new[] { 999L, 499L }, electronicsRows,
+            "Q1 prices must be the two electronics prices.");
+
+        // Q2 result-correctness (chosen-index policy): must return the books row, not electronics.
+        Assert.AreEqual(1, booksRows.Count, "Q2 must return exactly one books row.");
+        Assert.AreEqual(29L, booksRows[0],
+            "Q2 must return the books price (29), proving the cache hit re-bound the current predicate.");
+    }
 }

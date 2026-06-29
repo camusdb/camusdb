@@ -196,6 +196,40 @@ internal static class JoinEnumerator
                         return;
                     }
                 }
+
+                // IN-list leaf: same costing as TryBuildIndexLeaf uses.
+                foreach (AnalyzedInList inList in analysis.InListComparisons)
+                {
+                    if (inList.Values.Count == 0) continue;
+
+                    TableIndexSchema? bestIndex = null;
+                    bool bestIsUnique = false;
+                    foreach (TableIndexSchema tidx in table.Indexes.Values)
+                    {
+                        if (!SchemaElementStateRules.IsReadableIndex(table.Schema, tidx)) continue;
+                        if (tidx.Columns.Length == 0 ||
+                            !string.Equals(tidx.Columns[0], inList.ColumnName, StringComparison.Ordinal))
+                            continue;
+                        bool isUnique = tidx.Type == IndexType.Unique;
+                        if (isUnique && tidx.Columns.Length != 1) continue;
+                        if (bestIndex is null || (isUnique && !bestIsUnique))
+                        {
+                            bestIndex = tidx;
+                            bestIsUnique = isUnique;
+                        }
+                    }
+
+                    if (bestIndex is null) continue;
+
+                    long inListRows = CardinalityEstimator.EstimateInListRows(
+                        inList.ColumnName, inList.Values, bestIsUnique, tableRows, database, table, stats);
+                    long inListBreakeven = (long)Math.Ceiling(tableRows * CostEstimator.BreakevenFraction);
+                    if (inListRows >= inListBreakeven) continue;
+
+                    cost = inListRows * 2.0;
+                    card = inListRows;
+                    return;
+                }
             }
         }
 

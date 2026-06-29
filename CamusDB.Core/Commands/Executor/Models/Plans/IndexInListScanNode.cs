@@ -7,6 +7,8 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
+using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
@@ -26,6 +28,12 @@ public sealed class IndexInListScanNode : PhysicalPlanNode
 
     /// <summary>Non-null, non-duplicate constant values to seek (NULLs already stripped).</summary>
     public IReadOnlyList<ColumnValue> Values { get; }
+
+    /// <summary>Bound table source when used as a join leaf; null for single-table plans.</summary>
+    public BoundTableSource? BoundSource { get; init; }
+
+    /// <summary>Residual filter applied to fetched rows after the IN-list scan; null means no additional filter.</summary>
+    public NodeAst? ExecutionFilter { get; init; }
 
     public override bool CanDecomposeToLocalPlusMerge => true;
 

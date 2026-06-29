@@ -26,7 +26,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Verifies that equality predicates on non-unique String/Id indexes use an
 /// index-range-scan rather than falling back to a full table scan.
 ///
-/// Prior to the AF1 fix, <c>SupportsExactEqualityPrefixUpperBound</c> returned
+/// Prior to the fix, <c>SupportsExactEqualityPrefixUpperBound</c> returned
 /// false for String/Id columns, causing the planner to emit a FullScanFromTableIndex.
 /// These tests prove the fix: (1) plan shape changes from full-scan to range-scan,
 /// and (2) query results are identical to the full-scan baseline.
@@ -57,7 +57,7 @@ public class TestNonUniqueStringIndexScan : BaseTest
 
         await executor.CreateTable(tableTicket);
 
-        // Non-unique index on a String column — the AF1 target.
+        // Non-unique index on a String column.
         AlterIndexTicket addCategoryIdx = new(
             databaseName: dbname,
             tableName: "products",
@@ -215,7 +215,7 @@ public class TestNonUniqueStringIndexScan : BaseTest
             ("clothing",    "shirt",       29L),
         });
 
-        // Index scan path (uses category_idx after AF1 fix).
+        // Index scan path (uses category_idx).
         List<QueryResultRow> indexRows = await RunSql(executor, database, dbname,
             "SELECT name FROM products WHERE category = 'electronics' ORDER BY name");
 
@@ -253,8 +253,8 @@ public class TestNonUniqueStringIndexScan : BaseTest
         // EXPLAIN rows have columns: stage, node, detail, estimated_rows, estimated_cost.
         string nodeText = string.Join(" ", rows.Select(r =>
         {
-            string node   = r.Row.TryGetValue("node",   out ColumnValue nv) ? nv.StrValue ?? "" : "";
-            string detail = r.Row.TryGetValue("detail", out ColumnValue dv) ? dv.StrValue ?? "" : "";
+            string node   = r.Row.TryGetValue("node",   out ColumnValue? nv) ? nv?.StrValue ?? "" : "";
+            string detail = r.Row.TryGetValue("detail", out ColumnValue? dv) ? dv?.StrValue ?? "" : "";
             return node + " " + detail;
         }));
 
@@ -288,7 +288,7 @@ public class TestNonUniqueStringIndexScan : BaseTest
                 "All returned rows must be electronics products");
     }
 
-    // ── AF1 Case 2: String equality prefix + half-open trailing range ─────────
+    // ── Case 2: String equality prefix + half-open trailing range ─────────────
 
     [Test]
     public async Task StringPrefixPlusOpenUpperRange_ReturnsOnlyMatchingRows()
@@ -349,7 +349,7 @@ public class TestNonUniqueStringIndexScan : BaseTest
         Assert.AreEqual("cable", rows[0].Row["name"].StrValue);
     }
 
-    // ── AF1 Path 2 — both sides bounded ──────────────────────────────────────
+    // ── Path 2 — both sides bounded ──────────────────────────────────────────
 
     [Test]
     public async Task StringPrefixPlusBothBoundedRange_ReturnsOnlyMatchingRows()
@@ -380,7 +380,7 @@ public class TestNonUniqueStringIndexScan : BaseTest
         Assert.Less(rows[0].Row["price"].LongValue, 500L);
     }
 
-    // ── AF1 Path 3 — String equality prefix on composite index (no range col) ─
+    // ── Path 3 — String equality prefix on composite index (no range col) ──────
 
     /// <summary>
     /// Sets up a products table whose ONLY index is the composite (category, price) index.

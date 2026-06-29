@@ -212,6 +212,9 @@ internal static class CostEstimator
         if (node is IndexRangeScanNode { BoundSource: { } rangeBoundSource })
             return stats?.GetRowCountEstimate(database, rangeBoundSource.Table);
 
+        if (node is IndexInListScanNode { BoundSource: { } inListBoundSource })
+            return stats?.GetRowCountEstimate(database, inListBoundSource.Table);
+
         return null;
     }
 
@@ -241,6 +244,8 @@ internal static class CostEstimator
             return tsBound.Table;
         if (node is IndexRangeScanNode { BoundSource: { } irsBound })
             return irsBound.Table;
+        if (node is IndexInListScanNode { BoundSource: { } ilsBound })
+            return ilsBound.Table;
         return null;
     }
 
@@ -294,21 +299,29 @@ internal static class CostEstimator
 
             case IndexInListScanNode inListNode:
             {
-                long n = inListNode.Values.Count;
                 bool isUnique = inListNode.Index.Type == CamusDB.Core.Catalogs.Models.IndexType.Unique;
-                return (n, new PlanCost
+                // Use NDV/histogram to estimate fan-out for non-unique indexes; unique stays min(n, trc).
+                long rows = CardinalityEstimator.EstimateInListRows(
+                    inListNode.ColumnName, inListNode.Values, isUnique,
+                    trc, database, resolvedTable ?? primaryTable, stats);
+                int n = inListNode.Values.Count;
+                return (rows, new PlanCost
                 {
-                    EstimatedRows        = n,
+                    EstimatedRows        = rows,
                     KvPointLookups       = isUnique ? n : 0,
-                    KvRangeScanEntries   = isUnique ? 0 : n,
-                    RowFetchesAfterIndex = n,
-                    NetworkFactor        = ComputeNetworkFactor(node, n, resolvedTable),
+                    KvRangeScanEntries   = isUnique ? 0 : rows,  // non-unique: entries scanned ≈ matched rows
+                    RowFetchesAfterIndex = rows,
+                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable),
                 });
             }
 
             case IndexRangeScanNode rangeNode:
             {
-                long rows = EstimateRangeScanRows(rangeNode, trc, stats, database, primaryTable);
+                // In join plans primaryTable is null; resolvedTable carries the leaf's own table
+                // (resolved from BoundSource by ResolveNodeTable). Pass the non-null one so
+                // EstimateRangeScanRows can use histogram/min-max/NDV stats rather than the
+                // fixed 10%/40% fallback.
+                long rows = EstimateRangeScanRows(rangeNode, trc, stats, database, resolvedTable ?? primaryTable);
                 return (rows, new PlanCost
                 {
                     EstimatedRows        = rows,
@@ -538,7 +551,7 @@ internal static class CostEstimator
     }
 
     /// <summary>
-    /// Walks the left-input subtree looking for a leaf <see cref="TableScanNode"/>.
+    /// Walks the left-input subtree looking for a leaf scan node.
     /// Passes through transparent nodes (Filter, Project, Limit, Sort).
     /// Returns null when the left input is a complex subtree (e.g. a nested join).
     /// In 3+-way joins the left input is itself a join node, so leftTable is null and the
@@ -549,8 +562,12 @@ internal static class CostEstimator
     {
         while (input is not null)
         {
-            if (input is TableScanNode { BoundSource: { } src })
-                return src.Table;
+            if (input is TableScanNode { BoundSource: { } tsSrc })
+                return tsSrc.Table;
+            if (input is IndexRangeScanNode { BoundSource: { } irsSrc })
+                return irsSrc.Table;
+            if (input is IndexInListScanNode { BoundSource: { } ilsSrc })
+                return ilsSrc.Table;
             if (input is FilterNode or ProjectNode or LimitNode or SortNode)
             {
                 input = input.Input;

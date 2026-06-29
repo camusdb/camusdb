@@ -280,7 +280,7 @@ public sealed class QueryPlanner
         {
             _cache.Put(database.Id, shapeId,
                 new PlanCacheEntry(schemaDeps,
-                    SingleTable: new SingleTableDecision(s0.Type, s0.Index?.Name),
+                    SingleTable: new SingleTableDecision(s0.Index?.Name),
                     JoinAliasOrder: null));
         }
 
@@ -379,6 +379,13 @@ public sealed class QueryPlanner
     /// <summary>
     /// Cache-hit path: re-binds the current query's predicate literals into the pre-chosen
     /// access path recorded in <paramref name="decision"/>, skipping cost enumeration entirely.
+    ///
+    /// Chosen-index replay policy: only the index name is honored from the cache entry;
+    /// the scan type (range vs full) is re-derived from the current predicates by
+    /// <see cref="IndexScanSelector.TrySelectScanForForcedIndex"/>.  A query that cached a
+    /// full-index scan on its first run will therefore replay as a predicate-bounded range scan
+    /// on any subsequent run that has matching predicates — always correct, often more selective.
+    ///
     /// Falls back to <see cref="BuildScanNode"/> if the cached index name is no longer usable
     /// (defensive; should not occur when <see cref="PlanCacheEntry.SchemaDeps"/> are valid).
     /// </summary>
@@ -625,12 +632,17 @@ public sealed class QueryPlanner
 
             int n = inList.Values.Count;
 
-            // Cost gate.
+            // Cost gate: for non-unique indexes use estimated fan-out (NDV/histogram), not n.
             if (_stats is not null)
             {
                 long? tableRowCount = _stats.GetRowCountEstimate(database, table);
-                if (tableRowCount is { } trc && trc > 0 && 2L * n >= trc)
-                    continue; // full scan is cheaper
+                if (tableRowCount is { } trc && trc > 0)
+                {
+                    long estimatedRows = CardinalityEstimator.EstimateInListRows(
+                        inList.ColumnName, inList.Values, bestIsUnique, trc, database, table, _stats);
+                    if (2L * estimatedRows >= trc)
+                        continue; // full scan is cheaper
+                }
             }
             else if (n > MaxInListSizeWithoutStats)
             {
@@ -644,14 +656,14 @@ public sealed class QueryPlanner
     }
 
     /// <summary>
-    /// Attempts to find a unique single-column IN-list that is cheaper than an already-selected
-    /// range scan. Only unique single-column indexes compete here — their cost is exactly 2·N
-    /// (N point lookups + N row fetches), bounded and predictable regardless of data distribution.
+    /// Attempts to find an IN-list scan that is cheaper than an already-selected range scan.
     ///
-    /// Cost comparison:
-    ///   • With stats: 2·N vs 2·estimated_range_rows.
-    ///   • Without stats: compete only for N ≤ <c>MaxCompetingInListSizeWithoutStats</c> (100),
-    ///     assuming N bounded point-lookups beat an unconstrained range scan.
+    /// With stats: both unique and non-unique single-column indexes compete, priced via
+    /// <see cref="CardinalityEstimator.EstimateInListRows"/> (NDV/histogram fan-out for
+    /// non-unique; min(n, trc) for unique).
+    ///
+    /// Without stats: unique single-column only (cost exactly 2·N; bounded and predictable),
+    /// compete only when N ≤ <c>MaxCompetingInListSizeWithoutStats</c>.
     /// </summary>
     private IndexInListScanNode? TryBuildCompetingInListScanNode(
         DatabaseDescriptor database,
@@ -666,43 +678,71 @@ public sealed class QueryPlanner
             if (inList.Values.Count == 0)
                 continue;
 
-            // Only compete for unique single-column indexes: cost is exactly 2·N.
-            TableIndexSchema? uniqueIndex = null;
-            foreach (TableIndexSchema index in table.Indexes.Values)
-            {
-                if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
-                    continue;
-                if (index.Type != IndexType.Unique || index.Columns.Length != 1)
-                    continue;
-                if (!string.Equals(index.Columns[0], inList.ColumnName, StringComparison.Ordinal))
-                    continue;
-                uniqueIndex = index;
-                break;
-            }
-
-            if (uniqueIndex is null)
-                continue;
-
             int n = inList.Values.Count;
 
             if (_stats is not null)
             {
+                // With stats: unique and non-unique may both compete; price via EstimateInListRows.
+                TableIndexSchema? bestIndex = null;
+                bool bestIsUnique = false;
+                foreach (TableIndexSchema index in table.Indexes.Values)
+                {
+                    if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+                        continue;
+                    if (index.Columns.Length == 0 ||
+                        !string.Equals(index.Columns[0], inList.ColumnName, StringComparison.Ordinal))
+                        continue;
+                    bool isUnique = index.Type == IndexType.Unique;
+                    if (isUnique && index.Columns.Length != 1)
+                        continue;
+                    if (bestIndex is null || (isUnique && !bestIsUnique))
+                    {
+                        bestIndex = index;
+                        bestIsUnique = isUnique;
+                    }
+                }
+
+                if (bestIndex is null)
+                    continue;
+
                 long? tableRowCount = _stats.GetRowCountEstimate(database, table);
                 if (tableRowCount is { } trc && trc > 0)
                 {
                     var tempRangeNode = (IndexRangeScanNode)ToScanNode(rangeScanStep);
                     long rangeRows = CostEstimator.EstimateRangeScanRows(tempRangeNode, trc, _stats, database, table);
-                    if (2L * n >= 2L * rangeRows)
+                    long inListRows = CardinalityEstimator.EstimateInListRows(
+                        inList.ColumnName, inList.Values, bestIsUnique, trc, database, table, _stats);
+                    if (2L * inListRows >= 2L * rangeRows)
                         continue; // range scan is cheaper or equal
                 }
-                // Stats present but no row-count estimate — fall through and compete conservatively.
-            }
-            else if (n > MaxCompetingInListSizeWithoutStats)
-            {
-                continue; // without stats, only compete for small bounded lists
-            }
+                // No row-count estimate — fall through and compete conservatively.
 
-            return new IndexInListScanNode(uniqueIndex, inList.ColumnName, inList.Values);
+                return new IndexInListScanNode(bestIndex, inList.ColumnName, inList.Values);
+            }
+            else
+            {
+                // Without stats: unique single-column only.
+                if (n > MaxCompetingInListSizeWithoutStats)
+                    continue;
+
+                TableIndexSchema? uniqueIndex = null;
+                foreach (TableIndexSchema index in table.Indexes.Values)
+                {
+                    if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+                        continue;
+                    if (index.Type != IndexType.Unique || index.Columns.Length != 1)
+                        continue;
+                    if (!string.Equals(index.Columns[0], inList.ColumnName, StringComparison.Ordinal))
+                        continue;
+                    uniqueIndex = index;
+                    break;
+                }
+
+                if (uniqueIndex is null)
+                    continue;
+
+                return new IndexInListScanNode(uniqueIndex, inList.ColumnName, inList.Values);
+            }
         }
 
         return null;

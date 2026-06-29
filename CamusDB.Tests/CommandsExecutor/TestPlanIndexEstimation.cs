@@ -27,16 +27,16 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Unit tests for index bound selection (AF4) and range-scan row estimation (AF5/AF5b).
+/// Unit tests for index bound selection and range-scan row estimation.
 ///
-/// AF4 — Range bounds must be order-independent: conflicting comparisons on the same column
-///        must produce the tightest bound regardless of conjunct walk order.
+/// Range bounds are order-independent: conflicting comparisons on the same column
+/// produce the tightest bound regardless of conjunct walk order.
 ///
-/// AF5  — Composite-index range selectivity must use the actual range column (not the equality
-///         prefix column) combined with the prefix NDV fraction.
+/// Composite-index range selectivity uses the actual range column (not the equality
+/// prefix column) combined with the prefix NDV fraction.
 ///
-/// AF5b — String/Id equality represented as a degenerate [v, v] inclusive range must be
-///         estimated via 1/NDV, not via RangeFraction(v, v) which returns ~0.
+/// String/Id equality represented as a degenerate [v, v] inclusive range is
+/// estimated via 1/NDV, not via RangeFraction(v, v) which returns ~0.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -119,10 +119,10 @@ public sealed class TestPlanIndexEstimation : BaseTest
         return (database, table, executor);
     }
 
-    // ─── AF4 tests ──────────────────────────────────────────────────────────────
+    // ─── Range-bound tightening tests ───────────────────────────────────────────
 
     [Test]
-    public async Task AF4_ConflictingLowerBounds_TighterWins_AscendingOrder()
+    public async Task ConflictingLowerBounds_TighterWins_AscendingOrder()
     {
         // "x > 20 AND x > 45": walked as [>20, >45] — second overwrote first before fix.
         // After fix: fromBound must be 45 (the tighter / higher lower bound).
@@ -139,7 +139,7 @@ public sealed class TestPlanIndexEstimation : BaseTest
     }
 
     [Test]
-    public async Task AF4_ConflictingLowerBounds_TighterWins_DescendingOrder()
+    public async Task ConflictingLowerBounds_TighterWins_DescendingOrder()
     {
         // "x > 45 AND x > 20": walked as [>45, >20] — second overwrote first before fix.
         // After fix: fromBound must still be 45.
@@ -154,7 +154,7 @@ public sealed class TestPlanIndexEstimation : BaseTest
     }
 
     [Test]
-    public async Task AF4_BothOrderings_ProduceIdenticalBounds()
+    public async Task BothOrderings_ProduceIdenticalBounds()
     {
         (_, TableDescriptor table, _) = await CreateSingleColumnTableAsync("x", ColumnType.Integer64, "x_idx");
 
@@ -173,7 +173,7 @@ public sealed class TestPlanIndexEstimation : BaseTest
     }
 
     [Test]
-    public async Task AF4_ConflictingUpperBounds_TighterWins()
+    public async Task ConflictingUpperBounds_TighterWins()
     {
         // "x < 100 AND x < 50": tighter upper is 50.
         (_, TableDescriptor table, _) = await CreateSingleColumnTableAsync("x", ColumnType.Integer64, "x_idx");
@@ -192,7 +192,7 @@ public sealed class TestPlanIndexEstimation : BaseTest
     }
 
     [Test]
-    public async Task AF4_ExclusiveBeatsInclusiveForSameValue_LowerBound()
+    public async Task ExclusiveBeatsInclusiveForSameValue_LowerBound()
     {
         // "x > 45" (exclusive) is tighter than "x >= 45" (inclusive) for the same value.
         (_, TableDescriptor table, _) = await CreateSingleColumnTableAsync("x", ColumnType.Integer64, "x_idx");
@@ -208,10 +208,10 @@ public sealed class TestPlanIndexEstimation : BaseTest
         Assert.IsFalse(step2!.Value.FromInclusive, "exclusive > must beat inclusive >= for the same value (order 2)");
     }
 
-    // ─── AF5 tests ──────────────────────────────────────────────────────────────
+    // ─── Composite-index range selectivity tests ────────────────────────────────
 
     [Test]
-    public async Task AF5_CompositeIndex_RangeSelectivityUsesRangeColumn()
+    public async Task CompositeIndex_RangeSelectivityUsesRangeColumn()
     {
         // Index (tenant_id, created_at), query "WHERE tenant_id = 5 AND created_at > 1000".
         // The step emits FromBound = [5, 1000], ToBound = [6] (prefix upper).
@@ -262,13 +262,13 @@ public sealed class TestPlanIndexEstimation : BaseTest
 
         // Prefix sel = 1/10 = 10%; range sel = (2000-1000)/(2000-0) = 50%.
         // Expected ≈ 1000 * 0.10 * 0.50 = 50 rows.
-        // Without AF5 fix: 1000 * (6-5)/(100-1) ≈ 10 rows.
-        Assert.Greater(rows, 20L, "AF5 composite-index estimate must include both prefix and range selectivity");
-        Assert.Less(rows, 100L,   "AF5 composite-index estimate must not be close to full-scan cardinality");
+        // Without the fix: 1000 * (6-5)/(100-1) ≈ 10 rows.
+        Assert.Greater(rows, 20L, "composite-index estimate must include both prefix and range selectivity");
+        Assert.Less(rows, 100L,   "composite-index estimate must not be close to full-scan cardinality");
     }
 
     [Test]
-    public async Task AF5_CompositeIndex_UpperOpenRange_SymmetricEstimate()
+    public async Task CompositeIndex_UpperOpenRange_SymmetricEstimate()
     {
         // Regression for the upper-open composite case: "tenant_id = 5 AND created_at < 1000".
         // IndexScanSelector emits FromBound=null, ToBound=[5, 1000] (toLen=2).
@@ -340,13 +340,13 @@ public sealed class TestPlanIndexEstimation : BaseTest
             $"Upper-open ({upperOpenRows}) and lower-open ({lowerOpenRows}) estimates must be in the same ballpark");
     }
 
-    // ─── AF5b tests ─────────────────────────────────────────────────────────────
+    // ─── Degenerate-range NDV estimation tests ──────────────────────────────────
 
     [Test]
-    public async Task AF5b_StringEqualityDegenerate_UsesNdv()
+    public async Task StringEqualityDegenerate_UsesNdv()
     {
         // String equality "category = 'electronics'" on a non-unique index is represented as
-        // an inclusive [v, v] range (from AF1). RangeFraction(v, v) ≈ 0 → ~1 row without fix.
+        // an inclusive [v, v] range. RangeFraction(v, v) ≈ 0 → ~1 row without the NDV fix.
         // After fix: estimate = tableRows / NDV = 1000 / 10 = 100 rows.
 
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
@@ -377,7 +377,7 @@ public sealed class TestPlanIndexEstimation : BaseTest
 
         TableIndexSchema idx = table.Indexes["category_idx"];
 
-        // Degenerate [v, v] inclusive range — this is what AF1 emits for String equality.
+        // Degenerate [v, v] inclusive range — used for String equality.
         IndexRangeScanNode node = new(
             idx,
             fromBound:     new CompositeColumnValue([new(ColumnType.String, "electronics")]),
@@ -395,7 +395,7 @@ public sealed class TestPlanIndexEstimation : BaseTest
     }
 
     [Test]
-    public async Task AF5b_WithoutNdv_FallsBackToHeuristic()
+    public async Task DegenerateRange_WithoutNdv_FallsBackToHeuristic()
     {
         // When no NDV is available for the String column, the estimate must fall back to the
         // fixed heuristic (BothBoundsSelectivity = 10%) rather than returning ~1.

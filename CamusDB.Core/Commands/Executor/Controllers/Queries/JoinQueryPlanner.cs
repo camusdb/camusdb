@@ -610,9 +610,9 @@ internal sealed class JoinQueryPlanner
     /// the left subtree) we fall back to the engine default to avoid a recursive annotation
     /// that would mutate the partially-built tree.
     /// </summary>
-    // Internal for direct unit testing of the IndexRangeScanNode/IndexLookupNode arms, which
-    // BuildJoinTree does not currently produce in a join subtree (join leaves are TableScanNode)
-    // — they are defensive and otherwise unreachable through GetPlan.
+    // Internal for unit testing. With CostBasedAccessPathEnabled=true, BuildJoinTree emits
+    // IndexRangeScanNode join leaves when a selective index is available; the IndexRangeScanNode
+    // arm is therefore reachable through GetPlan in that mode.
     internal static long EstimatePhysicalNodeRows(
         PhysicalPlanNode node,
         DatabaseDescriptor database,
@@ -653,8 +653,8 @@ internal sealed class JoinQueryPlanner
             }
 
             case IndexRangeScanNode:
-                // Defensive: IndexRangeScanNode without BoundSource is a single-table leaf —
-                // BuildJoinTree does not emit these; use the default rather than recursing.
+                // Defensive: IndexRangeScanNode without BoundSource is a single-table leaf;
+                // use the default rather than recursing.
                 return CostEstimator.DefaultTableRowCount;
 
             default:
@@ -716,54 +716,92 @@ internal sealed class JoinQueryPlanner
         if (analysis.IndexableComparisons.Count == 0 && analysis.InListComparisons.Count == 0)
             return null;
 
+        // ── Range-scan path ───────────────────────────────────────────────────
         QueryPlanStep? step = IndexScanSelector.TrySelectScan(boundSource.Table, analysis);
-        if (step is null || step.Value.Type == QueryPlanStepType.FullScanFromTableIndex)
-            return null;
 
-        // Breakeven veto: fall back to full scan when the range scan touches too many rows.
-        if (step.Value.Type == QueryPlanStepType.RangeScanFromIndex
-            && (step.Value.FromBound is not null || step.Value.ToBound is not null))
+        if (step is not null && step.Value.Type != QueryPlanStepType.FullScanFromTableIndex)
         {
-            long? tableRows = stats.GetRowCountEstimate(database, boundSource.Table);
-            if (tableRows is { } trc && trc > 0)
+            if (step.Value.Type == QueryPlanStepType.RangeScanFromIndex
+                && (step.Value.FromBound is not null || step.Value.ToBound is not null))
             {
-                var candidate = (IndexRangeScanNode)QueryPlanner.ToScanNode(step.Value);
-                if (CostEstimator.ShouldPreferFullScan(candidate, trc, stats, database, boundSource.Table))
-                    return null;
+                long? tableRows = stats.GetRowCountEstimate(database, boundSource.Table);
+                bool breakeven = tableRows is { } trc && trc > 0
+                    && CostEstimator.ShouldPreferFullScan(
+                        (IndexRangeScanNode)QueryPlanner.ToScanNode(step.Value),
+                        trc, stats, database, boundSource.Table);
+
+                if (!breakeven)
+                {
+                    PhysicalPlanNode indexNode = QueryPlanner.ToScanNode(step.Value);
+                    NodeAst? residual = PredicateAnalyzer.BuildExecutionFilter(
+                        analysis, step, boundSource.Table, null);
+
+                    if (indexNode is IndexRangeScanNode rsn)
+                    {
+                        indexNode = new IndexRangeScanNode(
+                            rsn.Index, rsn.FromBound, rsn.FromInclusive, rsn.ToBound, rsn.ToInclusive)
+                        {
+                            BoundSource = boundSource,
+                            ExecutionFilter = residual,
+                        };
+                        indexNode.Distribution = PlacementReader.Instance.GetIndexScanDistribution(rsn.Index);
+                        return indexNode;
+                    }
+                }
             }
+            // Unique point-lookup (QueryFromIndex): unusual join-leaf shape; skip.
         }
 
-        PhysicalPlanNode indexNode = QueryPlanner.ToScanNode(step.Value);
-
-        // Residual conjuncts not absorbed by the index step become the ExecutionFilter.
-        // These ASTs still use qualified names (e.g. "o.status") — the executor qualifies
-        // rows before evaluation, so qualified residual filters are correct.
-        NodeAst? residual = PredicateAnalyzer.BuildExecutionFilter(analysis, step, boundSource.Table, null);
-
-        // Wire BoundSource and residual filter onto the node.
-        switch (indexNode)
+        // ── IN-list path ──────────────────────────────────────────────────────
+        // Tried when the range-scan path failed, produced no usable step, or was vetoed.
+        if (analysis.InListComparisons.Count > 0)
         {
-            case IndexRangeScanNode rsn:
-                indexNode = new IndexRangeScanNode(
-                    rsn.Index, rsn.FromBound, rsn.FromInclusive, rsn.ToBound, rsn.ToInclusive)
+            long trc = stats.GetRowCountEstimate(database, boundSource.Table)
+                       ?? CostEstimator.DefaultTableRowCount;
+
+            foreach (AnalyzedInList inList in analysis.InListComparisons)
+            {
+                if (inList.Values.Count == 0) continue;
+
+                TableIndexSchema? bestIndex = null;
+                bool bestIsUnique = false;
+                foreach (TableIndexSchema idx in boundSource.Table.Indexes.Values)
+                {
+                    if (!SchemaElementStateRules.IsReadableIndex(boundSource.Table.Schema, idx)) continue;
+                    if (idx.Columns.Length == 0 ||
+                        !string.Equals(idx.Columns[0], inList.ColumnName, StringComparison.Ordinal))
+                        continue;
+                    bool isUnique = idx.Type == IndexType.Unique;
+                    if (isUnique && idx.Columns.Length != 1) continue;
+                    if (bestIndex is null || (isUnique && !bestIsUnique))
+                    {
+                        bestIndex = idx;
+                        bestIsUnique = isUnique;
+                    }
+                }
+
+                if (bestIndex is null) continue;
+
+                long inListRows = CardinalityEstimator.EstimateInListRows(
+                    inList.ColumnName, inList.Values, bestIsUnique,
+                    trc, database, boundSource.Table, stats);
+                long breakeven = (long)Math.Ceiling(trc * CostEstimator.BreakevenFraction);
+                if (inListRows >= breakeven) continue;
+
+                NodeAst? residual = PredicateAnalyzer.BuildExecutionFilter(
+                    analysis, scanStep: null, boundSource.Table, inList.Conjunct);
+
+                var inListNode = new IndexInListScanNode(bestIndex, inList.ColumnName, inList.Values)
                 {
                     BoundSource = boundSource,
                     ExecutionFilter = residual,
                 };
-                indexNode.Distribution = PlacementReader.Instance.GetIndexScanDistribution(rsn.Index);
-                break;
-
-            case IndexLookupNode:
-                // Unique point lookup in a join leaf: fall back to full scan for now.
-                // (The executor's INLJ path already handles indexed right sides; the left
-                // side as a lookup node is unusual and not worth a separate path.)
-                return null;
-
-            default:
-                return null;
+                inListNode.Distribution = PlacementReader.GetLookupDistribution();
+                return inListNode;
+            }
         }
 
-        return indexNode;
+        return null;
     }
 
     private static TableDescriptor ResolvePlanTable(BoundSelectQuery bound)

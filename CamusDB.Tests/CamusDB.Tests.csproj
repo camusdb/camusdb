@@ -7,6 +7,7 @@
     <IsPackable>false</IsPackable>
     <Version>0.1.1</Version>
     <LangVersion>latest</LangVersion>
+    <NoWarn>$(NoWarn);NU1903</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

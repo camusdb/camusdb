@@ -27,7 +27,7 @@ namespace CamusDB.MicroBenchmarks;
 ///   - base benchmarks use a single-source (bare-key) resolver — the common single-table path
 ///   - _Qualified variants use a two-source (alias.column-key) resolver — the join path,
 ///     which exercises TrySplitQualified + FormatQualifiedKey (string allocation) per
-///     identifier. These are the shapes Task 4 targets for elimination.
+///     identifier.
 /// </summary>
 [SimpleJob]
 [MemoryDiagnoser]
@@ -63,7 +63,7 @@ public class EvalExprBenchmarks
 
     // Two-source resolver: UsesQualifiedRowKeys() == true → splits the identifier,
     // checks aliasToSource, then formats "bench.col" (allocates a string). This is
-    // the join path that Task 4 targets.
+    // the join path.
     private QueryRowNameResolver _resolverQualified = null!;
 
     [GlobalSetup]
@@ -189,7 +189,7 @@ public class EvalExprBenchmarks
     /// <summary>
     /// Join resolver: ResolveUnqualifiedColumn resolves to "bench", then
     /// FormatQualifiedKey allocates "bench.category" each call — the overhead
-    /// Task 4 (prepared identifier binding) would eliminate.
+    /// Prepared identifier binding would eliminate this overhead.
     /// </summary>
     [Benchmark(Description = "group key: category — qualified resolver (join path)")]
     public ColumnValue GroupByKey_Qualified() =>

@@ -476,8 +476,8 @@ public class TestQueryPlanner
     public void PlanUsesIndexRangeScanForNonUniqueStringEquality()
     {
         // Previously fell back to a full table scan because SupportsExactEqualityPrefixUpperBound
-        // returned false for String columns.  After AF1 the planner uses an inclusive [v, v] range
-        // scan — the same strategy the IN-list path already used — so the index is exploited.
+        // returned false for String columns. The planner uses an inclusive [v, v] range scan —
+        // the same strategy the IN-list path uses — so the index is exploited.
         QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE name = 'bob'");
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
@@ -903,15 +903,14 @@ public class TestQueryPlanner
         Assert.IsNull(cols, "EXISTS subquery WHERE should trigger full-decode fallback");
     }
 
-    // ── AF1: non-unique String/Id equality index scans ────────────────────────
+    // ── Non-unique String/Id equality index scans ─────────────────────────────
 
     [Test]
     public void StringEqualityOnNonUniqueIndexUsesRangeScan()
     {
         // name_idx is a Multi (non-unique) index on the String column `name`.
-        // Before AF1 fix: SupportsExactEqualityPrefixUpperBound returned false for String,
-        // so the planner fell through to a FullScanFromTableIndex.
-        // After fix: emits RangeScanFromIndex with inclusive [v, v] bounds.
+        // SupportsExactEqualityPrefixUpperBound returns true for String, so the planner
+        // emits RangeScanFromIndex with inclusive [v, v] bounds rather than FullScanFromTableIndex.
         QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE name = 'alice'");
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
@@ -954,7 +953,7 @@ public class TestQueryPlanner
     [Test]
     public void IdEqualityOnUniqueIndexStillUsesPointLookup()
     {
-        // AF1 only changes the non-unique path; unique Id lookups must remain QueryFromIndex.
+        // Unique Id lookups must remain QueryFromIndex; the range-scan path is for non-unique only.
         QueryTicket ticket = CreateQueryTicketFromSelectSql(
             "SELECT * FROM robots WHERE id = @id",
             new() { { "@id", new ColumnValue(ColumnType.Id, QueryPlannerTestContext.SampleRowId) } });
@@ -965,7 +964,7 @@ public class TestQueryPlanner
         Assert.IsInstanceOf<IndexLookupNode>(ScanRoot(plan));
     }
 
-    // ── AF1 Case 2: String equality prefix + half-open trailing range ─────────
+    // ── Case 2: String equality prefix + half-open trailing range ─────────────
 
     [Test]
     public void StringPrefixPlusOpenUpperRange_BoundsToPrefix()
@@ -1026,7 +1025,7 @@ public class TestQueryPlanner
         Assert.AreEqual(2020L, step.ToBound!.Values[1].LongValue);
     }
 
-    // ── AF1 Path 3 — String equality prefix on composite index (no range col) ─
+    // ── Path 3 — String equality prefix on composite index (no range col) ──────
 
     [Test]
     public void StringEqualityPrefix_CompositeIndex_EmitsInclusiveRangeScanStep()

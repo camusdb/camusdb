@@ -287,6 +287,53 @@ internal static class CardinalityEstimator
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Internal helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Estimates output rows for an IN-list index scan.
+    /// <list type="bullet">
+    ///   <item>Unique index: at most one match per value → <c>min(n, trc)</c>.</item>
+    ///   <item>Non-unique with stats: per-value equality selectivity summed across the list
+    ///     (via histogram / NDV) × trc.</item>
+    ///   <item>Non-unique without stats: conservative heuristic
+    ///     (<see cref="FallbackSelectivity"/> per value × trc).</item>
+    /// </list>
+    /// Always returns at least 1 for a non-empty list.
+    /// </summary>
+    internal static long EstimateInListRows(
+        string columnName,
+        IReadOnlyList<ColumnValue> values,
+        bool isUnique,
+        long trc,
+        DatabaseDescriptor database,
+        TableDescriptor? table,
+        StatisticsManager? stats)
+    {
+        int n = values.Count;
+        if (n == 0) return 0L;
+
+        if (isUnique)
+            return Math.Min(n, trc);
+
+        if (stats is not null && table is not null)
+        {
+            ColumnHistogram? hist = stats.GetColumnHistogram(database, table, columnName);
+            long? ndv = stats.GetColumnNdv(database, table, columnName);
+
+            double total = 0.0;
+            foreach (ColumnValue val in values)
+                total += EqualitySelectivity(TryGetBound(val), hist, ndv);
+
+            return Math.Max(1L, (long)(trc * Math.Min(1.0, total)));
+        }
+
+        // Conservative no-stats heuristic: FallbackSelectivity per value.
+        double heuristicSel = Math.Min(1.0, n * FallbackSelectivity);
+        return Math.Max(1L, (long)(trc * heuristicSel));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Private helpers
     // ─────────────────────────────────────────────────────────────────────────
 

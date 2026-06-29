@@ -131,6 +131,14 @@ internal sealed class QueryJoinExecutor
                 yield break;
             }
 
+            case IndexInListScanNode { BoundSource: not null } inListLeaf:
+            {
+                await foreach (QueryResultRow row in ScanBoundTableByInList(inListLeaf, plan).ConfigureAwait(false))
+                    yield return row;
+
+                yield break;
+            }
+
             case TableScanNode { BoundSource: not null, Source: TableScanSource.ForcedIndex, Index: not null } indexScanNode:
             {
                 await foreach (QueryResultRow row in ScanBoundTableByIndex(
@@ -350,6 +358,9 @@ internal sealed class QueryJoinExecutor
             case IndexRangeScanNode { BoundSource: not null } rangeScanNode:
                 return rangeScanNode.BoundSource.Alias;
 
+            case IndexInListScanNode { BoundSource: not null } inListScanNode:
+                return inListScanNode.BoundSource.Alias;
+
             case DerivedTableScanNode { BoundSource: not null } derivedScanNode:
                 return derivedScanNode.BoundSource.Alias;
 
@@ -527,6 +538,121 @@ internal sealed class QueryJoinExecutor
 
             yield return new QueryResultRow(rowId, row);
         }
+    }
+
+    /// <summary>
+    /// Executes an IN-list index scan for a join leaf node.
+    /// Unique indexes perform one <c>LookupUnique</c> per value; non-unique indexes perform one
+    /// equality range scan per value. Duplicate row IDs are suppressed across all values.
+    /// The residual <see cref="IndexInListScanNode.ExecutionFilter"/> (if any) is applied after
+    /// each row is fetched, using the alias-qualified row.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> ScanBoundTableByInList(
+        IndexInListScanNode inListNode,
+        QueryPlan plan,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        BoundTableSource source = inListNode.BoundSource!;
+        TableDescriptor table = source.Table;
+        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
+        ColumnType[] keyTypes = GetIndexColumnTypes(table, inListNode.Index);
+        IReadOnlySet<string>? required = GetRequiredColumnsForAlias(plan, source.Alias);
+        bool isUnique = inListNode.Index.Type == IndexType.Unique;
+        HashSet<ObjectIdValue> seen = new();
+
+        foreach (ColumnValue value in inListNode.Values)
+        {
+            CompositeColumnValue lookupKey = new(new[] { value });
+
+            if (isUnique)
+            {
+                ObjectIdValue? rowId = await table.Store.LookupUnique(
+                    plan.Ticket.TxnState, inListNode.Index.Name, lookupKey).ConfigureAwait(false);
+
+                if (rowId is null || !seen.Add(rowId.Value))
+                    continue;
+
+                byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId.Value).ConfigureAwait(false);
+                if (data is null || data.Length == 0)
+                    continue;
+
+                Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                    table.Schema, txId, rowId.Value, data,
+                    required,
+                    GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
+
+                if (inListNode.ExecutionFilter is not null)
+                {
+                    Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
+                    if (!await queryFilterer.MeetWhereAsync(
+                            inListNode.ExecutionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
+                        continue;
+                }
+
+                yield return new QueryResultRow(rowId.Value, row);
+            }
+            else
+            {
+                // Non-unique equality scan: use successor as exclusive upper bound when available,
+                // else inclusive exact-match [v, v].
+                CompositeColumnValue? upperBound = BuildInListScanUpperBound(table, inListNode.Index, lookupKey);
+                CompositeColumnValue toBound = upperBound ?? lookupKey;
+                bool toInclusive = upperBound is null;
+
+                await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+                    plan.Ticket.TxnState, inListNode.Index.Name, keyTypes,
+                    lookupKey, toBound, unique: false,
+                    fromInclusive: true, toInclusive: toInclusive,
+                    maxRows: null).ConfigureAwait(false))
+                {
+                    if (!seen.Add(rowId))
+                        continue;
+
+                    byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
+                    if (data is null || data.Length == 0)
+                        continue;
+
+                    Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                        table.Schema, txId, rowId, data,
+                        required,
+                        GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
+
+                    if (inListNode.ExecutionFilter is not null)
+                    {
+                        Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
+                        if (!await queryFilterer.MeetWhereAsync(
+                                inListNode.ExecutionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
+                            continue;
+                    }
+
+                    yield return new QueryResultRow(rowId, row);
+                }
+            }
+        }
+    }
+
+    private static CompositeColumnValue? BuildInListScanUpperBound(
+        TableDescriptor table,
+        TableIndexSchema index,
+        CompositeColumnValue lookupKey)
+    {
+        if (lookupKey.Values.Length == 0)
+            return null;
+
+        ColumnValue[] upperValues = new ColumnValue[lookupKey.Values.Length];
+        Array.Copy(lookupKey.Values, upperValues, lookupKey.Values.Length - 1);
+
+        string lastColumn = index.Columns[lookupKey.Values.Length - 1];
+        TableColumnSchema? column = table.Schema.Columns?.Find(c => c.Name == lastColumn);
+        ColumnType columnType = column?.Type ?? ColumnType.String;
+        ColumnValue lastValue = lookupKey.Values[^1];
+        ColumnValue? nextValue = IndexScanSelector.NextSortValue(columnType, lastValue);
+
+        if (nextValue is null)
+            return null;
+
+        upperValues[^1] = nextValue;
+        return new CompositeColumnValue(upperValues);
     }
 
     private async IAsyncEnumerable<QueryResultRow> ScanDerivedTable(

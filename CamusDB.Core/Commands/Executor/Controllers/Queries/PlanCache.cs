@@ -171,10 +171,16 @@ internal sealed record PlanCacheEntry(
 
 /// <summary>
 /// Cached access-path decision for a single-table query.
-/// <see cref="IndexName"/> is null when the chosen path is a full table scan.
-/// Literal values (lookup keys, range bounds) are <em>not</em> stored; callers re-bind them
-/// from the current query's predicates using <see cref="IndexScanSelector.TrySelectScanForForcedIndex"/>.
+///
+/// Policy: <strong>chosen-index replay</strong>.
+/// Only <see cref="IndexName"/> is stored — null means full primary-row scan.
+/// The scan type (range, lookup, full) is intentionally <em>not</em> cached; instead
+/// <see cref="IndexScanSelector.TrySelectScanForForcedIndex"/> re-derives it from the
+/// current query's predicates on each cache hit.  This lets a forced-index or order-only
+/// scan on the first query replay as a more selective range scan on a subsequent query that
+/// has matching predicates — without ever producing wrong results.
+///
+/// Literal values (lookup keys, range bounds) are never stored; they are always re-bound
+/// from the current query at replay time.
 /// </summary>
-internal sealed record SingleTableDecision(
-    QueryPlanStepType ScanType,
-    string? IndexName);
+internal sealed record SingleTableDecision(string? IndexName);
