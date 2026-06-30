@@ -18,6 +18,7 @@ using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.Diagnostics;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
@@ -219,7 +220,11 @@ public sealed class RowUpdater
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
-        state.RowsToUpdate = await cursor.ToListAsync();
+        SpillableRowList rowList = new();
+        await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
+            await rowList.AddAsync(row).ConfigureAwait(false);
+        await rowList.SealAsync().ConfigureAwait(false);
+        state.RowsToUpdate = rowList;
 
         return FluxAction.Continue;
     }
@@ -343,7 +348,7 @@ public sealed class RowUpdater
         UpdateTicket ticket = state.Ticket;
         KvTransaction tx = ticket.TxnState;
 
-        foreach (QueryResultRow queryRow in state.RowsToUpdate)
+        await foreach (QueryResultRow queryRow in state.RowsToUpdate.EnumerateAsync().ConfigureAwait(false))
         {
             ObjectIdValue rowId = queryRow.RowId;
             Dictionary<string, ColumnValue> oldRow = await LoadWritableRow(state.Database, table, tx, rowId).ConfigureAwait(false);
@@ -452,8 +457,16 @@ public sealed class RowUpdater
         machine.When(UpdateFluxSteps.LocateTupleToUpdate, LocateTuplesToUpdate);
         machine.When(UpdateFluxSteps.UpdateRowsAndIndexes, UpdateRowsAndIndexes);
 
-        while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
+        try
+        {
+            while (!machine.IsAborted)
+                await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (state.RowsToUpdate is not null)
+                await state.RowsToUpdate.DisposeAsync().ConfigureAwait(false);
+        }
 
         TimeSpan timeTaken = timer.GetElapsedTime();
 

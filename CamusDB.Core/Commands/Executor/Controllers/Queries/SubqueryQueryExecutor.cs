@@ -19,6 +19,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
 /// Shared uncorrelated subquery execution for scalar and IN subqueries.
+///
+/// <para>
+/// Both entry points return an <see cref="IAsyncEnumerable{T}"/> rather than a materialised
+/// <c>List</c>. Callers stream the rows and extract only what they need (e.g., a single
+/// <see cref="ColumnValue"/> per row for IN lists, the first row for scalar subqueries, or
+/// a row-presence check for EXISTS). This eliminates the <c>ToListAsync</c> unbounded
+/// in-memory buffer at the subquery level.
+/// </para>
 /// </summary>
 internal sealed class SubqueryQueryExecutor
 {
@@ -34,7 +42,11 @@ internal sealed class SubqueryQueryExecutor
         queryJoinExecutor = new QueryJoinExecutor(queryExecutor);
     }
 
-    public Task<List<QueryResultRow>> ExecuteSelectAsync(
+    /// <summary>
+    /// Executes a single-column subquery and returns a streaming cursor over the result rows.
+    /// The caller is responsible for consuming the cursor entirely when needed.
+    /// </summary>
+    public IAsyncEnumerable<QueryResultRow> ExecuteSelectAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,
         KvTransaction txnState,
@@ -42,21 +54,23 @@ internal sealed class SubqueryQueryExecutor
         ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: true);
 
     /// <summary>
-    /// Executes a subquery for EXISTS semantics: projection shape is ignored; only row presence matters.
+    /// Executes a subquery for EXISTS semantics and returns a streaming cursor.
+    /// Projection shape is not validated; callers check whether any row is present.
     /// </summary>
-    public Task<List<QueryResultRow>> ExecuteExistsSelectAsync(
+    public IAsyncEnumerable<QueryResultRow> ExecuteExistsSelectAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? parameters) =>
         ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: false);
 
-    private async Task<List<QueryResultRow>> ExecuteSelectInternalAsync(
+    private async IAsyncEnumerable<QueryResultRow> ExecuteSelectInternalAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? parameters,
-        bool requireSingleColumn)
+        bool requireSingleColumn,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         if (selectAst.nodeType != NodeType.Select)
         {
@@ -84,7 +98,8 @@ internal sealed class SubqueryQueryExecutor
             ? queryJoinExecutor.ExecuteJoinQuery(database, bound, queryTicket)
             : queryExecutor.Query(database, bound.PrimaryTable, queryTicket);
 
-        return await cursor.ToListAsync().ConfigureAwait(false);
+        await foreach (QueryResultRow row in cursor.WithCancellation(ct).ConfigureAwait(false))
+            yield return row;
     }
 
     internal static void ValidateSingleColumnProjection(SelectQuery subquery)

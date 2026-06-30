@@ -39,23 +39,26 @@ internal sealed class ScalarSubqueryExecutor
             ? selectQueryCreator.CreateSelectQuery(selectAst)
             : throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Scalar subquery must be a SELECT statement");
 
-        List<QueryResultRow> rows = await queryExecutor.ExecuteSelectAsync(
-            database,
-            selectAst,
-            txnState,
-            parameters).ConfigureAwait(false);
+        QueryResultRow? first = null;
+        int count = 0;
 
-        if (rows.Count == 0)
-            return ColumnValue.Null;
-
-        if (rows.Count > 1 && !HasLimitOne(subquery, parameters))
+        await foreach (QueryResultRow row in queryExecutor.ExecuteSelectAsync(
+            database, selectAst, txnState, parameters).ConfigureAwait(false))
         {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Scalar subquery returned more than one row");
+            count++;
+            first ??= row;
+            if (count > 1 && !HasLimitOne(subquery, parameters))
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Scalar subquery returned more than one row");
+            }
         }
 
-        return SubqueryQueryExecutor.ExtractSingleColumnValue(rows[0]);
+        if (first is null)
+            return ColumnValue.Null;
+
+        return SubqueryQueryExecutor.ExtractSingleColumnValue(first.Value);
     }
 
     private static bool HasLimitOne(SelectQuery subquery, Dictionary<string, ColumnValue>? parameters)

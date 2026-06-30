@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -15,13 +16,27 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <summary>
 /// Removes duplicate output tuples for <c>SELECT DISTINCT</c>.
 /// Comparison uses SQL DISTINCT null semantics: two NULL values are equal.
+///
+/// <b>Flag-off (default):</b> deduplication via a <see cref="HashSet{T}"/> of
+/// <see cref="DistinctRowKey"/> — O(distinct-count) memory.
+///
+/// <b>Flag-on (<see cref="CamusDBConfig.SpillEnabled"/> = <c>true</c>):</b> rows are sorted
+/// by all projected columns using the external merge sort (<see cref="QuerySorter.SortAsync"/>),
+/// which spills sorted runs to disk when the input exceeds
+/// <see cref="CamusDBConfig.SpillEffectiveThreshold"/>. After sorting, equal rows are adjacent
+/// and are removed by the O(1)-memory <see cref="StreamingDistinctRows"/> streaming dedup.
 /// </summary>
 internal sealed class QueryDistincter
 {
     internal IAsyncEnumerable<QueryResultRow> DistinctResultset(
         QueryTicket ticket,
-        IAsyncEnumerable<QueryResultRow> dataCursor) =>
-        DistinctRows(dataCursor);
+        IAsyncEnumerable<QueryResultRow> dataCursor)
+    {
+        if (!CamusDBConfig.SpillEnabled)
+            return DistinctRows(dataCursor);
+
+        return DistinctWithSpill(dataCursor);
+    }
 
     /// <summary>
     /// Streaming deduplication for R12: compares each row to the previously emitted row.
@@ -66,6 +81,56 @@ internal sealed class QueryDistincter
                 lastRow = row.Row;
                 yield return row;
             }
+        }
+    }
+
+    /// <summary>
+    /// Sorts <paramref name="dataCursor"/> by all projected columns using the external merge sort,
+    /// then streams the sorted sequence through <see cref="StreamingRows"/> which removes
+    /// adjacent equal rows in O(1) memory. The sort order places NULL before any non-null value
+    /// so that two NULLs are adjacent — consistent with the SQL DISTINCT equality rule
+    /// (<c>NULL = NULL</c> for dedup purposes) enforced by <see cref="DistinctValuesEqual"/>.
+    /// </summary>
+    private static IAsyncEnumerable<QueryResultRow> DistinctWithSpill(
+        IAsyncEnumerable<QueryResultRow> dataCursor,
+        CancellationToken ct = default)
+    {
+        IComparer<QueryResultRow> comparer = new DistinctRowComparer();
+        return StreamingRows(QuerySorter.SortAsync(dataCursor, comparer, ct));
+    }
+
+    /// <summary>
+    /// Compares two <see cref="QueryResultRow"/> values by all their columns in alphabetical
+    /// column-name order. NULL sorts before any non-null value; non-null values compare via
+    /// <see cref="ColumnValue.CompareTo"/>. This ordering guarantees that two rows are adjacent
+    /// after sorting if and only if they would be considered equal by
+    /// <see cref="DistinctValuesEqual"/>, so streaming dedup correctly deduplicates them.
+    ///
+    /// Column names are hoisted on the first call and reused for subsequent comparisons because
+    /// the schema is fixed across all rows produced by a single query.
+    /// </summary>
+    private sealed class DistinctRowComparer : IComparer<QueryResultRow>
+    {
+        private string[]? _sortedNames;
+
+        public int Compare(QueryResultRow x, QueryResultRow y)
+        {
+            _sortedNames ??= x.Row.Keys.OrderBy(static n => n, StringComparer.Ordinal).ToArray();
+
+            foreach (string name in _sortedNames)
+            {
+                ColumnValue xv = x.Row.TryGetValue(name, out ColumnValue? xval) ? xval : ColumnValue.Null;
+                ColumnValue yv = y.Row.TryGetValue(name, out ColumnValue? yval) ? yval : ColumnValue.Null;
+
+                if (xv.Type == ColumnType.Null && yv.Type == ColumnType.Null) continue;
+                if (xv.Type == ColumnType.Null) return -1;
+                if (yv.Type == ColumnType.Null) return 1;
+
+                int cmp = xv.CompareTo(yv);
+                if (cmp != 0) return cmp;
+            }
+
+            return 0;
         }
     }
 

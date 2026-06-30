@@ -43,13 +43,13 @@ internal sealed class ExistsSubqueryExecutor
                 "Uncorrelated EXISTS execution requires a subquery executor");
         }
 
-        List<QueryResultRow> rows = await queryExecutor.ExecuteExistsSelectAsync(
-            database,
-            selectAst,
-            txnState,
-            parameters).ConfigureAwait(false);
+        await foreach (QueryResultRow _ in queryExecutor.ExecuteExistsSelectAsync(
+            database, selectAst, txnState, parameters).ConfigureAwait(false))
+        {
+            return true;
+        }
 
-        return rows.Count > 0;
+        return false;
     }
 
     public async Task<bool> ExecuteCorrelatedAsync(

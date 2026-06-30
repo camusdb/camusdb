@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -77,13 +78,19 @@ public class TestQuerySorter
     {
         QueryTicket ticket = MakeTicket(new QueryOrderBy("missing", OrderType.Ascending));
 
+        // Two rows are required: List.Sort on a single element makes zero comparisons,
+        // so GetSortValue is never called and the missing column goes undetected on any path.
+        // List.Sort wraps comparer exceptions in InvalidOperationException; unwrap to get the root cause.
         QuerySorter sorter = new();
-        List<QueryResultRow> rows = [Row(("name", "robot-a"))];
+        List<QueryResultRow> rows = [Row(("name", "robot-a")), Row(("name", "robot-b"))];
 
-        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+        // List.Sort wraps comparer exceptions in InvalidOperationException; unwrap the inner cause.
+        Exception outer = Assert.CatchAsync(
             async () => await sorter.SortResultset(ticket, ToAsync(rows)).ToListAsync())!;
 
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInternalOperation, exception.Code);
+        CamusDBException? exception = outer as CamusDBException ?? outer.InnerException as CamusDBException;
+        Assert.IsNotNull(exception, $"Expected CamusDBException (possibly wrapped); got: {outer}");
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInternalOperation, exception!.Code);
         StringAssert.Contains("missing", exception.Message);
     }
 

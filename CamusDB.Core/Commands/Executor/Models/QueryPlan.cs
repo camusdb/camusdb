@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -53,9 +54,26 @@ public sealed class QueryPlan
 
 	public IAsyncEnumerable<QueryResultRow>? DataCursor { get; set; }
 
-    /// <summary>Cached materializations for derived table scans within a join query.</summary>
-    internal Dictionary<BoundDerivedTableSource, List<Dictionary<string, ColumnValue>>> DerivedMaterializations { get; } =
+    /// <summary>
+    /// Cached materializations for derived table scans within a join query.
+    /// Each <see cref="SpillableRowList"/> may hold rows in memory or overflow to a spill
+    /// file when the threshold is exceeded. All lists must be disposed by calling
+    /// <see cref="DisposeMaterializationsAsync"/> after the join cursor is fully consumed.
+    /// </summary>
+    internal Dictionary<BoundDerivedTableSource, SpillableRowList> DerivedMaterializations { get; } =
         new();
+
+    /// <summary>
+    /// Disposes all <see cref="SpillableRowList"/> entries in <see cref="DerivedMaterializations"/>,
+    /// deleting any spill files they hold. Called from the join executor after the cursor is consumed
+    /// (normal completion, cancellation, or exception).
+    /// </summary>
+    internal async Task DisposeMaterializationsAsync()
+    {
+        foreach (SpillableRowList list in DerivedMaterializations.Values)
+            await list.DisposeAsync().ConfigureAwait(false);
+        DerivedMaterializations.Clear();
+    }
 
     /// <summary>Single-table scan column subset. Null means decode all columns.</summary>
     public IReadOnlySet<string>? ScanRequiredColumns { get; internal set; }

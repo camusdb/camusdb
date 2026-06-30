@@ -17,6 +17,7 @@ using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.Diagnostics;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 
@@ -111,14 +112,18 @@ internal sealed class RowDeleter
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
-        state.RowsToDelete = await cursor.ToListAsync().ConfigureAwait(false);
+        SpillableRowList rowList = new();
+        await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
+            await rowList.AddAsync(row).ConfigureAwait(false);
+        await rowList.SealAsync().ConfigureAwait(false);
+        state.RowsToDelete = rowList;
 
         return FluxAction.Continue;
     }
 
     private async Task<FluxAction> DeleteRowsAndIndexesFromDisk(DeleteFluxState state)
     {
-        if (state.RowsToDelete is null || state.RowsToDelete.Count == 0)
+        if (state.RowsToDelete.Count == 0)
         {
             logger.LogError("Invalid rows to delete");
             return FluxAction.Abort;
@@ -129,7 +134,7 @@ internal sealed class RowDeleter
 
         List<KvTableStore.RowDelete> batch = new(state.RowsToDelete.Count);
 
-        foreach (QueryResultRow row in state.RowsToDelete)
+        await foreach (QueryResultRow row in state.RowsToDelete.EnumerateAsync().ConfigureAwait(false))
         {
             ObjectIdValue rowId = row.RowId;
             Dictionary<string, ColumnValue> writableRow = await LoadWritableRow(state.Database, table, tx, rowId).ConfigureAwait(false);
@@ -207,8 +212,15 @@ internal sealed class RowDeleter
         machine.When(DeleteFluxSteps.LocateTupleToDelete, LocateTupleToDelete);
         machine.When(DeleteFluxSteps.DeleteRowsAndIndexesFromDisk, DeleteRowsAndIndexesFromDisk);
 
-        while (!machine.IsAborted)
-            await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
+        try
+        {
+            while (!machine.IsAborted)
+                await machine.RunStep(machine.NextStep()).ConfigureAwait(false);
+        }
+        finally
+        {
+            await state.RowsToDelete.DisposeAsync().ConfigureAwait(false);
+        }
 
         TimeSpan timeTaken = timer.GetElapsedTime();
 

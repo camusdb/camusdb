@@ -8,6 +8,7 @@
 
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
@@ -21,7 +22,12 @@ internal sealed class UpdateFluxState
 
     public QueryExecutor QueryExecutor { get; }
 
-    public List<QueryResultRow>? RowsToUpdate { get; set; }
+    /// <summary>
+    /// Matched rows buffered before update (Halloween problem). Uses <see cref="SpillableRowList"/>
+    /// so that very large matched sets spill to disk rather than exhausting the process heap.
+    /// Owned by <c>RowUpdater.UpdateInternal</c>, which disposes it after the mutation phase.
+    /// </summary>
+    public SpillableRowList? RowsToUpdate { get; set; }
 
     public int ModifiedRows { get; set; }
 

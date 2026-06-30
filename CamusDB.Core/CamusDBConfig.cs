@@ -400,6 +400,20 @@ public static class CamusDBConfig
     public const int DefaultBytesMaxLength = 10_485_760;
 
     /// <summary>
+    /// Enables per-lock-acquisition debug log lines (<c>LogLevel.Debug</c>). When <c>false</c>
+    /// (default), no lock-trace messages are emitted regardless of the host logging configuration.
+    /// Enable only for targeted diagnostics — a busy workload emits one line per lock acquired.
+    /// </summary>
+    public static bool LockTracingEnabled = false;
+
+    /// <summary>
+    /// Enables per-step query-execution trace log lines (<c>LogLevel.Information</c>). When
+    /// <c>false</c> (default), no step-trace messages are emitted. Enable only for targeted
+    /// diagnostics — each query emits one line per plan step executed.
+    /// </summary>
+    public static bool QueryTracingEnabled = false;
+
+    /// <summary>
     /// Resolved Kahuna engine overrides from <c>config.yml</c>. Applied when constructing embedded
     /// nodes in cluster and standalone modes.
     /// </summary>

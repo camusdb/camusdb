@@ -92,6 +92,17 @@ public static class SpillRowCodec
         return row;
     }
 
+    /// <summary>
+    /// Decodes a row from a pre-read payload byte array (no leading frame-length prefix).
+    /// Used by <see cref="SpillRunReader"/>, which strips the 4-byte length header from
+    /// the stream separately before reading exactly that many bytes.
+    /// </summary>
+    public static QueryResultRow DecodePayload(byte[] payload)
+    {
+        int offset = 0;
+        return ReadPayload(payload, ref offset);
+    }
+
     /// <summary>Decodes all framed records from <paramref name="data"/>.</summary>
     public static List<QueryResultRow> DecodeAll(byte[] data)
     {

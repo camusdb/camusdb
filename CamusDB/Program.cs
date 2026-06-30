@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.Config;
 using CamusDB.Core.Config.Models;
 using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.App.Services;
 using CommandLine;
 using Kahuna;
@@ -242,6 +243,9 @@ if (config.IsClusterMode)
 
 await sharedNode.StartAsync();
 
+SpillFileManager.AcquireInstanceLock(CamusDBConfig.DataDirectory);
+SpillFileManager.RunStartupSweep(CamusDBConfig.DataDirectory);
+
 // Initialize DB system
 CamusStartup camus = new(
     app.Services.GetRequiredService<CommandExecutor>()
@@ -259,6 +263,8 @@ finally
 {
     ILogger<ICamusDB> shutdownLogger = app.Services.GetRequiredService<ILogger<ICamusDB>>();
     shutdownLogger.LogInformation("Graceful shutdown started");
+
+    SpillFileManager.ReleaseInstanceLock();
 
     await commandExecutor.DisposeAsync();
     shutdownLogger.LogInformation("Databases closed");

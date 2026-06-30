@@ -87,7 +87,8 @@ internal sealed class QueryExecutor
         for (int i = 0; i < plan.Steps.Count; i++)
         {
             QueryPlanStep step = plan.Steps[i];
-            Log.LogExecutingQueryStep(logger, step.Type);
+            if (CamusDBConfig.QueryTracingEnabled)
+                Log.LogExecutingQueryStep(logger, step.Type);
 
             switch (step.Type)
             {

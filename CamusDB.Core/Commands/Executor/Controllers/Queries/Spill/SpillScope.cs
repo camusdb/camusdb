@@ -20,6 +20,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 public sealed class SpillScope : IAsyncDisposable
 {
     private readonly string _scopeDir;
+    // Not thread-safe: file numbering and handle tracking assume a single writer at a time.
+    // Per-query execution is sequential today; revisit if intra-query parallelism is added.
     private readonly List<FileStream> _openHandles = new();
     private bool _disposed;
 

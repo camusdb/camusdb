@@ -31,20 +31,14 @@ internal sealed class InSubqueryExecutor
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? parameters)
     {
-        List<QueryResultRow> rows = await queryExecutor.ExecuteSelectAsync(
-            database,
-            selectAst,
-            txnState,
-            parameters).ConfigureAwait(false);
-
-        if (rows.Count == 0)
-            return new InSubqueryMaterialization([], ContainsNull: false, IsEmpty: true);
-
-        List<ColumnValue> values = new(rows.Count);
+        List<ColumnValue> values = new();
         bool containsNull = false;
+        bool anyRow = false;
 
-        foreach (QueryResultRow row in rows)
+        await foreach (QueryResultRow row in queryExecutor.ExecuteSelectAsync(
+            database, selectAst, txnState, parameters).ConfigureAwait(false))
         {
+            anyRow = true;
             ColumnValue value = SubqueryQueryExecutor.ExtractSingleColumnValue(row);
 
             if (value.Type == ColumnType.Null)
@@ -55,6 +49,9 @@ internal sealed class InSubqueryExecutor
 
             values.Add(value);
         }
+
+        if (!anyRow)
+            return new InSubqueryMaterialization([], ContainsNull: false, IsEmpty: true);
 
         return new InSubqueryMaterialization(values, containsNull, IsEmpty: false);
     }

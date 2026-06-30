@@ -303,7 +303,7 @@ public sealed class KvTableStore
             if (type == KeyValueResponseType.Locked)
             {
                 tx.TrackRangeLock(bucketPrefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent, mode);
-                if (logger.IsEnabled(LogLevel.Debug))
+                if (CamusDBConfig.LockTracingEnabled && logger.IsEnabled(LogLevel.Debug))
                 {
                     string modeStr = mode.ToString();
                     Log.LogRangeLockAcquired(logger, modeStr, bucketPrefix,
@@ -888,7 +888,8 @@ public sealed class KvTableStore
                 if (type == KeyValueResponseType.Locked)
                 {
                     tx.TrackLock(key, durability);
-                    Log.LogPointLockAcquired(logger, key, tx.UniqueId);
+                    if (CamusDBConfig.LockTracingEnabled)
+                        Log.LogPointLockAcquired(logger, key, tx.UniqueId);
                 }
             }
 
@@ -1219,7 +1220,8 @@ public sealed class KvTableStore
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {lockType}");
 
         tx.TrackLock(key, lockDurability);
-        Log.LogPointLockAcquired(logger, key, tx.UniqueId);
+        if (CamusDBConfig.LockTracingEnabled)
+            Log.LogPointLockAcquired(logger, key, tx.UniqueId);
     }
 
     /// <summary>

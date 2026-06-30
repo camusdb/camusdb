@@ -34,6 +34,7 @@ public sealed class TestSpillFileManager
     [TearDown]
     public void TearDown()
     {
+        SpillFileManager.ReleaseInstanceLock();
         SpillFileManager.InstanceId = _savedInstanceId;
         CamusDBConfig.SpillEnabled = _savedSpillEnabled;
         CamusDBConfig.ForceSpillThresholdRows = null;
@@ -168,53 +169,103 @@ public sealed class TestSpillFileManager
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // SpillFileManager — startup sweep
+    // Instance lock
     // ──────────────────────────────────────────────────────────────────────────
 
     [Test]
-    public void StartupSweep_RemovesThisInstanceOrphanDir()
+    public void AcquireInstanceLock_CreatesLockFile()
     {
-        SpillFileManager.InstanceId = "sweep-me";
+        SpillFileManager.AcquireInstanceLock(_dataDir);
 
-        // Plant orphan under this instance's dir
-        string orphanDir = Path.Combine(_dataDir, "tmp", "spill", "sweep-me");
+        string lockPath = Path.Combine(_dataDir, "tmp", "spill", SpillFileManager.InstanceId, ".lock");
+        Assert.That(File.Exists(lockPath), Is.True, ".lock file must be created");
+    }
+
+    [Test]
+    public void AcquireInstanceLock_IsIdempotent()
+    {
+        SpillFileManager.AcquireInstanceLock(_dataDir);
+        Assert.DoesNotThrow(() => SpillFileManager.AcquireInstanceLock(_dataDir));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Startup sweep — liveness-based orphan detection
+    // ──────────────────────────────────────────────────────────────────────────
+
+    [Test]
+    public void StartupSweep_RemovesOrphanDir_NoLockFile()
+    {
+        // Dir with no .lock file: crashed before acquiring, or old code version.
+        string orphanDir = Path.Combine(_dataDir, "tmp", "spill", "orphan-no-lock");
         Directory.CreateDirectory(orphanDir);
-        File.WriteAllBytes(Path.Combine(orphanDir, "orphan.spill"), [0x01]);
+        File.WriteAllBytes(Path.Combine(orphanDir, "data.spill"), [0x01]);
 
-        Assert.That(Directory.Exists(orphanDir), Is.True);
-
+        SpillFileManager.AcquireInstanceLock(_dataDir);
         SpillFileManager.RunStartupSweep(_dataDir);
 
-        Assert.That(Directory.Exists(orphanDir), Is.False, "sweep must delete own instance dir");
+        Assert.That(Directory.Exists(orphanDir), Is.False, "orphan dir with no .lock must be deleted");
     }
 
     [Test]
-    public void StartupSweep_DoesNotTouchOtherInstanceDir()
+    public void StartupSweep_RemovesOrphanDir_ReleasedLock()
     {
-        SpillFileManager.InstanceId = "my-instance";
+        // Dir with a .lock file that is NOT held — simulates a dead process.
+        string orphanDir = Path.Combine(_dataDir, "tmp", "spill", "dead-instance");
+        Directory.CreateDirectory(orphanDir);
+        File.WriteAllBytes(Path.Combine(orphanDir, ".lock"), []);    // file exists but not locked
+        File.WriteAllBytes(Path.Combine(orphanDir, "data.spill"), [0x01]);
 
-        // Plant orphan under this instance's dir
-        string myDir = Path.Combine(_dataDir, "tmp", "spill", "my-instance");
-        Directory.CreateDirectory(myDir);
-        File.WriteAllBytes(Path.Combine(myDir, "orphan.spill"), [0x01]);
-
-        // Plant file under a DIFFERENT instance's dir
-        string otherDir = Path.Combine(_dataDir, "tmp", "spill", "other-instance");
-        Directory.CreateDirectory(otherDir);
-        string otherFile = Path.Combine(otherDir, "live.spill");
-        File.WriteAllBytes(otherFile, [0x02]);
-
+        SpillFileManager.AcquireInstanceLock(_dataDir);
         SpillFileManager.RunStartupSweep(_dataDir);
 
-        Assert.That(Directory.Exists(myDir), Is.False, "own instance dir must be deleted");
-        Assert.That(File.Exists(otherFile), Is.True, "other instance's file must be untouched");
+        Assert.That(Directory.Exists(orphanDir), Is.False, "orphan dir with released .lock must be deleted");
     }
 
     [Test]
-    public void StartupSweep_NoInstanceDir_IsNoOp()
+    public void StartupSweep_DoesNotTouchLiveInstanceDir()
     {
-        SpillFileManager.InstanceId = "nonexistent-instance";
-        Assert.DoesNotThrow(() => SpillFileManager.RunStartupSweep(_dataDir));
+        // Create another dir whose .lock is exclusively held — simulates a live concurrent process.
+        string liveDir = Path.Combine(_dataDir, "tmp", "spill", "live-instance");
+        Directory.CreateDirectory(liveDir);
+        string liveDataFile = Path.Combine(liveDir, "data.spill");
+        File.WriteAllBytes(liveDataFile, [0x02]);
+
+        using FileStream liveLock = new(
+            Path.Combine(liveDir, ".lock"),
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None);
+
+        SpillFileManager.AcquireInstanceLock(_dataDir);
+        SpillFileManager.RunStartupSweep(_dataDir);
+
+        Assert.That(File.Exists(liveDataFile), Is.True, "live instance dir must not be touched");
+    }
+
+    [Test]
+    public void StartupSweep_DoesNotDeleteOwnInstanceDir()
+    {
+        SpillFileManager.AcquireInstanceLock(_dataDir);
+        SpillFileManager.RunStartupSweep(_dataDir);
+
+        string myDir = Path.Combine(_dataDir, "tmp", "spill", SpillFileManager.InstanceId);
+        Assert.That(Directory.Exists(myDir), Is.True, "own instance dir must survive the sweep");
+    }
+
+    [Test]
+    public void StartupSweep_NoSpillRoot_IsNoOp()
+    {
+        // No {DataDir}/tmp/spill/ exists yet — sweep must not throw.
+        SpillFileManager.AcquireInstanceLock(_dataDir);
+        string emptyDir = Path.Combine(Path.GetTempPath(), "camusdb_empty_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Assert.DoesNotThrow(() => SpillFileManager.RunStartupSweep(emptyDir));
+        }
+        finally
+        {
+            try { Directory.Delete(emptyDir, recursive: true); } catch { }
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -225,7 +276,6 @@ public sealed class TestSpillFileManager
     [Platform("Unix,Linux,MacOsX")]
     public void CreateScope_UnwritablePath_ThrowsSpillStorageUnavailable()
     {
-        // Point the data dir at a path that cannot be created (root-owned, no write perms)
         string badDir = "/proc/camusdb_spill_test_impossible_path";
 
         CamusDBException ex = Assert.Throws<CamusDBException>(
@@ -235,13 +285,13 @@ public sealed class TestSpillFileManager
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // Config knobs present and default values
+    // Config knobs
     // ──────────────────────────────────────────────────────────────────────────
 
     [Test]
     public void Config_DefaultValues()
     {
-        Assert.That(CamusDBConfig.SpillEnabled, Is.False, "SpillEnabled must default to false");
+        Assert.That(CamusDBConfig.SpillEnabled, Is.False);
         Assert.That(CamusDBConfig.SpillThresholdRows, Is.EqualTo(500_000));
         Assert.That(CamusDBConfig.SpillMergeFanIn, Is.EqualTo(16));
         Assert.That(CamusDBConfig.ForceSpillThresholdRows, Is.Null);
@@ -255,17 +305,5 @@ public sealed class TestSpillFileManager
 
         CamusDBConfig.ForceSpillThresholdRows = null;
         Assert.That(CamusDBConfig.SpillEffectiveThreshold, Is.EqualTo(CamusDBConfig.SpillThresholdRows));
-    }
-
-    [Test]
-    public void Config_SpillEnabled_False_ScopesCanStillBeCreated()
-    {
-        // SpillEnabled=false means OPERATORS won't call CreateScope.
-        // The manager itself does not enforce the flag — callers do.
-        CamusDBConfig.SpillEnabled = false;
-
-        SpillScope scope = SpillFileManager.CreateScope(_dataDir);
-        Assert.That(Directory.Exists(scope.ScopeDirectory), Is.True);
-        scope.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 }

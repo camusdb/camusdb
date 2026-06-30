@@ -8,15 +8,25 @@
 
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Executes a bound derived table into an in-memory row stream.
+/// Executes a bound derived table into a <see cref="SpillableRowList"/>.
+///
+/// <para>
+/// When <see cref="CamusDBConfig.SpillEnabled"/> is <c>false</c> or the row count stays
+/// below the threshold, all rows remain in memory — byte-identical to a plain list. When
+/// the threshold is exceeded, rows overflow to a spill file managed by
+/// <see cref="SpillableRowList"/>. The caller is responsible for disposing the returned
+/// list via <see cref="QueryPlan.DisposeMaterializationsAsync"/>.
+/// </para>
 /// </summary>
 internal sealed class DerivedTableExecutor
 {
@@ -30,7 +40,13 @@ internal sealed class DerivedTableExecutor
         this.queryJoinExecutor = queryJoinExecutor;
     }
 
-    public async Task<List<Dictionary<string, ColumnValue>>> MaterializeAsync(
+    /// <summary>
+    /// Executes the derived table query and materializes all passing rows into a
+    /// <see cref="SpillableRowList"/>. The caller must await <see cref="SpillableRowList.SealAsync"/>
+    /// before this method returns (it is called internally), so the returned list is ready to
+    /// enumerate. Ownership of the list transfers to the caller.
+    /// </summary>
+    public async Task<SpillableRowList> MaterializeAsync(
         DatabaseDescriptor database,
         BoundDerivedTableSource source,
         QueryTicket outerTicket,
@@ -50,7 +66,7 @@ internal sealed class DerivedTableExecutor
             ? queryJoinExecutor.ExecuteJoinQuery(database, innerBound, innerTicket)
             : queryExecutor.Query(database, innerBound.PrimaryTable, innerTicket);
 
-        List<Dictionary<string, ColumnValue>> rows = new();
+        SpillableRowList rows = new();
 
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
         {
@@ -69,9 +85,10 @@ internal sealed class DerivedTableExecutor
                 }
             }
 
-            rows.Add(new Dictionary<string, ColumnValue>(row.Row));
+            await rows.AddAsync(new QueryResultRow(default(ObjectIdValue), new Dictionary<string, ColumnValue>(row.Row))).ConfigureAwait(false);
         }
 
+        await rows.SealAsync().ConfigureAwait(false);
         return rows;
     }
 }

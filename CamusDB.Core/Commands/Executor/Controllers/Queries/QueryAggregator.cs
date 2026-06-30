@@ -6,10 +6,13 @@
  * file that was distributed with this source code.
  */
 
+using System.IO;
+using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.ObjectIds;
 
@@ -42,29 +45,206 @@ internal sealed class QueryAggregator
         };
     }
 
+    /// <summary>
+    /// Aggregates grouped rows. When <see cref="CamusDBConfig.SpillEnabled"/> is <c>false</c>
+    /// (the default), all groups are accumulated in a single in-memory dictionary — same as the
+    /// original implementation. When spilling is enabled the path buffers input rows until the
+    /// buffer reaches <see cref="CamusDBConfig.SpillEffectiveThreshold"/>; if overflow occurs
+    /// the rows are partitioned into <see cref="CamusDBConfig.SpillMergeFanIn"/> spill files by
+    /// group-key hash, and each partition is then aggregated in-memory independently. Because
+    /// the hash is deterministic, all rows that share a group key land in the same partition and
+    /// the per-partition result is identical to the global result.
+    /// </summary>
     private static async IAsyncEnumerable<QueryResultRow> AggregateGrouped(
         QueryTicket ticket,
-        IAsyncEnumerable<QueryResultRow> dataCursor)
+        IAsyncEnumerable<QueryResultRow> dataCursor,
+        [EnumeratorCancellation] CancellationToken ct = default)
     {
         IReadOnlyList<NodeAst> groupBy = ticket.GroupBy!;
         List<AnalyzedProjection> projections = AnalyzeGroupedWorkspace(ticket);
-        Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
 
-        await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
+        if (!CamusDBConfig.SpillEnabled)
         {
-            CompositeColumnValue groupKey = BuildGroupKey(groupBy, resultRow.Row, ticket);
-
-            if (!groups.TryGetValue(groupKey, out GroupAccumulator? accumulator))
+            Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
+            await foreach (QueryResultRow resultRow in dataCursor.WithCancellation(ct).ConfigureAwait(false))
             {
-                accumulator = new GroupAccumulator(projections);
-                groups.Add(groupKey, accumulator);
+                CompositeColumnValue groupKey = BuildGroupKey(groupBy, resultRow.Row, ticket);
+                if (!groups.TryGetValue(groupKey, out GroupAccumulator? accumulator))
+                {
+                    accumulator = new GroupAccumulator(projections);
+                    groups.Add(groupKey, accumulator);
+                }
+                accumulator.AddRow(resultRow.Row, ticket);
             }
-
-            accumulator.AddRow(resultRow.Row, ticket);
+            foreach (GroupAccumulator accumulator in groups.Values)
+                yield return accumulator.ToResultRow();
+            yield break;
         }
 
-        foreach (GroupAccumulator accumulator in groups.Values)
-            yield return accumulator.ToResultRow();
+        await foreach (QueryResultRow row in AggregateGroupedWithPossibleSpill(
+            groupBy, projections, ticket, dataCursor, ct).ConfigureAwait(false))
+            yield return row;
+    }
+
+    /// <summary>
+    /// Spill-aware GROUP BY aggregation. Buffers rows until the buffer count reaches
+    /// <see cref="CamusDBConfig.SpillEffectiveThreshold"/>. If the threshold is never reached
+    /// the buffered rows are aggregated in memory. Otherwise all buffered rows plus the
+    /// remaining input are written to <see cref="CamusDBConfig.SpillMergeFanIn"/> partition
+    /// files by <see cref="GroupPartitionIndex"/>, and each partition file is aggregated by
+    /// <see cref="AggregatePartitionAsync"/>. The <see cref="SpillScope"/> is disposed in a
+    /// <c>finally</c> block so spill files are cleaned up on completion, cancellation, and
+    /// exception.
+    /// </summary>
+    private static async IAsyncEnumerable<QueryResultRow> AggregateGroupedWithPossibleSpill(
+        IReadOnlyList<NodeAst> groupBy,
+        List<AnalyzedProjection> projections,
+        QueryTicket ticket,
+        IAsyncEnumerable<QueryResultRow> dataCursor,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        int threshold = CamusDBConfig.SpillEffectiveThreshold;
+        int K = CamusDBConfig.SpillMergeFanIn;
+
+        List<QueryResultRow> buffer = new();
+        SpillScope? scope = null;
+        FileStream[]? writers = null;
+        string[]? paths = null;
+
+        try
+        {
+            await foreach (QueryResultRow row in dataCursor.WithCancellation(ct).ConfigureAwait(false))
+            {
+                if (scope is null)
+                {
+                    buffer.Add(row);
+                    if (buffer.Count >= threshold)
+                    {
+                        scope = SpillFileManager.CreateScope(CamusDBConfig.DataDirectory);
+                        paths   = new string[K];
+                        writers = new FileStream[K];
+                        for (int i = 0; i < K; i++)
+                            paths[i] = scope.OpenWriter(out writers[i]);
+
+                        foreach (QueryResultRow buffered in buffer)
+                            WriteToGroupPartition(buffered, groupBy, ticket, K, writers);
+                        buffer.Clear();
+                    }
+                }
+                else
+                {
+                    WriteToGroupPartition(row, groupBy, ticket, K, writers!);
+                }
+            }
+
+            if (scope is null)
+            {
+                // All rows fit in the buffer — aggregate in-memory.
+                Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
+                foreach (QueryResultRow row in buffer)
+                {
+                    CompositeColumnValue key = BuildGroupKey(groupBy, row.Row, ticket);
+                    if (!groups.TryGetValue(key, out GroupAccumulator? acc))
+                    {
+                        acc = new GroupAccumulator(projections);
+                        groups.Add(key, acc);
+                    }
+                    acc.AddRow(row.Row, ticket);
+                }
+                foreach (GroupAccumulator acc in groups.Values)
+                    yield return acc.ToResultRow();
+            }
+            else
+            {
+                for (int i = 0; i < K; i++)
+                {
+                    await writers![i].FlushAsync(ct).ConfigureAwait(false);
+                    writers[i].Close();
+                }
+
+                for (int i = 0; i < K; i++)
+                {
+                    await foreach (QueryResultRow row in AggregatePartitionAsync(
+                        paths![i], projections, groupBy, ticket, ct).ConfigureAwait(false))
+                        yield return row;
+                }
+            }
+        }
+        finally
+        {
+            if (scope is not null)
+                await scope.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Hashes <paramref name="row"/>'s group key and writes it to the matching partition writer.
+    /// </summary>
+    private static void WriteToGroupPartition(
+        QueryResultRow row,
+        IReadOnlyList<NodeAst> groupBy,
+        QueryTicket ticket,
+        int K,
+        FileStream[] writers)
+    {
+        CompositeColumnValue key = BuildGroupKey(groupBy, row.Row, ticket);
+        int p = GroupPartitionIndex(key, K);
+        SpillRowCodec.EncodeToStream(writers[p], row);
+    }
+
+    /// <summary>
+    /// Maps a group key to a partition bucket in [0, <paramref name="K"/>). A murmur-style
+    /// finalizer is applied after the hash so the distribution is independent of the exact hash
+    /// bit pattern (important for power-of-two K values where a raw mod would cluster into
+    /// the low-order bits). Unlike <see cref="QueryJoinExecutor"/>'s version this function
+    /// takes no seed because GROUP BY partitioning does not need recursive repartitioning — even
+    /// if a partition overflows in-memory, each group key is still wholly within one partition
+    /// and the aggregation is correct.
+    /// </summary>
+    internal static int GroupPartitionIndex(CompositeColumnValue key, int K)
+    {
+        uint h = (uint)GroupKeyComparer.Instance.GetHashCode(key);
+        h *= 0x85EBCA6Bu; h ^= h >> 13;
+        h *= 0xC2B2AE35u; h ^= h >> 16;
+        return (int)(h % (uint)K);
+    }
+
+    /// <summary>
+    /// Reads all rows from a single partition spill file and aggregates them in-memory.
+    /// Because <see cref="GroupPartitionIndex"/> is deterministic, all rows sharing a group key
+    /// are guaranteed to be in the same partition, so the result is identical to a full-table
+    /// in-memory aggregation of the rows in this partition.
+    /// </summary>
+    private static async IAsyncEnumerable<QueryResultRow> AggregatePartitionAsync(
+        string path,
+        List<AnalyzedProjection> projections,
+        IReadOnlyList<NodeAst> groupBy,
+        QueryTicket ticket,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        SpillRunReader? reader = await SpillRunReader.OpenAsync(path, ct).ConfigureAwait(false);
+        if (reader is null) yield break;
+
+        await using (reader)
+        {
+            Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
+
+            do
+            {
+                QueryResultRow row = reader.Current;
+                CompositeColumnValue key = BuildGroupKey(groupBy, row.Row, ticket);
+                if (!groups.TryGetValue(key, out GroupAccumulator? acc))
+                {
+                    acc = new GroupAccumulator(projections);
+                    groups.Add(key, acc);
+                }
+                acc.AddRow(row.Row, ticket);
+            }
+            while (await reader.AdvanceAsync(ct).ConfigureAwait(false));
+
+            foreach (GroupAccumulator acc in groups.Values)
+                yield return acc.ToResultRow();
+        }
     }
 
     private static CompositeColumnValue BuildGroupKey(
