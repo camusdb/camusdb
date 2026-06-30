@@ -87,8 +87,10 @@ public static class CamusDBConfig
     public static int SqlParserCacheSweepSeconds = 60;
 
     /// <summary>
-    /// Maximum number of rows the hash-join build phase may materialise before falling back
-    /// to nested-loop for correctness (disk spilling is not implemented).
+    /// Maximum number of rows the hash-join build phase may materialise before degrading, used
+    /// only when <see cref="SpillEnabled"/> is <c>false</c>: the build falls back to a nested-loop
+    /// join for correctness. When spill is enabled the build instead routes to the Grace/hybrid
+    /// hash join once it exceeds <see cref="SpillEffectiveThreshold"/>, so this cap does not apply.
     /// Default: 1_000_000 rows.
     /// </summary>
     public static int HashJoinMaxBuildRows = 1_000_000;

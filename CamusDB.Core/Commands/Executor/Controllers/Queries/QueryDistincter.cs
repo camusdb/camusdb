@@ -39,7 +39,7 @@ internal sealed class QueryDistincter
     }
 
     /// <summary>
-    /// Streaming deduplication for R12: compares each row to the previously emitted row.
+    /// Streaming deduplication: compares each row to the previously emitted row.
     /// Requires the input to arrive in an order that groups equal rows adjacently (i.e. an
     /// index scan whose prefix covers all projected DISTINCT columns).
     /// Uses O(1) memory (one key) instead of the O(distinct-count) hash set.

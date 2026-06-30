@@ -95,13 +95,14 @@ the lock is released explicitly.
 
 ## Configuration
 
-Spill is controlled by these runtime knobs:
+Spill is controlled by these knobs, settable in `config.yml` as `spill_enabled` /
+`spill_threshold_rows` / `spill_merge_fan_in` (see [configuration.md](configuration.md)):
 
-| Knob | Default | Meaning |
-|---|---|---|
-| `SpillEnabled` | `false` | Master switch. When `false`, no operator spills and behavior is identical to pre-spill CamusDB. |
-| `SpillThresholdRows` | `500_000` | Per-operator in-memory row cap before that operator begins spilling. |
-| `SpillMergeFanIn` | `16` | Maximum simultaneously-open spill runs during a merge pass; more runs trigger a multi-pass merge. |
+| Knob | YAML key | Default | Meaning |
+|---|---|---|---|
+| `SpillEnabled` | `spill_enabled` | `false` | Master switch. When `false`, no operator spills and behavior is identical to pre-spill CamusDB. |
+| `SpillThresholdRows` | `spill_threshold_rows` | `500_000` | Per-operator in-memory row cap before that operator begins spilling. |
+| `SpillMergeFanIn` | `spill_merge_fan_in` | `16` | Maximum simultaneously-open spill runs during a merge pass; more runs trigger a multi-pass merge. |
 
 When `SpillEnabled` is `false`, the threshold and fan-in knobs are ignored.
 
@@ -115,31 +116,13 @@ writable; the underlying storage problem must be fixed.
 
 ## Known limitations
 
-Spill is being hardened. Until the items below are addressed, treat it as a mitigation that raises
-the memory ceiling substantially rather than a hard memory bound for *every* operator. With
-`SpillEnabled` off, none of these apply — behavior is unchanged from a build without spill.
+With `SpillEnabled` off, this does not apply — behavior is unchanged from a build without spill.
 
-- **Not yet settable from `config.yml`.** The spill knobs are in-process settings; enabling spill
-  through the configuration file is not wired up yet, so it currently requires an in-process toggle.
-- **Hash join spills on the build-row cap, not the threshold.** The hash join only switches to the
-  partitioned (Grace) strategy once its build side exceeds the 1,000,000-row build cap; a build
-  between `SpillThresholdRows` and that cap still stays in memory.
-- **Extreme hash-join skew can still grow unbounded.** A partition dominated by a single join key is
-  loaded fully into memory at the maximum repartition depth, so a pathological single-key skew can
-  still exhaust memory.
-- **GROUP BY partitions are not recursively bounded.** Each partition is aggregated with its own
-  in-memory group dictionary; a single partition with very high distinct-group cardinality can still
-  exceed memory.
 - **Some IN / NOT IN value sets stay in memory.** When the inner subquery has an index on its
   projected column it is rewritten to a bounded semi/anti join (including inner `DISTINCT`, which is a
   no-op for membership). The remaining cases — no index on the inner column, inner `GROUP BY`/`HAVING`,
   correlated, or multi-column projections — fall back to materializing the value set; that collection
   spills to disk, but the membership test still holds the values in memory for the duration of the query.
-- **DELETE applies its mutations in one batch.** A `DELETE` collects its full mutation batch in
-  memory before applying it, so a very large `DELETE` still holds one batch on-heap (an `UPDATE`
-  streams its mutations row by row and does not).
-- **Spill *read* failures are not normalized.** A failure opening or reading a spill file surfaces as
-  a raw IO error rather than the `CADB0507` reported on the write side.
 
 ## Design notes
 
