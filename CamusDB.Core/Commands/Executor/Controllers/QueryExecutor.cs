@@ -30,7 +30,7 @@ internal sealed class QueryExecutor
 
     private readonly QuerySorter querySorter = new();
 
-    private readonly QueryAggregator queryAggregator = new();
+    private readonly QueryAggregator queryAggregator;
 
     private readonly QueryProjector queryProjector = new();
 
@@ -51,6 +51,7 @@ internal sealed class QueryExecutor
         this.logger = logger;
         PlanCache = new PlanCache(CamusDBConfig.PlanCacheMaxEntries);
         queryPlanner = new QueryPlanner(stats, PlanCache);
+        queryAggregator = new QueryAggregator(stats);
         queryJoinExecutor = new QueryJoinExecutor(this, stats, PlanCache);
         this.queryScanner = new(logger);
     }

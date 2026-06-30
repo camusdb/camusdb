@@ -238,6 +238,45 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
             "Flag-off DELETE must not create any spill files.");
     }
 
+    // ── DELETE batch chunking discriminator ───────────────────────────────────
+
+    /// <summary>
+    /// Verifies that the DELETE mutation phase applies <see cref="KvTableStore.DeleteRowsBatch"/>
+    /// in bounded chunks rather than one O(matched) batch. The discriminator is
+    /// <c>StatisticsManager.DeleteBatchMaxChunkSeen</c>: its value must never exceed the
+    /// configured chunk size (which equals <see cref="CamusDBConfig.SpillEffectiveThreshold"/>).
+    ///
+    /// <para>Negative proof: reverting to the single-batch code path sets
+    /// <c>DeleteBatchMaxChunkSeen = 20</c> (all matched rows), which exceeds the forced
+    /// chunk size of 3 and trips the assertion.</para>
+    /// </summary>
+    [Test]
+    public async Task DeleteBatch_ChunkedMutation_MaxChunkDoesNotExceedThreshold()
+    {
+        const int rowCount  = 20;
+        const int chunkSize = 3;   // ForceSpillThresholdRows drives both the row-buffer and the chunk size
+
+        CamusDBConfig.SpillEnabled            = true;
+        CamusDBConfig.ForceSpillThresholdRows = chunkSize;
+
+        Fixture f = await SetupThingsTable(rowCount);
+        f.Executor.Statistics.DeleteBatchMaxChunkSeen = 0;
+
+        // Delete all rows so the chunking path is exercised across multiple batches.
+        await RunNonQuery(f, "DELETE FROM things WHERE value >= 0");
+
+        List<QueryResultRow> remaining = await RunQuery(f, "SELECT name FROM things");
+        Assert.That(remaining.Count, Is.EqualTo(0),
+            "All rows must be deleted regardless of how many batches are used.");
+
+        Assert.That(f.Executor.Statistics.DeleteBatchMaxChunkSeen, Is.GreaterThan(0),
+            "At least one DeleteRowsBatch call must have been tracked.");
+
+        Assert.That(f.Executor.Statistics.DeleteBatchMaxChunkSeen, Is.LessThanOrEqualTo(chunkSize),
+            $"No single DeleteRowsBatch call must exceed chunkSize={chunkSize}. " +
+            "A higher value proves the unbounded single-batch code path was taken.");
+    }
+
     // ── UPDATE spill tests ────────────────────────────────────────────────────
 
     /// <summary>

@@ -28,8 +28,14 @@ public enum HashJoinBuildSide { Right, Left }
 /// NULL join-key values are excluded from both the build table and the probe stream —
 /// consistent with SQL inner-join semantics where NULL = NULL is unknown.
 ///
-/// When the build side exceeds <c>CamusDBConfig.HashJoinMaxBuildRows</c> the executor falls
-/// back to nested-loop for correctness (disk spilling is out of scope).
+/// When <c>CamusDBConfig.SpillEnabled</c> is true and the build side exceeds
+/// <c>CamusDBConfig.SpillEffectiveThreshold</c>, the executor routes to the Grace/hybrid hash
+/// join: both sides are partitioned to spill files by hash of the join key, then each partition
+/// pair is joined in memory. Skewed partitions that still exceed the threshold are recursively
+/// repartitioned; beyond the recursion depth limit a nested-loop join over the partition files
+/// is used as a bounded-memory backstop.
+/// When spill is disabled and the build exceeds <c>CamusDBConfig.HashJoinMaxBuildRows</c>,
+/// the executor falls back to nested-loop (full-scan fallback, no spill).
 ///
 /// <see cref="CanDecomposeToLocalPlusMerge"/> is false and
 /// <see cref="PhysicalPlanNode.OutputOrdering"/> is null: hash join does not preserve order.

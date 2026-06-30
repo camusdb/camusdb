@@ -285,6 +285,91 @@ public sealed class TestSpillFileManager
     }
 
     // ──────────────────────────────────────────────────────────────────────────
+    // SpillRunReader — read-side failure mapping (SP16)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Verifies that opening a missing spill file via <see cref="SpillRunReader.OpenAsync"/>
+    /// surfaces a <see cref="CamusDBException"/> with
+    /// <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> rather than a bare
+    /// <see cref="FileNotFoundException"/>.
+    ///
+    /// <para>Negative proof: removing the try/catch in <c>SpillRunReader.OpenAsync</c> causes
+    /// <c>FileStream</c> to throw <c>FileNotFoundException</c> (a raw <c>IOException</c>
+    /// subclass), which does NOT satisfy <c>Assert.ThrowsAsync&lt;CamusDBException&gt;</c>.</para>
+    /// </summary>
+    [Test]
+    public async Task SpillRunReader_MissingFile_ThrowsSpillStorageUnavailable()
+    {
+        string missingPath = Path.Combine(_dataDir, "does_not_exist.spill");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await SpillRunReader.OpenAsync(missingPath))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.SpillStorageUnavailable),
+            "A missing spill file must surface as CADB0507, not a raw IOException.");
+    }
+
+    /// <summary>
+    /// Verifies that an I/O failure during <see cref="SpillRunReader.AdvanceAsync"/> (simulated
+    /// by writing a frame-length header that claims 100 payload bytes but providing only 4)
+    /// surfaces <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> rather than a raw
+    /// <see cref="EndOfStreamException"/>.
+    ///
+    /// <para>The call chain is <c>OpenAsync</c> → <c>AdvanceAsync</c> →
+    /// <c>ReadExactlyAsync</c> → <c>EndOfStreamException</c> (an <c>IOException</c> subclass)
+    /// → mapped to CADB0507 by the catch in <c>AdvanceAsync</c>.</para>
+    ///
+    /// <para>Negative proof: removing the try/catch in <c>AdvanceAsync</c> lets
+    /// <c>EndOfStreamException</c> propagate as-is, which does NOT satisfy
+    /// <c>Assert.ThrowsAsync&lt;CamusDBException&gt;</c>.</para>
+    /// </summary>
+    [Test]
+    public async Task SpillRunReader_TruncatedPayload_ThrowsSpillStorageUnavailable()
+    {
+        // Write a valid 4-byte length header claiming 100 payload bytes, then only 4 actual bytes.
+        // ReadExactlyAsync will throw EndOfStreamException (IOException subclass) when it cannot
+        // fill the promised 100 bytes.
+        string truncated = Path.Combine(_dataDir, "truncated.spill");
+        await using (FileStream fw = new(truncated, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            byte[] lenBuf = new byte[4];
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(lenBuf, 100);
+            await fw.WriteAsync(lenBuf);
+            await fw.WriteAsync(new byte[] { 1, 2, 3, 4 }); // only 4 of the promised 100 bytes
+        }
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await SpillRunReader.OpenAsync(truncated, default))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.SpillStorageUnavailable),
+            "A truncated spill file must surface as CADB0507, not a raw EndOfStreamException.");
+    }
+
+    /// <summary>
+    /// Verifies that a spill file truncated within its 4-byte frame-length header (here, a
+    /// 2-byte file) also surfaces <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> —
+    /// the same failure class as a payload-truncated file, so the two must map identically.
+    /// This path throws <c>InvalidDataException</c> (not an <c>IOException</c> subclass), so it
+    /// only maps correctly if the read catch covers corrupt/truncated framing too.
+    /// </summary>
+    [Test]
+    public async Task SpillRunReader_TruncatedHeader_ThrowsSpillStorageUnavailable()
+    {
+        string truncated = Path.Combine(_dataDir, "truncated_header.spill");
+        await using (FileStream fw = new(truncated, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            await fw.WriteAsync(new byte[] { 1, 2 }); // only 2 of the 4 header bytes
+        }
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await SpillRunReader.OpenAsync(truncated, default))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.SpillStorageUnavailable),
+            "A header-truncated spill file must surface as CADB0507, like a payload-truncated one.");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
     // Config knobs
     // ──────────────────────────────────────────────────────────────────────────
 

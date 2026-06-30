@@ -14,19 +14,27 @@ using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Statistics;
 using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 internal sealed class QueryAggregator
 {
+    private readonly StatisticsManager? _stats;
+
+    public QueryAggregator(StatisticsManager? stats = null)
+    {
+        _stats = stats;
+    }
+
     internal IAsyncEnumerable<QueryResultRow> AggregateResultset(QueryTicket ticket, IAsyncEnumerable<QueryResultRow> dataCursor)
     {
         if (ticket.Projection is null || ticket.Projection.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "This resultset shouldn't be aggregated");
 
         if (ticket.GroupBy is { Count: > 0 })
-            return AggregateGrouped(ticket, dataCursor);
+            return AggregateGrouped(ticket, dataCursor, _stats);
 
         if (QueryHavingWorkspace.NeedsExpandedGlobalAggregate(ticket))
             return AggregateGlobalWorkspace(ticket, dataCursor);
@@ -58,6 +66,7 @@ internal sealed class QueryAggregator
     private static async IAsyncEnumerable<QueryResultRow> AggregateGrouped(
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor,
+        StatisticsManager? stats,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         IReadOnlyList<NodeAst> groupBy = ticket.GroupBy!;
@@ -82,7 +91,7 @@ internal sealed class QueryAggregator
         }
 
         await foreach (QueryResultRow row in AggregateGroupedWithPossibleSpill(
-            groupBy, projections, ticket, dataCursor, ct).ConfigureAwait(false))
+            groupBy, projections, ticket, dataCursor, stats, ct).ConfigureAwait(false))
             yield return row;
     }
 
@@ -95,12 +104,17 @@ internal sealed class QueryAggregator
     /// <see cref="AggregatePartitionAsync"/>. The <see cref="SpillScope"/> is disposed in a
     /// <c>finally</c> block so spill files are cleaned up on completion, cancellation, and
     /// exception.
+    ///
+    /// If a first-level partition still holds more than <see cref="CamusDBConfig.SpillEffectiveThreshold"/>
+    /// distinct groups, <see cref="AggregatePartitionAsync"/> recursively re-partitions it with a
+    /// fresh hash seed until the partition fits in memory or the recursion depth cap is reached.
     /// </summary>
     private static async IAsyncEnumerable<QueryResultRow> AggregateGroupedWithPossibleSpill(
         IReadOnlyList<NodeAst> groupBy,
         List<AnalyzedProjection> projections,
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor,
+        StatisticsManager? stats,
         [EnumeratorCancellation] CancellationToken ct)
     {
         int threshold = CamusDBConfig.SpillEffectiveThreshold;
@@ -165,7 +179,7 @@ internal sealed class QueryAggregator
                 for (int i = 0; i < K; i++)
                 {
                     await foreach (QueryResultRow row in AggregatePartitionAsync(
-                        paths![i], projections, groupBy, ticket, ct).ConfigureAwait(false))
+                        paths![i], projections, groupBy, ticket, scope!, depth: 0, seed: 0, stats, ct).ConfigureAwait(false))
                         yield return row;
                 }
             }
@@ -185,10 +199,11 @@ internal sealed class QueryAggregator
         IReadOnlyList<NodeAst> groupBy,
         QueryTicket ticket,
         int K,
-        FileStream[] writers)
+        FileStream[] writers,
+        int seed = 0)
     {
         CompositeColumnValue key = BuildGroupKey(groupBy, row.Row, ticket);
-        int p = GroupPartitionIndex(key, K);
+        int p = GroupPartitionIndex(key, K, seed);
         SpillRowCodec.EncodeToStream(writers[p], row);
     }
 
@@ -196,54 +211,129 @@ internal sealed class QueryAggregator
     /// Maps a group key to a partition bucket in [0, <paramref name="K"/>). A murmur-style
     /// finalizer is applied after the hash so the distribution is independent of the exact hash
     /// bit pattern (important for power-of-two K values where a raw mod would cluster into
-    /// the low-order bits). Unlike <see cref="QueryJoinExecutor"/>'s version this function
-    /// takes no seed because GROUP BY partitioning does not need recursive repartitioning — even
-    /// if a partition overflows in-memory, each group key is still wholly within one partition
-    /// and the aggregation is correct.
+    /// the low-order bits). <paramref name="seed"/> is mixed in before the finalizer so that
+    /// recursive repartitioning (see <see cref="AggregatePartitionAsync"/>) uses a different
+    /// mapping at each level, spreading group keys that collided at the parent level across
+    /// different sub-partitions.
     /// </summary>
-    internal static int GroupPartitionIndex(CompositeColumnValue key, int K)
+    internal static int GroupPartitionIndex(CompositeColumnValue key, int K, int seed = 0)
     {
         uint h = (uint)GroupKeyComparer.Instance.GetHashCode(key);
+        h ^= (uint)seed * 0x9E3779B9u;
         h *= 0x85EBCA6Bu; h ^= h >> 13;
         h *= 0xC2B2AE35u; h ^= h >> 16;
         return (int)(h % (uint)K);
     }
 
+    // Maximum recursion depth for per-partition GROUP BY repartitioning. Beyond this depth
+    // the partition is aggregated in memory regardless of size (graceful degradation: the
+    // hash function cannot split the remaining keys further, so memory growth is bounded by
+    // the number of truly distinct group keys, not the raw row count).
+    private const int MaxGroupByRecursionDepth = 3;
+
     /// <summary>
     /// Reads all rows from a single partition spill file and aggregates them in-memory.
     /// Because <see cref="GroupPartitionIndex"/> is deterministic, all rows sharing a group key
-    /// are guaranteed to be in the same partition, so the result is identical to a full-table
-    /// in-memory aggregation of the rows in this partition.
+    /// are guaranteed to be in the same partition, so the result is correct independently of
+    /// which level produced this partition file.
+    ///
+    /// When the number of distinct groups in this partition would exceed
+    /// <see cref="CamusDBConfig.SpillEffectiveThreshold"/> and <paramref name="depth"/> is
+    /// below <see cref="MaxGroupByRecursionDepth"/>, the partition is re-read and split into
+    /// <see cref="CamusDBConfig.SpillMergeFanIn"/> sub-partitions using <paramref name="seed"/>+1
+    /// so that group keys that collided at this level land in different sub-partitions. Each
+    /// sub-partition is then aggregated recursively. Beyond the depth cap the remaining rows
+    /// are aggregated in-memory regardless of count: the hash function cannot separate truly
+    /// identical keys, and the in-memory dictionary is bounded by the number of distinct group
+    /// values, not the raw row count.
     /// </summary>
     private static async IAsyncEnumerable<QueryResultRow> AggregatePartitionAsync(
         string path,
         List<AnalyzedProjection> projections,
         IReadOnlyList<NodeAst> groupBy,
         QueryTicket ticket,
+        SpillScope scope,
+        int depth,
+        int seed,
+        StatisticsManager? stats,
         [EnumeratorCancellation] CancellationToken ct)
     {
+        int threshold = CamusDBConfig.SpillEffectiveThreshold;
+
         SpillRunReader? reader = await SpillRunReader.OpenAsync(path, ct).ConfigureAwait(false);
         if (reader is null) yield break;
 
+        Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
+        bool overflow = false;
+
         await using (reader)
         {
-            Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
-
             do
             {
                 QueryResultRow row = reader.Current;
                 CompositeColumnValue key = BuildGroupKey(groupBy, row.Row, ticket);
                 if (!groups.TryGetValue(key, out GroupAccumulator? acc))
                 {
+                    // A new distinct group: check threshold before adding. Beyond the recursion
+                    // depth cap we accept unbounded growth here because the dictionary is bounded
+                    // by truly distinct keys, not raw row count.
+                    if (depth < MaxGroupByRecursionDepth && groups.Count >= threshold)
+                    {
+                        overflow = true;
+                        break;
+                    }
                     acc = new GroupAccumulator(projections);
                     groups.Add(key, acc);
                 }
                 acc.AddRow(row.Row, ticket);
             }
             while (await reader.AdvanceAsync(ct).ConfigureAwait(false));
+        }
 
+        if (!overflow)
+        {
             foreach (GroupAccumulator acc in groups.Values)
                 yield return acc.ToResultRow();
+            yield break;
+        }
+
+        // Overflow: the partition still holds more distinct groups than the threshold.
+        // Re-read the file and split into K sub-partitions with a new seed so colliding
+        // group keys at this level redistribute across different sub-partitions.
+        if (stats is not null)
+            stats.GroupByPartitionRecursionCount++;
+
+        int K = Math.Max(2, CamusDBConfig.SpillMergeFanIn);
+        int newSeed = seed + 1;
+        string[] subPaths = new string[K];
+        FileStream[] subWriters = new FileStream[K];
+        for (int i = 0; i < K; i++)
+            subPaths[i] = scope.OpenWriter(out subWriters[i]);
+
+        SpillRunReader? rdr2 = await SpillRunReader.OpenAsync(path, ct).ConfigureAwait(false);
+        if (rdr2 is not null)
+        {
+            await using (rdr2)
+            {
+                do
+                {
+                    WriteToGroupPartition(rdr2.Current, groupBy, ticket, K, subWriters, newSeed);
+                }
+                while (await rdr2.AdvanceAsync(ct).ConfigureAwait(false));
+            }
+        }
+
+        for (int i = 0; i < K; i++)
+        {
+            await subWriters[i].FlushAsync(ct).ConfigureAwait(false);
+            subWriters[i].Close();
+        }
+
+        for (int i = 0; i < K; i++)
+        {
+            await foreach (QueryResultRow row in AggregatePartitionAsync(
+                subPaths[i], projections, groupBy, ticket, scope, depth + 1, newSeed, stats, ct).ConfigureAwait(false))
+                yield return row;
         }
     }
 

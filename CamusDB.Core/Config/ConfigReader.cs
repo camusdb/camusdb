@@ -55,6 +55,9 @@ public class ConfigReader
         "max_columns_per_table",
         "max_indexes_per_table",
         "max_tables_per_database",
+        "spill_enabled",
+        "spill_threshold_rows",
+        "spill_merge_fan_in",
         "kahuna",
     };
 

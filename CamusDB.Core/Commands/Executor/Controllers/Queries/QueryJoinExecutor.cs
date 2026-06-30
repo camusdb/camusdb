@@ -745,26 +745,19 @@ internal sealed class QueryJoinExecutor
 
     /// <summary>
     /// Materialises the build side into a hash table keyed on the equi-join columns.
-    /// Returns null when the build exceeds <see cref="CamusDBConfig.HashJoinMaxBuildRows"/>
-    /// (signals the caller to fall back to nested-loop).
     /// Rows whose join key contains any NULL value are excluded.
     ///
-    /// Note: on cap overflow the build scan is abandoned after reading up to
-    /// <c>HashJoinMaxBuildRows</c> rows; the fallback (Grace hash join or nested-loop) then
-    /// re-scans the build side from scratch (~2× cost on this rare path). This is intentional:
-    /// correctness over complexity. When <see cref="CamusDBConfig.SpillEnabled"/> is <c>true</c>,
-    /// the caller routes the overflow to <see cref="GraceHashJoinAsync"/> instead of nested-loop.
-    /// </summary>
-    /// <summary>
-    /// Materialises the build side into a hash table keyed on the equi-join columns.
-    /// Returns null when the build exceeds <see cref="CamusDBConfig.HashJoinMaxBuildRows"/>
-    /// (signals the caller to fall back to nested-loop).
-    /// Rows whose join key contains any NULL value are excluded.
+    /// Returns null to signal that the caller should route to a fallback:
+    /// <list type="bullet">
+    ///   <item>When <see cref="CamusDBConfig.SpillEnabled"/> is true, the effective cap is
+    ///     <see cref="CamusDBConfig.SpillEffectiveThreshold"/>; overflow routes to
+    ///     <see cref="GraceHashJoinAsync"/>.</item>
+    ///   <item>When spill is disabled, the cap is <see cref="CamusDBConfig.HashJoinMaxBuildRows"/>;
+    ///     overflow routes to a full nested-loop scan.</item>
+    /// </list>
     ///
-    /// Note: on cap overflow the build scan is abandoned after reading up to
-    /// <c>HashJoinMaxBuildRows</c> rows; the nested-loop fallback then re-scans the
-    /// build side from scratch, so the build table is read up to ~2× in that rare path.
-    /// This is intentional: correctness over complexity. Disk spilling is out of scope.
+    /// On cap overflow the build scan is abandoned; the fallback re-scans the build side from
+    /// scratch (~2× cost on this rare path). This is intentional: correctness over complexity.
     ///
     /// When <paramref name="buildSide"/> is <see cref="HashJoinBuildSide.Right"/> the
     /// right source (<see cref="HashJoinNode.BuildSource"/>) is scanned and keyed by
@@ -785,6 +778,13 @@ internal sealed class QueryJoinExecutor
         Dictionary<CompositeColumnValue, List<Dictionary<string, ColumnValue>>> table =
             new(CompositeColumnValueComparer.Instance);
 
+        // With spill enabled, cap at SpillEffectiveThreshold so the Grace path is triggered
+        // at the configured spill boundary instead of the (much larger) legacy NLJ cap.
+        // With spill disabled, honour the legacy HashJoinMaxBuildRows cap.
+        int buildCap = CamusDBConfig.SpillEnabled
+            ? CamusDBConfig.SpillEffectiveThreshold
+            : CamusDBConfig.HashJoinMaxBuildRows;
+
         int rowCount = 0;
 
         if (buildSide == HashJoinBuildSide.Right)
@@ -794,7 +794,7 @@ internal sealed class QueryJoinExecutor
             await foreach (QueryResultRow row in ScanJoinRightSource(
                 joinNode.BuildSource, joinNode.BuildExecutionFilter, plan).ConfigureAwait(false))
             {
-                if (rowCount >= CamusDBConfig.HashJoinMaxBuildRows) return null;
+                if (rowCount >= buildCap) return null;
 
                 ColumnValue[] keyValues = new ColumnValue[buildKeys.Count];
                 bool hasNull = false;
@@ -824,7 +824,7 @@ internal sealed class QueryJoinExecutor
 
             await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
             {
-                if (rowCount >= CamusDBConfig.HashJoinMaxBuildRows) return null;
+                if (rowCount >= buildCap) return null;
 
                 Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(
                     leftRow.Row, ResolveLeftAlias(joinNode.Input!, leftRow));
@@ -1301,6 +1301,9 @@ internal sealed class QueryJoinExecutor
     {
         int K = CamusDBConfig.SpillMergeFanIn;
 
+        if (_stats is not null)
+            _stats.HashJoinGracePathCount++;
+
         IAsyncEnumerable<QueryResultRow> buildStream;
         IReadOnlyList<string> buildKeyColumns;
         IAsyncEnumerable<QueryResultRow> probeStream;
@@ -1344,12 +1347,16 @@ internal sealed class QueryJoinExecutor
 
     /// <summary>
     /// Joins a single partition pair by loading the build partition into an in-memory hash table
-    /// and streaming the probe partition against it. When the build partition count exceeds the
-    /// threshold and the recursion depth allows it, both files are re-read with a perturbed hash
-    /// seed to split into sub-partitions. When the depth limit is reached (extreme skew where a
-    /// single key dominates and cannot be split further), all remaining build rows are loaded
-    /// regardless of the threshold — correctness is preserved at the cost of a larger in-memory
-    /// footprint for that partition.
+    /// and streaming the probe partition against it.
+    ///
+    /// <para>
+    /// When the build partition count exceeds <see cref="CamusDBConfig.SpillEffectiveThreshold"/>
+    /// and the recursion depth allows it, both files are re-read with a perturbed hash seed to
+    /// split into sub-partitions. When the depth limit is reached (extreme skew where a single
+    /// key dominates and cannot be split further), the method falls back to a nested-loop join
+    /// over the partition files — O(|probe|×|build|) reads but O(1) memory — instead of
+    /// materialising the entire skewed build partition into a hash table.
+    /// </para>
     /// </summary>
     private async IAsyncEnumerable<QueryResultRow> JoinPartitionAsync(
         HashJoinNode joinNode,
@@ -1368,9 +1375,9 @@ internal sealed class QueryJoinExecutor
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.BuildSource.Alias;
 
-        // Load build partition into an in-memory hash table, stopping early when the threshold
-        // is reached and recursion is still possible. The partial load is discarded and both
-        // files are re-read cleanly for repartitioning.
+        // Load build partition into an in-memory hash table, stopping early whenever
+        // the threshold is exceeded regardless of depth — the depth determines the
+        // overflow strategy, not whether we detect the overflow.
         Dictionary<CompositeColumnValue, List<Dictionary<string, ColumnValue>>> hashTable =
             new(CompositeColumnValueComparer.Instance);
         int buildCount = 0;
@@ -1385,7 +1392,7 @@ internal sealed class QueryJoinExecutor
             ColumnValue[]? keyVals = ExtractMergeKey(buildRow.Row, buildKeyColumns);
             if (keyVals is null) continue;
 
-            if (buildCount >= threshold && depth < MaxGraceHashDepth)
+            if (buildCount >= threshold)
             {
                 overflow = true;
                 break;
@@ -1400,18 +1407,34 @@ internal sealed class QueryJoinExecutor
 
         if (overflow)
         {
-            // Re-read both files with a new hash seed to distribute rows across K sub-partitions.
-            int newSeed = seed + 1;
-            string[] subBuildFiles = await PartitionStreamToFilesAsync(
-                scope, K, newSeed, ReadSpillFileAsync(buildFile, ct), buildKeyColumns, ct).ConfigureAwait(false);
-            string[] subProbeFiles = await PartitionStreamToFilesAsync(
-                scope, K, newSeed, ReadSpillFileAsync(probeFile, ct), probeKeyColumns, ct).ConfigureAwait(false);
-
-            for (int p = 0; p < K; p++)
+            if (depth < MaxGraceHashDepth)
             {
-                await foreach (QueryResultRow row in JoinPartitionAsync(
-                    joinNode, plan, scope, subBuildFiles[p], subProbeFiles[p],
-                    buildKeyColumns, probeKeyColumns, newSeed, depth + 1, ct).ConfigureAwait(false))
+                // Re-read both files with a new hash seed to distribute rows across K sub-partitions.
+                int newSeed = seed + 1;
+                string[] subBuildFiles = await PartitionStreamToFilesAsync(
+                    scope, K, newSeed, ReadSpillFileAsync(buildFile, ct), buildKeyColumns, ct).ConfigureAwait(false);
+                string[] subProbeFiles = await PartitionStreamToFilesAsync(
+                    scope, K, newSeed, ReadSpillFileAsync(probeFile, ct), probeKeyColumns, ct).ConfigureAwait(false);
+
+                for (int p = 0; p < K; p++)
+                {
+                    await foreach (QueryResultRow row in JoinPartitionAsync(
+                        joinNode, plan, scope, subBuildFiles[p], subProbeFiles[p],
+                        buildKeyColumns, probeKeyColumns, newSeed, depth + 1, ct).ConfigureAwait(false))
+                        yield return row;
+                }
+            }
+            else
+            {
+                // Recursion depth limit reached and the partition still exceeds the threshold
+                // (extreme single-key skew — the key cannot be split further). Fall back to a
+                // nested-loop join over the partition files: O(|probe|×|build|) reads, O(1) memory.
+                if (_stats is not null)
+                    _stats.HashJoinNljPartitionFallbackCount++;
+
+                await foreach (QueryResultRow row in NestedLoopPartitionJoinAsync(
+                    joinNode, buildFile, probeFile, buildKeyColumns, probeKeyColumns, ticket, plan, ct)
+                    .ConfigureAwait(false))
                     yield return row;
             }
             yield break;
@@ -1435,6 +1458,51 @@ internal sealed class QueryJoinExecutor
                 Dictionary<string, ColumnValue> merged = joinNode.BuildSide == HashJoinBuildSide.Right
                     ? QueryRowMerger.MergeRows(probeRow.Row, buildRow, rightAlias)
                     : QueryRowMerger.MergeRows(buildRow, probeRow.Row, rightAlias);
+
+                if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
+                    continue;
+
+                yield return new QueryResultRow(default(ObjectIdValue), merged);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Nested-loop join over two partition files, used as the bounded-memory backstop when
+    /// the recursion depth limit is reached and a skewed partition still exceeds the threshold.
+    /// For each probe row, the build file is streamed from the beginning and matching rows are
+    /// emitted. Memory is O(1): neither file is materialised.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> NestedLoopPartitionJoinAsync(
+        HashJoinNode joinNode,
+        string buildFile,
+        string probeFile,
+        IReadOnlyList<string> buildKeyColumns,
+        IReadOnlyList<string> probeKeyColumns,
+        QueryTicket ticket,
+        QueryPlan plan,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        string rightAlias = joinNode.BuildSource.Alias;
+
+        await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, ct).ConfigureAwait(false))
+        {
+            ColumnValue[]? probeKeyVals = ExtractMergeKey(probeRow.Row, probeKeyColumns);
+            if (probeKeyVals is null) continue;
+
+            CompositeColumnValue probeKey = new(probeKeyVals);
+
+            await foreach (QueryResultRow buildRow in ReadSpillFileAsync(buildFile, ct).ConfigureAwait(false))
+            {
+                ColumnValue[]? buildKeyVals = ExtractMergeKey(buildRow.Row, buildKeyColumns);
+                if (buildKeyVals is null) continue;
+
+                if (!CompositeColumnValueComparer.Instance.Equals(probeKey, new CompositeColumnValue(buildKeyVals)))
+                    continue;
+
+                Dictionary<string, ColumnValue> merged = joinNode.BuildSide == HashJoinBuildSide.Right
+                    ? QueryRowMerger.MergeRows(probeRow.Row, buildRow.Row, rightAlias)
+                    : QueryRowMerger.MergeRows(buildRow.Row, probeRow.Row, rightAlias);
 
                 if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;

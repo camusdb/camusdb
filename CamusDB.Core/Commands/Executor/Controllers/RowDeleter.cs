@@ -18,6 +18,7 @@ using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.Diagnostics;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
+using CamusDB.Core.Statistics;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 
@@ -26,10 +27,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 internal sealed class RowDeleter
 {
     private readonly ILogger<ICamusDB> logger;
+    private readonly StatisticsManager? _stats;
 
-    public RowDeleter(ILogger<ICamusDB> logger)
+    public RowDeleter(ILogger<ICamusDB> logger, StatisticsManager? stats = null)
     {
         this.logger = logger;
+        _stats = stats;
     }
 
     public async Task<int> Delete(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, DeleteTicket ticket)
@@ -132,7 +135,12 @@ internal sealed class RowDeleter
         TableDescriptor table = state.Table;
         KvTransaction tx = state.Ticket.TxnState;
 
-        List<KvTableStore.RowDelete> batch = new(state.RowsToDelete.Count);
+        // Drain RowsToDelete in bounded chunks so a DELETE over a huge matched set does not
+        // hold an O(matched) RowDelete list on the heap between scan and the Kahuna round-trip.
+        // The chunk size is tied to SpillEffectiveThreshold so force-spill tests drive both
+        // the row-buffer spill and the mutation batch with one knob.
+        int chunkSize = CamusDBConfig.SpillEffectiveThreshold;
+        List<KvTableStore.RowDelete> batch = new(Math.Min(chunkSize, 64));
 
         await foreach (QueryResultRow row in state.RowsToDelete.EnumerateAsync().ConfigureAwait(false))
         {
@@ -142,16 +150,34 @@ internal sealed class RowDeleter
             KvTableStore.RowDelete rowDelete = new() { RowId = rowId };
             CollectIndexDeletes(table, rowId, writableRow, rowDelete);
             batch.Add(rowDelete);
+
+            if (batch.Count >= chunkSize)
+            {
+                await FlushDeleteBatch(table, tx, batch, state).ConfigureAwait(false);
+                batch.Clear();
+            }
         }
 
-        await table.Store.DeleteRowsBatch(tx, batch).ConfigureAwait(false);
+        if (batch.Count > 0)
+            await FlushDeleteBatch(table, tx, batch, state).ConfigureAwait(false);
 
+        return FluxAction.Continue;
+    }
+
+    private async Task FlushDeleteBatch(
+        TableDescriptor table,
+        KvTransaction tx,
+        List<KvTableStore.RowDelete> batch,
+        DeleteFluxState state)
+    {
+        if (_stats is not null && batch.Count > _stats.DeleteBatchMaxChunkSeen)
+            _stats.DeleteBatchMaxChunkSeen = batch.Count;
+
+        await table.Store.DeleteRowsBatch(tx, batch).ConfigureAwait(false);
         state.DeletedRows += batch.Count;
 
         foreach (KvTableStore.RowDelete row in batch)
             Log.LogRowDeleted(logger, row.RowId);
-
-        return FluxAction.Continue;
     }
 
     private static async Task<Dictionary<string, ColumnValue>> LoadWritableRow(

@@ -45,6 +45,9 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `sql_parser_cache_ttl_seconds` | — | `300` |
 | `sql_parser_cache_max_entries` | — | `2048` |
 | `sql_parser_cache_sweep_seconds` | — | `60` |
+| `spill_enabled` | — | `false` |
+| `spill_threshold_rows` | — | `500000` |
+| `spill_merge_fan_in` | — | `16` |
 | `kahuna.*` | — | mode-specific baseline |
 
 Parser-cache and lock/isolation knobs are YAML-only (operational tuning, not per-node startup flags).
@@ -73,6 +76,8 @@ Storage backends: `memory`, `sqlite`, `rocksdb`.
 | `http_peers` count ≠ `peers` count | `InvalidConfig` |
 | Invalid `default_isolation_level` | `InvalidConfig` |
 | `range_lock_heartbeat_interval_ms` ≥ `range_lock_expires_ms` (when expiry > 0) | `InvalidConfig` |
+| `spill_threshold_rows` ≤ 0 | `InvalidConfig` |
+| `spill_merge_fan_in` ≤ 0 | `InvalidConfig` |
 | Unknown `kahuna` key | `InvalidConfig` |
 | Unknown `kahuna.storage` / `kahuna.wal_storage` | `InvalidConfig` |
 | `kahuna.start_election_timeout_ms` ≥ `kahuna.end_election_timeout_ms` | `InvalidConfig` |

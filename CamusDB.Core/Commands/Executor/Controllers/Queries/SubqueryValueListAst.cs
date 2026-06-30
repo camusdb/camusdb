@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.SQLParser;
 
@@ -15,11 +16,20 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 internal static class SubqueryValueListAst
 {
-    public static NodeAst BuildInMembership(NodeAst lhs, InSubqueryMaterialization materialization) =>
+    /// <summary>
+    /// Builds an <c>ExprInMembership</c> node by asynchronously enumerating the
+    /// <see cref="SpillableValueList"/> in the materialization. The enumeration reads from disk
+    /// when the value list has spilled, keeping peak in-memory usage bounded during collection.
+    /// The caller is responsible for disposing the materialization after this method returns.
+    /// </summary>
+    public static async Task<NodeAst> BuildInMembershipAsync(
+        NodeAst lhs,
+        InSubqueryMaterialization materialization,
+        CancellationToken ct = default) =>
         new(
             NodeType.ExprInMembership,
             lhs,
-            Build(materialization.Values),
+            await BuildAsync(materialization.Values, ct).ConfigureAwait(false),
             extendedOne: null,
             extendedTwo: null,
             extendedThree: null,
@@ -27,11 +37,20 @@ internal static class SubqueryValueListAst
             extendedFive: null,
             yytext: null);
 
-    public static NodeAst BuildNotInMembership(NodeAst lhs, InSubqueryMaterialization materialization) =>
+    /// <summary>
+    /// Builds an <c>ExprNotInMembership</c> node by asynchronously enumerating the
+    /// <see cref="SpillableValueList"/> in the materialization. Three-valued semantics are
+    /// preserved via the <c>extendedOne</c>/<c>extendedTwo</c> bool AST nodes.
+    /// The caller is responsible for disposing the materialization after this method returns.
+    /// </summary>
+    public static async Task<NodeAst> BuildNotInMembershipAsync(
+        NodeAst lhs,
+        InSubqueryMaterialization materialization,
+        CancellationToken ct = default) =>
         new(
             NodeType.ExprNotInMembership,
             lhs,
-            Build(materialization.Values),
+            await BuildAsync(materialization.Values, ct).ConfigureAwait(false),
             extendedOne: BoolAst(materialization.ContainsNull),
             extendedTwo: BoolAst(materialization.IsEmpty),
             extendedThree: null,
@@ -39,6 +58,10 @@ internal static class SubqueryValueListAst
             extendedFive: null,
             yytext: null);
 
+    /// <summary>
+    /// Builds an <c>ExprList</c> tree from a literal <c>IReadOnlyList&lt;ColumnValue&gt;</c>.
+    /// Used for grammar-parsed literal IN lists (e.g. <c>WHERE x IN (1, 2, 3)</c>).
+    /// </summary>
     public static NodeAst? Build(IReadOnlyList<ColumnValue> values)
     {
         if (values.Count == 0)
@@ -58,6 +81,45 @@ internal static class SubqueryValueListAst
                 extendedFour: null,
                 extendedFive: null,
                 yytext: null);
+        }
+
+        return current;
+    }
+
+    /// <summary>
+    /// Builds an <c>ExprList</c> tree by asynchronously enumerating a
+    /// <see cref="SpillableValueList"/>. When the list has spilled to disk, values are read
+    /// from the spill file rather than from an in-memory <c>List&lt;ColumnValue&gt;</c>,
+    /// bounding collection-time memory. Null values are skipped (nulls are tracked separately
+    /// in <c>InSubqueryMaterialization.ContainsNull</c>).
+    /// </summary>
+    private static async Task<NodeAst?> BuildAsync(SpillableValueList list, CancellationToken ct = default)
+    {
+        NodeAst? current = null;
+
+        await foreach (ColumnValue value in list.EnumerateAsync(ct).ConfigureAwait(false))
+        {
+            if (value.Type == ColumnType.Null)
+                continue;
+
+            NodeAst node = ColumnValueAstBuilder.FromColumnValue(value);
+            if (current is null)
+            {
+                current = node;
+            }
+            else
+            {
+                current = new NodeAst(
+                    NodeType.ExprList,
+                    current,
+                    node,
+                    extendedOne: null,
+                    extendedTwo: null,
+                    extendedThree: null,
+                    extendedFour: null,
+                    extendedFive: null,
+                    yytext: null);
+            }
         }
 
         return current;

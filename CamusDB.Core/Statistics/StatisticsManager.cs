@@ -890,6 +890,47 @@ public sealed class StatisticsManager
     /// </summary>
     internal bool ForceNestedLoopForTesting { get; set; }
 
+    /// <summary>
+    /// Counts how many times the Grace hash join has fallen back to nested-loop for a single
+    /// skewed partition that could not be split below the threshold within the recursion depth
+    /// limit. Incremented by <c>QueryJoinExecutor.JoinPartitionAsync</c>. Test-only; not thread-safe.
+    /// </summary>
+    internal int HashJoinNljPartitionFallbackCount { get; set; }
+
+    /// <summary>
+    /// Counts how many times a hash join routed to the Grace/hybrid partitioning path because the
+    /// build side exceeded <c>CamusDBConfig.SpillEffectiveThreshold</c> with spill enabled.
+    /// Incremented by <c>QueryJoinExecutor.GraceHashJoinAsync</c>. Lets a test prove the Grace path
+    /// was actually taken (vs the in-memory hash join) independent of result values. Test-only;
+    /// not thread-safe.
+    /// </summary>
+    internal int HashJoinGracePathCount { get; set; }
+
+    /// <summary>
+    /// Counts how many times <c>QueryAggregator.AggregatePartitionAsync</c> recursively
+    /// repartitioned a GROUP BY partition because its distinct-group count exceeded
+    /// <c>CamusDBConfig.SpillEffectiveThreshold</c>. Lets a test prove the recursion path was
+    /// taken rather than unbounded dictionary growth. Test-only; not thread-safe.
+    /// </summary>
+    internal int GroupByPartitionRecursionCount { get; set; }
+
+    /// <summary>
+    /// Counts how many times <c>InSubqueryExecutor.MaterializeAsync</c> overflowed the
+    /// in-memory buffer to a spill file when collecting the value set for an uncorrelated
+    /// IN/NOT IN subquery. A positive value proves the spill path was taken rather than
+    /// accumulating all values in a plain <c>List&lt;ColumnValue&gt;</c>. Test-only; not thread-safe.
+    /// </summary>
+    internal int InSubqueryValueListSpillCount { get; set; }
+
+    /// <summary>
+    /// Tracks the largest single batch size passed to
+    /// <see cref="KvTableStore.DeleteRowsBatch"/> during a DELETE operation. When the DELETE
+    /// mutation phase runs in bounded chunks this value never exceeds the configured chunk
+    /// size. A value larger than the chunk size proves the unbounded single-batch path was
+    /// taken. Test-only; not thread-safe.
+    /// </summary>
+    internal int DeleteBatchMaxChunkSeen { get; set; }
+
     private static string CacheKey(string dbId, string tableId)
         => string.Concat(dbId, ":", tableId);
 

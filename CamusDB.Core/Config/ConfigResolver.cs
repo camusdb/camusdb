@@ -107,6 +107,10 @@ public static class ConfigResolver
         CamusDBConfig.PlanCacheEnabled = config.PlanCacheEnabled;
         CamusDBConfig.PlanCacheMaxEntries = config.PlanCacheMaxEntries;
 
+        CamusDBConfig.SpillEnabled = config.SpillEnabled;
+        CamusDBConfig.SpillThresholdRows = config.SpillThresholdRows;
+        CamusDBConfig.SpillMergeFanIn = config.SpillMergeFanIn;
+
         CamusDBConfig.MaxIdentifierLength = config.MaxIdentifierLength;
         CamusDBConfig.MaxColumnsPerTable = config.MaxColumnsPerTable;
         CamusDBConfig.MaxIndexesPerTable = config.MaxIndexesPerTable;

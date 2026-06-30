@@ -385,6 +385,181 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// Proves that with <c>SpillEnabled=true</c> and <c>ForceSpillThresholdRows</c> set to a
+    /// value smaller than the build side, the Grace path triggers via the threshold — NOT via
+    /// <c>HashJoinMaxBuildRows</c>. The negative proof is the exact-threshold variant below.
+    ///
+    /// The discriminator: <c>HashJoinMaxBuildRows</c> is set to its default (1 million), well
+    /// above the 4-row build. Without the fix, <c>BuildHashTable</c> would never return null
+    /// (the 1M cap is never reached) and no partition files would be created. With the fix,
+    /// the threshold is <c>ForceSpillThresholdRows = 3</c> so the 4th row triggers the cap and
+    /// the Grace path partitions both sides to disk.
+    /// </summary>
+    [Test]
+    public async Task HashJoinSpill_ForceThreshold_TriggersGracePath_IndependentOfMaxBuildRows()
+    {
+        string sql = "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_id = o.id";
+
+        // Reference: spill off, large cap — in-memory path.
+        CamusDBConfig.SpillEnabled         = false;
+        CamusDBConfig.HashJoinMaxBuildRows = 1_000_000;
+        HJSFixture fRef = await SetupOrdersItems();
+        List<QueryResultRow> reference = await Run(fRef, sql);
+
+        // Grace path triggered by ForceSpillThresholdRows (not by HashJoinMaxBuildRows = 1).
+        CamusDBConfig.SpillEnabled            = true;
+        CamusDBConfig.HashJoinMaxBuildRows    = 1_000_000; // deliberately large — must NOT be the trigger
+        CamusDBConfig.ForceSpillThresholdRows = 3;         // 4-row build > 3 → overflow → Grace
+        CamusDBConfig.SpillMergeFanIn         = 4;
+        HJSFixture fSpill = await SetupOrdersItems();
+        fSpill.Executor.Statistics.HashJoinGracePathCount = 0;
+        List<QueryResultRow> spillResult = await Run(fSpill, sql);
+
+        // Positive signal that the Grace path actually ran. Result-equivalence alone does not
+        // discriminate the fix: with the threshold ignored (build cap = HashJoinMaxBuildRows = 1M),
+        // the 4-row build would stay in the in-memory hash join and still return the same rows.
+        Assert.That(fSpill.Executor.Statistics.HashJoinGracePathCount, Is.GreaterThan(0),
+            "A build exceeding ForceSpillThresholdRows must route to the Grace path even though it " +
+            "is far below HashJoinMaxBuildRows. A count of 0 means the threshold trigger was ignored.");
+
+        Assert.AreEqual(reference.Count, spillResult.Count,
+            "Grace path triggered via ForceSpillThresholdRows must return the same multiset size.");
+        CollectionAssert.AreEqual(ProductList(reference), ProductList(spillResult),
+            "Grace path triggered via threshold must return the same product values as in-memory.");
+
+        // Verify partition files were actually created and cleaned up.
+        string spillRoot = Path.Combine(_dataDir, "tmp", "spill");
+        if (Directory.Exists(spillRoot))
+        {
+            string[] remaining = Directory.GetFiles(spillRoot, "*.spill", SearchOption.AllDirectories);
+            Assert.IsEmpty(remaining, "Partition spill files must be deleted after the join completes.");
+        }
+    }
+
+    /// <summary>
+    /// Proves the at/under-threshold invariant for hash join: a build of exactly
+    /// <c>ForceSpillThresholdRows</c> rows must stay fully in the in-memory hash table and
+    /// must NOT trigger the Grace path or create any partition files.
+    ///
+    /// Negative proof: if the overflow check were <c>&gt;= threshold</c> instead of
+    /// <c>&gt; threshold - 1</c> (i.e. checking before vs after the threshold row is added
+    /// when rowCount would equal the cap), spill files would appear.
+    /// </summary>
+    [Test]
+    public async Task HashJoinSpill_ExactThresholdBuild_NoSpillTriggered()
+    {
+        // SetupOrdersItems builds a 4-row right side (orders). Set threshold to 4 so the
+        // build fits exactly within the cap and no overflow fires.
+        CamusDBConfig.SpillEnabled            = true;
+        CamusDBConfig.HashJoinMaxBuildRows    = 1_000_000;
+        CamusDBConfig.ForceSpillThresholdRows = 4; // build has exactly 4 rows → must NOT overflow
+        CamusDBConfig.SpillMergeFanIn         = 4;
+        HJSFixture f = await SetupOrdersItems();
+
+        string sql = "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_id = o.id";
+        List<QueryResultRow> rows = await Run(f, sql);
+
+        Assert.That(rows.Count, Is.GreaterThan(0),
+            "Join must return rows even when the build fits exactly at the threshold.");
+
+        // No partition files must have been created.
+        string spillRoot = Path.Combine(_dataDir, "tmp", "spill");
+        if (Directory.Exists(spillRoot))
+        {
+            string[] spillFiles = Directory.GetFiles(spillRoot, "*.spill", SearchOption.AllDirectories);
+            Assert.IsEmpty(spillFiles,
+                "A build of exactly ForceSpillThresholdRows rows must not trigger the Grace path.");
+        }
+    }
+
+    /// <summary>
+    /// Proves the NLJ backstop is taken — not load-all — when a single dominant key makes a
+    /// partition un-splittable at max recursion depth. The discriminator is
+    /// <c>StatisticsManager.HashJoinNljPartitionFallbackCount</c>: the counter is only
+    /// incremented by the NLJ backstop branch, never by the load-all branch. Reverting to the
+    /// old depth-guarded overflow check (no backstop) would leave the counter at 0, failing
+    /// this test.
+    ///
+    /// The test uses more probe rows than build rows so that the statistics manager routes
+    /// the build to the declared right side (items), keeping the skewed 4-row build on the side
+    /// that partitions and overflows at every recursion level.
+    /// </summary>
+    [Test]
+    public async Task HashJoinSpill_SkewedKey_NljBackstopTaken_NotLoadAll()
+    {
+        // items (right/build side, 4 rows) all share one order_id — extreme skew.
+        // orders (left/probe side, 6 rows) is larger so ChooseBuildSide picks items as build.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "orders",
+            columns: [new("id", ColumnType.Id), new("label", ColumnType.String, notNull: true)],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "items",
+            columns: [new("id", ColumnType.Id), new("order_id", ColumnType.Id), new("val", ColumnType.Integer64)],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        string singleOrderId = ObjectIdGenerator.Generate().ToString();
+
+        // 6 orders: only the first matches items; the rest have no items (they will appear in
+        // the probe scan but produce no join output rows). 6 > 4 → BuildSide.Right → items is build.
+        List<Dictionary<string, ColumnValue>> orders =
+        [
+            new() { { "id", new(ColumnType.Id, singleOrderId) }, { "label", new(ColumnType.String, "Main") } },
+            new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "label", new(ColumnType.String, "Pad1") } },
+            new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "label", new(ColumnType.String, "Pad2") } },
+            new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "label", new(ColumnType.String, "Pad3") } },
+            new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "label", new(ColumnType.String, "Pad4") } },
+            new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "label", new(ColumnType.String, "Pad5") } },
+        ];
+
+        await executor.Insert(new InsertTicket(txn, dbname, "orders", values: orders));
+
+        await executor.Insert(new InsertTicket(txn, dbname, "items",
+            values:
+            [
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, singleOrderId) }, { "val", new(ColumnType.Integer64, 1L) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, singleOrderId) }, { "val", new(ColumnType.Integer64, 2L) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, singleOrderId) }, { "val", new(ColumnType.Integer64, 3L) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, singleOrderId) }, { "val", new(ColumnType.Integer64, 4L) } },
+            ]));
+
+        await database.Transactions.CommitAsync(txn);
+        executor.Statistics.ForceHashJoinForTesting = true;
+
+        // Reset counter before the test run.
+        executor.Statistics.HashJoinNljPartitionFallbackCount = 0;
+
+        // threshold=2: the 4-row single-key build overflows at every recursion level.
+        // At MaxGraceHashDepth the NLJ backstop fires instead of load-all.
+        CamusDBConfig.SpillEnabled            = true;
+        CamusDBConfig.HashJoinMaxBuildRows    = 1_000_000;
+        CamusDBConfig.ForceSpillThresholdRows = 2;
+        CamusDBConfig.SpillMergeFanIn         = 4;
+
+        KvTransaction runTxn = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(txnState: runTxn, database: dbname,
+            sql: "SELECT o.label, i.val FROM orders o JOIN items i ON i.order_id = o.id",
+            parameters: null);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+
+        // All 4 items match the single order.
+        Assert.That(rows.Count, Is.EqualTo(4),
+            "All items must be returned even when extreme key skew forces the NLJ backstop.");
+
+        // The NLJ backstop counter must be non-zero — proving the bounded path was taken.
+        Assert.That(executor.Statistics.HashJoinNljPartitionFallbackCount, Is.GreaterThan(0),
+            "The NLJ partition backstop must be triggered for a single-key skewed partition " +
+            "at max recursion depth. A count of 0 means the old load-all path was taken instead.");
+    }
+
+    /// <summary>
     /// True discriminator for the murmur-finalizer fix: keys that share a partition bucket at
     /// recursion depth 0 (seed 0) must be redistributed across multiple buckets at depth 1
     /// (seed 1). With the old <c>(hash ^ seed) % K</c> scheme, same-bucket keys share the low

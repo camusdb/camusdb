@@ -147,8 +147,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableDropper = new(catalogs, logger);
         rowInserter = new(logger);
         rowUpdater = new(logger);
-        rowDeleter = new(logger);
         statisticsManager = new(logger);
+        rowDeleter = new(logger, statisticsManager);
         queryExecutor = new(logger, statisticsManager);
         sqlExecutor = new();
         schemaQuerier = new(catalogs, logger);
@@ -157,7 +157,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         ExistsSubqueryExecutor existsSubqueryExecutor = new(subqueryQueryExecutor);
         subqueryRewriter = new SubqueryRewriter(
             new ScalarSubqueryExecutor(subqueryQueryExecutor),
-            new InSubqueryExecutor(subqueryQueryExecutor));
+            new InSubqueryExecutor(subqueryQueryExecutor, statisticsManager));
         existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder);
         semiJoinAnalyzer = new SemiJoinAnalyzer(tableOpener);
         explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor, statisticsManager, semiJoinAnalyzer);

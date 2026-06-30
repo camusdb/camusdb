@@ -26,7 +26,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///   <item>LHS of IN / NOT IN is a bare <see cref="NodeType.Identifier"/>.</item>
 ///   <item>RHS subquery has exactly one non-star <see cref="NodeType.Identifier"/> projection.</item>
 ///   <item>RHS subquery has a single <see cref="TableSource"/> FROM clause.</item>
-///   <item>RHS subquery has no GROUP BY, DISTINCT, or HAVING.</item>
+///   <item>RHS subquery has no GROUP BY or HAVING. Inner <c>DISTINCT</c> is allowed: a semi/anti
+///     join is an existence test, so deduplicating the inner values cannot change membership
+///     (<c>x IN (SELECT DISTINCT c)</c> ≡ <c>x IN (SELECT c)</c>), and the join probes the inner
+///     index directly without re-running the inner query.</item>
 ///   <item>RHS subquery is uncorrelated (<see cref="ExistsSubqueryAnalyzer.IsCorrelated"/> returns false).</item>
 ///   <item>RHS subquery WHERE (if any) contains no nested subqueries.</item>
 /// </list>
@@ -112,8 +115,9 @@ internal sealed class SemiJoinAnalyzer
             return null;
         if (innerQuery.GroupBy is { Count: > 0 })
             return null;
-        if (innerQuery.IsDistinct)
-            return null;
+        // Inner DISTINCT is intentionally NOT a disqualifier: a semi/anti join tests existence,
+        // so deduplicating the inner values is a no-op for membership. The spec probes the inner
+        // index directly and never re-runs the inner query, so DISTINCT is simply dropped.
         if (innerQuery.Having is not null)
             return null;
         if (innerQuery.Projections.Count != 1)

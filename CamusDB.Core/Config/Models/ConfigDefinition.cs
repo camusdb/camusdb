@@ -169,6 +169,30 @@ public class ConfigDefinition
     /// <summary>Max tables per database. &lt;= 0 disables. Default 10 000.</summary>
     public int MaxTablesPerDatabase { get; set; } = 10_000;
 
+    /// <summary>
+    /// Enables spill-to-disk for blocking query operators (sort, GROUP BY, DISTINCT,
+    /// hash join, derived-table materialization, DELETE/UPDATE row buffers).
+    /// When <c>false</c> (default), every operator keeps its in-memory path; when <c>true</c>,
+    /// each operator spills sorted runs or partitioned rows to temp files once its buffer exceeds
+    /// <see cref="SpillThresholdRows"/>. Maps to <c>CamusDBConfig.SpillEnabled</c>.
+    /// </summary>
+    public bool SpillEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Per-operator in-memory row cap before the operator begins spilling to disk.
+    /// Must be &gt; 0. Ignored when <see cref="SpillEnabled"/> is <c>false</c>.
+    /// Maps to <c>CamusDBConfig.SpillThresholdRows</c>.
+    /// </summary>
+    public int SpillThresholdRows { get; set; } = 500_000;
+
+    /// <summary>
+    /// Maximum number of simultaneously-open spill-run readers during a k-way merge pass.
+    /// When the number of spilled runs exceeds this value, a multi-pass merge is performed.
+    /// Must be &gt; 0. Ignored when <see cref="SpillEnabled"/> is <c>false</c>.
+    /// Maps to <c>CamusDBConfig.SpillMergeFanIn</c>.
+    /// </summary>
+    public int SpillMergeFanIn { get; set; } = 16;
+
     /// <summary>Allow-listed Kahuna engine tunables for cluster and standalone nodes.</summary>
     public KahunaOptionsConfig Kahuna { get; set; } = new();
 
@@ -254,6 +278,12 @@ public class ConfigDefinition
 
         if (LockWaitDeadlineMs <= 0)
             throw Invalid($"'lock_wait_deadline_ms' must be > 0, got {LockWaitDeadlineMs}");
+
+        if (SpillThresholdRows <= 0)
+            throw Invalid($"'spill_threshold_rows' must be > 0, got {SpillThresholdRows}");
+
+        if (SpillMergeFanIn <= 0)
+            throw Invalid($"'spill_merge_fan_in' must be > 0, got {SpillMergeFanIn}");
 
         Kahuna.Validate();
 

@@ -79,6 +79,24 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 # sql_parser_cache_max_entries: 2048
 # sql_parser_cache_sweep_seconds: 60
 
+# ── Spill-to-disk ─────────────────────────────────────────────────────────────
+# When spill_enabled is false (default), all blocking operators (sort, GROUP BY, DISTINCT,
+# hash join, derived-table materialization, DELETE/UPDATE row buffers) keep their existing
+# in-memory behavior. When true, each operator writes sorted runs or partitioned rows to
+# temp files under {data_dir}/tmp/spill/ once its buffer exceeds spill_threshold_rows.
+# Spill files are always deleted on operator completion, cancellation, or exception;
+# orphaned files from a prior crash are swept on the next startup.
+#
+# spill_enabled: false            # gate all spill behavior; default false
+# spill_threshold_rows: 500000    # per-operator row cap before spilling; must be > 0
+# spill_merge_fan_in: 16          # max simultaneous run readers in a k-way merge; must be > 0
+
+# ── Cost-based optimizer ──────────────────────────────────────────────────────
+# cost_based_access_path_enabled: false   # cost all index access paths, pick cheapest
+# cost_based_join_order_enabled: false    # System-R DP join-order enumeration
+# plan_cache_enabled: false               # SQL plan cache (reuse parsed+planned queries)
+# plan_cache_max_entries: 512             # max LRU entries in the plan cache
+
 # ── Kahuna engine (cluster and standalone) ────────────────────────────────────
 # Allow-listed passthrough to EmbeddedKahunaOptions. Omit the section or any key to
 # keep the mode-specific CamusDB baseline (cluster: sqlite + election 2000/4000 ms;

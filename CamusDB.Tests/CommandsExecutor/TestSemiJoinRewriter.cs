@@ -160,6 +160,49 @@ public sealed class TestSemiJoinRewriter : BaseTest
     }
 
     [Test]
+    public async Task InSubqueryWithInnerDistinctProducesSemiJoinNode()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();
+
+        // Inner DISTINCT is a no-op for membership, so the predicate must still rewrite to a
+        // semi-join (it must NOT fall through to value-list materialisation). Negative proof:
+        // restoring the IsDistinct disqualifier in SemiJoinAnalyzer drops "semi-join" from the plan.
+        string plan = await GetExplainAsync(database, executor, dbname,
+            "SELECT name FROM robots WHERE name IN (SELECT DISTINCT name FROM approved)");
+
+        Assert.That(plan, Does.Contain("semi-join"),
+            "IN over an inner DISTINCT subquery must still produce a semi-join node, not materialise");
+    }
+
+    [Test]
+    public async Task NotInSubqueryWithInnerDistinctProducesAntiJoinNode()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();
+
+        string plan = await GetExplainAsync(database, executor, dbname,
+            "SELECT name FROM robots WHERE name NOT IN (SELECT DISTINCT name FROM approved)");
+
+        Assert.That(plan, Does.Contain("anti-join"),
+            "NOT IN over an inner DISTINCT subquery (NOT NULL inner column) must still produce an anti-join");
+    }
+
+    [Test]
+    public async Task InSubqueryWithInnerDistinctFiltersCorrectly()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();
+
+        List<QueryResultRow> rows = await RunQueryAsync(database, executor, dbname,
+            "SELECT name FROM robots WHERE name IN (SELECT DISTINCT name FROM approved)");
+
+        // Identical result to the non-DISTINCT form: only Alpha and Gamma are in approved.
+        Assert.AreEqual(2, rows.Count, "IN over inner DISTINCT must return the same rows as without DISTINCT");
+
+        IEnumerable<string?> names = rows.Select(r => r.Row["name"].StrValue).OrderBy(n => n);
+        CollectionAssert.AreEqual(new[] { "Alpha", "Gamma" }, names,
+            "IN over inner DISTINCT result must be Alpha and Gamma");
+    }
+
+    [Test]
     public async Task R11_NotInOverNotNullColumnProducesAntiJoinNode()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();

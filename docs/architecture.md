@@ -62,7 +62,9 @@ resulting plan. Full reference: [query-planner.md](query-planner.md) and
 The plan executes as composable, storage-agnostic operators — scanning, filtering,
 sorting, limiting, projection, aggregation, distinct, semi-join, and join execution.
 Keeping these independent of the storage layout means filtering, sorting, aggregation, and
-projection behave identically in standalone and cluster modes.
+projection behave identically in standalone and cluster modes. Blocking operators can
+optionally spill their intermediate buffers to temporary files instead of holding them
+entirely in memory — see [spill-to-disk.md](spill-to-disk.md).
 
 ### Catalog
 

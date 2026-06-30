@@ -120,14 +120,14 @@ internal sealed class SubqueryRewriter
 
         NodeAst lhs = await RewriteExpressionAsync(database, expr.leftAst, ticket).ConfigureAwait(false);
 
-        InSubqueryMaterialization materialization = await inExecutor.MaterializeAsync(
+        await using InSubqueryMaterialization materialization = await inExecutor.MaterializeAsync(
             database,
             expr.rightAst,
             ticket.TxnState,
             ticket.Parameters).ConfigureAwait(false);
 
         return negated
-            ? SubqueryValueListAst.BuildNotInMembership(lhs, materialization)
-            : SubqueryValueListAst.BuildInMembership(lhs, materialization);
+            ? await SubqueryValueListAst.BuildNotInMembershipAsync(lhs, materialization).ConfigureAwait(false)
+            : await SubqueryValueListAst.BuildInMembershipAsync(lhs, materialization).ConfigureAwait(false);
     }
 }
