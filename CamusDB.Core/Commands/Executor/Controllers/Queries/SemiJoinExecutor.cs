@@ -125,7 +125,7 @@ internal sealed class SemiJoinExecutor
 
         if (index.Type == IndexType.Unique)
         {
-            ObjectIdValue? rowId = await inner.Store.LookupUnique(outerTicket.TxnState, index.Name, key).ConfigureAwait(false);
+            ObjectIdValue? rowId = await inner.Store.LookupUnique(outerTicket.TxnState, index.KvId, key).ConfigureAwait(false);
             if (rowId is null)
                 return false;
 
@@ -152,7 +152,7 @@ internal sealed class SemiJoinExecutor
             : null;
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in inner.Store.ScanIndex(
-            outerTicket.TxnState, index.Name, new[] { keyType },
+            outerTicket.TxnState, index.KvId, new[] { keyType },
             key, upperBound,
             false, true, false,
             maxRows: null))

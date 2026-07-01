@@ -13,6 +13,7 @@ using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor.Models;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -79,22 +80,22 @@ internal sealed class DatabaseOpener
     {
         DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
 
-        string id;
-        if (!registry.TryResolveId(name, out id))
-        {
-            // Cache miss — fall back to a live KV read so that databases created on other
-            // cluster nodes (whose Raft-replicated write is visible in the shared store but
-            // not yet in this node's in-memory cache) are found without requiring a restart.
-            string? liveId = await registry.TryResolveIdAsync(name).ConfigureAwait(false);
-            if (liveId is null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.DatabaseDoesntExist,
-                    $"Database '{name}' does not exist");
-            id = liveId;
-        }
+        // Resolve the full registry entry in one call so the id and ancestry come from
+        // the same consistent snapshot.  TryResolveEntryAsync checks the in-memory cache
+        // first (synchronous fast path) and falls back to a live KV read only on a miss,
+        // providing both cross-node visibility and freedom from a TryResolveId→Get TOCTOU
+        // window where a concurrent drop could evict the entry between the two lookups.
+        DatabaseRegistryEntry? entry = await registry.TryResolveEntryAsync(name).ConfigureAwait(false);
+        if (entry is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.DatabaseDoesntExist,
+                $"Database '{name}' does not exist");
+
+        string id = entry.Id;
+        IReadOnlyList<DatabaseBranchAncestor> ancestors = entry.Ancestors;
 
         AsyncLazy<DatabaseDescriptor> lazy = databaseDescriptors.Descriptors.GetOrAdd(
-            id, _ => new(() => LoadDatabase(id, name)));
+            id, _ => new(() => LoadDatabase(id, name, ancestors)));
 
         DatabaseDescriptor descriptor = await lazy;
 
@@ -111,7 +112,8 @@ internal sealed class DatabaseOpener
         return descriptor;
     }
 
-    private async Task<DatabaseDescriptor> LoadDatabase(string id, string name)
+    private async Task<DatabaseDescriptor> LoadDatabase(
+        string id, string name, IReadOnlyList<DatabaseBranchAncestor> ancestors)
     {
         // Both modes use the single shared node. Opening a database is a pure metadata
         // load — no per-database node is constructed, started, or flushed here.
@@ -130,7 +132,8 @@ internal sealed class DatabaseOpener
             name: name,
             kahuna: sharedNode,
             transactions: transactions,
-            tableDescriptors: tableDescriptors
+            tableDescriptors: tableDescriptors,
+            ancestors: ancestors
         );
 
         await catalogs.LoadMetaAsync(databaseDescriptor).ConfigureAwait(false);

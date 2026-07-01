@@ -224,12 +224,12 @@ internal sealed class RowInserter
                         continue;
 
                     CompositeColumnValue uniqueKeyValue = GetColumnValue(values, index.Columns);
-                    write.IndexEntries.Add(new(index.Name, uniqueKeyValue, Unique: true));
+                    write.IndexEntries.Add(new(index.KvId, uniqueKeyValue, Unique: true));
                 }
                 else if (index.Type == IndexType.Multi)
                 {
                     CompositeColumnValue multiKeyValue = GetColumnValue(values, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
-                    write.IndexEntries.Add(new(index.Name, multiKeyValue, Unique: false));
+                    write.IndexEntries.Add(new(index.KvId, multiKeyValue, Unique: false));
                 }
             }
 

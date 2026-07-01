@@ -136,20 +136,24 @@ internal sealed class TableOpener
             {
                 case IndexType.Unique:
                 case IndexType.Multi:
-                    // In-memory projection: carries resolved column names, State, and Type.
-                    // Id, ColumnIds, and StartOffset are intentionally absent here — DDL and
-                    // backfill read those from table.Schema.Indexes (or SystemSchema fallback),
-                    // not from this descriptor. Any future query-time code that needs an index
-                    // Id must read table.Schema.Indexes, not TableDescriptor.Indexes.
+                    // In-memory projection: carries resolved column names, State, Type, and Id.
+                    // The immutable Id is propagated so that KvId resolves to the stable identifier
+                    // used as the Kahuna key segment — not the mutable name. ColumnIds and
+                    // StartOffset are intentionally absent here; DDL and backfill read those from
+                    // table.Schema.Indexes (or SystemSchema fallback), not from this descriptor.
                     tableDescriptor.Indexes[entry.Name] =
-                        new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State);
+                        new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State, id: entry.Id);
 
-                    // Register this index's key space for key-range routing if every key
-                    // column is a non-String ASCII-encoding type. String stays hash-routed (C3b).
+                    // Register display name so duplicate-key errors show the human-readable
+                    // name instead of the opaque immutable KvId stored in KV keys.
+                    store.RegisterIndexName(entry.KvId, entry.Name);
+
+                    // Register this index's key space for key-range routing using the stable KvId
+                    // so that range-routing registration survives a RENAME INDEX without a restart.
                     if (columnTypeById is not null && IsIndexRangeable(entry, columnTypeById))
                     {
-                        await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.IndexKeySpace(entry.Name));
-                        store.MarkIndexAsRanged(entry.Name);
+                        await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.IndexKeySpace(entry.KvId));
+                        store.MarkIndexAsRanged(entry.KvId);
                     }
                     break;
 

@@ -58,13 +58,17 @@ public sealed class KvTableStore
     private readonly string rowBucketPrefix;       // "{dbId}:{tableId}:r"  — bucket prefix for LocateAndScanRange
     private readonly string rowKeyPrefix;          // "{dbId}:{tableId}:r/" — prepended to rowIdHex
 
-    // Index IDs (names) registered as key-range routed by TableOpener.
+    // Index KvIds registered as key-range routed by TableOpener.
     // Written once during table open (inside AsyncLazy, single-threaded), then only read.
     private readonly HashSet<string> rangedIndexIds = [];
 
     // Caches "{dbId}:{tableId}:i:{indexId}" per index so the bucket prefix is interpolated once
     // instead of on every lock/scan. The index-id set is small and bounded by the table's schema.
     private readonly ConcurrentDictionary<string, string> indexBucketPrefixCache = new();
+
+    // Maps each index KvId to its human-readable name for user-facing error messages.
+    // Populated by TableOpener at open time; the KvId is the stable immutable id used in KV keys.
+    private readonly Dictionary<string, string> indexIdToDisplayName = [];
 
     private const int RowIdHexLength = 24;
     private const int DefaultPageSize = 512;
@@ -136,6 +140,14 @@ public sealed class KvTableStore
     /// <see cref="AcquireIndexRangeLockAsync"/> uses a Kahuna range lock instead of a prefix lock.
     /// </summary>
     public void MarkIndexAsRanged(string indexId) => rangedIndexIds.Add(indexId);
+
+    /// <summary>
+    /// Registers the human-readable display name for an index KvId so that duplicate-key
+    /// errors show the mutable index name (e.g., <c>robots.name_idx</c>) rather than the
+    /// immutable KvId stored in KV keys. Called by <c>TableOpener</c> for every index entry
+    /// when loading a table, before any DML can reference the index.
+    /// </summary>
+    public void RegisterIndexName(string indexId, string displayName) => indexIdToDisplayName[indexId] = displayName;
 
     // -----------------------------------------------------------------------
     // Range (prefix) locking — opt-in serializable scans
@@ -469,7 +481,11 @@ public sealed class KvTableStore
         if (type != KeyValueResponseType.Get || entry is null)
             return null;
 
-        return entry.Value;
+        (BranchKvKind kind, byte[]? payload) = BranchKvCodec.Decode(entry.Value);
+        if (kind == BranchKvKind.Tombstone)
+            return null;
+
+        return payload;
     }
 
     /// <summary>
@@ -505,6 +521,10 @@ public sealed class KvTableStore
             if (entry.Value is null)
                 continue;
 
+            (BranchKvKind rowKind, byte[]? rowPayload) = BranchKvCodec.Decode(entry.Value);
+            if (rowKind == BranchKvKind.Tombstone || rowPayload is null)
+                continue;
+
             // Key format: "{dbId}:{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
             ReadOnlySpan<char> hex = key.AsSpan(prefixLen);
             ObjectIdValue rowId = ObjectId.ToValue(hex.ToString());
@@ -518,7 +538,7 @@ public sealed class KvTableStore
             if (maxRows is not null && emitted >= maxRows.Value)
                 yield break;
 
-            yield return (rowId, entry.Value);
+            yield return (rowId, rowPayload);
             emitted++;
         }
     }
@@ -598,7 +618,11 @@ public sealed class KvTableStore
         if (type != KeyValueResponseType.Get || entry?.Value is null)
             return null;
 
-        return ObjectId.ToValue(Encoding.UTF8.GetString(entry.Value));
+        (BranchKvKind idxKind, byte[]? idxPayload) = BranchKvCodec.Decode(entry.Value);
+        if (idxKind == BranchKvKind.Tombstone || idxPayload is null)
+            return null;
+
+        return ObjectId.ToValue(Encoding.UTF8.GetString(idxPayload));
     }
 
     /// <summary>
@@ -657,6 +681,10 @@ public sealed class KvTableStore
             if (entry.Value is null)
                 continue;
 
+            (BranchKvKind scanKind, byte[]? scanPayload) = BranchKvCodec.Decode(entry.Value);
+            if (scanKind == BranchKvKind.Tombstone)
+                continue;
+
             if (!kvKey.StartsWith(keyPrefix, StringComparison.Ordinal))
                 continue;
 
@@ -667,8 +695,14 @@ public sealed class KvTableStore
 
             if (unique)
             {
+                // Unique index value = the row-id as UTF-8 bytes (wrapped in the envelope).
+                // Skip entries whose payload is empty — they indicate a corrupt or partially
+                // written entry and should not surface to callers.
+                if (scanPayload is null)
+                    continue;
+
                 encodedKey = suffix.ToString();
-                rowId = ObjectId.ToValue(Encoding.UTF8.GetString(entry.Value));
+                rowId = ObjectId.ToValue(Encoding.UTF8.GetString(scanPayload));
             }
             else
             {
@@ -735,7 +769,7 @@ public sealed class KvTableStore
             ? BuildUniqueIndexKey(indexId, key)
             : BuildNonUniqueIndexKey(indexId, key, rowId);
 
-        byte[] value = Encoding.UTF8.GetBytes(rowId.ToString());
+        byte[] value = BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(rowId.ToString()));
 
         tx.ReserveMutations(1);
 
@@ -763,7 +797,8 @@ public sealed class KvTableStore
                     () => kahuna.LocateAndTryGetValue(tx.TransactionId, kvKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cancellationToken),
                     cancellationToken
                 ).ConfigureAwait(false);
-                string existingRowId = existing?.Value is not null ? Encoding.UTF8.GetString(existing.Value) : "";
+                (BranchKvKind _, byte[]? existingPayload) = BranchKvCodec.Decode(existing?.Value);
+                string existingRowId = existingPayload is not null ? Encoding.UTF8.GetString(existingPayload) : "";
                 if (existingRowId != rowId.ToString())
                     throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(indexId)}'");
                 // else: same rowId — idempotent re-write on resume, continue
@@ -837,7 +872,7 @@ public sealed class KvTableStore
 
         foreach (RowWrite row in rows)
         {
-            AddWrite(BuildRowKey(row.RowId), row.RowData, unique: false);
+            AddWrite(BuildRowKey(row.RowId), BranchKvCodec.EncodeValue(row.RowData), unique: false);
 
             foreach (IndexWrite ix in row.IndexEntries)
             {
@@ -848,7 +883,7 @@ public sealed class KvTableStore
                 if (ix.Unique && !seenUnique.Add(kvKey))
                     throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(ix.IndexId)}'");
 
-                AddWrite(kvKey, Encoding.UTF8.GetBytes(row.RowId.ToString()), ix.Unique);
+                AddWrite(kvKey, BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(row.RowId.ToString())), ix.Unique);
             }
         }
 
@@ -1192,8 +1227,10 @@ public sealed class KvTableStore
 
         await AcquireLock(tx, key, cancellationToken).ConfigureAwait(false);
 
+        byte[] encodedData = BranchKvCodec.EncodeValue(data);
+
         (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, data, null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
+            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, encodedData, null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -1202,6 +1239,47 @@ public sealed class KvTableStore
 
         if (type != KeyValueResponseType.Set)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"WriteRow failed for key {key}: {type}");
+
+        tx.TrackModified(key, KeyValueDurability.Persistent);
+    }
+
+    /// <summary>
+    /// Test-only: overwrites the row entry for <paramref name="rowId"/> with a
+    /// <see cref="BranchKvKind.Tombstone"/> envelope, mirroring the locked write path of
+    /// <see cref="WriteRow"/>. Production deletes are physical (<see cref="DeleteRow"/>); branch
+    /// overlays will write tombstones for real in a later phase. This seam exists so storage
+    /// tests can verify that read paths treat a tombstone as a miss rather than as a value,
+    /// before any DML path produces one.
+    /// </summary>
+    internal async Task WriteRowTombstoneForTesting(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
+    {
+        tx.ReserveMutations(1);
+        string key = BuildRowKey(rowId);
+        await AcquireLock(tx, key, cancellationToken).ConfigureAwait(false);
+        await SetTombstoneForTesting(tx, key, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Test-only: overwrites the unique-index entry for <paramref name="key"/> with a
+    /// <see cref="BranchKvKind.Tombstone"/> envelope. See <see cref="WriteRowTombstoneForTesting"/>.
+    /// </summary>
+    internal async Task WriteUniqueIndexTombstoneForTesting(KvTransaction tx, string indexId, CompositeColumnValue key, CancellationToken cancellationToken = default)
+    {
+        tx.ReserveMutations(1);
+        string kvKey = BuildUniqueIndexKey(indexId, key);
+        await AcquireLock(tx, kvKey, cancellationToken).ConfigureAwait(false);
+        await SetTombstoneForTesting(tx, kvKey, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task SetTombstoneForTesting(KvTransaction tx, string key, CancellationToken cancellationToken)
+    {
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
+            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        if (type != KeyValueResponseType.Set)
+            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"WriteRowTombstoneForTesting failed for key {key}: {type}");
 
         tx.TrackModified(key, KeyValueDurability.Persistent);
     }
@@ -1417,8 +1495,12 @@ public sealed class KvTableStore
         => $"{tableKeyPrefix}:i:{indexId}/{KeyEncoder.Encode(key)}{rowId}";
 
     // Formats a human-readable "table.index" key name for duplicate-key errors.
+    // Resolves the immutable KvId to the mutable display name via the table-open-time registry.
     private string DuplicateKeyLabel(string indexId)
-        => string.IsNullOrEmpty(tableName) ? indexId : $"{tableName}.{indexId}";
+    {
+        string display = indexIdToDisplayName.TryGetValue(indexId, out string? name) ? name : indexId;
+        return string.IsNullOrEmpty(tableName) ? display : $"{tableName}.{display}";
+    }
 
     // Extracts the index name from a full KV key ("{dbId}:{tableId}:i:{indexId}/{...}").
     // Falls back to the raw key on unexpected formats.

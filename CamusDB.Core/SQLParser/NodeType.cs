@@ -120,6 +120,8 @@ public enum NodeType
     ShowDatabases,
     CreateDatabase,
     CreateDatabaseIfNotExists,
+    CreateDatabaseBranch,
+    CreateDatabaseBranchIfNotExists,
     DropDatabase,
     DropDatabaseIfExists,
     RenameDatabase,

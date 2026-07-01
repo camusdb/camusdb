@@ -265,7 +265,7 @@ internal sealed class QueryExecutor
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
-        ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.Name, lookupKey).ConfigureAwait(false);
+        ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey).ConfigureAwait(false);
 
         if (scanStats is not null)
             scanStats.KvPointLookups++;
@@ -326,13 +326,13 @@ internal sealed class QueryExecutor
         // Acquire a range lock scoped to [fromBound, toBound]. Shared for SELECT; Exclusive for
         // UPDATE/DELETE so concurrent Serializable+RW readers cannot enter the mutated sub-range.
         await table.Store.AcquireBoundedIndexRangeLockAsync(
-            ticket.TxnState, index.Name,
+            ticket.TxnState, index.KvId,
             fromBound, fromInclusive, toBound, toInclusive,
             unique, exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             ticket.TxnState,
-            index.Name,
+            index.KvId,
             keyTypes,
             fromBound,
             toBound,
@@ -399,7 +399,7 @@ internal sealed class QueryExecutor
                 if (maxVal is null || cv.CompareTo(maxVal) > 0) maxVal = cv;
             }
             await table.Store.AcquireBoundedIndexRangeLockAsync(
-                ticket.TxnState, index.Name,
+                ticket.TxnState, index.KvId,
                 minVal, true, maxVal, true,
                 unique: false, exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
         }
@@ -410,7 +410,7 @@ internal sealed class QueryExecutor
 
             if (isUnique)
             {
-                ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.Name, lookupKey).ConfigureAwait(false);
+                ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey).ConfigureAwait(false);
 
                 if (scanStats is not null)
                     scanStats.KvPointLookups++;
@@ -445,7 +445,7 @@ internal sealed class QueryExecutor
                 bool toInclusive = upperBound is null; // inclusive only for exact-match (no successor)
 
                 await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
-                    ticket.TxnState, index.Name, keyTypes,
+                    ticket.TxnState, index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
                     maxRows: null).ConfigureAwait(false))
@@ -491,7 +491,7 @@ internal sealed class QueryExecutor
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
-        ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.Name, new CompositeColumnValue(new[] { columnId })).ConfigureAwait(false);
+        ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, new CompositeColumnValue(new[] { columnId })).ConfigureAwait(false);
         if (rowId is null)
             yield break;
 

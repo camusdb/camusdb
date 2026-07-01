@@ -98,12 +98,12 @@ internal sealed class QueryScanner
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
         // Phantom-protection range lock on the index key space (mirrors ScanUsingTableIndex).
-        await table.Store.AcquireIndexRangeLockAsync(ticket.TxnState, index.Name,
+        await table.Store.AcquireIndexRangeLockAsync(ticket.TxnState, index.KvId,
             exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             ticket.TxnState,
-            index.Name,
+            index.KvId,
             keyTypes,
             null,
             null,

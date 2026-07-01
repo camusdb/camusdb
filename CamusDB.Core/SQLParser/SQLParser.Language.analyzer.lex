@@ -89,6 +89,7 @@ TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
 TRename         (R|r)(E|e)(N|n)(A|a)(M|m)(E|e)
 TTo             (T|t)(O|o)
 TAnalyze        (A|a)(N|n)(A|a)(L|l)(Y|y)(Z|z)(E|e)
+TBranch         (B|b)(R|r)(A|a)(N|n)(C|c)(H|h)
 TTransaction    (T|t)(R|r)(A|a)(N|n)(S|s)(A|a)(C|c)(T|t)(I|i)(O|o)(N|n)
 LParen          \(
 RParen          \)
@@ -165,6 +166,7 @@ TDot            \.
 {TRename} { return (int)Token.TRENAME; }
 {TTo} { return (int)Token.TTO; }
 {TAnalyze} { return (int)Token.TANALYZE; }
+{TBranch} { return (int)Token.TBRANCH; }
 
 {TCommit} { return (int)Token.TCOMMIT; }
 

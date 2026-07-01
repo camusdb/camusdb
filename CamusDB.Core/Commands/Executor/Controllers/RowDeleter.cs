@@ -221,12 +221,12 @@ internal sealed class RowDeleter
                     continue;
 
                 CompositeColumnValue key = GetColumnValue(row, index.Columns);
-                rowDelete.IndexEntries.Add(new KvTableStore.IndexDelete(index.Name, key, rowId, Unique: true));
+                rowDelete.IndexEntries.Add(new KvTableStore.IndexDelete(index.KvId, key, rowId, Unique: true));
             }
             else if (index.Type == IndexType.Multi)
             {
                 CompositeColumnValue key = GetColumnValue(row, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
-                rowDelete.IndexEntries.Add(new KvTableStore.IndexDelete(index.Name, key, rowId, Unique: false));
+                rowDelete.IndexEntries.Add(new KvTableStore.IndexDelete(index.KvId, key, rowId, Unique: false));
             }
         }
     }

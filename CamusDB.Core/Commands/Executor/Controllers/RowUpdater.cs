@@ -414,13 +414,13 @@ public sealed class RowUpdater
             if (!HasNullKeyColumn(oldRow, index.Columns))
             {
                 CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns);
-                await table.Store.DeleteIndexEntry(tx, index.Name, oldKey, rowId, unique: true).ConfigureAwait(false);
+                await table.Store.DeleteIndexEntry(tx, index.KvId, oldKey, rowId, unique: true).ConfigureAwait(false);
             }
 
             if (!HasNullKeyColumn(newRow, index.Columns))
             {
                 CompositeColumnValue newKey = GetColumnValue(newRow, index.Columns);
-                await table.Store.PutIndexEntry(tx, index.Name, newKey, rowId, unique: true).ConfigureAwait(false);
+                await table.Store.PutIndexEntry(tx, index.KvId, newKey, rowId, unique: true).ConfigureAwait(false);
             }
         }
     }
@@ -445,8 +445,8 @@ public sealed class RowUpdater
             CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns, rowIdValue);
             CompositeColumnValue newKey = GetColumnValue(newRow, index.Columns, rowIdValue);
 
-            await table.Store.DeleteIndexEntry(tx, index.Name, oldKey, rowId, unique: false).ConfigureAwait(false);
-            await table.Store.PutIndexEntry(tx, index.Name, newKey, rowId, unique: false).ConfigureAwait(false);
+            await table.Store.DeleteIndexEntry(tx, index.KvId, oldKey, rowId, unique: false).ConfigureAwait(false);
+            await table.Store.PutIndexEntry(tx, index.KvId, newKey, rowId, unique: false).ConfigureAwait(false);
         }
     }
 

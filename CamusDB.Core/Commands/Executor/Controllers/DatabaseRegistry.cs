@@ -230,17 +230,17 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     /// <summary>
     /// Async variant: checks the in-memory cache first, then falls back to a live Kahuna
-    /// read when the name is absent.  Required for multi-node clusters where a database
-    /// created on another node has been written to the shared Raft-replicated store but
-    /// has not yet been seen by this node's in-memory cache (which is only populated at
-    /// <see cref="OpenAsync"/> time).
+    /// read when the name is absent.  Returns the full <see cref="DatabaseRegistryEntry"/>
+    /// (including ancestry) rather than only the id.  Required for multi-node clusters
+    /// where a database created on another node has been written to the shared
+    /// Raft-replicated store but has not yet been seen by this node's in-memory cache.
     /// </summary>
-    public async Task<string?> TryResolveIdAsync(string name)
+    public async Task<DatabaseRegistryEntry?> TryResolveEntryAsync(string name)
     {
         name = Normalize(name);
 
         if (byName.TryGetValue(name, out DatabaseRegistryEntry? cached))
-            return cached.Id;
+            return cached;
 
         // Cache miss — try a live point-read from the persistent KV store.
         KvTransaction tx = await transactions.BeginAsync(
@@ -263,12 +263,25 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             // Backfill the local cache so subsequent reads are fast.
             byName[entry.Name] = entry;
             byId[entry.Id] = entry;
-            return entry.Id;
+            return entry;
         }
         finally
         {
             await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Async variant: checks the in-memory cache first, then falls back to a live Kahuna
+    /// read when the name is absent.  Required for multi-node clusters where a database
+    /// created on another node has been written to the shared Raft-replicated store but
+    /// has not yet been seen by this node's in-memory cache (which is only populated at
+    /// <see cref="OpenAsync"/> time).
+    /// </summary>
+    public async Task<string?> TryResolveIdAsync(string name)
+    {
+        DatabaseRegistryEntry? entry = await TryResolveEntryAsync(name).ConfigureAwait(false);
+        return entry?.Id;
     }
 
     public DatabaseRegistryEntry? Get(string name) =>
@@ -287,10 +300,16 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// Atomically registers <paramref name="name"/> → <paramref name="id"/> in the
     /// persistent store and the in-memory cache.
     /// </summary>
+    /// <param name="ancestors">
+    /// Branch ancestry chain, nearest parent first.  Pass <c>null</c> or an empty list
+    /// for root databases.  The list is stored verbatim and is immutable after registration.
+    /// </param>
     /// <exception cref="CamusDBException">
     ///   <c>DatabaseAlreadyExists</c> if the name is already registered or reserved.
     /// </exception>
-    public async Task<DatabaseRegistryEntry> RegisterAsync(string name, string id)
+    public async Task<DatabaseRegistryEntry> RegisterAsync(
+        string name, string id,
+        IReadOnlyList<DatabaseBranchAncestor>? ancestors = null)
     {
         name = Normalize(name);
 
@@ -311,7 +330,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             {
                 Id = id,
                 Name = name,
-                CreatedAt = DateTime.UtcNow
+                CreatedAt = DateTime.UtcNow,
+                Ancestors = ancestors is { Count: > 0 } ? [.. ancestors] : [],
             };
 
             byte[] entryBytes = MetaJsonSerializer.Serialize(entry, MetaJsonContext.Default.DatabaseRegistryEntry);
@@ -419,11 +439,13 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                     CamusDBErrorCodes.DatabaseAlreadyExists,
                     $"Database '{newName}' is already registered");
 
+            // Ancestry is immutable: copy the list so the updated entry owns its own instance.
             DatabaseRegistryEntry updated = new()
             {
                 Id = existing.Id,
                 Name = newName,
-                CreatedAt = existing.CreatedAt
+                CreatedAt = existing.CreatedAt,
+                Ancestors = existing.Ancestors.Count > 0 ? [.. existing.Ancestors] : [],
             };
 
             byte[] updatedBytes = MetaJsonSerializer.Serialize(updated, MetaJsonContext.Default.DatabaseRegistryEntry);

@@ -44,9 +44,13 @@ internal sealed class TableIndexDropper
         TableDescriptor table = state.Table;
         DatabaseDescriptor database = state.Database;
 
-        // Delete all KV entries for the index before removing it from the schema.
-        // Both happen in state.Tx so the purge is atomic with the schema update.
-        int purged = await table.Store.DropIndexEntries(state.Tx, ticket.IndexName).ConfigureAwait(false);
+        // Delete all KV entries for the index before removing it from the schema. The stable index
+        // identifier (Id) is used as the Kahuna key segment rather than the mutable name, so the
+        // purge correctly targets the physical key space even after a prior RENAME INDEX. For legacy
+        // entries without an assigned Id, the name is used as the fallback (same physical key).
+        // Both the purge and the schema removal happen in state.Tx so they are atomic.
+        string indexKvId = table.Schema.Indexes?.FirstOrDefault(ix => ix.Name == ticket.IndexName)?.Id ?? ticket.IndexName;
+        int purged = await table.Store.DropIndexEntries(state.Tx, indexKvId).ConfigureAwait(false);
         Log.LogIndexEntriesPurged(logger, purged, ticket.IndexName);
 
         try

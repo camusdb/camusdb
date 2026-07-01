@@ -10,6 +10,7 @@ using System.Linq;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
+using Kommander.Time;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
@@ -190,6 +191,9 @@ public sealed class CommandExecutor : IAsyncDisposable
                 $"Database '{name}' already exists");
         }
 
+        if (ticket.BranchFrom is not null)
+            return await CreateBranchDatabaseAsync(ticket, registry, name).ConfigureAwait(false);
+
         string id = await registry.AllocateIdAsync().ConfigureAwait(false);
 
         await registry.RegisterAsync(name, id).ConfigureAwait(false);
@@ -217,6 +221,94 @@ public sealed class CommandExecutor : IAsyncDisposable
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(openEx).Throw();
             throw; // unreachable
         }
+    }
+
+    /// <summary>
+    /// Creates a branch database from <paramref name="ticket"/>.<see cref="CreateDatabaseTicket.BranchFrom"/>.
+    /// The source must be schema-stable — <c>HeadSchemaVersion == SchemaVersion</c>, all columns and
+    /// indexes in the Public state, and no persisted coordinator jobs — before the branch is taken.
+    /// Schema metadata is copied O(schema-size) to the branch namespace under the source's
+    /// <c>SchemaDdlSemaphore</c> to keep the copy point consistent.  The registry entry is published
+    /// last ("metadata first, registry last") so an orphaned namespace from a crash between the two
+    /// steps is cleaned up by the startup orphan-namespace scrubber rather than being served to clients.
+    /// </summary>
+    private async Task<DatabaseDescriptor> CreateBranchDatabaseAsync(
+        CreateDatabaseTicket ticket, DatabaseRegistry registry, string branchName)
+    {
+        DatabaseDescriptor sourceDescriptor = await databaseOpener.Open(ticket.BranchFrom!).ConfigureAwait(false);
+
+        await sourceDescriptor.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            // Schema stability: no committed schema entry may be un-applied.
+            if (sourceDescriptor.HeadSchemaVersion != sourceDescriptor.Schema.SchemaVersion)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Database '{ticket.BranchFrom}' has in-flight schema changes; wait for them to complete before branching");
+
+            // Schema stability: every column and index must be in the Public (terminal) state.
+            // Non-Public elements indicate an online schema change is mid-sequence and the
+            // schema metadata is not yet a consistent snapshot.
+            foreach (TableSchema table in sourceDescriptor.Schema.Tables.Values)
+            {
+                if (table.Columns is not null)
+                    foreach (TableColumnSchema col in table.Columns)
+                        if (col.State != SchemaElementState.Public)
+                            throw new CamusDBException(
+                                CamusDBErrorCodes.InvalidInput,
+                                $"Column '{col.Name}' in table '{table.Name}' of database '{ticket.BranchFrom}' is in state '{col.State}'; wait for the schema change to reach Public before branching");
+
+                if (table.Indexes is not null)
+                    foreach (TableIndexSchema idx in table.Indexes)
+                        if (idx.State != SchemaElementState.Public)
+                            throw new CamusDBException(
+                                CamusDBErrorCodes.InvalidInput,
+                                $"Index '{idx.Name}' in table '{table.Name}' of database '{ticket.BranchFrom}' is in state '{idx.State}'; wait for the schema change to reach Public before branching");
+            }
+
+            // Schema stability: no coordinator jobs may be in-flight.  A coordinator job
+            // can resume after a leader change while element states momentarily read Public;
+            // checking persisted jobs under SchemaDdlSemaphore fences that window.
+            List<Catalogs.Models.PersistedCoordinatorJob> coordinatorJobs =
+                await catalogs.LoadCoordinatorJobsAsync(sourceDescriptor).ConfigureAwait(false);
+            if (coordinatorJobs.Count > 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Database '{ticket.BranchFrom}' has {coordinatorJobs.Count} pending coordinator job(s); wait for them to complete before branching");
+
+            // Mint a fork timestamp from the source's HLC; this timestamp marks the branch point
+            // in the ancestry chain. All branch reads will eventually use this as the "read at T"
+            // floor for the parent namespace (resolved in the storage read layer).
+            HLCTimestamp forkT = sourceDescriptor.Kahuna.Raft.HybridLogicalClock.SendOrLocalEvent(
+                sourceDescriptor.Kahuna.Raft.GetLocalNodeId());
+
+            // Snapshot hold: deferred to a later phase. When that phase lands, a Kahuna
+            // snapshot-floor registration will be inserted here to pin the source MVCC history
+            // at forkT so branch reads can see the snapshot without racing against GC.
+
+            string branchId = await registry.AllocateIdAsync().ConfigureAwait(false);
+
+            // Ancestry chain: immediate parent first, then its ancestors (nearest-parent ordering).
+            DatabaseRegistryEntry? sourceEntry = await registry.TryResolveEntryAsync(ticket.BranchFrom!).ConfigureAwait(false);
+            List<DatabaseBranchAncestor> ancestors =
+            [
+                new DatabaseBranchAncestor { DatabaseId = sourceDescriptor.Id, ForkTimestamp = forkT },
+                .. (sourceEntry?.Ancestors ?? [])
+            ];
+
+            // Copy schema metadata into the branch namespace before publishing the registry entry.
+            // If this node crashes between the copy and the RegisterAsync, the orphaned namespace
+            // has no registry entry and will be cleaned up by the startup orphan-namespace scrubber.
+            await catalogs.CopyMetaForBranchAsync(sourceDescriptor, branchId).ConfigureAwait(false);
+
+            await registry.RegisterAsync(branchName, branchId, ancestors).ConfigureAwait(false);
+        }
+        finally
+        {
+            sourceDescriptor.SchemaDdlSemaphore.Release();
+        }
+
+        return await databaseOpener.Open(branchName).ConfigureAwait(false);
     }
 
     public async Task<DatabaseDescriptor> OpenDatabase(string database, bool recoveryMode = false)
@@ -540,7 +632,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                             columnValues[i] = new(ColumnType.Id, rowId.ToString());
 
                         CompositeColumnValue compositeKey = new(columnValues);
-                        await table.Store.PutIndexEntry(tx, indexInfo.IndexName, compositeKey, rowId, unique, backfillMode: true).ConfigureAwait(false);
+                        await table.Store.PutIndexEntry(tx, indexInfo.IndexId, compositeKey, rowId, unique, backfillMode: true).ConfigureAwait(false);
                     }
 
                     lastRowId = rowId;
@@ -1115,11 +1207,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         // CREATE/DROP/RENAME DATABASE do not require an open database context.
-        if (ast.nodeType is NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists)
+        if (ast.nodeType is NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists
+                           or NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists)
         {
+            bool isBranch = ast.nodeType is NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists;
+            bool ifNotExists = ast.nodeType is NodeType.CreateDatabaseIfNotExists or NodeType.CreateDatabaseBranchIfNotExists;
             string dbName = ast.leftAst!.yytext!;
-            bool ifNotExists = ast.nodeType == NodeType.CreateDatabaseIfNotExists;
-            DatabaseDescriptor created = await CreateDatabase(new CreateDatabaseTicket(dbName, ifNotExists)).ConfigureAwait(false);
+            string? branchFrom = isBranch ? ast.rightAst!.yytext! : null;
+            DatabaseDescriptor created = await CreateDatabase(new CreateDatabaseTicket(dbName, ifNotExists, branchFrom)).ConfigureAwait(false);
             return new ExecuteDDLSQLResult(created, true);
         }
 
@@ -1214,20 +1309,18 @@ public sealed class CommandExecutor : IAsyncDisposable
                         return new ExecuteDDLSQLResult(database, ok);
                     }
 
-                    if (isClusterMode)
+                    // Both cluster (non-add) and standalone paths require the two-phase DDL sequence
+                    // so Phase 2 (ReplicateIndexChangeAsync) persists the schema change across
+                    // close/reopen. ExecuteDdlInTransaction is single-phase and skips that step.
+                    bool indexExistedBefore = table.Indexes.ContainsKey(alterIndexTicket.IndexName);
+                    bool compensateOnAbort = sqlAddIndex && !indexExistedBefore;
                     {
                         bool ok = await ExecuteClusteredIndexDdlAsync(
-                            database, table, alterIndexTicket, compensateOnAbort: false,
+                            database, table, alterIndexTicket, compensateOnAbort,
                             tx => tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx)
                         ).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
                     }
-
-                    return await ExecuteDdlInTransaction(database, async tx =>
-                    {
-                        bool ok = await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx).ConfigureAwait(false);
-                        return new ExecuteDDLSQLResult(database, ok);
-                    }).ConfigureAwait(false);
                 }
 
             case NodeType.AlterTableRenameColumn:

@@ -302,7 +302,7 @@ internal sealed class QueryJoinExecutor
         TableDescriptor table = source.Table;
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
 
-        ObjectIdValue? rowId = await table.Store.LookupUnique(plan.Ticket.TxnState, joinNode.Index.Name, lookupKey).ConfigureAwait(false);
+        ObjectIdValue? rowId = await table.Store.LookupUnique(plan.Ticket.TxnState, joinNode.Index.KvId, lookupKey).ConfigureAwait(false);
 
         if (rowId is null)
             yield break;
@@ -326,7 +326,7 @@ internal sealed class QueryJoinExecutor
 
         await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
-            joinNode.Index.Name,
+            joinNode.Index.KvId,
             keyTypes,
             lookupKey,
             to: null,
@@ -486,7 +486,7 @@ internal sealed class QueryJoinExecutor
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
-            index.Name,
+            index.KvId,
             keyTypes,
             from: null, to: null, unique: unique).ConfigureAwait(false))
         {
@@ -535,7 +535,7 @@ internal sealed class QueryJoinExecutor
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
-            rangeNode.Index.Name,
+            rangeNode.Index.KvId,
             keyTypes,
             from: rangeNode.FromBound,
             to: rangeNode.ToBound,
@@ -594,7 +594,7 @@ internal sealed class QueryJoinExecutor
             if (isUnique)
             {
                 ObjectIdValue? rowId = await table.Store.LookupUnique(
-                    plan.Ticket.TxnState, inListNode.Index.Name, lookupKey).ConfigureAwait(false);
+                    plan.Ticket.TxnState, inListNode.Index.KvId, lookupKey).ConfigureAwait(false);
 
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
@@ -627,7 +627,7 @@ internal sealed class QueryJoinExecutor
                 bool toInclusive = upperBound is null;
 
                 await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
-                    plan.Ticket.TxnState, inListNode.Index.Name, keyTypes,
+                    plan.Ticket.TxnState, inListNode.Index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
                     maxRows: null).ConfigureAwait(false))

@@ -1441,6 +1441,14 @@ public sealed class CatalogsManager
     private static string CoordinatorKey(string dbId, string tableId, string elementName) => $"{CoordinatorKeyPrefix(dbId)}{tableId}~{elementName}";
 
     /// <summary>
+    /// Returns the meta key that stores the grow-only set of all index ids ever allocated for
+    /// <paramref name="tableId"/>. The catalog is written on every schema persist so that
+    /// DROP DATABASE can discover and purge overlay entries for indexes that were dropped
+    /// before the database itself was dropped.
+    /// </summary>
+    private static string KeyspaceCatalogKey(string dbId, string tableId) => $"{dbId}/meta/keyspace:{tableId}";
+
+    /// <summary>
     /// Persists the system schema metadata. Schema table metadata is stored per object
     /// through <see cref="PersistSchemaTableAsync"/>.
     /// </summary>
@@ -1490,6 +1498,9 @@ public sealed class CatalogsManager
                 await WriteMetaKey(kahuna, tx, HistoryKey(database.Id, tableSchema.Id, history.Version), historyBytes).ConfigureAwait(false);
             }
         }
+
+        // Update the grow-only keyspace catalog to track all index ids ever used by this table.
+        await WriteKeyspaceCatalogAsync(kahuna, tx, database.Id, tableSchema).ConfigureAwait(false);
     }
 
     public async Task PersistDroppedTableAsync(DatabaseDescriptor database, string tableId, KvTransaction tx)
@@ -1740,6 +1751,13 @@ public sealed class CatalogsManager
                 database.Schema.Tables = await LoadTablesAsync(database, tx).ConfigureAwait(false);
             }
 
+            // Seed the Raft schema fence from the on-disk version so HeadSchemaVersion ≥
+            // SchemaVersion holds immediately after a load or reopen.  Without this, the fence
+            // starts at 0 each session and HeadSchemaVersion != SchemaVersion would incorrectly
+            // appear true for any database that has had prior DDL, breaking the branch stability
+            // gate and any other check that compares the two fields after a process restart.
+            database.ObserveSchemaEntryHead(database.Schema.SchemaVersion);
+
             (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
                 await kahuna.LocateAndTryGetValue(
                     tx.TransactionId, SystemKey(database.Id), -1,
@@ -1936,6 +1954,131 @@ public sealed class CatalogsManager
     }
 
     private const int MetaKeyMaxRetries = 32;
+
+    /// <summary>
+    /// Copies all schema metadata keys from <paramref name="source"/> into the namespace identified
+    /// by <paramref name="branchDbId"/>, rewriting only the database-id segment of each key.
+    /// This produces an independent, consistent schema starting point for a branch database.
+    ///
+    /// Keys under the coordinator prefix (in-flight DDL state specific to the source) and the
+    /// keyspace prefix (Kommander routing metadata) are skipped; all other keys — version, system,
+    /// table, and history — are copied verbatim so the branch opens with the same schema as the
+    /// source had at the fork point.
+    ///
+    /// The caller is responsible for holding the source's <c>SchemaDdlSemaphore</c> across this
+    /// call to prevent a concurrent DDL from mutating the source schema between the stability check
+    /// and the copy.
+    /// </summary>
+    public async Task CopyMetaForBranchAsync(DatabaseDescriptor source, string branchDbId)
+    {
+        IKahuna kahuna = source.Kahuna.Kahuna;
+        string sourceBucket = MetaBucketPrefix(source.Id);
+        string sourcePrefix = source.Id + "/meta/";
+        string branchPrefix = branchDbId + "/meta/";
+        string sourceCoordinatorPrefix = CoordinatorKeyPrefix(source.Id);
+        string sourceKeyspacePrefix = $"{source.Id}/meta/keyspace:";
+
+        List<(string destKey, byte[] value)> toCopy = [];
+
+        KvTransaction scanTx = await source.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+                scanTx.TransactionId,
+                sourceBucket,
+                null, true,
+                null, true,
+                512,
+                HLCTimestamp.Zero,
+                KeyValueDurability.Persistent,
+                CancellationToken.None).ConfigureAwait(false))
+            {
+                if (entry.Value is null)
+                    continue;
+
+                if (key.StartsWith(sourceCoordinatorPrefix, StringComparison.Ordinal) ||
+                    key.StartsWith(sourceKeyspacePrefix, StringComparison.Ordinal))
+                    continue;
+
+                if (!key.StartsWith(sourcePrefix, StringComparison.Ordinal))
+                    continue;
+
+                string destKey = branchPrefix + key[sourcePrefix.Length..];
+                toCopy.Add((destKey, entry.Value));
+            }
+        }
+        finally
+        {
+            await source.Transactions.RollbackIfNotCompletedAsync(scanTx).ConfigureAwait(false);
+        }
+
+        if (toCopy.Count == 0)
+            return;
+
+        KvTransaction writeTx = await source.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            foreach ((string destKey, byte[] value) in toCopy)
+                await WriteMetaKey(kahuna, writeTx, destKey, value).ConfigureAwait(false);
+
+            await source.Transactions.CommitAsync(writeTx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await source.Transactions.RollbackIfNotCompletedAsync(writeTx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Writes or updates the persisted keyspace catalog entry for <paramref name="tableSchema"/>.
+    /// The catalog records every index id ever allocated for this table — it grows monotonically
+    /// and never shrinks on DropIndex or DropTable, so DROP DATABASE can purge orphaned
+    /// overlay entries for indexes dropped before the database was dropped.
+    /// </summary>
+    private static async Task WriteKeyspaceCatalogAsync(
+        IKahuna kahuna, KvTransaction tx, string dbId, TableSchema tableSchema)
+    {
+        if (string.IsNullOrEmpty(tableSchema.Id))
+            return;
+
+        string catalogKey = KeyspaceCatalogKey(dbId, tableSchema.Id);
+
+        // Load existing catalog to accumulate ids from previously dropped indexes.
+        // This read uses HLCTimestamp.Zero (non-transactional) because the caller holds
+        // Schema.Semaphore, which serializes all writes to this key on a single node. The
+        // read is not read-your-writes with tx; it sees the last committed value, which is
+        // correct here since the semaphore ensures no concurrent write races this read.
+        HashSet<string> allIndexIds = [];
+        (KeyValueResponseType readType, ReadOnlyKeyValueEntry? existingEntry) =
+            await kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, catalogKey, -1, HLCTimestamp.Zero,
+                KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+
+        if (readType == KeyValueResponseType.Get && existingEntry?.Value is { Length: > 0 } existingBytes)
+        {
+            string[]? existingIds = MetaJsonSerializer.Deserialize(existingBytes, MetaJsonContext.Default.StringArray);
+            foreach (string id in existingIds)
+                allIndexIds.Add(id);
+        }
+
+        // Union with live indexes in the current schema.
+        if (tableSchema.Indexes is not null)
+            foreach (TableIndexSchema idx in tableSchema.Indexes)
+                if (!string.IsNullOrEmpty(idx.Id))
+                    allIndexIds.Add(idx.Id);
+
+        // Always write the catalog entry even when the index list is empty. The catalog is
+        // keyed by tableId, so its presence alone tells DROP DATABASE to purge the row bucket
+        // {dbId}:{tableId}:r for tables that were dropped before the database was dropped,
+        // regardless of whether the table had any indexes.
+        byte[] catalogBytes = MetaJsonSerializer.Serialize(allIndexIds.ToArray(), MetaJsonContext.Default.StringArray);
+        await WriteMetaKey(kahuna, tx, catalogKey, catalogBytes).ConfigureAwait(false);
+    }
 
     private static async Task WriteMetaKey(IKahuna kahuna, KvTransaction tx, string key, byte[] value)
     {

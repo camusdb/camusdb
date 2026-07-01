@@ -27,6 +27,17 @@ internal sealed class TableIndexAdder
 {
     private readonly ILogger<ICamusDB> logger;
 
+    /// <summary>
+    /// Test-only seam fired once while a newly added index is still in
+    /// <see cref="SchemaElementState.WriteOnly"/> — after backfill has scanned the existing rows
+    /// and immediately before the index is published. Tests use it to perform a concurrent DML
+    /// write whose index maintenance must be routed into the index's immutable-id keyspace (the
+    /// same keyspace backfill and post-publish readers use), not the mutable-name keyspace. It is
+    /// always <c>null</c> in production; the field is cleared by the handler before invoking it so
+    /// it can never fire twice or re-enter.
+    /// </summary>
+    internal static Func<Task>? TestHookBeforePublish;
+
     public TableIndexAdder(ILogger<ICamusDB> logger)
     {
         this.logger = logger;
@@ -155,8 +166,9 @@ internal sealed class TableIndexAdder
 
         table.Indexes.Add(
             ticket.IndexName,
-            new TableIndexSchema(ticket.IndexName, ticket.Columns.Select(x => x.Name).ToArray(), indexType, SchemaElementState.WriteOnly)
+            new TableIndexSchema(ticket.IndexName, ticket.Columns.Select(x => x.Name).ToArray(), indexType, SchemaElementState.WriteOnly, id: indexId)
         );
+        table.Store.RegisterIndexName(indexId, ticket.IndexName);
 
         state.IndexId = indexId;
 
@@ -215,7 +227,7 @@ internal sealed class TableIndexAdder
 
             CompositeColumnValue compositeKey = new(columnValues);
 
-            await table.Store.PutIndexEntry(tx, ticket.IndexName, compositeKey, rowId, unique).ConfigureAwait(false);
+            await table.Store.PutIndexEntry(tx, indexId, compositeKey, rowId, unique).ConfigureAwait(false);
             state.LastBackfilledRowId = rowId.ToString();
 
             rows++;
@@ -230,6 +242,14 @@ internal sealed class TableIndexAdder
 
     private async Task<FluxAction> PublishIndex(AddIndexFluxState state)
     {
+        // Test-only: drive a concurrent write while the index is still WriteOnly (pre-publish).
+        // Cleared before invoking so it fires at most once and cannot re-enter.
+        if (TestHookBeforePublish is { } hook)
+        {
+            TestHookBeforePublish = null;
+            await hook().ConfigureAwait(false);
+        }
+
         AlterIndexTicket ticket = state.Ticket;
         TableDescriptor table = state.Table;
         DatabaseDescriptor database = state.Database;
@@ -269,7 +289,7 @@ internal sealed class TableIndexAdder
         }
 
         TableIndexSchema current = table.Indexes[ticket.IndexName];
-        table.Indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public);
+        table.Indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id);
 
         return FluxAction.Continue;
     }

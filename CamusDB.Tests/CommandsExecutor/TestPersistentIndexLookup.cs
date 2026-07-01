@@ -8,6 +8,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 
 using NUnit.Framework;
 
@@ -102,6 +103,65 @@ internal sealed class TestPersistentIndexLookup : BaseTest
 
         int total = await CountAll(dbname, database, executor);
         Assert.AreEqual(1, total, $"Expected 1 row after duplicate insert attempt, found {total}");
+    }
+
+    /// <summary>
+    /// Regression: SQL <c>CREATE INDEX</c> via ExecuteDDLSQL must survive close/reopen.
+    /// Before the fix, the SQL path used single-phase DDL and skipped the schema-replication
+    /// checkpoint, so the index was only in memory and vanished after the database was closed.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task SqlCreateIndex_PersistsAcrossReopen()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        TrackDatabase(dbname, executor);
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!, database: dbname,
+            sql: "CREATE TABLE products (id OBJECT_ID PRIMARY KEY, name STRING, price FLOAT64)",
+            parameters: null));
+
+        // Create index via SQL — this is the path that was broken.
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!, database: dbname,
+            sql: "CREATE INDEX name_idx ON products (name)",
+            parameters: null));
+
+        // Close and reopen to verify the index survived.
+        await executor.CloseDatabase(new CloseDatabaseTicket(dbname));
+        DatabaseDescriptor reopened = await executor.OpenDatabase(dbname);
+
+        Assert.IsTrue(reopened.Schema.Tables["products"].Indexes!.Any(ix => ix.Name == "name_idx"),
+            "CREATE INDEX via SQL must persist across close/reopen");
+    }
+
+    /// <summary>
+    /// Regression: SQL <c>CREATE UNIQUE INDEX</c> via ExecuteDDLSQL must survive close/reopen
+    /// for the same reason as <see cref="SqlCreateIndex_PersistsAcrossReopen"/>.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task SqlCreateUniqueIndex_PersistsAcrossReopen()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        TrackDatabase(dbname, executor);
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!, database: dbname,
+            sql: "CREATE TABLE orders (id OBJECT_ID PRIMARY KEY, code STRING)",
+            parameters: null));
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!, database: dbname,
+            sql: "CREATE UNIQUE INDEX code_uidx ON orders (code)",
+            parameters: null));
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(dbname));
+        DatabaseDescriptor reopened = await executor.OpenDatabase(dbname);
+
+        Assert.IsTrue(reopened.Schema.Tables["orders"].Indexes!.Any(ix => ix.Name == "code_uidx"),
+            "CREATE UNIQUE INDEX via SQL must persist across close/reopen");
     }
 
     /// <summary>

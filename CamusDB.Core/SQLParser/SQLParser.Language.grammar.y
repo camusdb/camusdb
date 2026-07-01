@@ -29,7 +29,7 @@
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
-%token TRENAME TTO TANALYZE
+%token TRENAME TTO TANALYZE TBRANCH
 
 %%
 
@@ -235,6 +235,8 @@ drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $
 
 create_database_stmt : TCREATE TDATABASE any_identifier { $$.n = new(NodeType.CreateDatabase, $3.n, null, null, null, null, null, null, null); }
                      | TCREATE TDATABASE TIF TNOT TEXISTS any_identifier { $$.n = new(NodeType.CreateDatabaseIfNotExists, $6.n, null, null, null, null, null, null, null); }
+                     | TCREATE TDATABASE any_identifier TBRANCH TFROM any_identifier { $$.n = new(NodeType.CreateDatabaseBranch, $3.n, $6.n, null, null, null, null, null, null); }
+                     | TCREATE TDATABASE TIF TNOT TEXISTS any_identifier TBRANCH TFROM any_identifier { $$.n = new(NodeType.CreateDatabaseBranchIfNotExists, $6.n, $9.n, null, null, null, null, null, null); }
                      ;
 
 drop_database_stmt : TDROP TDATABASE any_identifier { $$.n = new(NodeType.DropDatabase, $3.n, null, null, null, null, null, null, null); }

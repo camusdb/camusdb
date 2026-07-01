@@ -114,6 +114,14 @@ public sealed record DatabaseDescriptor : IDisposable
         while (Interlocked.CompareExchange(ref _headSchemaVersion, entryVersion, current) != current);
     }
 
+    /// <summary>
+    /// Immutable branch ancestry chain inherited from the registry entry at open time,
+    /// nearest parent first.  Empty for root databases.  The full read lineage at
+    /// query-execution time is <c>[(this.Id, tx.ReadTimestamp)] + Ancestors</c>; the
+    /// self-level timestamp is transaction-dependent and resolved by the storage layer.
+    /// </summary>
+    public IReadOnlyList<DatabaseBranchAncestor> Ancestors { get; }
+
     public Schema Schema { get; } = new();
 
     public SystemSchema SystemSchema { get; set; } = new();
@@ -206,7 +214,8 @@ public sealed record DatabaseDescriptor : IDisposable
         string name,
         EmbeddedKahuna kahuna,
         KvTransactionsManager transactions,
-        ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors
+        ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors,
+        IReadOnlyList<DatabaseBranchAncestor>? ancestors = null
     )
     {
         Id = id;
@@ -214,6 +223,7 @@ public sealed record DatabaseDescriptor : IDisposable
         Kahuna = kahuna;
         Transactions = transactions;
         TableDescriptors = tableDescriptors;
+        Ancestors = ancestors ?? [];
     }
 
     public void SetSchemaReplicationSubscription(IDisposable subscription)

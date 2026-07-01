@@ -43,6 +43,8 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(Dictionary<string, DatabaseTableObject>))]
 [JsonSerializable(typeof(Dictionary<string, DatabaseIndexObject>))]
 [JsonSerializable(typeof(HLCTimestamp))]
+[JsonSerializable(typeof(DatabaseBranchAncestor))]
+[JsonSerializable(typeof(List<DatabaseBranchAncestor>))]
 [JsonSerializable(typeof(DatabaseRegistryEntry))]
 [JsonSerializable(typeof(TableStatistics))]
 [JsonSerializable(typeof(ScalarBound))]
@@ -53,4 +55,5 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(List<ColumnHistogramBucket>))]
 [JsonSerializable(typeof(Dictionary<string, ColumnHistogram>))]
 [JsonSerializable(typeof(Dictionary<string, long>))]
+[JsonSerializable(typeof(string[]))]
 internal sealed partial class MetaJsonContext : JsonSerializerContext;

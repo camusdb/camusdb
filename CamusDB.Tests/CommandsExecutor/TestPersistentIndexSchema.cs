@@ -20,6 +20,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
@@ -396,11 +397,13 @@ internal sealed class TestPersistentIndexSchema : BaseTest
             "Re-running the unique-index backfill over already-indexed rows must be idempotent (no DuplicateUniqueKeyValue)");
 
         // The index must remain intact — exactly RowCount entries, no duplicates introduced.
+        // Scan uses IndexId (the immutable KV key segment) not IndexName — backfill writes
+        // entries under the id and all subsequent DML uses the same id keyspace.
         TableDescriptor table = await executor.OpenTable(new OpenTableTicket(dbname, TableName));
         KvTransaction scanTx = await database.Transactions.BeginAsync();
         int entries = 0;
         await foreach (var _ in table.Store.ScanIndex(
-            scanTx, indexInfo.IndexName, [ColumnType.String], from: null, to: null, unique: true))
+            scanTx, indexInfo.IndexId, [ColumnType.String], from: null, to: null, unique: true))
         {
             entries++;
         }
@@ -511,5 +514,184 @@ internal sealed class TestPersistentIndexSchema : BaseTest
             await cursor.ToListAsync();
         });
         await db2.Transactions.RollbackAsync(tx);
+    }
+
+    /// <summary>
+    /// Rows inserted via DML after a secondary index transitions to Public must be findable
+    /// through that index after a close+reopen cycle.
+    ///
+    /// The trap: before BR0 the in-memory Public descriptor (<c>table.Indexes[name]</c>) was
+    /// constructed without the immutable <c>Id</c>, so its <c>KvId</c> resolved to the mutable
+    /// name ("name_idx"). DML wrote index entries under that name. On reopen
+    /// <c>TableOpener</c> rebuilds the descriptor from <c>TableSchema.Indexes</c>, which does
+    /// carry the immutable <c>Id</c>, so the reloaded <c>KvId</c> is the UUID. The two
+    /// keyspaces are different → rows written under the name key are invisible to a scan that
+    /// reads under the UUID key. This test exposes that regression by inserting after
+    /// <c>AlterIndex</c> and then forcing a reload.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task InsertAfterIndexPublish_RowFindableAfterReopen()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: TableName,
+            columns:
+            [
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64)
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            ],
+            ifNotExists: false
+        ));
+
+        // Add a secondary non-unique index on 'name' to an empty table (trivial backfill).
+        Assert.IsTrue(await executor.AlterIndex(new AlterIndexTicket(
+            databaseName: dbname,
+            tableName: TableName,
+            indexName: "name_idx",
+            columns: [new("name", OrderType.Ascending)],
+            operation: AlterIndexOperation.AddIndex
+        )));
+
+        // Insert rows using the Public descriptor. The descriptor's KvId must resolve to the
+        // immutable index Id (not the mutable name) so that these entries land in the same
+        // keyspace that TableOpener will use when it rebuilds the descriptor from the schema.
+        List<string> insertedIds = [];
+        for (int i = 0; i < 5; i++)
+        {
+            KvTransaction tx = await database.Transactions.BeginAsync();
+            await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                txnState: tx,
+                database: dbname,
+                sql: $"INSERT INTO {TableName} (id, name, year) VALUES (gen_id(), 'robot_{i}', {2000 + i})",
+                parameters: null
+            ));
+            await database.Transactions.CommitAsync(tx);
+        }
+
+        // Close the database. The next Open rebuilds all descriptors from the persisted
+        // TableSchema, which carries the immutable Id — that Id is now the KvId used for
+        // every scan. If DML above wrote to a different keyspace, rows won't be found.
+        await executor.CloseDatabase(new CloseDatabaseTicket(dbname));
+        DatabaseDescriptor db2 = await executor.OpenDatabase(dbname);
+
+        // FORCE_INDEX scan via the reloaded descriptor must find all five rows.
+        KvTransaction scanTx = await db2.Transactions.BeginAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> scanCursor) =
+            await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                txnState: scanTx,
+                database: dbname,
+                sql: $"SELECT id, name FROM {TableName}@{{FORCE_INDEX=name_idx}}",
+                parameters: null
+            ));
+        List<QueryResultRow> scanResult = await scanCursor.ToListAsync();
+        await db2.Transactions.CommitAsync(scanTx);
+
+        Assert.AreEqual(5, scanResult.Count,
+            "All rows inserted via the Public descriptor must be findable via name_idx after close+reopen");
+    }
+
+    /// <summary>
+    /// A row inserted by concurrent DML <i>while a new index is still in WriteOnly state during
+    /// backfill</i> must end up in the index's immutable-id keyspace, so it is findable through
+    /// that index after the index is published.
+    ///
+    /// This is the path that the post-publish test cannot reach: after AlterIndex completes, the
+    /// table descriptor is evicted and re-opened from schema (which carries the immutable id), so a
+    /// later insert always uses the id keyspace regardless of the bug. The only window where the
+    /// in-memory descriptor's KvId can diverge from the id is the WriteOnly backfill window, before
+    /// publish-and-reopen. DML maintaining a WriteOnly index then routes by that descriptor's KvId.
+    ///
+    /// The trap: if the WriteOnly descriptor is built without the immutable id, its KvId falls back
+    /// to the mutable name. Backfill writes existing rows under the id, but a concurrent insert in
+    /// this window writes its index entry under the name. After publish+reopen every reader uses the
+    /// id keyspace, orphaning the name-keyed entry — the row exists but is unfindable via the index.
+    ///
+    /// The test injects exactly one concurrent insert in that window via a test-only seam on
+    /// <see cref="TableIndexAdder"/>, then asserts the row is findable through the index. With the
+    /// WriteOnly descriptor missing the id this fails (0 rows); with the id propagated it passes.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task InsertDuringWriteOnlyBackfill_RowFindableViaIndexAfterPublish()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: TableName,
+            columns:
+            [
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64)
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            ],
+            ifNotExists: false
+        ));
+
+        // Insert one row that backfill will sweep, so the index is non-trivial and the
+        // concurrent-insert entry is the only one routed through the live WriteOnly descriptor.
+        await InsertRobot(executor, dbname, database, "backfilled_robot", 1990);
+
+        // The seam fires while name_idx is WriteOnly, after backfill has scanned existing rows and
+        // before publish. The insert here maintains the WriteOnly index via the live descriptor.
+        TableIndexAdder.TestHookBeforePublish = async () =>
+        {
+            await InsertRobot(executor, dbname, database, "writeonly_robot", 2025);
+        };
+
+        try
+        {
+            Assert.IsTrue(await executor.AlterIndex(new AlterIndexTicket(
+                databaseName: dbname,
+                tableName: TableName,
+                indexName: "name_idx",
+                columns: [new("name", OrderType.Ascending)],
+                operation: AlterIndexOperation.AddIndex
+            )));
+        }
+        finally
+        {
+            TableIndexAdder.TestHookBeforePublish = null;
+        }
+
+        // Force the index path so the lookup reads the index keyspace, not a table scan. The row
+        // inserted during the WriteOnly window must be reachable through the published index.
+        KvTransaction scanTx = await database.Transactions.BeginAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                txnState: scanTx,
+                database: dbname,
+                sql: $"SELECT id, name FROM {TableName}@{{FORCE_INDEX=name_idx}} WHERE name = 'writeonly_robot'",
+                parameters: null
+            ));
+        List<QueryResultRow> result = await cursor.ToListAsync();
+        await database.Transactions.CommitAsync(scanTx);
+
+        Assert.AreEqual(1, result.Count,
+            "A row inserted while the index was WriteOnly must be findable via the published index");
+    }
+
+    private static async Task InsertRobot(CommandExecutor executor, string dbname, DatabaseDescriptor database, string name, int year)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            txnState: tx,
+            database: dbname,
+            sql: $"INSERT INTO {TableName} (id, name, year) VALUES (gen_id(), '{name}', {year})",
+            parameters: null
+        ));
+        await database.Transactions.CommitAsync(tx);
     }
 }

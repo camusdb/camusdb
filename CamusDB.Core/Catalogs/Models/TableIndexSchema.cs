@@ -71,11 +71,23 @@ public sealed class TableIndexSchema
     public string? StartOffset { get; }
 
     /// <summary>
+    /// Stable identifier used as the Kahuna key segment for this index's data. Returns
+    /// <see cref="Id"/> when set (all indexes created after the stable-ID migration carry it);
+    /// falls back to <see cref="Name"/> for legacy entries that pre-date the migration.
+    /// Using the immutable ID rather than the mutable name ensures that a RENAME INDEX
+    /// operation does not require rewriting any stored KV data — the physical keys are stable.
+    /// </summary>
+    public string KvId => Id ?? Name;
+
+    /// <summary>
     /// Constructs an in-memory (query/DML) entry with resolved column names.
     /// Used by <c>TableOpener</c> when building <c>TableDescriptor.Indexes</c>.
+    /// The optional <paramref name="id"/> propagates the schema-assigned immutable identifier
+    /// so that <see cref="KvId"/> resolves to the stable ID rather than the mutable name.
     /// </summary>
-    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public)
+    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public, string? id = null)
     {
+        Id = id;
         Name = name;
         Columns = columns;
         Type = type;
