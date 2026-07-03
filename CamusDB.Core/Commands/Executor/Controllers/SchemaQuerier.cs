@@ -12,6 +12,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
+using Kommander.Time;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -181,6 +182,94 @@ internal sealed class SchemaQuerier
         {
             { "database", new ColumnValue(ColumnType.String, database.Name) }
         });
+    }
+
+    /// <summary>
+    /// Returns one row per transitive descendant of <paramref name="target"/> found in
+    /// <paramref name="allEntries"/>: depth 1 = direct children, 2 = grandchildren, etc.
+    /// An entry is a descendant when <paramref name="target"/>'s id appears in its
+    /// <see cref="DatabaseRegistryEntry.Ancestors"/> list. Rows are ordered depth-ascending then
+    /// database-name ascending.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowBranches(
+        IReadOnlyList<DatabaseRegistryEntry> allEntries,
+        DatabaseRegistryEntry target)
+    {
+        await Task.CompletedTask;
+
+        // Build id→name map for resolving parent names.
+        Dictionary<string, string> idToName = new(allEntries.Count, StringComparer.Ordinal);
+        foreach (DatabaseRegistryEntry e in allEntries)
+            idToName[e.Id] = e.Name;
+
+        // Collect (depth, entry) for every entry that descends from target.
+        List<(int depth, DatabaseRegistryEntry entry)> descendants = new();
+        foreach (DatabaseRegistryEntry e in allEntries)
+        {
+            for (int i = 0; i < e.Ancestors.Count; i++)
+            {
+                if (e.Ancestors[i].DatabaseId == target.Id)
+                {
+                    descendants.Add((i + 1, e));
+                    break;
+                }
+            }
+        }
+
+        descendants.Sort((a, b) =>
+        {
+            int d = a.depth.CompareTo(b.depth);
+            return d != 0 ? d : string.Compare(a.entry.Name, b.entry.Name, StringComparison.Ordinal);
+        });
+
+        foreach ((int depth, DatabaseRegistryEntry e) in descendants)
+        {
+            string parentName = e.Ancestors.Count > 0 && idToName.TryGetValue(e.Ancestors[0].DatabaseId, out string? pn)
+                ? pn : "";
+            string forkTs = e.Ancestors.Count > 0
+                ? e.Ancestors[0].ForkTimestamp.ToString()
+                : "";
+
+            yield return new QueryResultRow(default, new()
+            {
+                { "database",       new ColumnValue(ColumnType.String, e.Name) },
+                { "id",             new ColumnValue(ColumnType.String, e.Id) },
+                { "depth",          new ColumnValue(ColumnType.Integer64, depth) },
+                { "parent",         new ColumnValue(ColumnType.String, parentName) },
+                { "fork_timestamp", new ColumnValue(ColumnType.String, forkTs) },
+            });
+        }
+    }
+
+    /// <summary>
+    /// Returns one row per entry in <paramref name="target"/>'s
+    /// <see cref="DatabaseRegistryEntry.Ancestors"/> list, ordered by depth ascending (nearest parent
+    /// first). A root database (no ancestors) returns an empty result set. Ancestor names are
+    /// resolved from the id-to-name map built from <paramref name="allEntries"/>.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowAncestors(
+        DatabaseRegistryEntry target,
+        IReadOnlyList<DatabaseRegistryEntry> allEntries)
+    {
+        await Task.CompletedTask;
+
+        Dictionary<string, string> idToName = new(allEntries.Count, StringComparer.Ordinal);
+        foreach (DatabaseRegistryEntry e in allEntries)
+            idToName[e.Id] = e.Name;
+
+        for (int i = 0; i < target.Ancestors.Count; i++)
+        {
+            DatabaseBranchAncestor anc = target.Ancestors[i];
+            idToName.TryGetValue(anc.DatabaseId, out string? ancestorName);
+
+            yield return new QueryResultRow(default, new()
+            {
+                { "database",       new ColumnValue(ColumnType.String, ancestorName ?? anc.DatabaseId) },
+                { "id",             new ColumnValue(ColumnType.String, anc.DatabaseId) },
+                { "depth",          new ColumnValue(ColumnType.Integer64, i + 1) },
+                { "fork_timestamp", new ColumnValue(ColumnType.String, anc.ForkTimestamp.ToString()) },
+            });
+        }
     }
 
     internal async IAsyncEnumerable<QueryResultRow> ShowDatabases(IReadOnlyList<DatabaseRegistryEntry> entries, string? pattern = null)

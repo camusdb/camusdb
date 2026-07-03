@@ -80,10 +80,58 @@ internal static class CardinalityEstimator
         HashSet<string>? compositeHandled = TryApplyCompositeKeyNdv(
             comparisons, database, table, stats, ref sel);
 
+        // Group same-column range comparisons to avoid double-counting. A two-sided range
+        // "x > lo AND x < hi" is two AnalyzedComparisons on the same column; multiplying
+        // their individual selectivities treats them as independent events and under-estimates
+        // the intersection. Call EstimateRangeFraction(lo, hi) once instead.
+        //
+        // Only pairs of a lower bound (>/>=) and an upper bound (</<=) are merged here;
+        // single one-sided bounds, equalities, and ≠ comparisons remain in the independence loop.
+        HashSet<string>? rangePairHandled = null;
+
+        // Bucket comparisons by column → lower bound and upper bound.
+        Dictionary<string, (ScalarBound? lo, ScalarBound? hi)>? rangePairs = null;
+        foreach (AnalyzedComparison c in comparisons)
+        {
+            bool isLo = c.Operator is ">" or ">=";
+            bool isHi = c.Operator is "<" or "<=";
+            if (!isLo && !isHi) continue;
+
+            // Skip columns already handled by composite-KeyNdv (they are equalities, so
+            // this branch is unreachable for them, but guard anyway for clarity).
+            if (compositeHandled?.Contains(c.ColumnName) == true) continue;
+
+            rangePairs ??= new(StringComparer.Ordinal);
+            if (!rangePairs.TryGetValue(c.ColumnName, out var pair))
+                pair = (null, null);
+
+            ScalarBound? bound = TryGetBound(c.Constant);
+            if (isLo) pair = (pair.lo ?? bound, pair.hi);
+            else      pair = (pair.lo, pair.hi ?? bound);
+            rangePairs[c.ColumnName] = pair;
+        }
+
+        if (rangePairs is not null)
+        {
+            foreach (KeyValuePair<string, (ScalarBound? lo, ScalarBound? hi)> kv in rangePairs)
+            {
+                // Only merge when BOTH bounds are present — that is the two-sided case.
+                // A single one-sided bound is left for the independence loop below.
+                if (kv.Value.lo is null || kv.Value.hi is null) continue;
+
+                sel *= EstimateRangeFraction(kv.Value.lo, kv.Value.hi, kv.Key, database, table, stats);
+                rangePairHandled ??= new(StringComparer.Ordinal);
+                rangePairHandled.Add(kv.Key);
+            }
+        }
+
         foreach (AnalyzedComparison c in comparisons)
         {
             // Skip equality comparisons already priced by the composite KeyNdv path.
             if (c.Operator == "=" && compositeHandled?.Contains(c.ColumnName) == true)
+                continue;
+            // Skip range comparisons already merged into a two-sided range fraction above.
+            if ((c.Operator is ">" or ">=" or "<" or "<=") && rangePairHandled?.Contains(c.ColumnName) == true)
                 continue;
             sel *= SingleComparisonSelectivity(c.Operator, c.Constant, c.ColumnName, database, table, stats);
         }
@@ -168,6 +216,7 @@ internal static class CardinalityEstimator
         TableDescriptor table,
         StatisticsManager stats)
     {
+        columnName = StripAliasPrefix(columnName);
         ColumnHistogram? hist = stats.GetColumnHistogram(database, table, columnName);
         if (hist is null || hist.TotalRows == 0)
             return FallbackSelectivity;
@@ -318,8 +367,9 @@ internal static class CardinalityEstimator
 
         if (stats is not null && table is not null)
         {
-            ColumnHistogram? hist = stats.GetColumnHistogram(database, table, columnName);
-            long? ndv = stats.GetColumnNdv(database, table, columnName);
+            string colKey = StripAliasPrefix(columnName);
+            ColumnHistogram? hist = stats.GetColumnHistogram(database, table, colKey);
+            long? ndv = stats.GetColumnNdv(database, table, colKey);
 
             double total = 0.0;
             foreach (ColumnValue val in values)
@@ -345,6 +395,7 @@ internal static class CardinalityEstimator
         TableDescriptor table,
         StatisticsManager stats)
     {
+        columnName = StripAliasPrefix(columnName);
         ColumnHistogram? hist = stats.GetColumnHistogram(database, table, columnName);
         long? ndv = stats.GetColumnNdv(database, table, columnName);
         ScalarBound? bound = TryGetBound(constant);
@@ -447,4 +498,13 @@ internal static class CardinalityEstimator
         val.Type is ColumnType.Null ? null : ScalarBound.FromColumnValue(val);
 
     private static double Clamp(double v) => Math.Max(0.0, Math.Min(1.0, v));
+
+    // Strips a table-alias prefix ("alias.column" → "column") so that stats lookups work
+    // regardless of whether a column name was extracted from a qualified (join-context)
+    // or unqualified (single-table) identifier.
+    private static string StripAliasPrefix(string columnName)
+    {
+        int dot = columnName.IndexOf('.');
+        return dot > 0 ? columnName[(dot + 1)..] : columnName;
+    }
 }

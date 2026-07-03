@@ -28,9 +28,12 @@ internal sealed class ExecuteSQLValidator : ValidatorBase
             NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
             bool serverLevel = ast.nodeType is
                 NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists or
+                NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists or
                 NodeType.DropDatabase or NodeType.DropDatabaseIfExists or
                 NodeType.RenameDatabase or
-                NodeType.ShowDatabases;
+                NodeType.ShowDatabases or
+                NodeType.ShowBranches or
+                NodeType.ShowAncestors;
 
             if (!serverLevel)
                 throw new CamusDBException(

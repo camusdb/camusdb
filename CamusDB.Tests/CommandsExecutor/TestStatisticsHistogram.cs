@@ -389,4 +389,55 @@ public sealed class TestStatisticsHistogram
         // cumulativeRows for that bucket reflects how many rows had value ≤ 1 (the 800 skewed rows).
         Assert.That(h.Buckets[0].CumulativeRows, Is.GreaterThan(0));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ScalarBound.CompareTo ordering for Date, DateTime, Float32
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static ScalarBound DateBound(long v)  => new() { Type = ColumnType.Date,     LongValue  = v };
+    private static ScalarBound DtBound(long v)    => new() { Type = ColumnType.DateTime, LongValue  = v };
+    private static ScalarBound F32Bound(double v) => new() { Type = ColumnType.Float32,  FloatValue = v };
+
+    /// <summary>
+    /// ScalarBound.CompareTo must order Date/DateTime by LongValue and Float32 by FloatValue.
+    /// Before the fix, all three types fell to the default arm returning 0, so a < b and a > b
+    /// were indistinguishable and sorting was a no-op.
+    /// </summary>
+    [Test]
+    public void ScalarBoundCompareTo_Date_OrdersCorrectly()
+    {
+        ScalarBound lo = DateBound(100);
+        ScalarBound hi = DateBound(200);
+        ScalarBound eq = DateBound(100);
+
+        Assert.That(lo.CompareTo(hi), Is.LessThan(0),    "earlier date must be less than later date");
+        Assert.That(hi.CompareTo(lo), Is.GreaterThan(0), "later date must be greater than earlier date");
+        Assert.That(lo.CompareTo(eq), Is.EqualTo(0),     "equal dates must compare to 0");
+    }
+
+    [Test]
+    public void ScalarBoundCompareTo_DateTime_OrdersCorrectly()
+    {
+        ScalarBound lo = DtBound(1_000_000);
+        ScalarBound hi = DtBound(2_000_000);
+        ScalarBound eq = DtBound(1_000_000);
+
+        Assert.That(lo.CompareTo(hi), Is.LessThan(0));
+        Assert.That(hi.CompareTo(lo), Is.GreaterThan(0));
+        Assert.That(lo.CompareTo(eq), Is.EqualTo(0));
+    }
+
+    [Test]
+    public void ScalarBoundCompareTo_Float32_OrdersCorrectly()
+    {
+        ScalarBound lo  = F32Bound(1.5);
+        ScalarBound hi  = F32Bound(3.0);
+        ScalarBound eq  = F32Bound(1.5);
+        ScalarBound neg = F32Bound(-2.0);
+
+        Assert.That(lo.CompareTo(hi),  Is.LessThan(0),    "1.5 < 3.0");
+        Assert.That(hi.CompareTo(lo),  Is.GreaterThan(0), "3.0 > 1.5");
+        Assert.That(lo.CompareTo(eq),  Is.EqualTo(0),     "1.5 == 1.5");
+        Assert.That(neg.CompareTo(lo), Is.LessThan(0),    "negative must be less than positive");
+    }
 }

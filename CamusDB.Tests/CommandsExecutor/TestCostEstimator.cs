@@ -21,6 +21,8 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.Statistics;
+using CamusDB.Core.Statistics.Models;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
 
@@ -325,5 +327,119 @@ public sealed class TestCostEstimator : BaseTest
             "Half-open range (40 % < 50 % breakeven) must keep the index-range-scan");
         Assert.IsFalse(hasTableScan,
             "table-scan must not appear when the cost model keeps the index");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Tests — composite equality priced via KeyNdv, not collapsed to 1 row
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A composite index equality such as (tenant, status) = (v1, v2) is represented as a
+    /// degenerate [v, v] inclusive range on both columns. Before the fix, the range path
+    /// computed RangeFraction(v, v) = 0 and the result was Math.Max(1, 0) = 1 row regardless
+    /// of the real composite NDV. After the fix, the equality is detected and priced as
+    /// rows / KeyNdv, which correctly reflects the composite cardinality.
+    /// </summary>
+    [Test]
+    public async Task CompositeEqualityPricedViaKeyNdvNotCollapsedToOne()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        // Create a table with a composite index on (tenant, status).
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "orders",
+            columns: new ColumnInfo[]
+            {
+                new("id",     ColumnType.Id),
+                new("tenant", ColumnType.String, notNull: true),
+                new("status", ColumnType.String, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk",
+                    new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                new(ConstraintType.IndexMulti, "tenant_status_idx",
+                    new ColumnIndexInfo[]
+                    {
+                        new("tenant", OrderType.Ascending),
+                        new("status", OrderType.Ascending),
+                    }),
+            },
+            ifNotExists: false
+        ));
+        await database.Transactions.CommitAsync(txn);
+
+        TableDescriptor table = await GetTableDescriptorAsync(executor, dbname, "orders");
+
+        const long tableRows = 10_000;
+        const long compositeKeyNdv = 500; // 500 distinct (tenant, status) pairs
+
+        // Seed row count.
+        executor.Statistics.TrackInsert(database, table, (int)tableRows);
+
+        // Seed composite KeyNdv for ["tenant","status"].
+        await executor.Statistics.SetNdvAsync(database, table,
+            columnNdv: new() { { "tenant", 50 }, { "status", 20 } },
+            keyNdv: new() { { StatisticsManager.KeyTupleSignature(["tenant", "status"]), compositeKeyNdv } });
+
+        // Seed a histogram for the trailing range column 'status'. This is what makes the test
+        // discriminating: without the fix, a 2-column equality is decomposed into a 'tenant'
+        // equality prefix plus a degenerate [status, status] range, and the histogram path yields
+        // RangeFraction(v, v) == 0 → the estimate collapses to 1. (With no histogram/min-max the
+        // old path would instead fall back to a fixed selectivity that coincidentally also lands
+        // near rows/KeyNdv, hiding the bug.) The fix must price the whole tuple via KeyNdv before
+        // ever reaching this range path.
+        await executor.Statistics.SetHistogramsAsync(database, table, new()
+        {
+            {
+                "status",
+                new ColumnHistogram
+                {
+                    TotalRows = tableRows,
+                    Buckets =
+                    [
+                        new ColumnHistogramBucket
+                        {
+                            UpperBound       = new ScalarBound { Type = ColumnType.String, StrValue = "zzzz" },
+                            CumulativeRows   = tableRows,
+                            DistinctInBucket = 20,
+                        },
+                    ],
+                }
+            },
+        });
+
+        // Construct a 2-column composite equality: (tenant='acme', status='active').
+        var tenantVal = new ColumnValue(ColumnType.String, "acme");
+        var statusVal = new ColumnValue(ColumnType.String, "active");
+        var bound = new CompositeColumnValue([tenantVal, statusVal]);
+
+        var index = new TableIndexSchema(
+            name: "tenant_status_idx",
+            columns: ["tenant", "status"],
+            type: IndexType.Multi);
+
+        var node = new IndexRangeScanNode(
+            index: index,
+            fromBound: bound,
+            fromInclusive: true,
+            toBound: bound,
+            toInclusive: true);
+
+        long estimated = CostEstimator.EstimateRangeScanRows(
+            node, tableRows,
+            executor.Statistics, database, table);
+
+        long expectedApprox = tableRows / compositeKeyNdv; // = 20
+
+        // Must be priced near rows/KeyNdv (within 2×), not collapsed to 1.
+        Assert.Greater(estimated, 1,
+            "Composite equality must not collapse to 1 row when KeyNdv is seeded");
+        Assert.LessOrEqual(estimated, expectedApprox * 2,
+            "Composite equality estimate must not greatly exceed rows/KeyNdv");
+        Assert.GreaterOrEqual(estimated, Math.Max(1, expectedApprox / 2),
+            "Composite equality estimate must be within range of rows/KeyNdv");
     }
 }

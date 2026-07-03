@@ -26,7 +26,7 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Tests for BR1: branch ancestry on <see cref="DatabaseRegistryEntry"/> and
+/// Tests for branch ancestry on <see cref="DatabaseRegistryEntry"/> and
 /// cross-node entry resolution via <see cref="DatabaseRegistry.TryResolveEntryAsync"/>.
 /// </summary>
 [NonParallelizable]
@@ -365,8 +365,8 @@ internal sealed class TestDatabaseBranchAncestryEndToEnd : BaseTest
             TestNode!.Raft.GetLocalNodeId());
 
         // Register a branch entry directly in the registry.
-        // (CREATE DATABASE … BRANCH FROM … is BR2; here we bypass the SQL surface and
-        // inject the branch entry to verify the DatabaseOpener wiring in isolation.)
+        // (Rather than going through CREATE DATABASE … BRANCH FROM …, we bypass the SQL surface
+        // and inject the branch entry to verify the DatabaseOpener wiring in isolation.)
         string branchId = await sharedRegistry!.AllocateIdAsync();
         string branchName = NewName();
         await sharedRegistry.RegisterAsync(branchName, branchId,

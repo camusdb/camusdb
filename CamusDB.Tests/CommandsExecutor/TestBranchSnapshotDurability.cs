@@ -35,7 +35,7 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// The core BR7 acceptance: a branch keeps reading its parent as of <c>forkT</c> even after the
+/// The core frozen-view durability guarantee: a branch keeps reading its parent as of <c>forkT</c> even after the
 /// parent's row is overwritten far more than the node's in-memory revision-retention window. The
 /// snapshot-floor hold acquired at fork time keeps the fork-boundary revision reachable; without it
 /// that version would be reclaimed and the branch read would miss.

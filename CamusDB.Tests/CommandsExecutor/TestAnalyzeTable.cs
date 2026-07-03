@@ -323,6 +323,208 @@ public sealed class TestAnalyzeTable : BaseTest
     }
 
     /// <summary>
+    /// ANALYZE on a Date-typed indexed column must produce min/max that advance past the first row
+    /// and buckets that are monotonically ordered by date value. Before the fix, ScalarBound.CompareTo
+    /// returned 0 for Date, so min/max froze at the first-seen value and the sort used for
+    /// histogram building was a no-op.
+    /// </summary>
+    [Test]
+    public async Task AnalyzeDate_MinMaxAndHistogramOrderCorrectly()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "events",
+            columns: new ColumnInfo[]
+            {
+                new("id",         ColumnType.Id),
+                new("event_date", ColumnType.Date),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk",       new ColumnIndexInfo[] { new("id",         OrderType.Ascending) }),
+                new(ConstraintType.IndexMulti, "date_idx",  new ColumnIndexInfo[] { new("event_date", OrderType.Ascending) }),
+            },
+            ifNotExists: false
+        ));
+        await database.Transactions.CommitAsync(txn);
+
+        // Insert 5 rows in non-monotonic (shuffled) order so that the histogram bucket-ordering
+        // assertion is discriminating: a no-op sort would leave the data in insertion order and
+        // produce non-monotonic upper bounds, catching a broken CompareTo.
+        long[] dateTicks = new[]
+        {
+            new DateTime(2022, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks,
+            new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks,
+            new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks,
+            new DateTime(2023, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks,
+            new DateTime(2021, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks,
+        };
+
+        txn = await database.Transactions.BeginAsync();
+        foreach (long ticks in dateTicks)
+            await executor.Insert(new InsertTicket(
+                txnState: txn,
+                databaseName: dbname,
+                tableName: "events",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id",         new(ColumnType.Id,   ObjectIdGenerator.Generate().ToString()) },
+                        { "event_date", new(ColumnType.Date, ticks) },
+                    }
+                }));
+        await database.Transactions.CommitAsync(txn);
+
+        TableDescriptor table = await OpenTableAsync(database, "events");
+        await RunAnalyzeAsync(executor, database, dbname, "events");
+
+        long expectedMin = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks;
+        long expectedMax = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks;
+
+        // Min must be the earliest date, max must be the latest — regardless of insertion order.
+        ColumnMinMax? mm = executor.Statistics.GetColumnMinMax(database, table, "event_date");
+        Assert.IsNotNull(mm, "Min/max for 'event_date' must be populated after ANALYZE");
+        Assert.AreEqual(expectedMin, mm!.Min!.LongValue, "Min must be the earliest date");
+        Assert.AreEqual(expectedMax, mm.Max!.LongValue,  "Max must be the latest date");
+
+        // Histogram must be populated and buckets must be monotonically ordered.
+        ColumnHistogram? hist = executor.Statistics.GetColumnHistogram(database, table, "event_date");
+        Assert.IsNotNull(hist, "Histogram for 'event_date' must be populated after ANALYZE");
+        Assert.Greater(hist!.Buckets.Count, 0, "At least one bucket must exist");
+        for (int i = 1; i < hist.Buckets.Count; i++)
+            Assert.LessOrEqual(
+                hist.Buckets[i - 1].UpperBound!.LongValue,
+                hist.Buckets[i].UpperBound!.LongValue,
+                $"Bucket {i - 1} upper bound must not exceed bucket {i} upper bound");
+    }
+
+    /// <summary>
+    /// When the row count is not a multiple of the bucket count, the trailing partial run must
+    /// be included in the last histogram bucket. Before the fix, the index-stepping loop stopped
+    /// short of the tail, so the last UpperBound was below the column maximum and CumulativeRows
+    /// was patched to TotalRows but pointed at the wrong value.
+    /// </summary>
+    [Test]
+    public async Task AnalyzeHistogram_TrailingPartialBucket_UpperBoundEqualsColumnMax()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        // Use a small bucket count so the tail partial bucket is clearly visible.
+        // 10 rows / 3 buckets → bucketSize = ceil(10/3) = 4 → loop covers [0..3],[4..7], drops [8..9].
+        int originalBuckets = CamusDBConfig.StatsHistogramBuckets;
+        try
+        {
+            CamusDBConfig.StatsHistogramBuckets = 3;
+
+            // Insert 10 rows with years 2000–2009; max is 2009.
+            await InsertRobotsAsync(executor, database, dbname, count: 10, baseYear: 2000);
+
+            TableDescriptor table = await OpenTableAsync(database, "robots");
+            await RunAnalyzeAsync(executor, database, dbname, "robots");
+
+            ColumnHistogram? hist = executor.Statistics.GetColumnHistogram(database, table, "year");
+            Assert.IsNotNull(hist, "Histogram must be populated after ANALYZE");
+            Assert.AreEqual(10L, hist!.TotalRows, "TotalRows must equal 10");
+            Assert.AreEqual(10L, hist.Buckets[^1].CumulativeRows,
+                "Last bucket CumulativeRows must equal TotalRows");
+            Assert.AreEqual(2009L, hist.Buckets[^1].UpperBound!.LongValue,
+                "Last bucket UpperBound must equal the column maximum (2009), not the pre-tail value (2007)");
+        }
+        finally
+        {
+            CamusDBConfig.StatsHistogramBuckets = originalBuckets;
+        }
+    }
+
+    /// <summary>
+    /// When the requested bucket count times the ceil-rounded bucket size overshoots the row
+    /// count (e.g. 6 rows into 4 buckets → bucketSize=2 covers only 3 buckets), the builder must
+    /// stop once the data is exhausted rather than emitting trailing empty buckets that duplicate
+    /// the maximum's UpperBound with zero rows. Every emitted bucket must therefore carry at least
+    /// one distinct value, and the last bucket must still reach the column maximum.
+    /// </summary>
+    [Test]
+    public async Task AnalyzeHistogram_BucketOvershoot_EmitsNoEmptyTrailingBuckets()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        int originalBuckets = CamusDBConfig.StatsHistogramBuckets;
+        try
+        {
+            // 6 rows / 4 buckets → bucketSize = ceil(6/4) = 2 → only 3 buckets hold data;
+            // a 4th would be empty (start index 6 past the last row 5).
+            CamusDBConfig.StatsHistogramBuckets = 4;
+            await InsertRobotsAsync(executor, database, dbname, count: 6, baseYear: 2000);
+
+            TableDescriptor table = await OpenTableAsync(database, "robots");
+            await RunAnalyzeAsync(executor, database, dbname, "robots");
+
+            ColumnHistogram? hist = executor.Statistics.GetColumnHistogram(database, table, "year");
+            Assert.IsNotNull(hist, "Histogram must be populated after ANALYZE");
+
+            // No bucket may be empty — a real (start ≤ end) bucket always spans ≥ 1 value, so a
+            // DistinctInBucket of 0 can only come from a degenerate trailing bucket.
+            foreach (ColumnHistogramBucket b in hist!.Buckets)
+                Assert.Greater(b.DistinctInBucket, 0,
+                    "no histogram bucket may be empty (DistinctInBucket == 0 signals a degenerate trailing bucket)");
+
+            Assert.AreEqual(3, hist.Buckets.Count,
+                "6 rows at bucketSize 2 must yield exactly 3 buckets, not 4 with an empty tail");
+            Assert.AreEqual(2005L, hist.Buckets[^1].UpperBound!.LongValue,
+                "Last bucket UpperBound must still equal the column maximum (2005)");
+            Assert.AreEqual(6L, hist.Buckets[^1].CumulativeRows,
+                "Last bucket CumulativeRows must equal TotalRows");
+        }
+        finally
+        {
+            CamusDBConfig.StatsHistogramBuckets = originalBuckets;
+        }
+    }
+
+    /// <summary>
+    /// ANALYZE on a table larger than StatsAnalyzeSampleRows must report isSampled=true in
+    /// its status string and must report exactly StatsAnalyzeSampleRows rows — not the total
+    /// table size. Before the fix, ScanRows was capped at the limit so the sentinel row was
+    /// never delivered and isSampled stayed false; the status incorrectly said "analyzed N rows"
+    /// and the row count was taken as the absolute table size.
+    /// </summary>
+    [Test]
+    public async Task AnalyzeDetectsSamplingWhenTableExceedsSampleLimit()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        // Use a very small sample limit so we can insert past it without a large insert loop.
+        int originalLimit = CamusDBConfig.StatsAnalyzeSampleRows;
+        try
+        {
+            const int sampleLimit = 10;
+            CamusDBConfig.StatsAnalyzeSampleRows = sampleLimit;
+
+            // Insert more rows than the sample limit.
+            await InsertRobotsAsync(executor, database, dbname, count: sampleLimit + 5);
+
+            QueryResultRow resultRow = await RunAnalyzeAsync(executor, database, dbname, "robots");
+
+            // Status must say "sampled", not "analyzed".
+            string status = resultRow.Row["status"].StrValue!;
+            StringAssert.Contains("sampled", status,
+                "ANALYZE status must report 'sampled' when the table exceeds StatsAnalyzeSampleRows");
+
+            // Reported row count must equal the sample limit, not the total inserted count.
+            Assert.AreEqual(sampleLimit, resultRow.Row["rows"].LongValue,
+                "ANALYZE rows must equal the sample limit when the table is larger");
+        }
+        finally
+        {
+            CamusDBConfig.StatsAnalyzeSampleRows = originalLimit;
+        }
+    }
+
+    /// <summary>
     /// ANALYZE TABLE (with TABLE keyword) must produce the same result as ANALYZE tablename.
     /// </summary>
     [Test]

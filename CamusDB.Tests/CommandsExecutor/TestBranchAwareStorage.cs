@@ -28,12 +28,13 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsValidator;
+using CamusDB.Core.Diagnostics;
 using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// BR3 acceptance tests: the branch-aware read layer (KvTableStore) walks ancestry so a branch
+/// Branch-aware read-layer tests: the branch-aware read layer (KvTableStore) walks ancestry so a branch
 /// returns inherited data without physically copying rows or index entries.
 /// </summary>
 [NonParallelizable]
@@ -919,7 +920,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
     }
 
     // -----------------------------------------------------------------------
-    // BR6 — Branch-Aware DDL
+    // Branch-Aware DDL
     // -----------------------------------------------------------------------
 
     /// <summary>
@@ -1156,7 +1157,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
     }
 
     // -----------------------------------------------------------------------
-    // BR8: Drop, descendants, and orphan recovery
+    // Drop, descendants, and orphan recovery
     // -----------------------------------------------------------------------
 
     /// <summary>
@@ -1326,8 +1327,8 @@ internal sealed class TestBranchAwareStorage : BaseTest
     }
 
     /// <summary>
-    /// BR14 subsumes the old cross-node name race that used to reach the branch-create abort-after-copy
-    /// path: because the existence check at the top of <c>CreateDatabase</c> now resolves through the
+    /// The persistent existence check subsumes the old cross-node name race that used to reach the
+    /// branch-create abort-after-copy path: because the existence check at the top of <c>CreateDatabase</c> now resolves through the
     /// persistent registry, a branch target that already exists in the shared KV (even if absent from
     /// this node's cache) is rejected <em>before</em> the branch flow runs. So no branch id is
     /// allocated, no snapshot hold is acquired, and no metadata is copied — the branch-create's inline
@@ -1335,8 +1336,8 @@ internal sealed class TestBranchAwareStorage : BaseTest
     /// defense-in-depth for a genuine concurrent registration between the two persistent checks, which
     /// is not deterministically reproducible.)
     ///
-    /// Discriminator: the registry id sequence is unchanged after the rejected create. Before BR14 the
-    /// cache-only precheck missed and the branch flow ran — allocating an id (advancing the sequence)
+    /// Discriminator: the registry id sequence is unchanged after the rejected create. With a cache-only
+    /// precheck the check missed and the branch flow ran — allocating an id (advancing the sequence)
     /// and copying metadata — only to fail late at RegisterAsync.
     /// </summary>
     [Test]
@@ -1420,7 +1421,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
     }
 
     /// <summary>
-    /// Proves the cross-node drop-vs-branch-create fence (BR12). The race is: DropDatabase on node A
+    /// Proves the cross-node drop-vs-branch-create fence. The race is: DropDatabase on node A
     /// passes its descendant scan (no children yet), then CreateBranchDatabaseAsync on node B
     /// registers a child — after which A's purge would orphan the child against a destroyed namespace.
     ///
@@ -1530,7 +1531,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
     /// <summary>
     /// Startup drop-intent recovery must be owner-scoped: a restarting node must NOT clear a
     /// drop-intent that a different, still-live cluster node currently holds for an in-flight drop.
-    /// Clearing it would reopen the cross-node drop/create race BR12 closes. The drop-intent marker
+    /// Clearing it would reopen the cross-node drop/create race the drop-intent fence closes. The drop-intent marker
     /// carries the owning node's id; the scrub deletes only markers stamped with this node's id.
     ///
     /// Simulated by planting a drop-intent whose value is a foreign node id, then running this node's
@@ -1767,7 +1768,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
     }
 
     /// <summary>
-    /// The second BR12 outcome: when branch-create registers its child BEFORE DropDatabase sets
+    /// The second fence outcome: when branch-create registers its child BEFORE DropDatabase sets
     /// the drop-intent, DropDatabase's subsequent HasLiveDescendantsAsync scan observes the child
     /// and drop fails with DatabaseHasLiveDescendants, leaving both parent and child intact.
     /// This is symmetrical to <see cref="DropDatabase_DropIntent_PreventsCrossNodeBranchCreateRace"/>:
@@ -1807,7 +1808,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
     }
 
     /// <summary>
-    /// BR15: the pending-create marker is now a mandatory, confirmed write before
+    /// The pending-create marker is a mandatory, confirmed write before
     /// <c>CopyMetaForBranchAsync</c> runs — not best-effort. This test verifies the key invariant
     /// that the fix preserves: every meta namespace written by <c>CopyMetaForBranchAsync</c> is
     /// either registered in the persistent registry (success path) or it has a pending-create marker
@@ -1837,7 +1838,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         // Allocate a branch id directly, as CreateBranchDatabaseAsync would.
         string branchId = await sharedRegistry!.AllocateIdAsync();
 
-        // Write the mandatory pending-create marker. With the BR15 fix, this write is confirmed
+        // Write the mandatory pending-create marker. This write is confirmed
         // durable before CopyMetaForBranchAsync runs: if it threw, creation would abort and no
         // meta namespace would exist (no orphan possible).
         await sharedRegistry.TrackPendingBranchAsync(branchId);
@@ -1858,5 +1859,125 @@ internal sealed class TestBranchAwareStorage : BaseTest
         // Side-effect: verify rootDb is unaffected.
         _ = rootDb;
         _ = executor;
+    }
+
+    /// <summary>
+    /// BranchMetrics counters track ancestor-probe and scan-iterator costs for a known chain.
+    /// Creates a 3-level chain (root → child → grandchild), performs point reads and a scan on the
+    /// grandchild, and asserts that the process-wide counters reflect the expected amplification.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task BranchMetrics_TrackAncestorProbesAndScanIterators_ForKnownChain()
+    {
+        BranchMetrics.Reset();
+
+        // Root: two rows.
+        (string rootName, DatabaseDescriptor rootDb, CommandExecutor executor) =
+            await CreateRootWithTable("CREATE TABLE items (id OBJECT_ID PRIMARY KEY, label STRING NOT NULL)");
+
+        await InsertRow(rootName, rootDb, executor, "INSERT INTO items (id, label) VALUES (gen_id(), \"alpha\")");
+        await InsertRow(rootName, rootDb, executor, "INSERT INTO items (id, label) VALUES (gen_id(), \"beta\")");
+
+        // Child branch (depth 1).
+        string childName = NewName();
+        DatabaseDescriptor childDb = await executor.CreateDatabase(
+            new CreateDatabaseTicket(childName, ifNotExists: false, branchFrom: rootName));
+        TrackDatabase(childName, executor);
+
+        // Grandchild branch (depth 2).
+        string grandchildName = NewName();
+        DatabaseDescriptor grandchildDb = await executor.CreateDatabase(
+            new CreateDatabaseTicket(grandchildName, ifNotExists: false, branchFrom: childName));
+        TrackDatabase(grandchildName, executor);
+
+        long probesBefore = BranchMetrics.AncestorProbesTotal;
+        long scansBefore  = BranchMetrics.ScanIteratorsTotal;
+
+        // A full table scan on the grandchild opens 2 ancestor iterators (child + root).
+        List<QueryResultRow> rows = await SelectAll(grandchildName, grandchildDb, executor,
+            "SELECT label FROM items");
+
+        Assert.AreEqual(2, rows.Count, "grandchild must see both root rows via 2-level ancestry walk");
+
+        long scansAfter = BranchMetrics.ScanIteratorsTotal;
+        Assert.GreaterOrEqual(scansAfter - scansBefore, 2,
+            "ScanIteratorsTotal must increment by at least 2 (one per ancestor level) per scan");
+
+        // A SELECT by non-unique label triggers a full scan (no index on label).
+        // A SELECT by pk would trigger a point read with possible ancestor probe on a miss —
+        // but since items are inherited at grandchild level-0 miss, each row probe walks ancestors.
+        // Re-scan to accumulate point-read probes via WHERE on the pk index.
+        List<QueryResultRow> rootRows = await SelectAll(rootName, rootDb, executor, "SELECT id FROM items");
+        string firstId = rootRows[0].Row["id"].StrValue!;
+
+        long probesStart = BranchMetrics.AncestorProbesTotal;
+        List<QueryResultRow> pkRows = await SelectAll(grandchildName, grandchildDb, executor,
+            $"SELECT label FROM items WHERE id = \"{firstId}\"");
+        Assert.AreEqual(1, pkRows.Count, "grandchild must find inherited row by primary key");
+
+        long probesEnd = BranchMetrics.AncestorProbesTotal;
+        // A pk lookup on the grandchild misses level-0 → probes child (1 probe) → hits or misses →
+        // probes root (2nd probe if child also misses). At least 1 ancestor probe must fire.
+        Assert.GreaterOrEqual(probesEnd - probesStart, 1,
+            "AncestorProbesTotal must increment for each ancestor level probed on a GetRow/LookupUnique miss");
+
+        // Lineage depth is observable on the descriptor's store (indirect via table open).
+        // Verify that probes and scan iters both grew from the baseline, meaning the observability
+        // path is wired end-to-end and tracks a known chain.
+        Assert.Greater(BranchMetrics.AncestorProbesTotal, probesBefore,
+            "AncestorProbesTotal must grow from baseline across the full test");
+        Assert.Greater(BranchMetrics.ScanIteratorsTotal, scansBefore,
+            "ScanIteratorsTotal must grow from baseline across the full test");
+
+        _ = childDb;
+    }
+
+    /// <summary>
+    /// Opening a table store at a lineage depth at or beyond <see cref="BranchMetrics.LineageWarningThreshold"/>
+    /// records a deep-lineage warning — the operational guardrail signalling a chain deep enough to
+    /// warrant compaction/rebase. Exercised with the threshold lowered to 2 so a grandchild (depth 2)
+    /// trips it while a child (depth 1) does not.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task BranchMetrics_DeepLineageWarning_FiresAtThreshold()
+    {
+        int originalThreshold = BranchMetrics.LineageWarningThreshold;
+        BranchMetrics.LineageWarningThreshold = 2;
+        BranchMetrics.Reset();
+        try
+        {
+            (string rootName, DatabaseDescriptor rootDb, CommandExecutor executor) =
+                await CreateRootWithTable("CREATE TABLE items (id OBJECT_ID PRIMARY KEY, label STRING NOT NULL)");
+            await InsertRow(rootName, rootDb, executor, "INSERT INTO items (id, label) VALUES (gen_id(), \"alpha\")");
+
+            string childName = NewName();
+            DatabaseDescriptor childDb = await executor.CreateDatabase(
+                new CreateDatabaseTicket(childName, ifNotExists: false, branchFrom: rootName));
+            TrackDatabase(childName, executor);
+
+            // Opening the table on the child (depth 1 < threshold 2) must NOT warn.
+            await SelectAll(childName, childDb, executor, "SELECT label FROM items");
+            Assert.AreEqual(0, BranchMetrics.DeepLineageWarnings,
+                "a depth-1 chain is below the threshold and must not warn");
+
+            string grandchildName = NewName();
+            DatabaseDescriptor grandchildDb = await executor.CreateDatabase(
+                new CreateDatabaseTicket(grandchildName, ifNotExists: false, branchFrom: childName));
+            TrackDatabase(grandchildName, executor);
+
+            // Opening the table on the grandchild (depth 2 == threshold) constructs a KvTableStore
+            // deep enough to trip the guardrail.
+            await SelectAll(grandchildName, grandchildDb, executor, "SELECT label FROM items");
+
+            Assert.GreaterOrEqual(BranchMetrics.DeepLineageWarnings, 1,
+                "opening a table store at lineage depth >= LineageWarningThreshold must record a deep-lineage warning");
+        }
+        finally
+        {
+            BranchMetrics.LineageWarningThreshold = originalThreshold;
+            BranchMetrics.Reset();
+        }
     }
 }

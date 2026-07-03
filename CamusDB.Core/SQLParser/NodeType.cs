@@ -118,6 +118,8 @@ public enum NodeType
     ShowCreateTable,
     ShowDatabase,
     ShowDatabases,
+    ShowBranches,
+    ShowAncestors,
     CreateDatabase,
     CreateDatabaseIfNotExists,
     CreateDatabaseBranch,

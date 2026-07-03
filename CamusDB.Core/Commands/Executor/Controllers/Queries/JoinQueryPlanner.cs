@@ -246,7 +246,7 @@ internal sealed class JoinQueryPlanner
                         if (leftFree && rightFree && leftRows > MergeJoinPreferenceThreshold)
                             return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter);
 
-                        if (ShouldPreferHashOverIndexNestedLoop(left, right, database, stats))
+                        if (ShouldPreferHashOverIndexNestedLoop(left, right, database, stats, rightFilter))
                             return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats);
                     }
 
@@ -506,7 +506,7 @@ internal sealed class JoinQueryPlanner
             buildKeys[i] = equiKeys[i].RightColumnName;
         }
 
-        HashJoinBuildSide buildSide = ChooseBuildSide(left, right, database, stats);
+        HashJoinBuildSide buildSide = ChooseBuildSide(left, right, database, stats, rightFilter);
 
         return new HashJoinNode(left, right, onPredicate, probeKeys, buildKeys)
         {
@@ -559,11 +559,11 @@ internal sealed class JoinQueryPlanner
         PhysicalPlanNode leftNode,
         BoundJoinRightSource rightSource,
         DatabaseDescriptor database,
-        StatisticsManager stats)
+        StatisticsManager stats,
+        NodeAst? rightScanFilter = null)
     {
         long leftRows  = EstimatePhysicalNodeRows(leftNode, database, stats);
-        long rightRows = stats.GetRowCountEstimate(database, rightSource.Table!.Table)
-                         ?? CostEstimator.DefaultTableRowCount;
+        long rightRows = EstimateRightRows(rightSource, database, stats, rightScanFilter);
 
         double inljCost = leftRows * 2.0;
         long   buildRows = Math.Min(leftRows, rightRows);
@@ -590,17 +590,44 @@ internal sealed class JoinQueryPlanner
         PhysicalPlanNode leftNode,
         BoundJoinRightSource rightSource,
         DatabaseDescriptor database,
-        StatisticsManager? stats)
+        StatisticsManager? stats,
+        NodeAst? rightScanFilter = null)
     {
         if (stats is null || rightSource.Table is null)
             return HashJoinBuildSide.Right;
 
-        long rightRows = stats.GetRowCountEstimate(database, rightSource.Table.Table)
-                         ?? CostEstimator.DefaultTableRowCount;
-
-        long leftRows = EstimatePhysicalNodeRows(leftNode, database, stats);
+        long rightRows = EstimateRightRows(rightSource, database, stats, rightScanFilter);
+        long leftRows  = EstimatePhysicalNodeRows(leftNode, database, stats);
 
         return leftRows < rightRows ? HashJoinBuildSide.Left : HashJoinBuildSide.Right;
+    }
+
+    /// <summary>
+    /// Returns the estimated row count for the right side of a join, applying the pushed-down
+    /// scan filter when present. Without the filter the raw table row count is used, which
+    /// over-sizes the right side for selective predicates and skews both build-side selection
+    /// and hash-vs-INLJ threshold decisions.
+    /// </summary>
+    private static long EstimateRightRows(
+        BoundJoinRightSource rightSource,
+        DatabaseDescriptor database,
+        StatisticsManager stats,
+        NodeAst? rightScanFilter)
+    {
+        if (rightSource.Table is null)
+            return CostEstimator.DefaultTableRowCount;
+
+        long tableRows = stats.GetRowCountEstimate(database, rightSource.Table.Table)
+                         ?? CostEstimator.DefaultTableRowCount;
+
+        if (rightScanFilter is not null)
+        {
+            double sel = CardinalityEstimator.EstimateFilterSelectivity(
+                rightScanFilter, database, rightSource.Table.Table, stats);
+            return Math.Max(1L, (long)(tableRows * sel));
+        }
+
+        return tableRows;
     }
 
     /// <summary>

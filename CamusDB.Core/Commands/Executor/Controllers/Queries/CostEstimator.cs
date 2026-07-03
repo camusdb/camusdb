@@ -644,15 +644,60 @@ internal static class CostEstimator
             int fromLen = node.FromBound?.Values.Length ?? 0;
             int toLen   = node.ToBound?.Values.Length   ?? 0;
 
-            // String/Id equality is represented as a degenerate [v, v] inclusive range, for which
-            // RangeFraction(v, v) ≈ 0 → ~1 row, over-ranking these steps. Use 1/NDV instead.
-            if (fromLen == 1 && toLen == 1 && node.FromInclusive && node.ToInclusive
-                && IndexScanSelector.IsStringOrIdType(table, node.Index.Columns[0]))
+            // A degenerate equality range is one where every bound position has from==to and both
+            // sides are inclusive — e.g. a single-column String/Id equality or a composite equality
+            // such as (tenant, status) = (v1, v2). RangeFraction(v, v) ≈ 0 → 1 row for numeric
+            // types, and the histogram/min-max paths both collapse to 0 for any type, so all such
+            // lookups must be priced via NDV rather than the range path.
+            //
+            // Detect: same bound length, both inclusive, and every value pair compares equal.
+            bool isFullEquality = fromLen > 0 && fromLen == toLen
+                && node.FromInclusive && node.ToInclusive;
+            if (isFullEquality)
             {
-                long? colNdv = stats.GetColumnNdv(database, table, node.Index.Columns[0]);
-                if (colNdv is { } ndv && ndv > 0)
-                    return Math.Max(1, (long)(tableRowCount / (double)ndv));
-                // Fall through to general path when NDV is absent.
+                for (int i = 0; i < fromLen; i++)
+                {
+                    if (node.FromBound!.Values[i].CompareTo(node.ToBound!.Values[i]) != 0)
+                    {
+                        isFullEquality = false;
+                        break;
+                    }
+                }
+            }
+
+            if (isFullEquality)
+            {
+                // Price via composite KeyNdv for the full prefix, then single-column NDV, then
+                // NDV product as successive fallbacks.
+                string[] eqCols = node.Index.Columns[..Math.Min(fromLen, node.Index.Columns.Length)];
+
+                if (eqCols.Length > 1)
+                {
+                    long? keyNdv = stats.GetKeyNdv(database, table, eqCols);
+                    if (keyNdv is { } kn && kn > 0)
+                        return Math.Max(1, (long)(tableRowCount / (double)kn));
+                }
+
+                if (eqCols.Length == 1)
+                {
+                    long? colNdv = stats.GetColumnNdv(database, table, eqCols[0]);
+                    if (colNdv is { } cn && cn > 0)
+                        return Math.Max(1, (long)(tableRowCount / (double)cn));
+                }
+                else
+                {
+                    // NDV product fallback for composite when KeyNdv is absent.
+                    double sel = 1.0;
+                    bool hasSel = false;
+                    foreach (string col in eqCols)
+                    {
+                        long? colNdv = stats.GetColumnNdv(database, table, col);
+                        if (colNdv is { } cn && cn > 0) { sel /= cn; hasSel = true; }
+                    }
+                    if (hasSel)
+                        return Math.Max(1, (long)(tableRowCount * sel));
+                }
+                // Fall through to general path when no NDV stats are available.
             }
 
             // For composite-index steps (equality prefix + trailing range), price the equality

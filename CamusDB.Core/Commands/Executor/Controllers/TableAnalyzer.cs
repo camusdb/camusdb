@@ -87,7 +87,10 @@ internal sealed class TableAnalyzer
         bool isSampled  = false;
         long? limit     = sampleLimit > 0 ? sampleLimit : null;
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(tx, maxRows: limit))
+        // Request one row past the sample limit so the sentinel can set isSampled=true;
+        // the sentinel is detected below and not counted toward rowCount.
+        long? scanLimit = limit.HasValue ? limit.Value + 1 : null;
+        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(tx, maxRows: scanLimit))
         {
             if (limit.HasValue && rowCount >= limit.Value)
             {
@@ -252,25 +255,29 @@ internal sealed class TableAnalyzer
 
         var buckets = new List<ColumnHistogramBucket>(bucketsActual);
 
-        for (int i = bucketSize - 1; i < total; i += bucketSize)
+        // Iterate by bucket index so the last bucket always ends at total-1, even when total
+        // is not a multiple of bucketSize. The previous index-stepping loop stopped short of
+        // the tail, leaving a partial run unrepresented and the last UpperBound below the max.
+        for (int k = 0; k < bucketsActual; k++)
         {
-            int end = Math.Min(i, (int)total - 1);
-            int start = Math.Max(0, end - bucketSize + 1);
+            int start = k * bucketSize;
+            if (start > (int)total - 1) break;
+            int end   = Math.Min((k + 1) * bucketSize - 1, (int)total - 1);
 
             var distinct = new HashSet<string>(StringComparer.Ordinal);
             for (int j = start; j <= end; j++)
                 distinct.Add(BoundKey(values[j]));
 
-            long cumulative = Math.Min((long)(end + 1), total);
             buckets.Add(new ColumnHistogramBucket
             {
                 UpperBound       = values[end],
-                CumulativeRows   = cumulative,
+                CumulativeRows   = end + 1,
                 DistinctInBucket = distinct.Count,
             });
         }
 
-        // Ensure last bucket covers all rows.
+        // Guarantee the last bucket's CumulativeRows equals TotalRows in case rounding
+        // caused end+1 to be one short of total.
         if (buckets.Count > 0)
             buckets[^1].CumulativeRows = total;
 

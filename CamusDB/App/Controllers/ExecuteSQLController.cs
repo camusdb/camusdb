@@ -51,8 +51,9 @@ public sealed class ExecuteSQLController : CommandsController
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
 
-            // SHOW DATABASES does not require a database context or a transaction.
-            if (ast.nodeType == NodeType.ShowDatabases)
+            // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no
+            // database context or transaction.
+            if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors)
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: null!,
@@ -264,6 +265,7 @@ public sealed class ExecuteSQLController : CommandsController
                 // they are handled in CommandExecutor before databaseOpener.Open is called.
                 bool isDbManagement = ast.nodeType is
                     NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists or
+                    NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists or
                     NodeType.DropDatabase or NodeType.DropDatabaseIfExists or
                     NodeType.RenameDatabase;
 

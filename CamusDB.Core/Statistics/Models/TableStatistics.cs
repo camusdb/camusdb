@@ -22,6 +22,8 @@ public sealed class TableStatistics
     /// <summary>
     /// Approximate number of rows in the table.
     /// <c>-1</c> means the count has never been recorded (treat as unknown).
+    /// When ANALYZE samples a table larger than <see cref="CamusDBConfig.StatsAnalyzeSampleRows"/>,
+    /// this is the sample size, not the true table size — treat it as a lower bound in that case.
     /// </summary>
     [JsonPropertyName("rowCount")]
     public long RowCount { get; set; } = -1;

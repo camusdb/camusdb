@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Diagnostics;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
 
@@ -137,6 +138,16 @@ public sealed class KvTableStore
         rowBucketPrefix = $"{dbId}:{tableId}:r";
         rowKeyPrefix    = $"{dbId}:{tableId}:r/";
         this.ancestorStores = ancestorStores ?? [];
+
+        if (this.ancestorStores.Length >= BranchMetrics.LineageWarningThreshold)
+        {
+            BranchMetrics.RecordDeepLineageWarning();
+            this.logger.LogWarning(
+                "Table '{Table}' opened on a branch with lineage depth {Depth}. " +
+                "Point reads probe every ancestor level on a miss and scans open one iterator per level. " +
+                "Consider compacting the branch chain to reduce read amplification.",
+                tableName, this.ancestorStores.Length);
+        }
     }
 
     /// <summary>
@@ -152,6 +163,15 @@ public sealed class KvTableStore
     /// column types are order-safe for range routing (String included, via its hex encoding).
     /// </summary>
     public string IndexKeySpace(string indexId) => BuildIndexBucketPrefix(indexId);
+
+    /// <summary>
+    /// Number of ancestor levels this store is configured to walk on a read miss.
+    /// Zero for root databases (no ancestry). This is the per-read amplification factor:
+    /// a point read may probe up to <c>LineageDepth</c> extra levels, and a range scan
+    /// opens <c>LineageDepth</c> extra iterators. Exposed for observability and tests;
+    /// see <see cref="BranchMetrics"/> for process-wide counters.
+    /// </summary>
+    public int LineageDepth => ancestorStores.Length;
 
     /// <summary>
     /// Marks <paramref name="indexId"/> as key-range routed on this node. Called by
@@ -499,6 +519,7 @@ public sealed class KvTableStore
         // Miss at level-0: walk ancestry levels until a hit or a tombstone (stop walking).
         foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
         {
+            BranchMetrics.RecordAncestorProbe();
             string ancestorKey = ancestorStore.BuildRowKey(rowId);
             (kind, payload) = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKey, cancellationToken).ConfigureAwait(false);
             if (kind == BranchKvKind.Tombstone) return null;
@@ -584,6 +605,9 @@ public sealed class KvTableStore
                 (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
                 iters[ai + 1] = ancestorStore.ScanRowsRawAsync(HLCTimestamp.Zero, forkTimestamp, cancellationToken).GetAsyncEnumerator(cancellationToken);
             }
+
+            if (ancestorStores.Length > 0)
+                BranchMetrics.RecordScanIterators(ancestorStores.Length);
 
             // Priority key: (rowIdHex ordinal-ascending, levelIndex ascending) so ties go to the nearest level.
             PriorityQueue<(int level, string hex, BranchKvKind kind, byte[]? payload),
@@ -750,6 +774,7 @@ public sealed class KvTableStore
         // Miss at level-0: walk ancestry.
         foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
         {
+            BranchMetrics.RecordAncestorProbe();
             string ancestorKvKey = ancestorStore.BuildUniqueIndexKey(indexId, key);
             (idxKind, idxPayload) = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKvKey, cancellationToken).ConfigureAwait(false);
             if (idxKind == BranchKvKind.Tombstone) return null;
@@ -900,6 +925,9 @@ public sealed class KvTableStore
                 (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
                 iters[ai + 1] = ancestorStore.ScanIndexRawAsync(HLCTimestamp.Zero, forkTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken).GetAsyncEnumerator(cancellationToken);
             }
+
+            if (ancestorStores.Length > 0)
+                BranchMetrics.RecordScanIterators(ancestorStores.Length);
 
             PriorityQueue<(int level, string suffix, BranchKvKind kind, byte[]? payload),
                           (string suffix, int level)> heap = new(

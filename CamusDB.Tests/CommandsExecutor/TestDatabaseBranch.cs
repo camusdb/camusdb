@@ -25,7 +25,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Tests for BR2: CREATE DATABASE name BRANCH FROM source — SQL syntax, ticket API,
+/// Tests for CREATE DATABASE name BRANCH FROM source — SQL syntax, ticket API,
 /// ancestry threading, schema copy, and error paths.
 /// </summary>
 [NonParallelizable]
@@ -59,6 +59,31 @@ internal sealed class TestDatabaseBranch : BaseTest
             "ancestor DatabaseId must match the source");
         Assert.IsFalse(branchDescriptor.Ancestors[0].ForkTimestamp.IsNull(),
             "fork timestamp must be non-null");
+    }
+
+    /// <summary>
+    /// CREATE DATABASE … BRANCH FROM is a server-level statement: like plain CREATE DATABASE it
+    /// carries no database context, so ExecuteDDLSQL must accept it with an empty DatabaseName
+    /// (the HTTP layer always sends "" for database-management statements). Regression for the
+    /// validator rejecting the branch node types as non-server-level and demanding a database name.
+    /// </summary>
+    [Test]
+    public async Task CreateBranch_Via_SQL_EmptyDatabaseName_Succeeds()
+    {
+        string rootName = NewName();
+        CommandExecutor executor = CreateCommandExecutor();
+        await executor.CreateDatabase(new CreateDatabaseTicket(rootName, ifNotExists: false));
+        TrackDatabase(rootName, executor);
+
+        string branchName = NewName();
+        // database: "" mirrors the HTTP request for a database-management statement.
+        DatabaseDescriptor branchDescriptor = (await executor.ExecuteDDLSQL(
+            new ExecuteSQLTicket(txnState: null!, database: "", sql: $"CREATE DATABASE {branchName} BRANCH FROM {rootName}", parameters: null))
+        ).Database!;
+        TrackDatabase(branchName, executor);
+
+        Assert.IsNotNull(branchDescriptor, "branch-create with empty DatabaseName must succeed");
+        Assert.AreEqual(1, branchDescriptor.Ancestors.Count, "branch must carry one ancestor");
     }
 
     [Test]

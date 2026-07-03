@@ -2023,6 +2023,22 @@ public sealed class CommandExecutor : IAsyncDisposable
             return (null!, schemaQuerier.ShowDatabases(reg.List(), dbPattern));
         }
 
+        // SHOW BRANCHES and SHOW ANCESTORS operate on the registry directly.
+        if (ast.nodeType is NodeType.ShowBranches or NodeType.ShowAncestors)
+        {
+            string targetName = ast.leftAst!.yytext!;
+            DatabaseRegistry reg = await registryTask.ConfigureAwait(false);
+            DatabaseRegistryEntry? target = await reg.TryResolveEntryAsync(targetName).ConfigureAwait(false);
+            if (target is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.DatabaseDoesntExist,
+                    $"Database '{targetName}' does not exist");
+            IReadOnlyList<DatabaseRegistryEntry> allEntries = await reg.ScanAllEntriesAsync().ConfigureAwait(false);
+            if (ast.nodeType == NodeType.ShowBranches)
+                return (null!, schemaQuerier.ShowBranches(allEntries, target));
+            return (null!, schemaQuerier.ShowAncestors(target, allEntries));
+        }
+
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
 
         // Mark the transaction as having executed a statement for every statement type except

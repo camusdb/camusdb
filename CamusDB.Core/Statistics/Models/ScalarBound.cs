@@ -55,6 +55,9 @@ public sealed class ScalarBound
         {
             ColumnType.Integer64 => LongValue.CompareTo(other.LongValue),
             ColumnType.Float64   => FloatValue.CompareTo(other.FloatValue),
+            ColumnType.Float32   => ((float)FloatValue).CompareTo((float)other.FloatValue),
+            ColumnType.Date      => LongValue.CompareTo(other.LongValue),
+            ColumnType.DateTime  => LongValue.CompareTo(other.LongValue),
             ColumnType.String    => string.Compare(StrValue, other.StrValue, StringComparison.Ordinal),
             ColumnType.Id        => string.Compare(StrValue, other.StrValue, StringComparison.Ordinal),
             _                    => 0,

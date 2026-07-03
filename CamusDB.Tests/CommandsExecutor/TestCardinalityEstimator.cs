@@ -1137,6 +1137,96 @@ public sealed class TestCardinalityEstimator : BaseTest
     }
 
     /// <summary>
+    /// A two-sided range predicate x > lo AND x &lt; hi must be priced as a single
+    /// EstimateRangeFraction(lo, hi) call, not as sel(x&gt;lo) × sel(x&lt;hi). The product
+    /// path treats the two bounds as independent events and systematically under-estimates the
+    /// intersection. The correct result must be strictly greater than the product.
+    /// </summary>
+    [Test]
+    public async Task TwoSidedRange_PricedAsRangeFraction_NotAsProduct()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "readings",
+            columns: new ColumnInfo[]
+            {
+                new("id",    ColumnType.Id),
+                new("value", ColumnType.Integer64),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk",
+                    new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                new(ConstraintType.IndexMulti, "value_idx",
+                    new ColumnIndexInfo[] { new("value", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+        await database.Transactions.CommitAsync(txn);
+
+        TableDescriptor table = await database.TableDescriptors["readings"];
+
+        // Seed a uniform histogram: values 1..100, each appearing once, in 10 equal buckets.
+        // With 10 rows per bucket, RangeFraction(20, 80) covers 6 buckets ≈ 0.60.
+        // sel(x>20) ≈ 0.80, sel(x<80) ≈ 0.80, so the old product ≈ 0.64 > 0.60 — the
+        // product over-estimates, not under-estimates, for symmetric uniform distributions.
+        // Use an asymmetric range to make the direction clear: x > 50 AND x < 60.
+        // RangeFraction(50,60) ≈ 0.10; sel(x>50) ≈ 0.50; sel(x<60) ≈ 0.60 → product ≈ 0.30.
+        const long totalRows = 100;
+        var buckets = new List<ColumnHistogramBucket>();
+        for (int k = 0; k < 10; k++)
+        {
+            buckets.Add(new ColumnHistogramBucket
+            {
+                UpperBound       = new ScalarBound { Type = ColumnType.Integer64, LongValue = (k + 1) * 10 },
+                CumulativeRows   = (k + 1) * 10,
+                DistinctInBucket = 10,
+            });
+        }
+
+        await executor.Statistics.SetHistogramsAsync(database, table, new()
+        {
+            { "value", new ColumnHistogram { Buckets = buckets, TotalRows = totalRows } }
+        });
+
+        var loBound = new ColumnValue(ColumnType.Integer64, 50L);
+        var hiBound = new ColumnValue(ColumnType.Integer64, 60L);
+
+        // Two separate one-sided comparisons on the same column.
+        var comparisons = new List<AnalyzedComparison>
+        {
+            new("value", ">",  loBound, NodeAst.Null),
+            new("value", "<",  hiBound, NodeAst.Null),
+        };
+
+        double merged = CardinalityEstimator.EstimatePredicateSelectivity(
+            comparisons, inLists: [],
+            database, table, executor.Statistics);
+
+        // The merged path calls EstimateRangeFraction(50, 60) once.
+        var loScalar = ScalarBound.FromColumnValue(loBound);
+        var hiScalar = ScalarBound.FromColumnValue(hiBound);
+        double rangeFrac = CardinalityEstimator.EstimateRangeFraction(
+            loScalar, hiScalar, "value", database, table, executor.Statistics);
+
+        // The old product path would compute sel(>50) × sel(<60) ≈ 0.50 × 0.60 = 0.30,
+        // which is strictly greater than rangeFrac ≈ 0.10. The fix must return rangeFrac.
+        Assert.That(merged, Is.EqualTo(rangeFrac).Within(1e-9),
+            "Two-sided range must be priced as EstimateRangeFraction(lo,hi), not sel(>lo)×sel(<hi)");
+
+        // Sanity: the merged result must be strictly less than the product, confirming that
+        // the product path was double-counting.
+        ColumnHistogram hist = executor.Statistics.GetColumnHistogram(database, table, "value")!;
+        double selLo = hist.RangeFraction(loScalar, null);
+        double selHi = hist.RangeFraction(null, hiScalar);
+        double product = selLo * selHi;
+        Assert.That(merged, Is.LessThan(product),
+            "Merged range fraction must be strictly less than the independence product");
+    }
+
+    /// <summary>
     /// Unindexed correlated columns fall back to column independence (known limitation).
     /// </summary>
     [Test]

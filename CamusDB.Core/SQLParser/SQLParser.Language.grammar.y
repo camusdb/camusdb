@@ -29,7 +29,7 @@
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
-%token TRENAME TTO TANALYZE TBRANCH
+%token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS
 
 %%
 
@@ -283,6 +283,8 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TDATABASES TLIKE string { $$.n = new(NodeType.ShowDatabases, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TINDEXES TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TINDEX TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null, null); }
+          | TSHOW TBRANCHES TFROM any_identifier { $$.n = new(NodeType.ShowBranches, $4.n, null, null, null, null, null, null, null); }
+          | TSHOW TANCESTORS TFROM any_identifier { $$.n = new(NodeType.ShowAncestors, $4.n, null, null, null, null, null, null, null); }
           ;
 
 analyze_stmt : TANALYZE any_identifier

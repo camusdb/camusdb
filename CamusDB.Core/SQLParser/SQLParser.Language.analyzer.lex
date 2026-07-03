@@ -90,6 +90,8 @@ TRename         (R|r)(E|e)(N|n)(A|a)(M|m)(E|e)
 TTo             (T|t)(O|o)
 TAnalyze        (A|a)(N|n)(A|a)(L|l)(Y|y)(Z|z)(E|e)
 TBranch         (B|b)(R|r)(A|a)(N|n)(C|c)(H|h)
+TBranches       (B|b)(R|r)(A|a)(N|n)(C|c)(H|h)(E|e)(S|s)
+TAncestors      (A|a)(N|n)(C|c)(E|e)(S|s)(T|t)(O|o)(R|r)(S|s)
 TTransaction    (T|t)(R|r)(A|a)(N|n)(S|s)(A|a)(C|c)(T|t)(I|i)(O|o)(N|n)
 LParen          \(
 RParen          \)
@@ -166,6 +168,8 @@ TDot            \.
 {TRename} { return (int)Token.TRENAME; }
 {TTo} { return (int)Token.TTO; }
 {TAnalyze} { return (int)Token.TANALYZE; }
+{TBranches} { return (int)Token.TBRANCHES; }
+{TAncestors} { return (int)Token.TANCESTORS; }
 {TBranch} { return (int)Token.TBRANCH; }
 
 {TCommit} { return (int)Token.TCOMMIT; }

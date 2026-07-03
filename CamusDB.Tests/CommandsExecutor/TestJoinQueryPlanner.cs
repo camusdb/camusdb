@@ -13,6 +13,7 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.Statistics.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -1359,5 +1360,139 @@ public sealed class TestJoinQueryPlanner : BaseTest
         MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
         Assert.IsTrue(mergeJoin.LeftIsOrdered,  "Left has single-column index → ForcedIndex scan → LeftIsOrdered=true");
         Assert.IsTrue(mergeJoin.RightIsOrdered, "Right has composite index → FindIndexForJoinKey → ForcedIndex scan → RightIsOrdered=true");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Right-side pushed-down scan filter must be applied when sizing the right
+    // side for ChooseBuildSide and ShouldPreferHashOverIndexNestedLoop.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// When the right side of a join has a pushed-down scan filter, the build-side selection
+    /// must use the filtered row count, not the raw table row count. Without the fix both
+    /// decisions (build-side and hash-vs-INLJ threshold) used the unfiltered right-side count,
+    /// causing the larger side to be chosen as build when the filter made it the smaller one.
+    ///
+    /// Scenario: left = 1 000 rows, right = 10 000 raw rows, NDV("product") = 100
+    /// → filtered right ≈ 100 rows.
+    ///
+    /// Expected with fix: build = Right (100 &lt; 1 000 → right is smaller after filter).
+    /// Without fix: build = Left (raw right 10 000 &gt; left 1 000 → left incorrectly chosen).
+    /// </summary>
+    [Test]
+    public async Task RightSideScanFilter_ChooseBuildSide_UsesFilteredRowCount()
+    {
+        // Use the same schema as the cost-selection suite but add a WHERE on li.product.
+        const string sql =
+            "SELECT o.name, li.product FROM orders o " +
+            "JOIN line_items li ON li.order_ext_key = o.ext_key " +
+            "WHERE li.product = \"widgetA\"";
+
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindCostSelectionQuery(sql, indexLeftJoinKey: false, indexRightJoinKey: false);
+
+        TableDescriptor ordersTable    = await database.TableDescriptors["orders"];
+        TableDescriptor lineItemsTable = await database.TableDescriptors["line_items"];
+
+        const long leftRows       = 1_000;
+        const long rightRawRows   = 10_000;
+        const long productNdv     = 100;    // filtered right ≈ 10 000 / 100 = 100
+
+        executor.Statistics.SeedRowCountForTesting(database, ordersTable,    (int)leftRows);
+        executor.Statistics.SeedRowCountForTesting(database, lineItemsTable, (int)rightRawRows);
+
+        // Seed NDV for the right-side filter column so the selectivity is 1/100 (deterministic).
+        await executor.Statistics.SetNdvAsync(database, lineItemsTable,
+            new() { { "product", productNdv } }, keyNdv: null);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        // With the fix the planner sees filteredRight ≈ 100 < leftRows 1 000 → build = Right.
+        // Without the fix rawRight 10 000 > leftRows 1 000 → build = Left.
+        Assert.IsInstanceOf<HashJoinNode>(plan.Root, "Unindexed equi-join must choose hash join");
+        HashJoinNode hashJoin = (HashJoinNode)plan.Root;
+
+        Assert.AreEqual(HashJoinBuildSide.Right, hashJoin.BuildSide,
+            "Filtered right side (≈100 rows) is smaller than left (1 000) — must build on right");
+    }
+
+    /// <summary>
+    /// Baseline: without a right-side scan filter the raw right-side row count is used.
+    /// Left = 1 000 rows, right = 10 000 raw rows → build = Left (left is smaller).
+    /// This confirms that seeding right-side NDV alone does not change the decision when
+    /// there is no pushed-down filter.
+    /// </summary>
+    [Test]
+    public async Task NoRightSideScanFilter_ChooseBuildSide_UsesRawRowCount()
+    {
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
+            await BindCostSelectionQuery(CostSelectionSql, indexLeftJoinKey: false, indexRightJoinKey: false);
+
+        TableDescriptor ordersTable    = await database.TableDescriptors["orders"];
+        TableDescriptor lineItemsTable = await database.TableDescriptors["line_items"];
+
+        executor.Statistics.SeedRowCountForTesting(database, ordersTable,    1_000);
+        executor.Statistics.SeedRowCountForTesting(database, lineItemsTable, 10_000);
+
+        await executor.Statistics.SetNdvAsync(database, lineItemsTable,
+            new() { { "product", 100L } }, keyNdv: null);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<HashJoinNode>(plan.Root);
+        HashJoinNode hashJoin = (HashJoinNode)plan.Root;
+
+        // No filter → right raw count = 10 000 > left 1 000 → build = Left.
+        Assert.AreEqual(HashJoinBuildSide.Left, hashJoin.BuildSide,
+            "No right filter → raw right (10 000) > left (1 000) → build side is left");
+    }
+
+    /// <summary>
+    /// ShouldPreferHashOverIndexNestedLoop must account for the right-side pushed-down
+    /// scan filter when the right join key is indexed (INLJ is a live alternative).
+    ///
+    /// Without filter: raw right = 10 000, left = 1 000 → left is small → INLJ wins.
+    /// With filter on right (product NDV=100): filtered right ≈ 100 → right becomes
+    /// smaller than left → hash beats INLJ at the filtered threshold.
+    /// </summary>
+    [Test]
+    public async Task RightSideScanFilter_IndexedRightKey_FlipsHashVsInlj()
+    {
+        // First confirm the no-filter baseline: small left + indexed right → INLJ.
+        const string sqlNoFilter =
+            "SELECT o.name, li.product FROM orders o " +
+            "JOIN line_items li ON li.order_ext_key = o.ext_key";
+
+        (DatabaseDescriptor dbBase, BoundSelectQuery boundBase, QueryTicket ticketBase, CommandExecutor execBase) =
+            await BindCostSelectionQuery(sqlNoFilter, indexLeftJoinKey: false, indexRightJoinKey: true);
+
+        TableDescriptor ordersBase    = await dbBase.TableDescriptors["orders"];
+        TableDescriptor lineItemsBase = await dbBase.TableDescriptors["line_items"];
+        execBase.Statistics.SeedRowCountForTesting(dbBase, ordersBase,    1_000);
+        execBase.Statistics.SeedRowCountForTesting(dbBase, lineItemsBase, 10_000);
+        await execBase.Statistics.SetNdvAsync(dbBase, lineItemsBase, new() { { "product", 100L } }, keyNdv: null);
+
+        QueryPlan planBase = new JoinQueryPlanner(execBase.Statistics).GetPlan(dbBase, boundBase, ticketBase);
+        Assert.IsInstanceOf<IndexNestedLoopJoinNode>(planBase.Root,
+            "No right filter: left (1 000) < right (10 000) → INLJ wins (left is small outer)");
+
+        // Now with a selective filter on the right side: filtered right ≈ 100 < left 1 000 → hash wins.
+        const string sqlFiltered =
+            "SELECT o.name, li.product FROM orders o " +
+            "JOIN line_items li ON li.order_ext_key = o.ext_key " +
+            "WHERE li.product = \"widgetA\"";
+
+        (DatabaseDescriptor dbFilt, BoundSelectQuery boundFilt, QueryTicket ticketFilt, CommandExecutor execFilt) =
+            await BindCostSelectionQuery(sqlFiltered, indexLeftJoinKey: false, indexRightJoinKey: true);
+
+        TableDescriptor ordersFilt    = await dbFilt.TableDescriptors["orders"];
+        TableDescriptor lineItemsFilt = await dbFilt.TableDescriptors["line_items"];
+        execFilt.Statistics.SeedRowCountForTesting(dbFilt, ordersFilt,    1_000);
+        execFilt.Statistics.SeedRowCountForTesting(dbFilt, lineItemsFilt, 10_000);
+        await execFilt.Statistics.SetNdvAsync(dbFilt, lineItemsFilt, new() { { "product", 100L } }, keyNdv: null);
+
+        QueryPlan planFilt = new JoinQueryPlanner(execFilt.Statistics).GetPlan(dbFilt, boundFilt, ticketFilt);
+        Assert.IsInstanceOf<HashJoinNode>(planFilt.Root,
+            "Right filter reduces right to ≈100 rows < left 1 000 → hash beats INLJ at the filtered threshold");
     }
 }
