@@ -20,6 +20,7 @@ Features
 - **Query introspection** — `EXPLAIN`, `EXPLAIN (LOGICAL)`, `EXPLAIN (PHYSICAL)`, and `EXPLAIN (ANALYZE)` return the plan as result rows (node names, details, estimated rows/cost, and — for `ANALYZE` — actual row counts and KV access counters).
 - **Indexes** — PRIMARY KEY, inline UNIQUE column constraints, UNIQUE indexes, multi-column indexes, CREATE INDEX IF NOT EXISTS, CREATE UNIQUE INDEX IF NOT EXISTS, and ALTER TABLE ADD/DROP INDEX.
 - **Database management** — databases must be created explicitly (`CREATE DATABASE`, `DROP DATABASE [IF EXISTS]`, `RENAME DATABASE old TO new`); there is no magic creation. Each database is assigned an immutable internal id at creation time; the name is a display-only label that can be renamed without moving any data.
+- **Copy-on-write database branching** — fork a database instantly with `CREATE DATABASE feature_x BRANCH FROM prod`. The branch shares the parent's data until it diverges (no row data is copied), reads see the parent as of the fork instant, writes are private to the branch, and the parent keeps evolving and never sees the branch. Inspect the tree with `SHOW BRANCHES FROM db` and `SHOW ANCESTORS FROM db`. Ideal for cheap staging clones, schema-migration dry-runs, and per-PR ephemeral databases. See [Database Branching](#database-branching) below.
 - **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, ALTER TABLE ADD/DROP COLUMN.
 - **ACID transactions** — pessimistic locking; serializable isolation is the default (range/predicate locks with wait-die deadlock avoidance and snapshot reads), with read-committed available per transaction (`SET TRANSACTION` or the begin-request field) or as a process default; cross-partition writes use two-phase commit (2PC).
 - **Multi-node cluster** — Raft consensus (via Kommander) partitions data across nodes; each partition elects its own leader. Nodes join a cluster with `--mode=cluster` and a static peer list.
@@ -127,6 +128,27 @@ Distributed Schema
 ------------------
 
 See [docs/distributed-schema-architecture.md](docs/distributed-schema-architecture.md) for a full developer reference on how DDL works across a cluster: schema as a replicated state machine over an ordered Raft log, the schema-change delta and the two-version invariant, ack-based convergence, the staged online-schema state machine (`DeleteOnly → WriteOnly → Public`) with a convergence gate between steps, the resumable change coordinator and crash-safe index backfill, follower→leader DDL forwarding with idempotent dedup, positional row encoding (why renames are free), schema-version pinning, the checkpoint persist-failure policy, an invariants checklist, and known limitations.
+
+Database Branching
+------------------
+
+Fork a database the way you branch code. `CREATE DATABASE feature_x BRANCH FROM prod` mints an instant, **copy-on-write point-in-time fork**: it shares the parent's bytes until it diverges, so creating a branch copies no row data — only a small amount of schema metadata. Reads on the branch see the parent as of the fork instant, writes are private to the branch, and the parent keeps evolving and never sees the branch.
+
+```sql
+-- Instantly fork production into an isolated, writable clone (no data copied)
+CREATE DATABASE staging BRANCH FROM prod;
+
+-- Inspect the branch tree
+SHOW BRANCHES  FROM prod;     -- every database forked (transitively) from prod, with depth
+SHOW ANCESTORS FROM staging;  -- staging's fork chain, immediate parent up to the root
+
+-- Throw it away when done — the parent is untouched
+DROP DATABASE staging;
+```
+
+Use it for cheap staging clones of production, schema-migration dry-runs, per-PR ephemeral databases, and "what-if" analytics. Branches nest arbitrarily deep, and the fork's frozen view is kept durable by a Raft-replicated snapshot-floor hold — so a long-lived branch keeps reading its parent as of the fork instant even under heavy parent churn.
+
+See [docs/database-branching.md](docs/database-branching.md) for a full developer/operator reference: the ancestry model and read lineage, the copy-on-write overlay and tombstones, frozen-view durability, crash-recovery, and operator guidance (metrics, config knobs, limitations).
 
 Configuration
 -------------
