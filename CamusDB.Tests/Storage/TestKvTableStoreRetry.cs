@@ -114,6 +114,19 @@ public sealed class TestKvTableStoreRetry
             return inner.LocateAndTryDeleteKeyValue(txId, key, durability, ct);
         }
 
+        // ---- pass-through: MVCC snapshot floor ----
+        public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> LocateAndAcquireSnapshotHold(string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct)
+            => inner.LocateAndAcquireSnapshotHold(holderId, timestamp, leaseMs, ct);
+
+        public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct)
+            => inner.LocateAndRenewSnapshotHold(holdId, leaseMs, ct);
+
+        public Task<KeyValueResponseType> LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct)
+            => inner.LocateAndReleaseSnapshotHold(holdId, ct);
+
+        public Task<(HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct)
+            => inner.GetSnapshotFloor(ct);
+
         // ---- intercepted: batch acquire locks ----
         public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
             HLCTimestamp txId, List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken ct)

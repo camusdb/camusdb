@@ -55,6 +55,16 @@ public static class CamusDBConfig
     public static int StatsHistogramBuckets = 100;
 
     /// <summary>
+    /// Lease duration, in milliseconds, of the Kahuna snapshot-floor hold a branch database
+    /// acquires on its immediate parent at fork time. The hold pins the parent's MVCC history at
+    /// <c>forkT</c> so branch as-of reads stay correct under aggressive revision retention. The
+    /// hold must be renewed well inside this window for as long as the branch exists (see the
+    /// leader-owned renewer); if renewal stops, the hold lapses after one lease and the branch's
+    /// frozen view can be reclaimed. Chosen coarse so lease renewals are not a hot Raft path.
+    /// </summary>
+    public static int BranchSnapshotHoldLeaseMs = 300_000;
+
+    /// <summary>
     /// Sliding TTL for the SQL parser AST cache, in seconds.
     /// A successfully-parsed <c>NodeAst</c> is kept in the cache for this many seconds after
     /// the last hit; each cache hit extends the deadline by the same interval.

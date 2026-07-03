@@ -103,6 +103,13 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string SpillStorageUnavailable = "CADB0507";
 
+    /// <summary>
+    /// Dropped database has one or more live branch descendants still registered in the database
+    /// registry. Dropping it would release its snapshot-floor hold, invalidating the frozen views
+    /// of those branches. Drop all descendant branches first, then drop this database.
+    /// </summary>
+    public const string DatabaseHasLiveDescendants = "CADB0508";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>

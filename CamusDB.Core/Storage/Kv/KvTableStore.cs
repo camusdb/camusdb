@@ -105,7 +105,25 @@ public sealed class KvTableStore
     // Guard against int overflow: `1 << attempt` becomes negative for attempt >= 31.
     private static int RetryDelayMs(int attempt) => attempt < 6 ? 1 << attempt : MaxRetryDelayMs;
 
-    public KvTableStore(IKahuna kahuna, string dbId, string tableId, string tableName = "", ILogger<ICamusDB>? logger = null)
+    // Branch lineage stores, in nearest-parent-first order.  Each entry holds a KvTableStore
+    // constructed for that ancestor's dbId (so its row/index key prefixes address the right
+    // keyspace) together with the HLC timestamp at which this database was forked from that
+    // ancestor.  Empty for root databases — the hot read path has no overhead in that case.
+    private readonly (KvTableStore store, HLCTimestamp forkTimestamp)[] ancestorStores;
+
+    /// <summary>
+    /// Creates a table store for the given <paramref name="dbId"/> and <paramref name="tableId"/>.
+    /// Pass <paramref name="ancestorStores"/> (nearest parent first) when the database is a branch;
+    /// read methods will walk the lineage on a miss so inherited rows and index entries are visible
+    /// without having been physically copied into the branch namespace.
+    /// </summary>
+    public KvTableStore(
+        IKahuna kahuna,
+        string dbId,
+        string tableId,
+        string tableName = "",
+        ILogger<ICamusDB>? logger = null,
+        (KvTableStore store, HLCTimestamp forkTimestamp)[]? ancestorStores = null)
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         ArgumentException.ThrowIfNullOrEmpty(dbId);
@@ -118,6 +136,7 @@ public sealed class KvTableStore
         tableKeyPrefix  = $"{dbId}:{tableId}";
         rowBucketPrefix = $"{dbId}:{tableId}:r";
         rowKeyPrefix    = $"{dbId}:{tableId}:r/";
+        this.ancestorStores = ancestorStores ?? [];
     }
 
     /// <summary>
@@ -473,19 +492,20 @@ public sealed class KvTableStore
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await AcquireSharedPointLockAsync(tx, rowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetry(
-            () => kahuna.LocateAndTryGetValue(tx.TransactionId, key, -1, tx.ReadTimestamp, KeyValueDurability.Persistent, cancellationToken),
-            cancellationToken
-        ).ConfigureAwait(false);
+        (BranchKvKind kind, byte[]? payload) = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, key, cancellationToken).ConfigureAwait(false);
+        if (kind == BranchKvKind.Tombstone) return null;   // explicitly deleted at this level
+        if (payload is not null) return payload;            // found at this level
 
-        if (type != KeyValueResponseType.Get || entry is null)
-            return null;
+        // Miss at level-0: walk ancestry levels until a hit or a tombstone (stop walking).
+        foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
+        {
+            string ancestorKey = ancestorStore.BuildRowKey(rowId);
+            (kind, payload) = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKey, cancellationToken).ConfigureAwait(false);
+            if (kind == BranchKvKind.Tombstone) return null;
+            if (payload is not null) return payload;
+        }
 
-        (BranchKvKind kind, byte[]? payload) = BranchKvCodec.Decode(entry.Value);
-        if (kind == BranchKvKind.Tombstone)
-            return null;
-
-        return payload;
+        return null;
     }
 
     /// <summary>
@@ -505,41 +525,130 @@ public sealed class KvTableStore
         if (maxRows is <= 0)
             yield break;
 
-        long emitted = 0;
-        int prefixLen = rowKeyPrefix.Length;
-
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            tx.TransactionId,
-            rowBucketPrefix,
-            null, true,
-            null, true,
-            DefaultPageSize,
-            tx.ReadTimestamp,
-            KeyValueDurability.Persistent,
-            cancellationToken).ConfigureAwait(false))
+        if (ancestorStores.Length == 0)
         {
-            if (entry.Value is null)
-                continue;
+            // Root database (no ancestry): stream directly without materialization.
+            long emitted = 0;
+            int prefixLen = rowKeyPrefix.Length;
 
-            (BranchKvKind rowKind, byte[]? rowPayload) = BranchKvCodec.Decode(entry.Value);
-            if (rowKind == BranchKvKind.Tombstone || rowPayload is null)
-                continue;
+            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+                tx.TransactionId,
+                rowBucketPrefix,
+                null, true,
+                null, true,
+                DefaultPageSize,
+                tx.ReadTimestamp,
+                KeyValueDurability.Persistent,
+                cancellationToken).ConfigureAwait(false))
+            {
+                if (entry.Value is null)
+                    continue;
 
-            // Key format: "{dbId}:{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
-            ReadOnlySpan<char> hex = key.AsSpan(prefixLen);
-            ObjectIdValue rowId = ObjectId.ToValue(hex.ToString());
+                (BranchKvKind rowKind, byte[]? rowPayload) = BranchKvCodec.Decode(entry.Value);
+                if (rowKind == BranchKvKind.Tombstone || rowPayload is null)
+                    continue;
 
-            // Resume uses ObjectIdValue.CompareTo because ObjectId.ToString writes the
-            // same unsigned a/b/c segments in big-endian hex. Keep that equivalence
-            // pinned by tests before changing ObjectId formatting or comparison.
-            if (afterRowId is not null && rowId.CompareTo(afterRowId.Value) <= 0)
-                continue;
+                // Key format: "{dbId}:{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
+                ReadOnlySpan<char> hex = key.AsSpan(prefixLen);
+                ObjectIdValue rowId = ObjectId.ToValue(hex.ToString());
 
-            if (maxRows is not null && emitted >= maxRows.Value)
-                yield break;
+                // Resume uses ObjectIdValue.CompareTo because ObjectId.ToString writes the
+                // same unsigned a/b/c segments in big-endian hex. Keep that equivalence
+                // pinned by tests before changing ObjectId formatting or comparison.
+                if (afterRowId is not null && rowId.CompareTo(afterRowId.Value) <= 0)
+                    continue;
 
-            yield return (rowId, rowPayload);
-            emitted++;
+                if (maxRows is not null && emitted >= maxRows.Value)
+                    yield break;
+
+                yield return (rowId, rowPayload);
+                emitted++;
+            }
+        }
+        else
+        {
+            // Branch database: streaming k-way merge across all lineage levels.
+            // Each level's raw iterator yields rows in ascending rowIdHex (ordinal) order — the
+            // same order Kahuna's BTree scan produces.  A priority queue merges them without
+            // materializing any level, so LIMIT 1 against a large parent reads exactly 1 row.
+            // "Nearest-wins" semantics: for the same rowIdHex the entry from the lowest level
+            // index (nearest) is processed first; the seen set skips all deeper-level entries
+            // for the same key.
+
+            int levelCount = 1 + ancestorStores.Length;
+            var iters = new IAsyncEnumerator<(string rowIdHex, BranchKvKind kind, byte[]? payload)>[levelCount];
+
+            iters[0] = ScanRowsRawAsync(tx.TransactionId, tx.ReadTimestamp, cancellationToken).GetAsyncEnumerator(cancellationToken);
+            for (int ai = 0; ai < ancestorStores.Length; ai++)
+            {
+                (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
+                iters[ai + 1] = ancestorStore.ScanRowsRawAsync(HLCTimestamp.Zero, forkTimestamp, cancellationToken).GetAsyncEnumerator(cancellationToken);
+            }
+
+            // Priority key: (rowIdHex ordinal-ascending, levelIndex ascending) so ties go to the nearest level.
+            PriorityQueue<(int level, string hex, BranchKvKind kind, byte[]? payload),
+                          (string hex, int level)> heap = new(
+                Comparer<(string hex, int level)>.Create(static (a, b) =>
+                {
+                    int c = string.CompareOrdinal(a.hex, b.hex);
+                    return c != 0 ? c : a.level.CompareTo(b.level);
+                }));
+
+            // afterRowId as ordinal-comparable hex; ordinal hex comparison matches ObjectId ordering
+            // because ObjectId.ToString() writes all three unsigned segments as fixed-width big-endian hex.
+            string? afterHex = afterRowId.HasValue ? afterRowId.Value.ToString() : null;
+
+            // The heap priority is (hex, levelIndex) — for the same hex, level 0 (branch) dequeues
+            // before level 1 (nearest ancestor) and so on. This guarantees all entries for a given
+            // hex are dequeued consecutively, so a single lastHex string is enough to suppress
+            // duplicate logical keys, replacing an O(distinct-rows) HashSet with O(1) memory.
+            string? lastHex = null;
+            long emitted = 0;
+
+            try
+            {
+                for (int i = 0; i < levelCount; i++)
+                {
+                    if (await iters[i].MoveNextAsync().ConfigureAwait(false))
+                    {
+                        (string hex, BranchKvKind kind, byte[]? payload) = iters[i].Current;
+                        heap.Enqueue((i, hex, kind, payload), (hex, i));
+                    }
+                }
+
+                while (heap.Count > 0)
+                {
+                    (int levelIdx, string rowIdHex, BranchKvKind kind, byte[]? payload) = heap.Dequeue();
+
+                    if (rowIdHex != lastHex)
+                    {
+                        lastHex = rowIdHex;
+
+                        // Nearest level wins for this rowIdHex.
+                        if (kind == BranchKvKind.Value && payload is not null &&
+                            (afterHex is null || string.CompareOrdinal(rowIdHex, afterHex) > 0))
+                        {
+                            yield return (ObjectId.ToValue(rowIdHex), payload);
+                            emitted++;
+
+                            if (maxRows is not null && emitted >= maxRows.Value)
+                                yield break;
+                        }
+                        // Tombstone: lastHex is updated; deeper-level entries for this hex will be skipped.
+                    }
+
+                    if (await iters[levelIdx].MoveNextAsync().ConfigureAwait(false))
+                    {
+                        (string nextHex, BranchKvKind nextKind, byte[]? nextPayload) = iters[levelIdx].Current;
+                        heap.Enqueue((levelIdx, nextHex, nextKind, nextPayload), (nextHex, levelIdx));
+                    }
+                }
+            }
+            finally
+            {
+                for (int i = 0; i < levelCount; i++)
+                    await iters[i].DisposeAsync().ConfigureAwait(false);
+            }
         }
     }
 
@@ -557,7 +666,13 @@ public sealed class KvTableStore
         => await WriteRow(tx, rowId, data, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
-    /// Deletes a row. Acquires a pessimistic exclusive lock then issues the delete.
+    /// Deletes a row.
+    ///
+    /// For root databases (no ancestry), issues a physical KV delete — the key is gone.
+    /// For branch databases, writes a <see cref="BranchKvKind.Tombstone"/> to the level-0
+    /// overlay instead of deleting the key.  A physical delete would leave no level-0 entry,
+    /// which would let the ancestry merge surface the row again from an ancestor namespace.
+    /// The tombstone is the "deleted in this branch" signal that the merge respects.
     /// </summary>
     public async Task DeleteRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
     {
@@ -570,16 +685,34 @@ public sealed class KvTableStore
 
         await AcquireLock(tx, key, cancellationToken).ConfigureAwait(false);
 
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-            () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, key, KeyValueDurability.Persistent, cancellationToken),
-            cancellationToken
-        ).ConfigureAwait(false);
+        if (ancestorStores.Length > 0)
+        {
+            // Branch: write a tombstone so the ancestry merge suppresses the inherited row.
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
+                () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
+                cancellationToken
+            ).ConfigureAwait(false);
 
-        if (type == KeyValueResponseType.MustRetry)
-            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {key}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
+            if (type == KeyValueResponseType.MustRetry)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {key}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
-        if (type is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"DeleteRow failed for key {key}: {type}");
+            if (type != KeyValueResponseType.Set)
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"DeleteRow failed for key {key}: {type}");
+        }
+        else
+        {
+            // Root: physical delete — no ancestor namespace to suppress.
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
+                () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, key, KeyValueDurability.Persistent, cancellationToken),
+                cancellationToken
+            ).ConfigureAwait(false);
+
+            if (type == KeyValueResponseType.MustRetry)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {key}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
+
+            if (type is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"DeleteRow failed for key {key}: {type}");
+        }
 
         tx.TrackModified(key, KeyValueDurability.Persistent);
     }
@@ -610,19 +743,20 @@ public sealed class KvTableStore
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await AcquireSharedPointLockAsync(tx, BuildIndexBucketPrefix(indexId), kvKey, cancellationToken).ConfigureAwait(false);
 
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetry(
-            () => kahuna.LocateAndTryGetValue(tx.TransactionId, kvKey, -1, tx.ReadTimestamp, KeyValueDurability.Persistent, cancellationToken),
-            cancellationToken
-        ).ConfigureAwait(false);
+        (BranchKvKind idxKind, byte[]? idxPayload) = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken).ConfigureAwait(false);
+        if (idxKind == BranchKvKind.Tombstone) return null;   // tombstone at this level
+        if (idxPayload is not null) return ObjectId.ToValue(Encoding.UTF8.GetString(idxPayload));
 
-        if (type != KeyValueResponseType.Get || entry?.Value is null)
-            return null;
+        // Miss at level-0: walk ancestry.
+        foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
+        {
+            string ancestorKvKey = ancestorStore.BuildUniqueIndexKey(indexId, key);
+            (idxKind, idxPayload) = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKvKey, cancellationToken).ConfigureAwait(false);
+            if (idxKind == BranchKvKind.Tombstone) return null;
+            if (idxPayload is not null) return ObjectId.ToValue(Encoding.UTF8.GetString(idxPayload));
+        }
 
-        (BranchKvKind idxKind, byte[]? idxPayload) = BranchKvCodec.Decode(entry.Value);
-        if (idxKind == BranchKvKind.Tombstone || idxPayload is null)
-            return null;
-
-        return ObjectId.ToValue(Encoding.UTF8.GetString(idxPayload));
+        return null;
     }
 
     /// <summary>
@@ -668,81 +802,198 @@ public sealed class KvTableStore
             ? (unique ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;
 
-        await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            tx.TransactionId,
-            bucketPrefix,
-            startKey, fromInclusive,
-            endKey, toInclusive,
-            DefaultPageSize,
-            tx.ReadTimestamp,
-            KeyValueDurability.Persistent,
-            cancellationToken).ConfigureAwait(false))
+        if (ancestorStores.Length == 0)
         {
-            if (entry.Value is null)
-                continue;
-
-            (BranchKvKind scanKind, byte[]? scanPayload) = BranchKvCodec.Decode(entry.Value);
-            if (scanKind == BranchKvKind.Tombstone)
-                continue;
-
-            if (!kvKey.StartsWith(keyPrefix, StringComparison.Ordinal))
-                continue;
-
-            ReadOnlySpan<char> suffix = kvKey.AsSpan(prefixLen);
-
-            string encodedKey;
-            ObjectIdValue rowId;
-
-            if (unique)
+            // Root database: stream directly without materialization.
+            await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+                tx.TransactionId,
+                bucketPrefix,
+                startKey, fromInclusive,
+                endKey, toInclusive,
+                DefaultPageSize,
+                tx.ReadTimestamp,
+                KeyValueDurability.Persistent,
+                cancellationToken).ConfigureAwait(false))
             {
-                // Unique index value = the row-id as UTF-8 bytes (wrapped in the envelope).
-                // Skip entries whose payload is empty — they indicate a corrupt or partially
-                // written entry and should not surface to callers.
-                if (scanPayload is null)
+                if (entry.Value is null)
                     continue;
 
-                encodedKey = suffix.ToString();
-                rowId = ObjectId.ToValue(Encoding.UTF8.GetString(scanPayload));
-            }
-            else
-            {
-                // Non-unique: suffix = {encodedKey}{rowIdHex24}; rowId is the last 24 chars.
-                if (suffix.Length < RowIdHexLength)
+                (BranchKvKind scanKind, byte[]? scanPayload) = BranchKvCodec.Decode(entry.Value);
+                if (scanKind == BranchKvKind.Tombstone)
                     continue;
 
-                encodedKey = suffix[..^RowIdHexLength].ToString();
-                rowId = ObjectId.ToValue(suffix[^RowIdHexLength..].ToString());
-            }
-
-            CompositeColumnValue decodedKey = KeyEncoder.Decode(encodedKey, keyTypes);
-
-            // Bounds filter on the DECODED value, compared as a PREFIX (trailing columns of
-            // decodedKey are ignored). This is correct for both shapes that carry extra trailing
-            // columns beyond the bound:
-            //   • non-unique single-column index: stored Encode([value, rowId]); a raw encoded
-            //     string compare dropped value==upperBound (Encode([v,rowId]) > Encode([v])),
-            //   • composite index with a prefix bound (e.g. year=2023 AND enabled>false): a
-            //     length-tiebreaking compare leaked/!dropped later prefix values.
-            // This in-range check is load-bearing: when the planner absorbs the predicate into
-            // the scan it is not re-applied by the executor.
-            if (from is not null)
-            {
-                int cmp = ComparePrefix(decodedKey, from);
-                if (fromInclusive ? cmp < 0 : cmp <= 0)
+                if (!kvKey.StartsWith(keyPrefix, StringComparison.Ordinal))
                     continue;
+
+                ReadOnlySpan<char> suffix = kvKey.AsSpan(prefixLen);
+
+                string encodedKey;
+                ObjectIdValue rowId;
+
+                if (unique)
+                {
+                    // Unique index value = the row-id as UTF-8 bytes (wrapped in the envelope).
+                    // Skip entries whose payload is empty — they indicate a corrupt or partially
+                    // written entry and should not surface to callers.
+                    if (scanPayload is null)
+                        continue;
+
+                    encodedKey = suffix.ToString();
+                    rowId = ObjectId.ToValue(Encoding.UTF8.GetString(scanPayload));
+                }
+                else
+                {
+                    // Non-unique: suffix = {encodedKey}{rowIdHex24}; rowId is the last 24 chars.
+                    if (suffix.Length < RowIdHexLength)
+                        continue;
+
+                    encodedKey = suffix[..^RowIdHexLength].ToString();
+                    rowId = ObjectId.ToValue(suffix[^RowIdHexLength..].ToString());
+                }
+
+                CompositeColumnValue decodedKey = KeyEncoder.Decode(encodedKey, keyTypes);
+
+                // Bounds filter on the DECODED value, compared as a PREFIX (trailing columns of
+                // decodedKey are ignored). This is correct for both shapes that carry extra trailing
+                // columns beyond the bound:
+                //   • non-unique single-column index: stored Encode([value, rowId]); a raw encoded
+                //     string compare dropped value==upperBound (Encode([v,rowId]) > Encode([v])),
+                //   • composite index with a prefix bound (e.g. year=2023 AND enabled>false): a
+                //     length-tiebreaking compare leaked/!dropped later prefix values.
+                // This in-range check is load-bearing: when the planner absorbs the predicate into
+                // the scan it is not re-applied by the executor.
+                if (from is not null)
+                {
+                    int cmp = ComparePrefix(decodedKey, from);
+                    if (fromInclusive ? cmp < 0 : cmp <= 0)
+                        continue;
+                }
+                if (to is not null)
+                {
+                    int cmp = ComparePrefix(decodedKey, to);
+                    if (toInclusive ? cmp > 0 : cmp >= 0)
+                        continue;
+                }
+
+                if (maxRows is not null && emitted >= maxRows.Value)
+                    yield break;
+
+                yield return (decodedKey, rowId);
+                emitted++;
             }
-            if (to is not null)
+        }
+        else
+        {
+            // Branch database: streaming k-way merge across all lineage levels.
+            // Each level's raw iterator yields index entries in ascending suffix (ordinal) order.
+            // A priority queue merges them without materializing any level; bounds (fromEncoded/
+            // toEncoded) are pushed into the per-level scans by ScanIndexRawAsync so Kahuna
+            // itself skips out-of-range pages.  The decoded-key in-range check below is a
+            // second filter for the ComparePrefix edge cases documented on the root path above.
+
+            int levelCount = 1 + ancestorStores.Length;
+            var iters = new IAsyncEnumerator<(string suffix, BranchKvKind kind, byte[]? payload)>[levelCount];
+
+            iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken).GetAsyncEnumerator(cancellationToken);
+            for (int ai = 0; ai < ancestorStores.Length; ai++)
             {
-                int cmp = ComparePrefix(decodedKey, to);
-                if (toInclusive ? cmp > 0 : cmp >= 0)
-                    continue;
+                (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
+                iters[ai + 1] = ancestorStore.ScanIndexRawAsync(HLCTimestamp.Zero, forkTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken).GetAsyncEnumerator(cancellationToken);
             }
 
-            if (maxRows is not null && emitted >= maxRows.Value)
-                yield break;
+            PriorityQueue<(int level, string suffix, BranchKvKind kind, byte[]? payload),
+                          (string suffix, int level)> heap = new(
+                Comparer<(string suffix, int level)>.Create(static (a, b) =>
+                {
+                    int c = string.CompareOrdinal(a.suffix, b.suffix);
+                    return c != 0 ? c : a.level.CompareTo(b.level);
+                }));
 
-            yield return (decodedKey, rowId);
-            emitted++;
+            // Same O(1) lastSuffix dedup as ScanRows (heap orders by (suffix, levelIndex) so all
+            // entries for a given suffix are consecutive; the branch level-0 entry always dequeues
+            // first and wins, suppressing ancestor entries for the same suffix).
+            string? lastSuffix = null;
+
+            try
+            {
+                for (int i = 0; i < levelCount; i++)
+                {
+                    if (await iters[i].MoveNextAsync().ConfigureAwait(false))
+                    {
+                        (string suffix, BranchKvKind kind, byte[]? payload) = iters[i].Current;
+                        heap.Enqueue((i, suffix, kind, payload), (suffix, i));
+                    }
+                }
+
+                while (heap.Count > 0)
+                {
+                    (int levelIdx, string suffix, BranchKvKind kind, byte[]? payload) = heap.Dequeue();
+
+                    if (suffix != lastSuffix)
+                    {
+                        lastSuffix = suffix;
+
+                        if (kind == BranchKvKind.Value)
+                        {
+                            // Decode the suffix to (encodedKey, rowId).
+                            string? encKey = null;
+                            ObjectIdValue rowId = default;
+
+                            if (unique)
+                            {
+                                if (payload is not null)
+                                {
+                                    encKey = suffix;
+                                    rowId = ObjectId.ToValue(Encoding.UTF8.GetString(payload));
+                                }
+                            }
+                            else if (suffix.Length >= RowIdHexLength)
+                            {
+                                encKey = suffix[..^RowIdHexLength];
+                                rowId = ObjectId.ToValue(suffix[^RowIdHexLength..]);
+                            }
+
+                            if (encKey is not null)
+                            {
+                                CompositeColumnValue decodedKey = KeyEncoder.Decode(encKey, keyTypes);
+
+                                bool inRange = true;
+                                if (from is not null)
+                                {
+                                    int cmp = ComparePrefix(decodedKey, from);
+                                    if (fromInclusive ? cmp < 0 : cmp <= 0) inRange = false;
+                                }
+                                if (inRange && to is not null)
+                                {
+                                    int cmp = ComparePrefix(decodedKey, to);
+                                    if (toInclusive ? cmp > 0 : cmp >= 0) inRange = false;
+                                }
+
+                                if (inRange)
+                                {
+                                    yield return (decodedKey, rowId);
+                                    emitted++;
+
+                                    if (maxRows is not null && emitted >= maxRows.Value)
+                                        yield break;
+                                }
+                            }
+                        }
+                        // Tombstone: lastSuffix is updated; deeper-level entries for this suffix are skipped.
+                    }
+
+                    if (await iters[levelIdx].MoveNextAsync().ConfigureAwait(false))
+                    {
+                        (string nextSuffix, BranchKvKind nextKind, byte[]? nextPayload) = iters[levelIdx].Current;
+                        heap.Enqueue((levelIdx, nextSuffix, nextKind, nextPayload), (nextSuffix, levelIdx));
+                    }
+                }
+            }
+            finally
+            {
+                for (int i = 0; i < levelCount; i++)
+                    await iters[i].DisposeAsync().ConfigureAwait(false);
+            }
         }
     }
 
@@ -779,7 +1030,19 @@ public sealed class KvTableStore
 
         await AcquireLock(tx, kvKey, cancellationToken).ConfigureAwait(false);
 
-        KeyValueFlags flags = unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
+        // For unique entries on branch databases, SetIfNotExists alone is not sufficient:
+        // (a) a level-0 tombstone causes NotSet, blocking re-insert of a slot that was
+        //     deliberately cleared (tombstone-replace must succeed), and
+        // (b) SetIfNotExists only checks level-0, so an ancestor value for a different row
+        //     goes undetected, creating a cross-lineage duplicate.
+        // ResolveBranchUniqueFlagsAsync probes level-0 and ancestry post-lock so it sees
+        // the committed state after any lock contention resolved, then returns the correct
+        // write flag or throws DuplicateUniqueKeyValue.
+        KeyValueFlags flags;
+        if (unique && ancestorStores.Length > 0)
+            flags = await ResolveBranchUniqueFlagsAsync(tx, indexId, key, kvKey, rowId, cancellationToken).ConfigureAwait(false);
+        else
+            flags = unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
 
         (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
             () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken),
@@ -809,7 +1072,7 @@ public sealed class KvTableStore
             }
         }
 
-        if (type == KeyValueResponseType.MustRetry)
+        if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.Aborted)
             throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {kvKey}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
         if (type is not (KeyValueResponseType.Set or KeyValueResponseType.NotSet))
@@ -848,42 +1111,43 @@ public sealed class KvTableStore
         if (rows.Count == 0)
             return;
 
-        List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys = [];
-        List<KahunaSetKeyValueRequestItem> setItems = [];
-        Dictionary<string, bool> uniqueByKey = new();
-        HashSet<string> seenUnique = [];
+        bool isBranch = ancestorStores.Length > 0;
 
-        void AddWrite(string key, byte[] value, bool unique)
-        {
-            lockKeys.Add((key, 0, KeyValueDurability.Persistent));
-            uniqueByKey[key] = unique;
-            setItems.Add(new KahunaSetKeyValueRequestItem
-            {
-                TransactionId = tx.TransactionId,
-                Key = key,
-                Value = value,
-                CompareValue = null,
-                CompareRevision = -1,
-                Flags = unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set,
-                ExpiresMs = 0,
-                Durability = KeyValueDurability.Persistent
-            });
-        }
+        // Collect lock keys and — for root databases — the batch write items in one pass.
+        // Branch databases require per-item writes for unique entries (see branch phase below),
+        // so their write items are built during the write phase, not here.
+        List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys = [];
+        List<KahunaSetKeyValueRequestItem> setItems = [];   // root only
+        Dictionary<string, bool> uniqueByKey = new();       // root only
+        HashSet<string> seenUnique = [];                    // within-batch duplicate guard (both paths)
 
         foreach (RowWrite row in rows)
         {
-            AddWrite(BuildRowKey(row.RowId), BranchKvCodec.EncodeValue(row.RowData), unique: false);
+            string rowKey = BuildRowKey(row.RowId);
+            byte[] rowValue = BranchKvCodec.EncodeValue(row.RowData);
+            lockKeys.Add((rowKey, 0, KeyValueDurability.Persistent));
+
+            if (!isBranch)
+            {
+                uniqueByKey[rowKey] = false;
+                setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+            }
 
             foreach (IndexWrite ix in row.IndexEntries)
             {
                 string kvKey = ix.Unique
                     ? BuildUniqueIndexKey(ix.IndexId, ix.Key)
                     : BuildNonUniqueIndexKey(ix.IndexId, ix.Key, row.RowId);
+                lockKeys.Add((kvKey, 0, KeyValueDurability.Persistent));
 
                 if (ix.Unique && !seenUnique.Add(kvKey))
                     throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(ix.IndexId)}'");
 
-                AddWrite(kvKey, BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(row.RowId.ToString())), ix.Unique);
+                if (!isBranch)
+                {
+                    uniqueByKey[kvKey] = ix.Unique;
+                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(row.RowId.ToString())), CompareValue = null, CompareRevision = -1, Flags = ix.Unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                }
             }
         }
 
@@ -892,8 +1156,63 @@ public sealed class KvTableStore
         // Phase 1 — acquire every lock for the batch in one round-trip (retrying only transients).
         await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
 
-        // Phase 2 — set every value for the batch in one round-trip (retrying only transients).
-        await SetManyWithRetry(setItems, uniqueByKey, cancellationToken).ConfigureAwait(false);
+        if (!isBranch)
+        {
+            // Phase 2 (root) — set every value in one round-trip.
+            await SetManyWithRetry(setItems, uniqueByKey, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            // Phase 2 (branch) — write non-unique entries and row data in a batch (using Set);
+            // write unique entries individually with a post-lock ancestry probe so that:
+            //   (a) tombstoned unique slots can be replaced (tombstone-replace), and
+            //   (b) ancestor values for a different rowId are detected as conflicts.
+            // The probe happens post-lock so it sees the committed state after any competing
+            // writer released the lock, not a stale pre-lock snapshot.
+            List<KahunaSetKeyValueRequestItem> batchItems = [];
+            Dictionary<string, bool> batchByKey = new();
+
+            foreach (RowWrite row in rows)
+            {
+                string rowKey = BuildRowKey(row.RowId);
+                byte[] rowValue = BranchKvCodec.EncodeValue(row.RowData);
+                batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                batchByKey[rowKey] = false;
+
+                foreach (IndexWrite ix in row.IndexEntries)
+                {
+                    string kvKey = ix.Unique
+                        ? BuildUniqueIndexKey(ix.IndexId, ix.Key)
+                        : BuildNonUniqueIndexKey(ix.IndexId, ix.Key, row.RowId);
+                    byte[] value = BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(row.RowId.ToString()));
+
+                    if (!ix.Unique)
+                    {
+                        batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = value, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                        batchByKey[kvKey] = false;
+                    }
+                    else
+                    {
+                        KeyValueFlags flags = await ResolveBranchUniqueFlagsAsync(
+                            tx, ix.IndexId, ix.Key, kvKey, row.RowId, cancellationToken).ConfigureAwait(false);
+
+                        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
+                            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken),
+                            cancellationToken
+                        ).ConfigureAwait(false);
+
+                        if (type == KeyValueResponseType.NotSet)
+                            throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(ix.IndexId)}'");
+                        if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.Aborted)
+                            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {kvKey}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
+                        if (type is not (KeyValueResponseType.Set or KeyValueResponseType.NotSet))
+                            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch set failed for branch unique key {kvKey}: {type}");
+                    }
+                }
+            }
+
+            await SetManyWithRetry(batchItems, batchByKey, cancellationToken).ConfigureAwait(false);
+        }
 
         // Track modified keys for the 2PC commit. Locks were already tracked inside
         // AcquireManyWithRetry as each key was confirmed Locked.
@@ -1036,9 +1355,15 @@ public sealed class KvTableStore
     public readonly record struct IndexDelete(string IndexId, CompositeColumnValue Key, ObjectIdValue RowId, bool Unique);
 
     /// <summary>
-    /// Deletes many rows (and their index entries) using two Kahuna round-trips for the whole
-    /// batch — one <see cref="IKahuna.LocateAndTryAcquireManyExclusiveLocks"/> and one
-    /// <see cref="IKahuna.LocateAndTryDeleteManyKeyValue"/> — instead of an acquire+delete per key.
+    /// Deletes many rows (and their index entries).
+    ///
+    /// For root databases, issues a physical batch KV delete via two round-trips
+    /// (<see cref="IKahuna.LocateAndTryAcquireManyExclusiveLocks"/> then
+    /// <see cref="IKahuna.LocateAndTryDeleteManyKeyValue"/>).
+    ///
+    /// For branch databases, writes a <see cref="BranchKvKind.Tombstone"/> to every key
+    /// in the level-0 overlay instead.  Physical deletes would leave no level-0 entry,
+    /// letting the ancestry merge re-surface the rows from ancestor namespaces.
     /// </summary>
     public async Task DeleteRowsBatch(KvTransaction tx, IReadOnlyList<RowDelete> rows, CancellationToken cancellationToken = default)
     {
@@ -1061,11 +1386,44 @@ public sealed class KvTableStore
 
         tx.ReserveMutations(keys.Count);
 
-        await DeleteKeysBatch(tx, keys, cancellationToken).ConfigureAwait(false);
+        if (ancestorStores.Length > 0)
+        {
+            // Branch: write tombstones so the ancestry merge suppresses inherited rows.
+            List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys =
+                keys.Select(k => (k, 0, KeyValueDurability.Persistent)).ToList();
+
+            List<KahunaSetKeyValueRequestItem> tombstoneItems = keys.Select(k => new KahunaSetKeyValueRequestItem
+            {
+                TransactionId = tx.TransactionId,
+                Key = k,
+                Value = BranchKvCodec.EncodeTombstone(),
+                CompareValue = null,
+                CompareRevision = -1,
+                Flags = KeyValueFlags.Set,
+                ExpiresMs = 0,
+                Durability = KeyValueDurability.Persistent
+            }).ToList();
+
+            await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
+            await SetManyWithRetry(tombstoneItems, new Dictionary<string, bool>(), cancellationToken).ConfigureAwait(false);
+
+            foreach (string key in keys)
+                tx.TrackModified(key, KeyValueDurability.Persistent);
+        }
+        else
+        {
+            await DeleteKeysBatch(tx, keys, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
-    /// Removes a secondary index entry. No-ops silently if the entry does not exist.
+    /// Removes a secondary index entry.
+    ///
+    /// For root databases, issues a physical KV delete.
+    /// For branch databases, writes a <see cref="BranchKvKind.Tombstone"/> to the level-0
+    /// overlay so that <see cref="LookupUnique"/> and <see cref="ScanIndex"/> suppress the
+    /// inherited index entry in the ancestry merge — the same reason <see cref="DeleteRow"/>
+    /// writes a tombstone rather than a physical delete on branch stores.
     /// </summary>
     public async Task DeleteIndexEntry(
         KvTransaction tx,
@@ -1087,16 +1445,34 @@ public sealed class KvTableStore
 
         await AcquireLock(tx, kvKey, cancellationToken).ConfigureAwait(false);
 
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-            () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, kvKey, KeyValueDurability.Persistent, cancellationToken),
-            cancellationToken
-        ).ConfigureAwait(false);
+        if (ancestorStores.Length > 0)
+        {
+            // Branch: write a tombstone so the ancestry merge suppresses the inherited index entry.
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
+                () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
+                cancellationToken
+            ).ConfigureAwait(false);
 
-        if (type == KeyValueResponseType.MustRetry)
-            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {kvKey}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
+            if (type == KeyValueResponseType.MustRetry)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {kvKey}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
-        if (type is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"DeleteIndexEntry failed for key {kvKey}: {type}");
+            if (type != KeyValueResponseType.Set)
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"DeleteIndexEntry failed for key {kvKey}: {type}");
+        }
+        else
+        {
+            // Root: physical delete.
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
+                () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, kvKey, KeyValueDurability.Persistent, cancellationToken),
+                cancellationToken
+            ).ConfigureAwait(false);
+
+            if (type == KeyValueResponseType.MustRetry)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {kvKey}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
+
+            if (type is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"DeleteIndexEntry failed for key {kvKey}: {type}");
+        }
 
         tx.TrackModified(kvKey, KeyValueDurability.Persistent);
     }
@@ -1126,6 +1502,36 @@ public sealed class KvTableStore
             cancellationToken).ConfigureAwait(false))
         {
             if (kvKey.StartsWith(keyPrefix, StringComparison.Ordinal))
+                keysToDelete.Add(kvKey);
+        }
+
+        await DeleteKeysBatch(tx, keysToDelete, cancellationToken).ConfigureAwait(false);
+
+        return keysToDelete.Count;
+    }
+
+    /// <summary>
+    /// Physically deletes every KV entry in this database's row overlay for this table
+    /// (<c>{dbId}:{tableId}:r/…</c>). Used by <c>DROP TABLE</c> on a branch database to reclaim
+    /// branch-local row entries without scanning or tombstoning inherited ancestor rows — those
+    /// become unreachable through the schema once the table is dropped from the branch, so no
+    /// tombstone is required. Returns the number of entries deleted.
+    /// </summary>
+    public async Task<int> PurgeLocalRowOverlayAsync(KvTransaction tx, CancellationToken cancellationToken = default)
+    {
+        List<string> keysToDelete = [];
+
+        await foreach ((string kvKey, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
+            tx.TransactionId,
+            rowBucketPrefix,
+            null, true,
+            null, true,
+            DefaultPageSize,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            cancellationToken).ConfigureAwait(false))
+        {
+            if (kvKey.StartsWith(rowKeyPrefix, StringComparison.Ordinal))
                 keysToDelete.Add(kvKey);
         }
 
@@ -1246,10 +1652,8 @@ public sealed class KvTableStore
     /// <summary>
     /// Test-only: overwrites the row entry for <paramref name="rowId"/> with a
     /// <see cref="BranchKvKind.Tombstone"/> envelope, mirroring the locked write path of
-    /// <see cref="WriteRow"/>. Production deletes are physical (<see cref="DeleteRow"/>); branch
-    /// overlays will write tombstones for real in a later phase. This seam exists so storage
-    /// tests can verify that read paths treat a tombstone as a miss rather than as a value,
-    /// before any DML path produces one.
+    /// <see cref="WriteRow"/>. Useful for storage-layer tests that need to inject a tombstone
+    /// directly without going through a DELETE DML statement.
     /// </summary>
     internal async Task WriteRowTombstoneForTesting(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
     {
@@ -1442,6 +1846,175 @@ public sealed class KvTableStore
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
 
         return (type, endpoint, durability, holder);
+    }
+
+    // -----------------------------------------------------------------------
+    // Branch lineage helpers (used by the branch-aware read paths above)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Resolves the <see cref="KeyValueFlags"/> to use when writing a unique index entry on a
+    /// branch database.
+    ///
+    /// <para>
+    /// This method MUST be called AFTER <see cref="AcquireLock"/> for <paramref name="kvKey"/>
+    /// has returned.  Because Kahuna creates each transaction's MVCC snapshot lazily on first
+    /// access, probing <paramref name="kvKey"/> here — the first access for this transaction —
+    /// reflects the committed state that exists once the lock was acquired, not a stale snapshot
+    /// captured before lock contention resolved.
+    /// </para>
+    ///
+    /// Three cases:
+    /// <list type="bullet">
+    ///   <item>Level-0 tombstone → <see cref="KeyValueFlags.Set"/> (tombstone-replace: the slot was
+    ///     explicitly cleared in this branch and is available for re-use).</item>
+    ///   <item>Level-0 live value, same rowId → <see cref="KeyValueFlags.Set"/> (idempotent write).</item>
+    ///   <item>Level-0 live value, different rowId → throws <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>.</item>
+    ///   <item>Level-0 miss → walks ancestor chain; ancestor live value for a different rowId → throws
+    ///     <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>; otherwise → <see cref="KeyValueFlags.SetIfNotExists"/>
+    ///     (concurrent-insert fence for same-branch races).</item>
+    /// </list>
+    /// </summary>
+    private async Task<KeyValueFlags> ResolveBranchUniqueFlagsAsync(
+        KvTransaction tx,
+        string indexId,
+        CompositeColumnValue key,
+        string kvKey,
+        ObjectIdValue rowId,
+        CancellationToken cancellationToken)
+    {
+        // Post-lock probe: first access to this key in the transaction, so Kahuna creates the
+        // MVCC snapshot from the current committed state — after any competing writer released
+        // the lock by committing or rolling back.
+        (BranchKvKind existingKind, byte[]? existingPayload) = await ProbeRaw(
+            tx.TransactionId, HLCTimestamp.Zero, kvKey, cancellationToken).ConfigureAwait(false);
+
+        if (existingKind == BranchKvKind.Tombstone)
+            // Slot was explicitly cleared in this branch; replace the tombstone with the new value.
+            return KeyValueFlags.Set;
+
+        if (existingKind == BranchKvKind.Value && existingPayload is not null)
+        {
+            // Live value at level-0: idempotent same-row write (e.g. backfill resume or an UPDATE
+            // that touches non-indexed columns) is allowed; a different rowId is a conflict.
+            if (Encoding.UTF8.GetString(existingPayload) != rowId.ToString())
+                throw new CamusDBException(
+                    CamusDBErrorCodes.DuplicateUniqueKeyValue,
+                    $"Duplicate entry for key '{DuplicateKeyLabel(indexId)}'");
+            return KeyValueFlags.Set;
+        }
+
+        // Miss at level-0: walk ancestry to enforce uniqueness over the full union.
+        // Nearest ancestor first; stop on the first hit (tombstone or live value).
+        foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
+        {
+            string ancestorKvKey = ancestorStore.BuildUniqueIndexKey(indexId, key);
+            (BranchKvKind ancestorKind, byte[]? ancestorPayload) = await ancestorStore.ProbeRaw(
+                HLCTimestamp.Zero, forkTimestamp, ancestorKvKey, cancellationToken).ConfigureAwait(false);
+
+            if (ancestorKind == BranchKvKind.Tombstone)
+                break;   // an ancestor branch cleared this slot; treat as available
+
+            if (ancestorKind == BranchKvKind.Value && ancestorPayload is not null)
+            {
+                if (Encoding.UTF8.GetString(ancestorPayload) != rowId.ToString())
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.DuplicateUniqueKeyValue,
+                        $"Duplicate entry for key '{DuplicateKeyLabel(indexId)}'");
+                break;   // same rowId in ancestor (branch shadows its own inherited entry); allow
+            }
+        }
+
+        // Slot absent from level-0 and all ancestors.  SetIfNotExists is a concurrent-insert
+        // fence: if two branch transactions race to insert the same unique key, one wins the
+        // lock and writes; the other, when it retries the lock and probes, sees the winner's
+        // committed value and throws DuplicateUniqueKeyValue above.  As an additional safety net,
+        // SetIfNotExists here ensures the second writer's set also fails if the MVCC snapshot
+        // somehow missed the intermediate commit.
+        return KeyValueFlags.SetIfNotExists;
+    }
+
+    // -----------------------------------------------------------------------
+
+    // Probes a single Kahuna key at the given transaction identity and read timestamp, returning the
+    // raw (kind, payload) pair decoded by BranchKvCodec.  A Kahuna miss returns (Value, null) —
+    // the same signal as BranchKvCodec.Decode(null) — so callers treat null payload as "not here,
+    // continue walking ancestry."  A Tombstone payload means "deleted at this level; stop walking."
+    private async Task<(BranchKvKind kind, byte[]? payload)> ProbeRaw(
+        HLCTimestamp txId,
+        HLCTimestamp readTimestamp,
+        string key,
+        CancellationToken cancellationToken)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetry(
+            () => kahuna.LocateAndTryGetValue(txId, key, -1, readTimestamp, KeyValueDurability.Persistent, cancellationToken),
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        if (type == KeyValueResponseType.Aborted)
+            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                $"Read of key {key} was aborted by Kahuna — retry the operation from BeginAsync");
+
+        if (type != KeyValueResponseType.Get || entry is null)
+            return (BranchKvKind.Value, null);  // Kahuna miss — continue ancestry walk
+
+        return BranchKvCodec.Decode(entry.Value);
+    }
+
+    // Scans all rows in this store's keyspace at the given read timestamp (no live transaction).
+    // Yields every (rowIdHex, kind, payload) triple, including tombstones, so the branch-merge
+    // caller can apply the nearest-wins/tombstone-suppression rule across levels.
+    // Yields every row entry from this store's namespace at the given snapshot.
+    // txId is the live transaction id for level-0 reads (use HLCTimestamp.Zero for ancestor snapshots).
+    private async IAsyncEnumerable<(string rowIdHex, BranchKvKind kind, byte[]? payload)> ScanRowsRawAsync(
+        HLCTimestamp txId,
+        HLCTimestamp readTimestamp,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        int prefixLen = rowKeyPrefix.Length;
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            txId, rowBucketPrefix, null, true, null, true, DefaultPageSize,
+            readTimestamp, KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false))
+        {
+            if (entry.Value is null) continue;
+            string rowIdHex = key.AsSpan(prefixLen).ToString();
+            (BranchKvKind kind, byte[]? payload) = BranchKvCodec.Decode(entry.Value);
+            yield return (rowIdHex, kind, payload);
+        }
+    }
+
+    // Yields every index entry within optional encoded bounds from this store's namespace at the
+    // given snapshot.  txId is the live transaction id for level-0 reads (HLCTimestamp.Zero for
+    // ancestor snapshots).  fromEncoded/toEncoded are the raw encoded key strings (no prefix) so
+    // this store builds its own start/end keys in its own keyspace ({dbId}:{tableId}:i:{indexId}/…).
+    private async IAsyncEnumerable<(string suffix, BranchKvKind kind, byte[]? payload)> ScanIndexRawAsync(
+        HLCTimestamp txId,
+        HLCTimestamp readTimestamp,
+        string indexId,
+        string? fromEncoded, bool fromInclusive,
+        string? toEncoded, bool toInclusive,
+        bool unique,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        string bucketPrefix = BuildIndexBucketPrefix(indexId);
+        string keyPrefix = bucketPrefix + "/";
+        int prefixLen = keyPrefix.Length;
+
+        string? startKey = fromEncoded is not null ? keyPrefix + fromEncoded : null;
+        string? endKey   = toEncoded   is not null
+            ? (unique ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
+            : null;
+
+        await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            txId, bucketPrefix, startKey, fromInclusive, endKey, toInclusive,
+            DefaultPageSize, readTimestamp, KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false))
+        {
+            if (entry.Value is null || !kvKey.StartsWith(keyPrefix, StringComparison.Ordinal)) continue;
+            string suffix = kvKey.Substring(prefixLen);
+            (BranchKvKind kind, byte[]? payload) = BranchKvCodec.Decode(entry.Value);
+            yield return (suffix, kind, payload);
+        }
     }
 
     /// <summary>

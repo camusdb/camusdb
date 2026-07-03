@@ -681,5 +681,17 @@ public sealed class TestKvTransactionsManager
 
         public Task<KahunaRestoreResponse> RestoreToAsync(Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken ct = default)
             => inner.RestoreToAsync(leafBackupId, targetDir, targetTimeMs, ct);
+
+        public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> LocateAndAcquireSnapshotHold(string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct)
+            => inner.LocateAndAcquireSnapshotHold(holderId, timestamp, leaseMs, ct);
+
+        public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct)
+            => inner.LocateAndRenewSnapshotHold(holdId, leaseMs, ct);
+
+        public Task<KeyValueResponseType> LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct)
+            => inner.LocateAndReleaseSnapshotHold(holdId, ct);
+
+        public Task<(HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct)
+            => inner.GetSnapshotFloor(ct);
     }
 }

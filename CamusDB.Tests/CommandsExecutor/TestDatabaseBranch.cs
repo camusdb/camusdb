@@ -313,7 +313,7 @@ internal sealed class TestDatabaseBranch : BaseTest
     // -----------------------------------------------------------------------
 
     [Test]
-    public async Task CreateBranch_NoRowsCopied_BranchTableIsEmpty()
+    public async Task CreateBranch_InheritsParentRowsViaLineage()
     {
         (string rootName, DatabaseDescriptor rootDescriptor, CommandExecutor executor) = await CreateDatabase();
         TrackDatabase(rootName, executor);
@@ -329,7 +329,8 @@ internal sealed class TestDatabaseBranch : BaseTest
             ins, rootName, "INSERT INTO events (id, kind) VALUES (gen_id(), \"click\")", null));
         await rootDescriptor.Transactions.CommitAsync(ins);
 
-        // Branch — only schema metadata is copied, not data.
+        // Branch — schema is copied; no rows are physically copied into the branch namespace.
+        // The branch-aware read layer walks ancestry so reads return inherited data.
         string branchName = NewName();
         DatabaseDescriptor branch = await executor.CreateDatabase(
             new CreateDatabaseTicket(branchName, ifNotExists: false, branchFrom: rootName));
@@ -341,8 +342,8 @@ internal sealed class TestDatabaseBranch : BaseTest
         List<QueryResultRow> rows = await cursor.ToListAsync();
         await branch.Transactions.CommitAsync(sel);
 
-        Assert.AreEqual(0, rows.Count,
-            "branching must not copy source rows; branch data namespace must be empty");
+        Assert.AreEqual(1, rows.Count,
+            "branch must return the parent's row via ancestry lineage walk (no physical copy)");
     }
 
     // -----------------------------------------------------------------------

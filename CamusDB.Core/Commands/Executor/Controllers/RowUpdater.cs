@@ -411,17 +411,27 @@ public sealed class RowUpdater
             // NULLs are distinct: a row with a NULL (or absent) value in any indexed column has no
             // unique index entry. So only delete the old entry if the old row had one, and only put
             // the new entry if the new row qualifies (value->NULL removes it, NULL->value adds it).
-            if (!HasNullKeyColumn(oldRow, index.Columns))
-            {
-                CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns);
-                await table.Store.DeleteIndexEntry(tx, index.KvId, oldKey, rowId, unique: true).ConfigureAwait(false);
-            }
+            bool oldHasKey = !HasNullKeyColumn(oldRow, index.Columns);
+            bool newHasKey = !HasNullKeyColumn(newRow, index.Columns);
 
-            if (!HasNullKeyColumn(newRow, index.Columns))
-            {
-                CompositeColumnValue newKey = GetColumnValue(newRow, index.Columns);
-                await table.Store.PutIndexEntry(tx, index.KvId, newKey, rowId, unique: true).ConfigureAwait(false);
-            }
+            CompositeColumnValue? oldKey = oldHasKey ? GetColumnValue(oldRow, index.Columns) : null;
+            CompositeColumnValue? newKey = newHasKey ? GetColumnValue(newRow, index.Columns) : null;
+
+            // When the indexed columns are unchanged, skip the delete+insert cycle. On a root this
+            // avoids a needless round-trip; on a branch it is required for correctness: the delete
+            // writes a tombstone and a subsequent SetIfNotExists on the same key would hit that
+            // tombstone and incorrectly throw DuplicateUniqueKeyValue (tombstone-replace for
+            // in-place unique updates is not yet supported). The inherited index entry already
+            // points to the correct rowId, and the row fetch returns the branch-local value via
+            // the branch-aware read path.
+            if (oldHasKey && newHasKey && oldKey!.CompareTo(newKey!) == 0)
+                continue;
+
+            if (oldHasKey)
+                await table.Store.DeleteIndexEntry(tx, index.KvId, oldKey!, rowId, unique: true).ConfigureAwait(false);
+
+            if (newHasKey)
+                await table.Store.PutIndexEntry(tx, index.KvId, newKey!, rowId, unique: true).ConfigureAwait(false);
         }
     }
 
@@ -444,6 +454,12 @@ public sealed class RowUpdater
 
             CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns, rowIdValue);
             CompositeColumnValue newKey = GetColumnValue(newRow, index.Columns, rowIdValue);
+
+            // Skip unchanged entries — same correctness requirement as UpdateUniqueIndexes above.
+            // For non-unique indexes the tombstone+Set cycle would result in a wasted write pair;
+            // the inherited entry already carries the correct rowId for the unchanged key.
+            if (oldKey.CompareTo(newKey) == 0)
+                continue;
 
             await table.Store.DeleteIndexEntry(tx, index.KvId, oldKey, rowId, unique: false).ConfigureAwait(false);
             await table.Store.PutIndexEntry(tx, index.KvId, newKey, rowId, unique: false).ConfigureAwait(false);

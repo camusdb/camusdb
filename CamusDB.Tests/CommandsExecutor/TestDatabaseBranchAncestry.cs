@@ -326,7 +326,7 @@ internal sealed class TestDatabaseBranchAncestry
 /// <summary>
 /// End-to-end tests that open databases through <see cref="CommandExecutor"/> and
 /// verify that <see cref="DatabaseDescriptor.Ancestors"/> is populated correctly by
-/// <see cref="DatabaseOpener"/> — the production path that BR3 will consume.
+/// <see cref="DatabaseOpener"/> — the production path consumed by branch-aware table opens.
 /// </summary>
 [NonParallelizable]
 internal sealed class TestDatabaseBranchAncestryEndToEnd : BaseTest

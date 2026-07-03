@@ -520,7 +520,7 @@ internal sealed class TestPersistentIndexSchema : BaseTest
     /// Rows inserted via DML after a secondary index transitions to Public must be findable
     /// through that index after a close+reopen cycle.
     ///
-    /// The trap: before BR0 the in-memory Public descriptor (<c>table.Indexes[name]</c>) was
+    /// The trap: the in-memory Public descriptor (<c>table.Indexes[name]</c>) was
     /// constructed without the immutable <c>Id</c>, so its <c>KvId</c> resolved to the mutable
     /// name ("name_idx"). DML wrote index entries under that name. On reopen
     /// <c>TableOpener</c> rebuilds the descriptor from <c>TableSchema.Indexes</c>, which does

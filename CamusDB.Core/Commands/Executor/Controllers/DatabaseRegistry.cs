@@ -61,7 +61,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // send mixed-case names are silently folded — no separate "Foo" / "foo" databases.
     private static string Normalize(string name) => name.ToLowerInvariant();
 
-    private string RegistryBucket => $"{keyPrefix}dbregistry";
+    /// <summary>
+    /// KV bucket that holds every registry key. Exposed so the snapshot-hold renewer can elect a
+    /// single sweeping node via leadership of this bucket's Raft partition.
+    /// </summary>
+    public string RegistryBucket => $"{keyPrefix}dbregistry";
     private string NameKeyPrefix => $"{keyPrefix}dbregistry/db:";
     private string NameKey(string name) => $"{keyPrefix}dbregistry/db:{name}";
     private string SequenceKey => $"{keyPrefix}dbregistry/seq";
@@ -292,6 +296,70 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     public IReadOnlyList<DatabaseRegistryEntry> List() => [.. byName.Values];
 
+    /// <summary>
+    /// Returns <c>true</c> if any registered database has <paramref name="targetId"/> in
+    /// its ancestry chain — i.e. the target is not a leaf and cannot be safely dropped.
+    ///
+    /// The check performs a persistent KV scan of the full registry so it reflects databases
+    /// created on other nodes in a cluster. The in-memory <c>byId</c> cache is checked first
+    /// as a fast path; the persistent scan runs only if the cache shows no descendants,
+    /// catching the window where a concurrent sibling node registered a new branch after this
+    /// node loaded its registry.
+    ///
+    /// <para>Ancestry is immutable (rename never touches it), so reading from the in-memory
+    /// cache is safe for entries already there; only newly-registered entries on remote nodes
+    /// can be missed by the cache alone.</para>
+    /// </summary>
+    public async Task<bool> HasLiveDescendantsAsync(string targetId)
+    {
+        // Fast path: check the in-memory cache.
+        foreach (DatabaseRegistryEntry entry in byId.Values)
+        {
+            foreach (DatabaseBranchAncestor ancestor in entry.Ancestors)
+            {
+                if (ancestor.DatabaseId == targetId)
+                    return true;
+            }
+        }
+
+        // Persistent scan: catch branches registered on other nodes that this node's cache missed.
+        string namePrefix = NameKeyPrefix;
+        KvTransaction tx = await transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry kve) in kahuna.LocateAndScanRange(
+                tx.TransactionId,
+                RegistryBucket,
+                null, true,
+                null, true,
+                1000,
+                HLCTimestamp.Zero,
+                KeyValueDurability.Persistent,
+                CancellationToken.None).ConfigureAwait(false))
+            {
+                if (!key.StartsWith(namePrefix, StringComparison.Ordinal) || kve.Value is null)
+                    continue;
+
+                DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
+                    kve.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
+
+                foreach (DatabaseBranchAncestor ancestor in loaded.Ancestors)
+                {
+                    if (ancestor.DatabaseId == targetId)
+                        return true;
+                }
+            }
+        }
+        finally
+        {
+            await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+
+        return false;
+    }
+
     // -----------------------------------------------------------------------
     // Mutations (serialised by writeSem)
     // -----------------------------------------------------------------------
@@ -309,7 +377,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// </exception>
     public async Task<DatabaseRegistryEntry> RegisterAsync(
         string name, string id,
-        IReadOnlyList<DatabaseBranchAncestor>? ancestors = null)
+        IReadOnlyList<DatabaseBranchAncestor>? ancestors = null,
+        string? immediateParentHoldId = null)
     {
         name = Normalize(name);
 
@@ -332,6 +401,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 Name = name,
                 CreatedAt = DateTime.UtcNow,
                 Ancestors = ancestors is { Count: > 0 } ? [.. ancestors] : [],
+                ImmediateParentHoldId = immediateParentHoldId ?? "",
             };
 
             byte[] entryBytes = MetaJsonSerializer.Serialize(entry, MetaJsonContext.Default.DatabaseRegistryEntry);
@@ -482,6 +552,107 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         {
             writeSem.Release();
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pending-create tracking for orphan-namespace recovery
+    // -----------------------------------------------------------------------
+
+    // Branch creation writes metadata before publishing the registry entry; a crash between the two
+    // leaves an orphaned namespace. Tracking the allocated id in a persistent pending-set lets a
+    // startup scrubber find and purge such orphans. The pending key is deleted on success and on the
+    // abort path; only a crash between TrackPendingBranchAsync and the finally cleanup leaves it.
+    //
+    // Keys: _system/dbregistry/pending:{branchId}  (value is a single 0x01 sentinel byte)
+
+    private string PendingKey(string branchId) => $"{keyPrefix}dbregistry/pending:{branchId}";
+
+    /// <summary>
+    /// Writes a persistent pending-create marker for <paramref name="branchId"/> so a startup
+    /// scrubber can find orphaned branch metadata if the process crashes mid-creation.
+    /// Best-effort: a failure here is logged and swallowed; creation continues. If the marker is
+    /// not written and the process crashes, the orphan namespace is inert (unreachable without a
+    /// registry entry) and will be reclaimed manually or left as wasted space.
+    /// </summary>
+    public async Task TrackPendingBranchAsync(string branchId)
+    {
+        try
+        {
+            await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, PendingKey(branchId), [0x01], null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        catch
+        {
+            // best-effort: scrub is advisory, not load-bearing
+        }
+    }
+
+    /// <summary>
+    /// Removes the pending-create marker for <paramref name="branchId"/>. Called on both the
+    /// success path (after <see cref="RegisterAsync"/>) and the abort path so a successful or
+    /// cleanly-aborted creation does not leave a spurious pending entry that the next startup
+    /// would try to scrub.
+    /// Best-effort: a failure is silently ignored.
+    /// </summary>
+    public async Task ClearPendingBranchAsync(string branchId)
+    {
+        try
+        {
+            await kahuna.LocateAndTryDeleteKeyValue(
+                HLCTimestamp.Zero, PendingKey(branchId),
+                KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        catch
+        {
+            // best-effort
+        }
+    }
+
+    /// <summary>
+    /// Scans the registry bucket for pending-create markers and returns the ids of any that are
+    /// not currently registered. These represent branch namespaces written before the registry
+    /// entry was committed — typically from a process crash during
+    /// <see cref="CreateBranchDatabaseAsync"/>. The caller is responsible for purging the
+    /// corresponding <c>{branchId}/meta/…</c> namespace and then calling
+    /// <see cref="ClearPendingBranchAsync"/> for each returned id.
+    /// </summary>
+    public async Task<List<string>> LoadOrphanBranchIdsAsync()
+    {
+        string pendingPrefix = $"{keyPrefix}dbregistry/pending:";
+        List<string> orphans = [];
+
+        KvTransaction tx = await transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
+                tx.TransactionId,
+                RegistryBucket,
+                null, true,
+                null, true,
+                1000,
+                HLCTimestamp.Zero,
+                KeyValueDurability.Persistent,
+                CancellationToken.None).ConfigureAwait(false))
+            {
+                if (!key.StartsWith(pendingPrefix, StringComparison.Ordinal))
+                    continue;
+
+                string branchId = key[pendingPrefix.Length..];
+                if (!byId.ContainsKey(branchId))
+                    orphans.Add(branchId);
+            }
+        }
+        finally
+        {
+            await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+
+        return orphans;
     }
 
     // -----------------------------------------------------------------------

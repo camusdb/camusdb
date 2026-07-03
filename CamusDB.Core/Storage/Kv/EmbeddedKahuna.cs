@@ -324,6 +324,19 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         return await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Returns true when this node is the Raft leader of the partition that owns <paramref name="key"/>.
+    /// Used to elect a single node for process-wide singleton background work keyed on a stable KV key
+    /// (e.g. the branch snapshot-hold renewer, elected on the database-registry key's partition), so
+    /// the sweep runs on exactly one node and fails over with leadership. A standalone node leads every
+    /// partition and always returns true.
+    /// </summary>
+    public async ValueTask<bool> AmILeaderForKeyAsync(string key, CancellationToken cancellationToken = default)
+    {
+        int partitionId = Raft.GetPrefixPartitionKey(key);
+        return await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
+    }
+
     public async ValueTask<string> WaitForSchemaLeaderAsync(string db, CancellationToken cancellationToken = default)
     {
         int partitionId = SchemaLogPartition(db);

@@ -10,6 +10,8 @@ using System.Linq;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
+using Kahuna;
+using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
@@ -45,6 +47,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     private readonly DatabaseDropper databaseDroper;
 
     private readonly DatabaseDescriptors databaseDescriptors;
+
+    // Process-level Kahuna node shared across all databases. Used to route snapshot-floor hold
+    // release/renew calls, which auto-forward to the system-partition leader from any node.
+    private readonly EmbeddedKahuna? sharedNode;
+
+    // Leader-owned loop that keeps every branch's snapshot-floor hold alive while it exists.
+    // Started once the registry is ready; disposed on teardown. Null when no shared node is present.
+    private readonly Task? snapshotRenewerStart;
+    private SnapshotHoldRenewer? snapshotHoldRenewer;
 
     private readonly TableOpener tableOpener;
 
@@ -124,6 +135,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         this.logger = logger;
         this.schemaDdlForwarder = schemaDdlForwarder;
         this.isClusterMode = isClusterMode;
+        this.sharedNode = sharedNode;
 
         if (registry is not null)
         {
@@ -169,6 +181,101 @@ public sealed class CommandExecutor : IAsyncDisposable
             CamusDBConfig.SqlParserCacheTtlSeconds,
             CamusDBConfig.SqlParserCacheMaxEntries,
             CamusDBConfig.SqlParserCacheSweepSeconds);
+
+        // Keep every branch's snapshot-floor hold alive for as long as the branch exists. The
+        // registry is opened asynchronously, so defer the start until it is ready; the renewer
+        // itself elects a single sweeping node by registry-partition leadership.
+        if (sharedNode is not null)
+            snapshotRenewerStart = StartSnapshotHoldRenewerAsync(sharedNode);
+    }
+
+    private async Task StartSnapshotHoldRenewerAsync(EmbeddedKahuna node)
+    {
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        SnapshotHoldRenewer renewer = new(node, registry, logger, CamusDBConfig.BranchSnapshotHoldLeaseMs);
+        renewer.Start();
+        snapshotHoldRenewer = renewer;
+
+        // On startup, find any branch ids that were allocated and partially written (metadata
+        // copied) but never registered — left by a crash between CopyMetaForBranchAsync and
+        // RegisterAsync during a previous branch-creation attempt. Purge their namespaces so
+        // wasted KV space is reclaimed.  Errors are logged and swallowed; orphan cleanup is
+        // advisory and must not block normal startup.
+        _ = ScrubOrphanBranchNamespacesAsync(node, registry);
+    }
+
+    /// <summary>
+    /// Purges KV namespace entries for branch ids that appear in the pending-create set but
+    /// are not registered in the database registry. These orphans are left when a process crash
+    /// occurs after metadata is written but before the registry entry is published during
+    /// <c>CreateBranchDatabaseAsync</c>.
+    ///
+    /// <para>Safe to call concurrently with normal operations: orphan ids are not registered,
+    /// so no live transaction or table-open path can reference them. The purge is idempotent.</para>
+    /// </summary>
+    private async Task ScrubOrphanBranchNamespacesAsync(EmbeddedKahuna node, DatabaseRegistry registry)
+    {
+        try
+        {
+            List<string> orphanIds = await registry.LoadOrphanBranchIdsAsync().ConfigureAwait(false);
+            if (orphanIds.Count == 0)
+                return;
+
+            logger.LogInformation("Found {Count} orphan branch namespace(s) to scrub on startup", orphanIds.Count);
+
+            IKahuna kahuna = node.Kahuna;
+            foreach (string orphanId in orphanIds)
+            {
+                try
+                {
+                    // Purge the meta namespace written by CopyMetaForBranchAsync.
+                    string metaBucket = $"{orphanId}/meta";
+                    string metaPrefix = $"{orphanId}/";
+
+                    for (int round = 0; round < 3; round++)
+                    {
+                        List<string> keys = [];
+                        await foreach ((string key, Kahuna.Server.KeyValues.ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
+                            HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
+                            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+                        {
+                            if (key.StartsWith(metaPrefix, StringComparison.Ordinal))
+                                keys.Add(key);
+                        }
+
+                        if (keys.Count == 0)
+                            break;
+
+                        foreach (string key in keys)
+                        {
+                            try
+                            {
+                                await kahuna.LocateAndTryDeleteKeyValue(
+                                    HLCTimestamp.Zero, key,
+                                    KeyValueDurability.Persistent, CancellationToken.None
+                                ).ConfigureAwait(false);
+                            }
+                            catch (Exception ex)
+                            {
+                                logger.LogWarning(ex, "Failed to delete orphan key '{Key}' for branch id {BranchId}", key, orphanId);
+                            }
+                        }
+
+                        logger.LogInformation("Scrubbed {Count} orphan meta key(s) for branch id {BranchId}", keys.Count, orphanId);
+                    }
+
+                    await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to scrub orphan branch namespace for id {BranchId}", orphanId);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Startup orphan-branch scrub failed");
+        }
     }
 
     #region database
@@ -276,32 +383,80 @@ public sealed class CommandExecutor : IAsyncDisposable
                     CamusDBErrorCodes.InvalidInput,
                     $"Database '{ticket.BranchFrom}' has {coordinatorJobs.Count} pending coordinator job(s); wait for them to complete before branching");
 
-            // Mint a fork timestamp from the source's HLC; this timestamp marks the branch point
-            // in the ancestry chain. All branch reads will eventually use this as the "read at T"
-            // floor for the parent namespace (resolved in the storage read layer).
-            HLCTimestamp forkT = sourceDescriptor.Kahuna.Raft.HybridLogicalClock.SendOrLocalEvent(
-                sourceDescriptor.Kahuna.Raft.GetLocalNodeId());
-
-            // Snapshot hold: deferred to a later phase. When that phase lands, a Kahuna
-            // snapshot-floor registration will be inserted here to pin the source MVCC history
-            // at forkT so branch reads can see the snapshot without racing against GC.
+            // Mint a fork timestamp by going through Kahuna's transaction pipeline rather than
+            // reading the Raft node's local HLC directly. The LocateAndStartTransaction call
+            // routes through the partition actor's message queue, which serializes with any
+            // in-progress partition-actor HLC advances (e.g. from an ongoing TrySet's ReceiveEvent).
+            // This is the causal fence that ensures forkT is strictly after every write that was
+            // already committed before branch creation, even in a multi-partition deployment where
+            // the Raft node's local HLC might lag a partition actor's HLC. The transaction is
+            // rolled back immediately — we only needed the causal timestamp.
+            KvTransaction forkTx = await sourceDescriptor.Transactions.BeginAsync().ConfigureAwait(false);
+            HLCTimestamp forkT = forkTx.TransactionId;
+            await sourceDescriptor.Transactions.RollbackIfNotCompletedAsync(forkTx).ConfigureAwait(false);
 
             string branchId = await registry.AllocateIdAsync().ConfigureAwait(false);
 
-            // Ancestry chain: immediate parent first, then its ancestors (nearest-parent ordering).
-            DatabaseRegistryEntry? sourceEntry = await registry.TryResolveEntryAsync(ticket.BranchFrom!).ConfigureAwait(false);
-            List<DatabaseBranchAncestor> ancestors =
-            [
-                new DatabaseBranchAncestor { DatabaseId = sourceDescriptor.Id, ForkTimestamp = forkT },
-                .. (sourceEntry?.Ancestors ?? [])
-            ];
+            // Pin the immediate parent's MVCC history at forkT with a Kahuna snapshot-floor hold so
+            // the branch's as-of-forkT reads stay correct even under aggressive revision reclamation.
+            // The holder id is the branch's own stable id (acquire is idempotent by (holder, forkT)).
+            // A hold that is not confirmed granted means durability cannot be guaranteed — fail the
+            // create rather than register a branch whose frozen view GC may later reclaim. The hold
+            // is renewed while the branch lives (leader-owned renewer) and released on leaf drop.
+            IKahuna sourceKahuna = sourceDescriptor.Kahuna.Kahuna;
+            (KeyValueResponseType holdType, string holdId, _) = await sourceKahuna
+                .LocateAndAcquireSnapshotHold(branchId, forkT, CamusDBConfig.BranchSnapshotHoldLeaseMs, CancellationToken.None)
+                .ConfigureAwait(false);
 
-            // Copy schema metadata into the branch namespace before publishing the registry entry.
-            // If this node crashes between the copy and the RegisterAsync, the orphaned namespace
-            // has no registry entry and will be cleaned up by the startup orphan-namespace scrubber.
-            await catalogs.CopyMetaForBranchAsync(sourceDescriptor, branchId).ConfigureAwait(false);
+            if (holdType != KeyValueResponseType.Set || string.IsNullOrEmpty(holdId))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Could not acquire a snapshot-floor hold on '{ticket.BranchFrom}' at the fork point (status {holdType}); branch not created because its frozen view could not be guaranteed durable");
 
-            await registry.RegisterAsync(branchName, branchId, ancestors).ConfigureAwait(false);
+            // Write the pending-create marker before copying metadata. If the process crashes
+            // between the metadata copy and the registry publish, the startup orphan scrubber
+            // finds this id unregistered and purges the orphaned namespace.
+            await registry.TrackPendingBranchAsync(branchId).ConfigureAwait(false);
+            try
+            {
+                // Ancestry chain: immediate parent first, then its ancestors (nearest-parent ordering).
+                DatabaseRegistryEntry? sourceEntry = await registry.TryResolveEntryAsync(ticket.BranchFrom!).ConfigureAwait(false);
+                List<DatabaseBranchAncestor> ancestors =
+                [
+                    new DatabaseBranchAncestor { DatabaseId = sourceDescriptor.Id, ForkTimestamp = forkT },
+                    .. (sourceEntry?.Ancestors ?? [])
+                ];
+
+                // Copy schema metadata into the branch namespace before publishing the registry entry.
+                // The pending marker above ensures that if the process crashes here, the orphaned
+                // namespace is found by the startup scrubber and purged on next restart.
+                await catalogs.CopyMetaForBranchAsync(sourceDescriptor, branchId).ConfigureAwait(false);
+
+                await registry.RegisterAsync(branchName, branchId, ancestors, holdId).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The branch was never published (no registry entry), so nothing will ever renew or
+                // release this hold. Release it best-effort so a failed create does not pin parent
+                // history forever; if the release itself fails the lease still lapses on its own.
+                try
+                {
+                    await sourceKahuna.LocateAndReleaseSnapshotHold(holdId, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception releaseEx)
+                {
+                    logger.LogWarning(releaseEx, "Failed to release snapshot hold {HoldId} after aborted branch creation of '{Branch}'", holdId, branchName);
+                }
+                throw;
+            }
+            finally
+            {
+                // Remove the pending marker whether creation succeeded or was aborted cleanly.
+                // On success the branch is now registered and the marker is no longer needed.
+                // On abort the hold was released above; the pending marker is stale.
+                // Only a crash between TrackPending and here leaves the marker for the scrubber.
+                await registry.ClearPendingBranchAsync(branchId).ConfigureAwait(false);
+            }
         }
         finally
         {
@@ -343,6 +498,14 @@ public sealed class CommandExecutor : IAsyncDisposable
                 $"Database '{ticket.DatabaseName}' does not exist");
         }
 
+        // Block dropping a database that has live branch descendants. Releasing its snapshot-floor
+        // hold while a descendant still depends on the pinned MVCC history would break the
+        // descendant's frozen view. Drop all descendants first, leaf by leaf, then drop this one.
+        if (await registry.HasLiveDescendantsAsync(entry.Id).ConfigureAwait(false))
+            throw new CamusDBException(
+                CamusDBErrorCodes.DatabaseHasLiveDescendants,
+                $"Database '{ticket.DatabaseName}' cannot be dropped because it has live branch descendants. Drop all descendant branches first.");
+
         // Unregister first: once the registry KV entry is deleted and the in-memory cache
         // cleared, any concurrent Open(name) gets DatabaseDoesntExist immediately — the name
         // is unreachable before the descriptor is removed from the descriptor cache.
@@ -350,6 +513,25 @@ public sealed class CommandExecutor : IAsyncDisposable
         // than wedged (better failure mode than registering after Drop).
         await registry.UnregisterAsync(ticket.DatabaseName).ConfigureAwait(false);
         await databaseDroper.Drop(entry.Id).ConfigureAwait(false);
+
+        // Release the snapshot-floor hold this branch owned on its immediate parent so the parent's
+        // pinned MVCC history can be reclaimed. The effective floor only rises when the lowest live
+        // hold is released, so a still-live descendant's own deeper hold keeps its view intact.
+        // (Blocking a drop while live descendants exist is enforced separately; this release runs
+        // after the branch's keyspace is gone.) Best-effort: a failed release lets the lease lapse.
+        if (!string.IsNullOrEmpty(entry.ImmediateParentHoldId) && sharedNode is not null)
+        {
+            try
+            {
+                await sharedNode.Kahuna
+                    .LocateAndReleaseSnapshotHold(entry.ImmediateParentHoldId, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to release snapshot hold {HoldId} for dropped branch '{Database}'", entry.ImmediateParentHoldId, ticket.DatabaseName);
+            }
+        }
     }
 
     public async Task RenameDatabase(RenameDatabaseTicket ticket)
@@ -1801,6 +1983,16 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // Stop the snapshot-hold renewer first. Await its deferred start so the renewer instance is
+        // observed (or its start fault surfaces) before disposal, avoiding a lost background loop.
+        if (snapshotRenewerStart is not null)
+        {
+            try { await snapshotRenewerStart.ConfigureAwait(false); }
+            catch { /* a failed start left nothing to dispose */ }
+        }
+        if (snapshotHoldRenewer is not null)
+            await snapshotHoldRenewer.DisposeAsync().ConfigureAwait(false);
+
         await databaseCloser.DisposeAsync();
         await sqlParserCache.DisposeAsync().ConfigureAwait(false);
 

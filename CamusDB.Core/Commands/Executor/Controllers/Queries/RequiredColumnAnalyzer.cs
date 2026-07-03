@@ -231,8 +231,12 @@ internal static class RequiredColumnAnalyzer
         if (orderBy is null)
             return;
 
+        // A single-table ORDER BY column can be alias-qualified ("e.created_at"); single-table
+        // scan rows are keyed by the bare column name, so store the bare form here. This matches
+        // the sorter, which fetches the value by bare name when the qualified lookup misses —
+        // without stripping, the sort column would never be decoded and the sort would fail.
         foreach (QueryOrderBy clause in orderBy)
-            required.Add(clause.ColumnName);
+            required.Add(GetBareColumnName(clause.ColumnName));
     }
 
     private static void CollectFromOrderByForAlias(

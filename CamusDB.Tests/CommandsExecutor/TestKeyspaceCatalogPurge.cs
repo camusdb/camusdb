@@ -35,8 +35,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// The catalog (<c>{dbId}/meta/keyspace:{tableId}</c>) grows monotonically: it records every
 /// index id ever allocated for a table and survives DROP TABLE / DROP INDEX. Its purpose is to
 /// let DROP DATABASE purge overlay entries belonging to tables/indexes that are no longer in the
-/// live schema — entries the previous live-schema-only purge could not reach. Because BR0 DDL
-/// still eagerly purges on DROP TABLE/INDEX, these tests inject an orphan entry under a dropped
+/// live schema — entries the previous live-schema-only purge could not reach. DDL currently
+/// still eagerly purges on DROP TABLE/INDEX, so these tests inject an orphan entry under a dropped
 /// object's keyspace to exercise the catalog-driven purge path directly.
 /// </summary>
 [NonParallelizable]

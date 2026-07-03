@@ -50,15 +50,27 @@ internal sealed class TableDropper
             await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx).ConfigureAwait(false);
         }
 
-        DeleteTicket deleteTicket = new(
-            txnState: tx,
-            databaseName: ticket.DatabaseName,
-            tableName: ticket.TableName,
-            where: null,
-            filters: null
-        );
+        // On a branch database the table's inherited rows live in ancestor keyspaces and are already
+        // unreachable once the schema no longer references this table — no tombstones are needed.
+        // Only the branch-local overlay entries (if any) need to be physically removed.
+        // On a root database every row is in the local keyspace and must be logically deleted so
+        // active transactions see a correct row count and the DML delete path fires correctly.
+        if (database.Ancestors.Count > 0)
+        {
+            await table.Store.PurgeLocalRowOverlayAsync(tx).ConfigureAwait(false);
+        }
+        else
+        {
+            DeleteTicket deleteTicket = new(
+                txnState: tx,
+                databaseName: ticket.DatabaseName,
+                tableName: ticket.TableName,
+                where: null,
+                filters: null
+            );
 
-        await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
+            await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
+        }
 
         string tableId = table.Id;
 
