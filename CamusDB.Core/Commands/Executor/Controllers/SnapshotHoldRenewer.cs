@@ -88,6 +88,11 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
     /// every registered branch. Returns the number of holds that were successfully renewed (0 when this
     /// node is not the sweeping leader or no branch holds exist). Exposed to tests so a sweep can be
     /// forced without waiting a full tick and its effect asserted.
+    ///
+    /// <para>The sweep reads from the persistent KV registry (not only the local in-memory cache) so
+    /// that branches registered on other nodes after this node started are not missed. A branch absent
+    /// from the local cache would never have its hold renewed if the sweep used the cache alone, and the
+    /// hold would eventually lapse while the branch is still live.</para>
     /// </summary>
     internal async Task<int> RenewDueHoldsAsync(CancellationToken ct)
     {
@@ -95,7 +100,8 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
             return 0;
 
         int renewed = 0;
-        foreach (DatabaseRegistryEntry entry in registry.List())
+        IReadOnlyList<DatabaseRegistryEntry> entries = await registry.ScanAllEntriesAsync().ConfigureAwait(false);
+        foreach (DatabaseRegistryEntry entry in entries)
         {
             if (string.IsNullOrEmpty(entry.ImmediateParentHoldId))
                 continue;

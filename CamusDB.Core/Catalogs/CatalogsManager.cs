@@ -1966,10 +1966,17 @@ public sealed class CatalogsManager
     /// source had at the fork point.
     ///
     /// The caller is responsible for holding the source's <c>SchemaDdlSemaphore</c> across this
-    /// call to prevent a concurrent DDL from mutating the source schema between the stability check
-    /// and the copy.
+    /// call to prevent a concurrent DDL on the same node from mutating the source schema between
+    /// the stability check and the copy. In cluster mode a remote DDL can still commit between
+    /// <paramref name="forkT"/> and the scan; reading at <paramref name="forkT"/> ensures the copy
+    /// is consistent with the row/index snapshot the branch will read at that timestamp.
+    ///
+    /// <para>The scan uses no live transaction (<c>HLCTimestamp.Zero</c> as the transaction id)
+    /// and <paramref name="forkT"/> as the MVCC read timestamp. This matches the snapshot-read
+    /// pattern used for ancestry reads in <see cref="KvTableStore"/> and guarantees the branch
+    /// schema is consistent with the ancestor rows it inherits.</para>
     /// </summary>
-    public async Task CopyMetaForBranchAsync(DatabaseDescriptor source, string branchDbId)
+    public async Task CopyMetaForBranchAsync(DatabaseDescriptor source, string branchDbId, HLCTimestamp forkT)
     {
         IKahuna kahuna = source.Kahuna.Kahuna;
         string sourceBucket = MetaBucketPrefix(source.Id);
@@ -1980,38 +1987,32 @@ public sealed class CatalogsManager
 
         List<(string destKey, byte[] value)> toCopy = [];
 
-        KvTransaction scanTx = await source.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
+        // Scan source metadata as-of forkT: any schema change committed after forkT is invisible,
+        // so the branch gets exactly the schema the row/index snapshot at forkT reflects.
+        // Uses HLCTimestamp.Zero as the transaction id (no live tx) and forkT as the read timestamp,
+        // matching the ancestor-read pattern in KvTableStore.ScanRowsRawAsync.
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero,
+            sourceBucket,
+            null, true,
+            null, true,
+            512,
+            forkT,
+            KeyValueDurability.Persistent,
+            CancellationToken.None).ConfigureAwait(false))
         {
-            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-                scanTx.TransactionId,
-                sourceBucket,
-                null, true,
-                null, true,
-                512,
-                HLCTimestamp.Zero,
-                KeyValueDurability.Persistent,
-                CancellationToken.None).ConfigureAwait(false))
-            {
-                if (entry.Value is null)
-                    continue;
+            if (entry.Value is null)
+                continue;
 
-                if (key.StartsWith(sourceCoordinatorPrefix, StringComparison.Ordinal) ||
-                    key.StartsWith(sourceKeyspacePrefix, StringComparison.Ordinal))
-                    continue;
+            if (key.StartsWith(sourceCoordinatorPrefix, StringComparison.Ordinal) ||
+                key.StartsWith(sourceKeyspacePrefix, StringComparison.Ordinal))
+                continue;
 
-                if (!key.StartsWith(sourcePrefix, StringComparison.Ordinal))
-                    continue;
+            if (!key.StartsWith(sourcePrefix, StringComparison.Ordinal))
+                continue;
 
-                string destKey = branchPrefix + key[sourcePrefix.Length..];
-                toCopy.Add((destKey, entry.Value));
-            }
-        }
-        finally
-        {
-            await source.Transactions.RollbackIfNotCompletedAsync(scanTx).ConfigureAwait(false);
+            string destKey = branchPrefix + key[sourcePrefix.Length..];
+            toCopy.Add((destKey, entry.Value));
         }
 
         if (toCopy.Count == 0)

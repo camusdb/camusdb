@@ -205,6 +205,51 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     /// <summary>
+    /// Purges the <c>{branchId}/meta/…</c> namespace written by <c>CopyMetaForBranchAsync</c>
+    /// when a branch-creation attempt is abandoned — either by a process crash (startup scrubber
+    /// path) or by an in-process abort after the copy but before <c>RegisterAsync</c> commits.
+    /// Uses a 3-round retry to absorb transient scan misses; each key is deleted idempotently.
+    /// </summary>
+    private async Task PurgeBranchMetaNamespaceAsync(string branchId, IKahuna kahuna)
+    {
+        string metaBucket = $"{branchId}/meta";
+        string metaPrefix = $"{branchId}/";
+
+        for (int round = 0; round < 3; round++)
+        {
+            List<string> keys = [];
+            await foreach ((string key, Kahuna.Server.KeyValues.ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
+                HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
+                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+            {
+                if (key.StartsWith(metaPrefix, StringComparison.Ordinal))
+                    keys.Add(key);
+            }
+
+            if (keys.Count == 0)
+                break;
+
+            foreach (string key in keys)
+            {
+                try
+                {
+                    await kahuna.LocateAndTryDeleteKeyValue(
+                        HLCTimestamp.Zero, key,
+                        KeyValueDurability.Persistent, CancellationToken.None
+                    ).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to delete orphan key '{Key}' for branch id {BranchId}", key, branchId);
+                }
+            }
+
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Purged {Count} meta key(s) for branch id {BranchId}", keys.Count, branchId);
+        }
+    }
+
+    /// <summary>
     /// Purges KV namespace entries for branch ids that appear in the pending-create set but
     /// are not registered in the database registry. These orphans are left when a process crash
     /// occurs after metadata is written but before the registry entry is published during
@@ -212,58 +257,65 @@ public sealed class CommandExecutor : IAsyncDisposable
     ///
     /// <para>Safe to call concurrently with normal operations: orphan ids are not registered,
     /// so no live transaction or table-open path can reference them. The purge is idempotent.</para>
+    ///
+    /// <para>Also clears <em>this node's own</em> stale drop-intent markers left by a crash during
+    /// <c>DropDatabase</c>. A node's own drop-intent can never legitimately survive its restart
+    /// (drops do not span restarts), so any own-owned marker at startup is a crash remnant; without
+    /// this cleanup the affected database would be permanently undroppable because
+    /// <c>AcquireDropIntentAsync</c> uses <c>SetIfNotExists</c> and would always find the key present.
+    /// The cleanup is owner-scoped so a restarting node never deletes a drop-intent another live node
+    /// currently holds for an in-flight drop (which would reopen the cross-node drop/create race).</para>
+    ///
+    /// <para>Internal visibility is intentional: tests invoke this directly to verify the
+    /// production scrub path rather than reimplementing the same logic inline.</para>
     /// </summary>
-    private async Task ScrubOrphanBranchNamespacesAsync(EmbeddedKahuna node, DatabaseRegistry registry)
+    internal async Task ScrubOrphanBranchNamespacesAsync(EmbeddedKahuna node, DatabaseRegistry registry)
     {
         try
         {
+            // Clear this node's own stale drop-intent markers first so that a marker left by a crash
+            // does not permanently block future drops. Owner-scoped: a restarting node must not delete
+            // a drop-intent another live node currently holds for an in-flight drop.
+            int intentsCleared = await registry.ClearOwnStaleDropIntentsAsync().ConfigureAwait(false);
+            if (intentsCleared > 0 && logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Cleared {Count} stale drop-intent marker(s) on startup", intentsCleared);
+
+            // Resume any DROP DATABASE this node started but did not finish before a crash. The
+            // keyspace purge is per-key and non-transactional, so an interrupted drop can leave
+            // orphaned row/index/stats data with no other reclaim. Owner-scoped markers mean we only
+            // resume our own drops; a marker whose id is still registered means the crash preceded
+            // UnregisterAsync (nothing was purged) so we just clear the stale marker.
+            foreach (string droppingId in await registry.LoadOwnDroppingIdsAsync().ConfigureAwait(false))
+            {
+                try
+                {
+                    if (registry.GetById(droppingId) is null)
+                    {
+                        if (logger.IsEnabled(LogLevel.Information))
+                            logger.LogInformation("Resuming interrupted DROP DATABASE keyspace purge for id {DbId} on startup", droppingId);
+                        await databaseDroper.PurgeKeyspaceByIdAsync(node.Kahuna, droppingId, null).ConfigureAwait(false);
+                    }
+                    await registry.ClearDroppingAsync(droppingId).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to resume interrupted drop for id {DbId}", droppingId);
+                }
+            }
+
             List<string> orphanIds = await registry.LoadOrphanBranchIdsAsync().ConfigureAwait(false);
             if (orphanIds.Count == 0)
                 return;
 
-            logger.LogInformation("Found {Count} orphan branch namespace(s) to scrub on startup", orphanIds.Count);
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Found {Count} orphan branch namespace(s) to scrub on startup", orphanIds.Count);
 
             IKahuna kahuna = node.Kahuna;
             foreach (string orphanId in orphanIds)
             {
                 try
                 {
-                    // Purge the meta namespace written by CopyMetaForBranchAsync.
-                    string metaBucket = $"{orphanId}/meta";
-                    string metaPrefix = $"{orphanId}/";
-
-                    for (int round = 0; round < 3; round++)
-                    {
-                        List<string> keys = [];
-                        await foreach ((string key, Kahuna.Server.KeyValues.ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
-                            HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
-                            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
-                        {
-                            if (key.StartsWith(metaPrefix, StringComparison.Ordinal))
-                                keys.Add(key);
-                        }
-
-                        if (keys.Count == 0)
-                            break;
-
-                        foreach (string key in keys)
-                        {
-                            try
-                            {
-                                await kahuna.LocateAndTryDeleteKeyValue(
-                                    HLCTimestamp.Zero, key,
-                                    KeyValueDurability.Persistent, CancellationToken.None
-                                ).ConfigureAwait(false);
-                            }
-                            catch (Exception ex)
-                            {
-                                logger.LogWarning(ex, "Failed to delete orphan key '{Key}' for branch id {BranchId}", key, orphanId);
-                            }
-                        }
-
-                        logger.LogInformation("Scrubbed {Count} orphan meta key(s) for branch id {BranchId}", keys.Count, orphanId);
-                    }
-
+                    await PurgeBranchMetaNamespaceAsync(orphanId, kahuna).ConfigureAwait(false);
                     await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
                 }
                 catch (Exception ex)
@@ -287,7 +339,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
         string name = ticket.DatabaseName;
 
-        DatabaseRegistryEntry? existing = registry.Get(name);
+        // Resolve the target through the persistent registry (cache-first, live-KV fallback), not the
+        // local cache alone. In a cluster the name may be registered on another node but absent from
+        // this node's cache; a cache-only check would let CREATE IF NOT EXISTS run the whole create/
+        // branch flow (allocating an id, acquiring a snapshot hold, copying metadata) only to fail late
+        // at RegisterAsync, instead of returning the existing database here.
+        DatabaseRegistryEntry? existing = await registry.TryResolveEntryAsync(name).ConfigureAwait(false);
         if (existing is not null)
         {
             if (ticket.IfNotExists)
@@ -347,6 +404,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         await sourceDescriptor.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
+            // Re-validate the source is still registered under the semaphore. DropDatabase acquires
+            // the same semaphore before unregistering, so if Drop won the race it will have already
+            // removed the source from the registry by the time we get here.
+            if (registry.Get(ticket.BranchFrom!) is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.DatabaseDoesntExist,
+                    $"Source database '{ticket.BranchFrom}' was dropped concurrently; branch creation aborted");
+
             // Schema stability: no committed schema entry may be un-applied.
             if (sourceDescriptor.HeadSchemaVersion != sourceDescriptor.Schema.SchemaVersion)
                 throw new CamusDBException(
@@ -413,12 +478,20 @@ public sealed class CommandExecutor : IAsyncDisposable
                     CamusDBErrorCodes.InvalidInput,
                     $"Could not acquire a snapshot-floor hold on '{ticket.BranchFrom}' at the fork point (status {holdType}); branch not created because its frozen view could not be guaranteed durable");
 
-            // Write the pending-create marker before copying metadata. If the process crashes
-            // between the metadata copy and the registry publish, the startup orphan scrubber
-            // finds this id unregistered and purges the orphaned namespace.
-            await registry.TrackPendingBranchAsync(branchId).ConfigureAwait(false);
+            bool metaCopied = false;
+            bool childRegistered = false;
+            bool leaveMarkerForScrubber = false;
             try
             {
+                // Write the pending-create marker FIRST, inside this try block so the catch below
+                // releases the snapshot hold if the write fails. The marker must be confirmed
+                // durable before CopyMetaForBranchAsync runs: if the process crashes after the
+                // metadata copy but before RegisterAsync commits, the startup scrubber finds this
+                // id unregistered and purges the orphaned namespace. If the marker write itself
+                // fails, we propagate the error and CopyMetaForBranchAsync is never called —
+                // so no orphan can exist without a recovery handle (BR15).
+                await registry.TrackPendingBranchAsync(branchId).ConfigureAwait(false);
+
                 // Ancestry chain: immediate parent first, then its ancestors (nearest-parent ordering).
                 DatabaseRegistryEntry? sourceEntry = await registry.TryResolveEntryAsync(ticket.BranchFrom!).ConfigureAwait(false);
                 List<DatabaseBranchAncestor> ancestors =
@@ -428,17 +501,52 @@ public sealed class CommandExecutor : IAsyncDisposable
                 ];
 
                 // Copy schema metadata into the branch namespace before publishing the registry entry.
+                // Pass forkT so the scan reads source metadata as-of the fork point: any schema
+                // change committed after forkT on another cluster node is not included, keeping the
+                // branch schema consistent with the row/index MVCC snapshot it inherits.
                 // The pending marker above ensures that if the process crashes here, the orphaned
                 // namespace is found by the startup scrubber and purged on next restart.
-                await catalogs.CopyMetaForBranchAsync(sourceDescriptor, branchId).ConfigureAwait(false);
+                await catalogs.CopyMetaForBranchAsync(sourceDescriptor, branchId, forkT).ConfigureAwait(false);
+                metaCopied = true;
 
                 await registry.RegisterAsync(branchName, branchId, ancestors, holdId).ConfigureAwait(false);
+                childRegistered = true;
+
+                // Cross-node drop-vs-branch-create fence (BR12): check whether DropDatabase set a
+                // drop-intent marker on the source after we passed the source-still-registered check
+                // above but before RegisterAsync committed.
+                //
+                // Raft linearizability guarantees: if drop's intent write committed before our
+                // RegisterAsync, we observe it here and abort; if our RegisterAsync committed first,
+                // drop's subsequent HasLiveDescendantsAsync scan sees our child and drop aborts
+                // instead.  One of those two cases always applies, so exactly one of drop or
+                // branch-create wins with no orphaned child and no purged-ancestor branch.
+                if (await registry.HasDropIntentAsync(sourceDescriptor.Id).ConfigureAwait(false))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.DatabaseDoesntExist,
+                        $"Source database '{ticket.BranchFrom}' is being dropped concurrently; branch creation aborted");
             }
             catch
             {
-                // The branch was never published (no registry entry), so nothing will ever renew or
-                // release this hold. Release it best-effort so a failed create does not pin parent
-                // history forever; if the release itself fails the lease still lapses on its own.
+                // If the child was published (drop-intent check threw after RegisterAsync), retract
+                // it so no stale entry remains. Hold release and meta purge follow regardless.
+                if (childRegistered)
+                {
+                    try
+                    {
+                        await registry.UnregisterAsync(branchName).ConfigureAwait(false);
+                        childRegistered = false;
+                    }
+                    catch (Exception unregEx)
+                    {
+                        logger.LogWarning(unregEx,
+                            "Failed to unregister branch '{Branch}' after aborting due to concurrent parent drop; entry may be stale",
+                            branchName);
+                    }
+                }
+
+                // The branch was never published (or has now been retracted), so nothing will ever
+                // renew or release this hold. Release it best-effort.
                 try
                 {
                     await sourceKahuna.LocateAndReleaseSnapshotHold(holdId, CancellationToken.None).ConfigureAwait(false);
@@ -447,15 +555,34 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     logger.LogWarning(releaseEx, "Failed to release snapshot hold {HoldId} after aborted branch creation of '{Branch}'", holdId, branchName);
                 }
+
+                // If metadata was already written before the abort, purge it inline so the orphaned
+                // namespace does not linger. If the inline purge fails, leave the pending marker so
+                // the startup scrubber can still reclaim the namespace on next restart.
+                if (metaCopied)
+                {
+                    try
+                    {
+                        await PurgeBranchMetaNamespaceAsync(branchId, sourceKahuna).ConfigureAwait(false);
+                    }
+                    catch (Exception purgeEx)
+                    {
+                        logger.LogWarning(purgeEx,
+                            "Failed to inline-purge orphaned branch metadata for id {BranchId}; namespace will be reclaimed by startup scrubber",
+                            branchId);
+                        leaveMarkerForScrubber = true;
+                        throw;
+                    }
+                }
                 throw;
             }
             finally
             {
-                // Remove the pending marker whether creation succeeded or was aborted cleanly.
-                // On success the branch is now registered and the marker is no longer needed.
-                // On abort the hold was released above; the pending marker is stale.
-                // Only a crash between TrackPending and here leaves the marker for the scrubber.
-                await registry.ClearPendingBranchAsync(branchId).ConfigureAwait(false);
+                // Remove the pending marker whether creation succeeded or was cleanly aborted.
+                // EXCEPTION: if the inline purge failed the namespace is still present and the
+                // marker is the scrubber's only handle — keep it so startup can reclaim it.
+                if (!leaveMarkerForScrubber)
+                    await registry.ClearPendingBranchAsync(branchId).ConfigureAwait(false);
             }
         }
         finally
@@ -498,39 +625,123 @@ public sealed class CommandExecutor : IAsyncDisposable
                 $"Database '{ticket.DatabaseName}' does not exist");
         }
 
-        // Block dropping a database that has live branch descendants. Releasing its snapshot-floor
-        // hold while a descendant still depends on the pinned MVCC history would break the
-        // descendant's frozen view. Drop all descendants first, leaf by leaf, then drop this one.
-        if (await registry.HasLiveDescendantsAsync(entry.Id).ConfigureAwait(false))
-            throw new CamusDBException(
-                CamusDBErrorCodes.DatabaseHasLiveDescendants,
-                $"Database '{ticket.DatabaseName}' cannot be dropped because it has live branch descendants. Drop all descendant branches first.");
-
-        // Unregister first: once the registry KV entry is deleted and the in-memory cache
-        // cleared, any concurrent Open(name) gets DatabaseDoesntExist immediately — the name
-        // is unreachable before the descriptor is removed from the descriptor cache.
-        // If Drop throws after this point, the name is already freed for recreate rather
-        // than wedged (better failure mode than registering after Drop).
-        await registry.UnregisterAsync(ticket.DatabaseName).ConfigureAwait(false);
-        await databaseDroper.Drop(entry.Id).ConfigureAwait(false);
-
-        // Release the snapshot-floor hold this branch owned on its immediate parent so the parent's
-        // pinned MVCC history can be reclaimed. The effective floor only rises when the lowest live
-        // hold is released, so a still-live descendant's own deeper hold keeps its view intact.
-        // (Blocking a drop while live descendants exist is enforced separately; this release runs
-        // after the branch's keyspace is gone.) Best-effort: a failed release lets the lease lapse.
-        if (!string.IsNullOrEmpty(entry.ImmediateParentHoldId) && sharedNode is not null)
+        // Acquire the target's SchemaDdlSemaphore before the descendant check so that a concurrent
+        // CreateBranchDatabaseAsync — which holds the source's SchemaDdlSemaphore through
+        // RegisterAsync — cannot slip between the check and the Unregister on this node.
+        // The semaphore is released before the heavier Drop/drain step so long-running DML on the
+        // database can drain while the schema lock is no longer held.
+        //
+        // If the descriptor is not yet cached (database was never opened after server start) we open
+        // it to obtain the semaphore. If the open itself fails the descriptor is unusable and no
+        // concurrent branch-create can be in flight against it, so we fall through without the lock.
+        //
+        // Cross-node limitation (documented): a branch-create racing on a different cluster node
+        // can still interleave because the registry KV scan and the remote Open are not atomic.
+        // A stronger cross-node guard (e.g. a replicated drop-lock key) is deferred.
+        DatabaseDescriptor? targetDescriptor = null;
+        try
         {
+            targetDescriptor = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Descriptor unavailable (faulted or being torn down). No concurrent branch-create can
+            // be in flight against a descriptor that cannot be opened; proceed without the semaphore.
+        }
+
+        // Acquire a persistent drop-intent marker for this database id before the descendant scan.
+        // CreateBranchDatabaseAsync checks this marker after registering a new child: if the marker
+        // is set, branch-create unregisters the child and aborts. Together with HasLiveDescendantsAsync
+        // this closes the cross-node race where a branch-create slips between the scan and UnregisterAsync
+        // on a different cluster node. Raft linearizability ensures either:
+        //   (a) intent committed before branch-create's RegisterAsync: branch-create sees it and aborts, or
+        //   (b) branch-create's RegisterAsync committed first: HasLiveDescendantsAsync below sees the child
+        //       and this drop aborts with DatabaseHasLiveDescendants.
+        // The intent is held through purge and released on every exit path (success, descendant check
+        // failure, or Drop error) via the outer finally below.
+        bool dropIntentAcquired = false;
+        try
+        {
+            dropIntentAcquired = await registry.AcquireDropIntentAsync(entry.Id).ConfigureAwait(false);
+            if (!dropIntentAcquired)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"A concurrent drop of '{ticket.DatabaseName}' is already in progress; retry later");
+        }
+        catch (CamusDBException) { throw; }
+        catch (Exception intentEx)
+        {
+            // Transient Kahuna error; fall through with only the single-node semaphore guard (BR8).
+            logger.LogWarning(intentEx,
+                "Could not acquire drop-intent marker for '{Database}'; cross-node branch-create race is not fully fenced",
+                ticket.DatabaseName);
+        }
+
+        // Single outer try/finally ensures the intent marker is released on every exit path:
+        // successful drop, failed descendant check, or error during Drop/hold-release.
+        try
+        {
+            if (targetDescriptor is not null)
+                await targetDescriptor.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
             try
             {
-                await sharedNode.Kahuna
-                    .LocateAndReleaseSnapshotHold(entry.ImmediateParentHoldId, CancellationToken.None)
-                    .ConfigureAwait(false);
+                // Re-check descendants under the semaphore (single-node guard from BR8) and after the
+                // intent marker is set (cross-node guard from BR12). A branch-create on another node
+                // that registered its child before we set the intent will be visible here; one that
+                // registered after we set the intent will see the intent flag and abort itself.
+                if (await registry.HasLiveDescendantsAsync(entry.Id).ConfigureAwait(false))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.DatabaseHasLiveDescendants,
+                        $"Database '{ticket.DatabaseName}' cannot be dropped because it has live branch descendants. Drop all descendant branches first.");
+
+                // Mark the drop in progress before unregistering so a crash during the (non-atomic,
+                // per-key) keyspace purge below can be resumed at startup. The marker is owner-scoped
+                // and cleared only after the purge fully completes.
+                await registry.MarkDroppingAsync(entry.Id).ConfigureAwait(false);
+
+                // Unregister first: once the registry KV entry is deleted and the in-memory cache
+                // cleared, any concurrent Open(name) gets DatabaseDoesntExist immediately — the name
+                // is unreachable before the descriptor is removed from the descriptor cache.
+                // If Drop throws after this point, the name is already freed for recreate rather
+                // than wedged (better failure mode than registering after Drop).
+                await registry.UnregisterAsync(ticket.DatabaseName).ConfigureAwait(false);
             }
-            catch (Exception ex)
+            finally
             {
-                logger.LogWarning(ex, "Failed to release snapshot hold {HoldId} for dropped branch '{Database}'", entry.ImmediateParentHoldId, ticket.DatabaseName);
+                if (targetDescriptor is not null)
+                    targetDescriptor.SchemaDdlSemaphore.Release();
             }
+
+            await databaseDroper.Drop(entry.Id).ConfigureAwait(false);
+
+            // Release the snapshot-floor hold this branch owned on its immediate parent so the
+            // parent's pinned MVCC history can be reclaimed. Best-effort.
+            if (!string.IsNullOrEmpty(entry.ImmediateParentHoldId) && sharedNode is not null)
+            {
+                try
+                {
+                    await sharedNode.Kahuna
+                        .LocateAndReleaseSnapshotHold(entry.ImmediateParentHoldId, CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to release snapshot hold {HoldId} for dropped branch '{Database}'", entry.ImmediateParentHoldId, ticket.DatabaseName);
+                }
+            }
+
+            // Purge completed: clear the drop-in-progress marker. Left in place only if a step above
+            // threw (crash/failure), so the startup scrub resumes the interrupted purge.
+            await registry.ClearDroppingAsync(entry.Id).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Release the intent marker now that the keyspace is purged (or on any failure path).
+            // Branch-creates that were blocked by this intent now see the id gone; any that already
+            // checked and are in-flight will either unregister (if they saw the intent) or will be
+            // caught by a re-read of the now-unregistered source.
+            if (dropIntentAcquired)
+                await registry.ReleaseDropIntentAsync(entry.Id).ConfigureAwait(false);
         }
     }
 

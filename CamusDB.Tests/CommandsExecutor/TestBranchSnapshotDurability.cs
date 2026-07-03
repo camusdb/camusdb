@@ -17,6 +17,9 @@ using NUnit.Framework;
 using Microsoft.Extensions.Logging;
 
 using Kahuna;
+using Kahuna.Server.KeyValues;
+using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 
 using CamusDB.Core;
 using CamusDB.Core.Storage.Kv;
@@ -51,6 +54,7 @@ public sealed class TestBranchSnapshotDurability
     private string tempDir = "";
     private EmbeddedKahuna node = null!;
     private DatabaseRegistry registry = null!;
+    private CatalogsManager catalogs = null!;
     private CommandExecutor executor = null!;
     private ILogger<ICamusDB> logger = null!;
 
@@ -77,7 +81,8 @@ public sealed class TestBranchSnapshotDurability
         await node.FlushAsync();
 
         registry = await DatabaseRegistry.OpenAsync(node);
-        executor = new CommandExecutor(new CommandValidator(), new CatalogsManager(logger), logger,
+        catalogs = new CatalogsManager(logger);
+        executor = new CommandExecutor(new CommandValidator(), catalogs, logger,
                                        sharedNode: node, registry: registry, isClusterMode: false);
     }
 
@@ -123,6 +128,76 @@ public sealed class TestBranchSnapshotDurability
             "branch must still find the row at forkT despite the parent being churned past retention");
         Assert.That(branchRows[0].Row["v"].StrValue, Is.EqualTo("v0"),
             "branch must read the fork-time value; the snapshot-floor hold kept that revision reachable");
+    }
+
+    /// <summary>
+    /// Verifies that <c>CopyMetaForBranchAsync</c> reads source metadata as-of <paramref name="forkT"/>
+    /// rather than at the live HLC head. In cluster mode a DDL committed on another node between
+    /// <c>forkT</c> and the metadata copy would produce a schema/data mismatch: the branch schema would
+    /// reflect the post-fork column layout while the row/index snapshot it reads still reflects the
+    /// pre-fork layout.
+    ///
+    /// The test simulates the cross-node scenario on a single node by:
+    /// 1. Creating a source database with a pre-fork metadata key.
+    /// 2. Minting <c>forkT</c> via a begin+rollback transaction (the same causal fence used in production).
+    /// 3. Writing a "post-fork" marker key directly to the source's meta namespace via the raw Kahuna API
+    ///    — this commits at a timestamp greater than <c>forkT</c>, exactly as a remote DDL would.
+    /// 4. Calling <c>CopyMetaForBranchAsync</c> directly at <c>forkT</c>.
+    /// 5. Asserting the branch namespace does NOT contain the post-fork marker (snapshot isolation holds)
+    ///    and DOES contain a legitimate pre-fork schema key (schema is not completely empty).
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task CopyMeta_AsOfForkT_ExcludesPostForkSchemaWrite()
+    {
+        string root = "r_" + Guid.NewGuid().ToString("n");
+        DatabaseDescriptor rootDb = await executor.CreateDatabase(new CreateDatabaseTicket(root, ifNotExists: false));
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(null!, root,
+            "CREATE TABLE meta_test (k STRING PRIMARY KEY, v STRING)", null));
+
+        // Mint forkT: begin+rollback a Kahuna transaction to get a causal fence timestamp that is
+        // strictly after all writes committed so far — same as CreateBranchDatabaseAsync does.
+        KvTransaction forkTx = await rootDb.Transactions.BeginAsync();
+        HLCTimestamp forkT = forkTx.TransactionId;
+        await rootDb.Transactions.RollbackIfNotCompletedAsync(forkTx);
+
+        DatabaseRegistryEntry? rootEntry = registry.Get(root);
+        Assert.That(rootEntry, Is.Not.Null, "sanity: root must be in registry");
+
+        // Inject a "post-fork" metadata key directly into the source's meta namespace via raw Kahuna.
+        // This key commits at a timestamp > forkT (Kahuna HLC advances strictly past our already-minted
+        // forkT), exactly replicating what a DDL on another cluster node would produce.
+        string postForkKey = $"{rootEntry!.Id}/meta/post-fork-sentinel";
+        byte[] sentinel = [0xBE, 0xEF];
+        await node.Kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, postForkKey, sentinel, null, -1,
+            KeyValueFlags.None, 0, KeyValueDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+
+        // Call CopyMetaForBranchAsync at forkT — the post-fork key must NOT be included.
+        string branchId = await registry.AllocateIdAsync();
+        await catalogs.CopyMetaForBranchAsync(rootDb, branchId, forkT);
+
+        // The post-fork sentinel must be absent from the branch namespace.
+        string branchSentinelKey = $"{branchId}/meta/post-fork-sentinel";
+        (KeyValueResponseType getType, ReadOnlyKeyValueEntry? _) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, branchSentinelKey, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+
+        Assert.That(getType, Is.Not.EqualTo(KeyValueResponseType.Get),
+            "CopyMetaForBranchAsync must not copy metadata committed after forkT (snapshot isolation at forkT)");
+
+        // The branch namespace must contain at least the schema version key copied from pre-fork metadata.
+        string branchVersionKey = $"{branchId}/meta/version";
+        (KeyValueResponseType versionType, ReadOnlyKeyValueEntry? _) = await node.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, branchVersionKey, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+
+        Assert.That(versionType, Is.EqualTo(KeyValueResponseType.Get),
+            "Branch namespace must contain the pre-fork schema version key — the copy must not be empty");
     }
 
     private async Task ExecOn(string db, DatabaseDescriptor descriptor, string sql)

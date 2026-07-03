@@ -42,6 +42,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     private readonly KvTransactionsManager transactions;
     private readonly string keyPrefix;
 
+    // Stable local Raft node id (from configured NodeId or a hash of the node name; survives restart).
+    // Stamped into every drop-intent marker this node writes so startup recovery can reclaim only its
+    // own crash remnants and never delete a live drop-intent owned by another cluster node.
+    private readonly int localNodeId;
+
     private readonly SemaphoreSlim writeSem = new(1, 1);
     private readonly ConcurrentDictionary<string, DatabaseRegistryEntry> byName = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DatabaseRegistryEntry> byId = new(StringComparer.Ordinal);
@@ -73,11 +78,13 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     private DatabaseRegistry(
         IKahuna kahuna,
         KvTransactionsManager transactions,
-        string keyPrefix)
+        string keyPrefix,
+        int localNodeId)
     {
         this.kahuna = kahuna;
         this.transactions = transactions;
         this.keyPrefix = keyPrefix;
+        this.localNodeId = localNodeId;
     }
 
     // -----------------------------------------------------------------------
@@ -170,7 +177,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         };
 
         KvTransactionsManager txManager = new(sharedNode.Kahuna, mintLocalT);
-        DatabaseRegistry registry = new(sharedNode.Kahuna, txManager, "_system/");
+        DatabaseRegistry registry = new(sharedNode.Kahuna, txManager, "_system/", sharedNode.Raft.GetLocalNodeId());
         await registry.LoadAsync().ConfigureAwait(false);
         return registry;
     }
@@ -510,12 +517,16 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                     $"Database '{newName}' is already registered");
 
             // Ancestry is immutable: copy the list so the updated entry owns its own instance.
+            // ImmediateParentHoldId must be carried over — a branch keeps the same snapshot-floor
+            // hold on its parent across a rename; dropping it here would make the renewer skip the
+            // branch and the drop path unable to release the hold, losing the frozen view on expiry.
             DatabaseRegistryEntry updated = new()
             {
                 Id = existing.Id,
                 Name = newName,
                 CreatedAt = existing.CreatedAt,
                 Ancestors = existing.Ancestors.Count > 0 ? [.. existing.Ancestors] : [],
+                ImmediateParentHoldId = existing.ImmediateParentHoldId,
             };
 
             byte[] updatedBytes = MetaJsonSerializer.Serialize(updated, MetaJsonContext.Default.DatabaseRegistryEntry);
@@ -555,6 +566,245 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     }
 
     // -----------------------------------------------------------------------
+    // Drop-intent fence for cross-node drop-vs-branch-create atomicity
+    // -----------------------------------------------------------------------
+
+    // A DROP DATABASE on node A and a CREATE ... BRANCH FROM ... on node B can race: if A's
+    // descendant scan completes before B registers the new child, A sees no descendants and
+    // proceeds to purge the parent's keyspace, orphaning the child.
+    //
+    // The fence works via a persistent KV key per database id:
+    //   A sets the key (SetIfNotExists) before its descendant scan and holds it through purge.
+    //   B checks the key after RegisterAsync (not before — the Raft-linearized ordering means
+    //   either A's set happened before B's register and B will observe it here, or B's register
+    //   happened before A's set in which case A's subsequent descendant scan sees B's child and
+    //   A aborts instead).
+    // Together these two checks guarantee exactly one wins with no orphaned child.
+    //
+    // Keys: _system/dbregistry/drop-intent:{dbId}  (value is a single 0x01 sentinel byte)
+
+    private string DropIntentKey(string dbId) => $"{keyPrefix}dbregistry/drop-intent:{dbId}";
+
+    // Value stamped into a node's own lifecycle markers (drop-intent, dropping) so startup recovery
+    // can distinguish its own crash remnants from a marker a *different* live node currently holds.
+    private byte[] LocalOwnerValue => System.Text.Encoding.UTF8.GetBytes(localNodeId.ToString());
+
+    /// <summary>
+    /// Atomically sets a persistent drop-in-progress marker for <paramref name="dbId"/> using
+    /// <c>SetIfNotExists</c>. Returns <c>true</c> if the marker was written (the caller now owns
+    /// the drop fence); returns <c>false</c> if another concurrent drop already holds the fence.
+    /// The marker value is the owning node's id so startup recovery can safely reclaim only its own
+    /// stale markers. The caller must call <see cref="ReleaseDropIntentAsync"/> on every exit path so
+    /// the marker does not strand and block future drops.
+    /// </summary>
+    public async Task<bool> AcquireDropIntentAsync(string dbId)
+    {
+        (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, DropIntentKey(dbId), LocalOwnerValue, null, -1,
+            KeyValueFlags.SetIfNotExists, 0, KeyValueDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+        return type == KeyValueResponseType.Set;
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> if a drop-in-progress marker is set for <paramref name="sourceId"/>,
+    /// meaning a concurrent <see cref="DropDatabase"/> is actively processing the source and its
+    /// keyspace may be purged at any moment. A branch-create that detects this after registering
+    /// must unregister the newly-created branch and abort.
+    /// </summary>
+    public async Task<bool> HasDropIntentAsync(string sourceId)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, DropIntentKey(sourceId), -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+        return type == KeyValueResponseType.Get;
+    }
+
+    /// <summary>
+    /// Removes the drop-intent marker for <paramref name="dbId"/>. Called after
+    /// <see cref="DropDatabase"/> completes (whether it succeeded or failed the descendant check).
+    /// Best-effort: a failure is logged and swallowed; a stranded marker blocks future drops of
+    /// the same id until the marker is manually cleared or the process restarts.
+    /// </summary>
+    public async Task ReleaseDropIntentAsync(string dbId)
+    {
+        try
+        {
+            await kahuna.LocateAndTryDeleteKeyValue(
+                HLCTimestamp.Zero, DropIntentKey(dbId),
+                KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        catch { }
+    }
+
+    // ── Drop-in-progress markers (crash-resumable keyspace purge) ──────────────────────────────
+    //
+    // DROP DATABASE unregisters the entry and then purges its keyspace with per-key autocommit
+    // deletes — not one transaction. A crash mid-purge would orphan row/index/stats/meta data with
+    // no reclaim. A "dropping" marker written before the unregister and cleared only after the purge
+    // completes lets startup resume any interrupted purge. Owner-scoped (value = this node's id) so a
+    // restarting node never resumes a drop another live node is actively running.
+    //
+    // Keys: _system/dbregistry/dropping:{dbId}  (value is the owning node id)
+
+    private string DroppingKey(string dbId) => $"{keyPrefix}dbregistry/dropping:{dbId}";
+
+    /// <summary>
+    /// Marks database <paramref name="dbId"/> as drop-in-progress before its keyspace purge begins.
+    /// Stamped with this node's id so startup recovery resumes only its own interrupted drops. Cleared
+    /// via <see cref="ClearDroppingAsync"/> only after the purge fully completes.
+    /// </summary>
+    public async Task MarkDroppingAsync(string dbId)
+    {
+        string key = DroppingKey(dbId);
+        KeyValueResponseType type;
+        int retries = 0;
+
+        do
+        {
+            if (retries > 0)
+                await Task.Delay(retries * 10).ConfigureAwait(false);
+
+            (type, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, LocalOwnerValue, null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+               && ++retries < MaxRetries);
+
+        if (type != KeyValueResponseType.Set)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Failed to write drop-in-progress marker for database id '{dbId}': {type}");
+    }
+
+    /// <summary>Removes the drop-in-progress marker for <paramref name="dbId"/> after a completed purge. Best-effort.</summary>
+    public async Task ClearDroppingAsync(string dbId)
+    {
+        try
+        {
+            await kahuna.LocateAndTryDeleteKeyValue(
+                HLCTimestamp.Zero, DroppingKey(dbId),
+                KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Scans for drop-in-progress markers owned by <em>this</em> node and returns their database ids.
+    /// Each is an interrupted drop this node started before a crash: the caller resumes the keyspace
+    /// purge for any id no longer registered, then clears the marker via <see cref="ClearDroppingAsync"/>.
+    /// A marker whose id is still registered means the crash preceded <see cref="UnregisterAsync"/> (no
+    /// data was purged); the caller clears it without resuming. Owner-scoped so another live node's
+    /// in-flight drop is never disturbed.
+    /// </summary>
+    public async Task<List<string>> LoadOwnDroppingIdsAsync()
+    {
+        string droppingPrefix = $"{keyPrefix}dbregistry/dropping:";
+        byte[] ownerValue = LocalOwnerValue;
+        List<string> ids = [];
+
+        KvTransaction tx = await transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry kve) in kahuna.LocateAndScanRange(
+                tx.TransactionId,
+                RegistryBucket,
+                null, true,
+                null, true,
+                1000,
+                HLCTimestamp.Zero,
+                KeyValueDurability.Persistent,
+                CancellationToken.None).ConfigureAwait(false))
+            {
+                if (!key.StartsWith(droppingPrefix, StringComparison.Ordinal))
+                    continue;
+
+                if (kve.Value is not null && kve.Value.AsSpan().SequenceEqual(ownerValue))
+                    ids.Add(key[droppingPrefix.Length..]);
+            }
+        }
+        finally
+        {
+            await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// Scans the registry bucket for drop-intent keys owned by <em>this</em> node and deletes them.
+    /// Called once at startup: a drop never spans a process restart, so any drop-intent stamped with
+    /// this node's id that survived a restart is a crash remnant — left when a crash hit between
+    /// <see cref="AcquireDropIntentAsync"/> and the release, permanently blocking future drops of that
+    /// database id until cleared.
+    ///
+    /// <para><b>Owner-scoped on purpose.</b> In a cluster the drop-intent key is Raft-replicated and
+    /// visible on every node. Deleting <em>all</em> drop-intents at startup would let a restarting
+    /// node wipe a drop-intent that a different node currently holds for an in-flight drop, reopening
+    /// the cross-node drop/create race this fence exists to close. A node only ever writes markers
+    /// under its own id, and its own in-flight drops die with its crash, so clearing only own-owned
+    /// markers is always safe and never touches another live node's fence.</para>
+    ///
+    /// Returns the number of own stale markers deleted. Best-effort: individual delete failures are
+    /// swallowed.
+    /// </summary>
+    public async Task<int> ClearOwnStaleDropIntentsAsync()
+    {
+        string intentPrefix = $"{keyPrefix}dbregistry/drop-intent:";
+        byte[] ownerValue = LocalOwnerValue;
+        List<string> keys = [];
+
+        KvTransaction tx = await transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry kve) in kahuna.LocateAndScanRange(
+                tx.TransactionId,
+                RegistryBucket,
+                null, true,
+                null, true,
+                1000,
+                HLCTimestamp.Zero,
+                KeyValueDurability.Persistent,
+                CancellationToken.None).ConfigureAwait(false))
+            {
+                if (!key.StartsWith(intentPrefix, StringComparison.Ordinal))
+                    continue;
+
+                // Only reclaim markers this node owns; leave another live node's fence untouched.
+                if (kve.Value is not null && kve.Value.AsSpan().SequenceEqual(ownerValue))
+                    keys.Add(key);
+            }
+        }
+        finally
+        {
+            await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+
+        foreach (string key in keys)
+        {
+            try
+            {
+                await kahuna.LocateAndTryDeleteKeyValue(
+                    HLCTimestamp.Zero, key,
+                    KeyValueDurability.Persistent, CancellationToken.None
+                ).ConfigureAwait(false);
+            }
+            catch { }
+        }
+
+        return keys.Count;
+    }
+
+    // -----------------------------------------------------------------------
     // Pending-create tracking for orphan-namespace recovery
     // -----------------------------------------------------------------------
 
@@ -570,23 +820,42 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// <summary>
     /// Writes a persistent pending-create marker for <paramref name="branchId"/> so a startup
     /// scrubber can find orphaned branch metadata if the process crashes mid-creation.
-    /// Best-effort: a failure here is logged and swallowed; creation continues. If the marker is
-    /// not written and the process crashes, the orphan namespace is inert (unreachable without a
-    /// registry entry) and will be reclaimed manually or left as wasted space.
+    ///
+    /// <para><b>This write is mandatory, not best-effort.</b> Callers must invoke this method
+    /// inside a try block whose catch releases any resources allocated so far (snapshot hold,
+    /// etc.) and must invoke <see cref="CopyMetaForBranchAsync"/> only if this method returns
+    /// without throwing. The invariant this preserves: every meta namespace written by
+    /// <see cref="CopyMetaForBranchAsync"/> is either registered in the persistent registry, or
+    /// it has a pending-create marker that the startup scrubber can use to find and purge it.
+    /// Without this guarantee a failed marker write followed by a crash after metadata copy would
+    /// leave an unreachable orphan namespace with no recovery path.</para>
+    ///
+    /// <para>Kahuna errors are propagated to the caller; <see cref="ClearPendingBranchAsync"/>
+    /// is best-effort and may be called even when no marker was written (idempotent delete).</para>
     /// </summary>
     public async Task TrackPendingBranchAsync(string branchId)
     {
-        try
+        string key = PendingKey(branchId);
+        KeyValueResponseType type;
+        int retries = 0;
+
+        do
         {
-            await kahuna.LocateAndTrySetKeyValue(
-                HLCTimestamp.Zero, PendingKey(branchId), [0x01], null, -1,
+            if (retries > 0)
+                await Task.Delay(retries * 10).ConfigureAwait(false);
+
+            (type, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, [0x01], null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
         }
-        catch
-        {
-            // best-effort: scrub is advisory, not load-bearing
-        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+               && ++retries < MaxRetries);
+
+        if (type != KeyValueResponseType.Set)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Failed to write pending-create marker for branch id '{branchId}': {type}");
     }
 
     /// <summary>
@@ -653,6 +922,62 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         }
 
         return orphans;
+    }
+
+    /// <summary>
+    /// Returns all registered database entries by scanning the persistent KV store directly,
+    /// rather than reading only the in-memory cache. Hold filtering (non-empty
+    /// <c>ImmediateParentHoldId</c>) is the caller's responsibility.
+    ///
+    /// <para>This is the authoritative source for the snapshot-hold renewer sweep: in a cluster,
+    /// a branch created on another node after this node's startup load will not be in the local
+    /// <see cref="byName"/> cache, so iterating only the cache would silently skip its hold renewal
+    /// until the node restarted. Scanning persistent storage catches every registered database
+    /// regardless of which node wrote it.</para>
+    ///
+    /// <para>As a side effect, any entry loaded from the scan that is absent from the local caches
+    /// is backfilled into <c>byName</c> and <c>byId</c>, consistent with the lazy-load pattern
+    /// used by <see cref="TryResolveEntryAsync"/>.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<DatabaseRegistryEntry>> ScanAllEntriesAsync()
+    {
+        string namePrefix = NameKeyPrefix;
+        List<DatabaseRegistryEntry> entries = [];
+
+        KvTransaction tx = await transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry kve) in kahuna.LocateAndScanRange(
+                tx.TransactionId,
+                RegistryBucket,
+                null, true,
+                null, true,
+                1000,
+                HLCTimestamp.Zero,
+                KeyValueDurability.Persistent,
+                CancellationToken.None).ConfigureAwait(false))
+            {
+                if (!key.StartsWith(namePrefix, StringComparison.Ordinal) || kve.Value is null)
+                    continue;
+
+                DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
+                    kve.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
+
+                // Backfill cache for entries registered on other nodes.
+                byName.TryAdd(loaded.Name, loaded);
+                byId.TryAdd(loaded.Id, loaded);
+
+                entries.Add(loaded);
+            }
+        }
+        finally
+        {
+            await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+
+        return entries;
     }
 
     // -----------------------------------------------------------------------

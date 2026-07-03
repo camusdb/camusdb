@@ -88,98 +88,83 @@ internal sealed class DatabaseDropper
     }
 
     /// <summary>
-    /// Deletes all KV entries belonging to the database from the shared node.
-    ///
-    /// Phase 1 scans the meta bucket to delete all schema keys and simultaneously reads keyspace
-    /// catalog entries (<c>{id}/meta/keyspace:{tableId}</c>) that record every index id ever
-    /// allocated for each table. Using the catalog ensures that indexes dropped before the
-    /// database was dropped are still purged — the in-memory schema only reflects live indexes.
-    ///
-    /// Phase 2 uses the collected catalog data (plus a safety-net pass over live in-memory
-    /// tables) to build the full set of row and index bucket prefixes to purge.
-    ///
-    /// Phase 3 purges all row and index entries. Phase 4 deletes exact statistics keys that
-    /// contain no '/' and therefore cannot be reached by a bucket scan.
-    ///
-    /// Scan bucket = the string before the last '/' of the stored keys, matching KvTableStore
-    /// convention. Each key is deleted as a standalone autocommit operation (HLCTimestamp.Zero).
-    /// Errors are logged and skipped so a partial failure never wedges the drop.
+    /// Deletes all KV entries belonging to <paramref name="descriptor"/>'s database, using the
+    /// descriptor's live schema as a safety net over the persisted keyspace catalog.
     /// </summary>
-    private async Task PurgeClusterKeyspaceAsync(DatabaseDescriptor descriptor, string id)
+    private Task PurgeClusterKeyspaceAsync(DatabaseDescriptor descriptor, string id)
+        => PurgeKeyspaceByIdAsync(descriptor.Kahuna.Kahuna, id, [.. descriptor.Schema.Tables.Values]);
+
+    /// <summary>
+    /// Purges the full keyspace of database <paramref name="id"/>, driven by the persisted keyspace
+    /// catalog under <c>{id}/meta/keyspace:{tableId}</c> (which records every index id ever allocated,
+    /// so historically-dropped indexes are still purged), plus an optional
+    /// <paramref name="safetyNetTables"/> pass for live tables not yet in the catalog.
+    ///
+    /// <para><b>Meta is deleted LAST</b> (row/index/stats first). The keyspace catalog lives in the
+    /// meta namespace, and a crash-resumed purge rebuilds the row/index target list from it. Deleting
+    /// meta last guarantees the catalog is intact until the data it describes is already gone, so a
+    /// resume can re-run this method from the id alone (no live descriptor, <c>safetyNetTables = null</c>)
+    /// and is fully idempotent — already-deleted keys are harmless no-op deletes.</para>
+    ///
+    /// Scan bucket = the string before the last '/' of the stored keys. Each key is deleted as a
+    /// standalone autocommit operation (HLCTimestamp.Zero). Errors are logged and skipped so a partial
+    /// failure never wedges the drop.
+    /// </summary>
+    internal async Task PurgeKeyspaceByIdAsync(IKahuna kahuna, string id, IReadOnlyList<TableSchema>? safetyNetTables)
     {
-        IKahuna kahuna = descriptor.Kahuna.Kahuna;
         string metaBucket = $"{id}/meta";
         string metaKeyPrefix = $"{id}/meta";
         string catalogPrefix = $"{id}/meta/keyspace:";
 
-        // Phase 1: Purge the meta namespace and collect keyspace catalog data.
-        // Catalog entries live under {id}/meta/keyspace:{tableId} and are reached
-        // by the same meta scan that purges version/system/schema/table/history entries.
+        // Phase A: read the keyspace catalog. Read-only — meta (including the catalog) is deleted last
+        // (Phase E) so the catalog survives for every crash-resume. The scan is repeated up to
+        // MaxPurgeScanRounds times, accumulating entries idempotently (TryAdd), and stops once a full
+        // round adds nothing new. A catalog key transiently missed on one round would otherwise leak
+        // its table's entire row/index overlay: on a crashed drop the resume re-scans, but on a
+        // *successful* drop the marker is cleared and there is no resume, so re-scanning here is the
+        // only guard for that case.
         Dictionary<string, List<string>> catalogByTableId = [];
-
         for (int round = 0; round < MaxPurgeScanRounds; round++)
         {
-            List<string> keys = [];
+            CatalogScanRoundsForTesting++;
+            int before = catalogByTableId.Count;
             try
             {
                 await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
                     HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
                     HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
                 {
-                    if (!key.StartsWith(metaKeyPrefix, StringComparison.Ordinal))
+                    if (!key.StartsWith(catalogPrefix, StringComparison.Ordinal) || entry.Value is not { Length: > 0 })
                         continue;
-                    keys.Add(key);
 
-                    // Collect catalog entries on the first pass before their values are deleted.
-                    if (round == 0 && key.StartsWith(catalogPrefix, StringComparison.Ordinal) && entry.Value is { Length: > 0 })
+                    string tableId = key[catalogPrefix.Length..];
+                    try
                     {
-                        string tableId = key[catalogPrefix.Length..];
-                        try
-                        {
-                            string[] indexIds = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.StringArray);
-                            if (!catalogByTableId.ContainsKey(tableId))
-                                catalogByTableId[tableId] = [.. indexIds];
-                        }
-                        catch (Exception ex)
-                        {
-                            logger.LogWarning(ex, "Failed to parse keyspace catalog for table {TableId} in database {Id}", tableId, id);
-                        }
+                        string[] indexIds = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.StringArray);
+                        catalogByTableId.TryAdd(tableId, [.. indexIds]);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Failed to parse keyspace catalog for table {TableId} in database {Id}", tableId, id);
                     }
                 }
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Failed to scan meta bucket while purging database (id={Id})", id);
+                logger.LogWarning(ex, "Failed to scan meta bucket for catalog while purging database (id={Id})", id);
                 break;
             }
 
-            if (keys.Count == 0) break;
-
-            foreach (string key in keys)
-            {
-                try
-                {
-                    await kahuna.LocateAndTryDeleteKeyValue(
-                        HLCTimestamp.Zero, key, KeyValueDurability.Persistent, CancellationToken.None)
-                        .ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "Failed to delete meta key '{Key}' while purging database (id={Id})", key, id);
-                }
-            }
-
-            if (logger.IsEnabled(LogLevel.Information))
-                logger.LogInformation("Purged {Count} meta key(s) for dropped database (id={Id})", keys.Count, id);
+            // A confirming round that adds nothing new means the catalog is fully collected.
+            if (round > 0 && catalogByTableId.Count == before)
+                break;
         }
 
-        // Phase 2: Build purge list from keyspace catalog (includes historically-dropped tables/indexes)
-        // plus any live tables not yet in the catalog (safety net).
+        // Phase B: build the row/index bucket prefixes and exact stats keys.
         List<(string bucket, string keyPrefix)> rowIndexPrefixes = [];
         List<string> exactKeys = [];
         HashSet<string> coveredTableIds = [];
 
-        // From keyspace catalog (historically complete).
         foreach ((string tableId, List<string> indexIds) in catalogByTableId)
         {
             coveredTableIds.Add(tableId);
@@ -189,63 +174,27 @@ internal sealed class DatabaseDropper
                 rowIndexPrefixes.Add(($"{id}:{tableId}:i:{indexId}", $"{id}:{tableId}:i:{indexId}/"));
         }
 
-        // Safety net: live tables not yet in the catalog.
-        foreach (TableSchema table in descriptor.Schema.Tables.Values)
+        // Safety net: live tables not yet in the catalog (unavailable on a headless resume).
+        if (safetyNetTables is not null)
         {
-            if (table.Id is null || coveredTableIds.Contains(table.Id))
-                continue;
-            rowIndexPrefixes.Add(($"{id}:{table.Id}:r", $"{id}:{table.Id}:r/"));
-            exactKeys.Add($"{id}:stats:{table.Id}");
-            if (table.Indexes is not null)
-                foreach (TableIndexSchema index in table.Indexes)
-                    if (!string.IsNullOrEmpty(index.KvId))
-                        rowIndexPrefixes.Add(($"{id}:{table.Id}:i:{index.KvId}", $"{id}:{table.Id}:i:{index.KvId}/"));
-        }
-
-        // Phase 3: Purge rows and index entries.
-        foreach ((string bucket, string keyPrefix) in rowIndexPrefixes)
-        {
-            for (int round = 0; round < MaxPurgeScanRounds; round++)
+            foreach (TableSchema table in safetyNetTables)
             {
-                List<string> keys = [];
-                try
-                {
-                    await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
-                        HLCTimestamp.Zero, bucket, null, true, null, true, 512,
-                        HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
-                    {
-                        if (key.StartsWith(keyPrefix, StringComparison.Ordinal))
-                            keys.Add(key);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "Failed to scan bucket '{Bucket}' while purging database (id={Id})", bucket, id);
-                    break;
-                }
-
-                if (keys.Count == 0) break;
-
-                foreach (string key in keys)
-                {
-                    try
-                    {
-                        await kahuna.LocateAndTryDeleteKeyValue(
-                            HLCTimestamp.Zero, key, KeyValueDurability.Persistent, CancellationToken.None)
-                            .ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogWarning(ex, "Failed to delete key '{Key}' while purging database (id={Id})", key, id);
-                    }
-                }
-
-                if (logger.IsEnabled(LogLevel.Information))
-                    logger.LogInformation("Purged {Count} key(s) under bucket '{Bucket}' for dropped database (id={Id})", keys.Count, bucket, id);
+                if (table.Id is null || coveredTableIds.Contains(table.Id))
+                    continue;
+                rowIndexPrefixes.Add(($"{id}:{table.Id}:r", $"{id}:{table.Id}:r/"));
+                exactKeys.Add($"{id}:stats:{table.Id}");
+                if (table.Indexes is not null)
+                    foreach (TableIndexSchema index in table.Indexes)
+                        if (!string.IsNullOrEmpty(index.KvId))
+                            rowIndexPrefixes.Add(($"{id}:{table.Id}:i:{index.KvId}", $"{id}:{table.Id}:i:{index.KvId}/"));
             }
         }
 
-        // Phase 4: Delete exact stats keys (no '/' suffix so unreachable by bucket scan).
+        // Phase C: purge rows and index entries.
+        foreach ((string bucket, string keyPrefix) in rowIndexPrefixes)
+            await PurgeBucketAsync(kahuna, id, bucket, keyPrefix).ConfigureAwait(false);
+
+        // Phase D: delete exact stats keys (no '/' suffix so unreachable by bucket scan).
         foreach (string key in exactKeys)
         {
             try
@@ -258,6 +207,89 @@ internal sealed class DatabaseDropper
             {
                 logger.LogWarning(ex, "Failed to delete stats key '{Key}' while purging database (id={Id})", key, id);
             }
+        }
+
+        // Phase E: delete the meta namespace LAST (catalog included) so it survived for every resume.
+        await PurgeBucketAsync(kahuna, id, metaBucket, metaKeyPrefix).ConfigureAwait(false);
+    }
+
+    // Test-only: counts the number of delete batches the purge has issued, so a test with a low
+    // KeyspacePurgeBatchSize can prove the purge actually pages (multiple batches) rather than
+    // materialising the whole bucket in one shot.
+    internal static long PurgeBatchesForTesting;
+
+    // Test-only: counts the keyspace-catalog scan rounds, so a test can prove the collection re-scans
+    // (a confirming round) rather than reading the catalog once — the guard against a transient miss.
+    internal static long CatalogScanRoundsForTesting;
+
+    /// <summary>
+    /// Deletes every key under <paramref name="keyPrefix"/> in <paramref name="bucket"/> in bounded
+    /// batches of <see cref="CamusDBConfig.KeyspacePurgeBatchSize"/>: scan one batch, delete it,
+    /// re-scan. Peak memory is one batch regardless of how large the overlay is — a <c>DROP DATABASE</c>
+    /// can span an entire database. The loop ends after <see cref="MaxPurgeScanRounds"/> consecutive
+    /// scans make no progress (all-empty or all-failed), which also absorbs a transient scan miss; a
+    /// batch that deletes nothing (persistent delete errors) counts as no-progress so the loop can't
+    /// spin. Each delete is an idempotent autocommit operation.
+    /// </summary>
+    private async Task PurgeBucketAsync(IKahuna kahuna, string id, string bucket, string keyPrefix)
+    {
+        int batchSize = CamusDBConfig.KeyspacePurgeBatchSize;
+        if (batchSize < 1) batchSize = 1;
+
+        int dryRounds = 0;
+        while (dryRounds < MaxPurgeScanRounds)
+        {
+            List<string> batch = [];
+            try
+            {
+                await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
+                    HLCTimestamp.Zero, bucket, null, true, null, true, batchSize,
+                    HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+                {
+                    if (!key.StartsWith(keyPrefix, StringComparison.Ordinal))
+                        continue;
+
+                    batch.Add(key);
+                    if (batch.Count >= batchSize)
+                        break; // bound memory; the next iteration re-scans for the remainder
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to scan bucket '{Bucket}' while purging database (id={Id})", bucket, id);
+                break;
+            }
+
+            if (batch.Count == 0)
+            {
+                dryRounds++;
+                continue;
+            }
+
+            PurgeBatchesForTesting++;
+
+            bool progressed = false;
+            foreach (string key in batch)
+            {
+                try
+                {
+                    await kahuna.LocateAndTryDeleteKeyValue(
+                        HLCTimestamp.Zero, key, KeyValueDurability.Persistent, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    progressed = true;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to delete key '{Key}' while purging database (id={Id})", key, id);
+                }
+            }
+
+            // Reset only on real progress; an all-failed batch counts as a dry round so a persistently
+            // failing key cannot spin the loop forever (the startup drop resume is the backstop).
+            dryRounds = progressed ? 0 : dryRounds + 1;
+
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Purged {Count} key(s) under bucket '{Bucket}' for dropped database (id={Id})", batch.Count, bucket, id);
         }
     }
 }

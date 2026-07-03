@@ -55,6 +55,14 @@ public static class CamusDBConfig
     public static int StatsHistogramBuckets = 100;
 
     /// <summary>
+    /// Max keys the non-transactional <c>DROP DATABASE</c> keyspace purge scans and deletes per batch.
+    /// The purge pages through each bucket one batch at a time so peak memory is bounded to this many
+    /// keys regardless of how large a database (or branch overlay) is — a full database drop can span
+    /// every table and row. Kept modest so the purge never materialises an entire keyspace at once.
+    /// </summary>
+    public static int KeyspacePurgeBatchSize = 512;
+
+    /// <summary>
     /// Lease duration, in milliseconds, of the Kahuna snapshot-floor hold a branch database
     /// acquires on its immediate parent at fork time. The hold pins the parent's MVCC history at
     /// <c>forkT</c> so branch as-of reads stay correct under aggressive revision retention. The

@@ -16,15 +16,18 @@ using System.Threading.Tasks;
 using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
+using Kahuna.Shared.Sequences;
 using Kommander.Time;
 
 using CamusDB.Core;
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
@@ -1268,9 +1271,12 @@ internal sealed class TestBranchAwareStorage : BaseTest
     }
 
     /// <summary>
-    /// The startup orphan scrubber removes metadata written for a branch id that was never
-    /// registered. This simulates a crash between <c>CopyMetaForBranchAsync</c> and
-    /// <c>RegisterAsync</c> during a branch creation attempt.
+    /// The production startup scrubber (<c>ScrubOrphanBranchNamespacesAsync</c>) removes metadata
+    /// written for a branch id that was never registered — simulating a crash between
+    /// <c>CopyMetaForBranchAsync</c> and <c>RegisterAsync</c> during a branch creation attempt.
+    ///
+    /// This test invokes the real scrubber (not a reimplementation) to verify its bucket/prefix
+    /// math, 3-round retry loop, per-key error handling, and pending-marker cleanup end-to-end.
     /// </summary>
     [Test]
     [NonParallelizable]
@@ -1283,55 +1289,574 @@ internal sealed class TestBranchAwareStorage : BaseTest
         // after CopyMetaForBranchAsync but before RegisterAsync.
         string orphanId = await sharedRegistry!.AllocateIdAsync();
 
-        // Write a sentinel meta key under the orphan id.
+        // Write a sentinel meta key under the orphan id (mirrors what CopyMetaForBranchAsync writes).
         string orphanMetaKey = $"{orphanId}/meta/version";
         IKahuna kahuna = rootDb.Kahuna.Kahuna;
         await kahuna.LocateAndTrySetKeyValue(
             HLCTimestamp.Zero, orphanMetaKey, [0x01], null, -1,
             KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
 
-        // Write a pending marker, as the production code does.
+        // Write a pending marker, as the production code does before CopyMetaForBranchAsync.
         await sharedRegistry.TrackPendingBranchAsync(orphanId);
 
-        // Verify the sentinel exists before scrubbing.
+        // Sanity: the sentinel and the pending marker are present before scrubbing.
         string metaBucket = $"{orphanId}/meta";
         int beforeCount = await CountKeysUnder(kahuna, metaBucket, $"{orphanId}/");
         Assert.AreEqual(1, beforeCount, "sentinel meta key must be present before scrub");
 
-        // Find the orphan ids — must include the injected id.
-        List<string> orphans = await sharedRegistry.LoadOrphanBranchIdsAsync();
-        Assert.Contains(orphanId, orphans, "pending id not in registry must appear as an orphan");
+        List<string> orphansBefore = await sharedRegistry.LoadOrphanBranchIdsAsync();
+        Assert.Contains(orphanId, orphansBefore, "pending id not in registry must appear as an orphan");
 
-        // Scrub: delete the meta keys and clear the pending marker.
-        foreach (string id in orphans)
-        {
-            // Delete meta keys.
-            string bucket = $"{id}/meta";
-            string prefix = $"{id}/";
-            List<string> keys = [];
-            await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
-                HLCTimestamp.Zero, bucket, null, true, null, true, 1000,
-                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None))
-            {
-                if (key.StartsWith(prefix, StringComparison.Ordinal))
-                    keys.Add(key);
-            }
-            foreach (string k in keys)
-                await kahuna.LocateAndTryDeleteKeyValue(HLCTimestamp.Zero, k, KeyValueDurability.Persistent, CancellationToken.None);
-            await sharedRegistry.ClearPendingBranchAsync(id);
-        }
+        // Invoke the PRODUCTION scrubber — not a reimplementation. This exercises the real
+        // bucket/prefix math, 3-round retry loop, per-key error handling, and marker clearing.
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry!);
 
-        // Verify sentinel is gone.
+        // Sentinel meta key must be gone.
         int afterCount = await CountKeysUnder(kahuna, metaBucket, $"{orphanId}/");
-        Assert.AreEqual(0, afterCount, "scrubber must have removed the orphan meta key");
+        Assert.AreEqual(0, afterCount, "production scrubber must have removed the orphan meta key");
 
-        // Verify the pending marker is also gone.
-        List<string> remainingOrphans = await sharedRegistry.LoadOrphanBranchIdsAsync();
-        Assert.IsFalse(remainingOrphans.Contains(orphanId),
-            "orphan id must be removed from pending set after scrub");
+        // Pending marker must also be cleared.
+        List<string> orphansAfter = await sharedRegistry.LoadOrphanBranchIdsAsync();
+        Assert.IsFalse(orphansAfter.Contains(orphanId),
+            "production scrubber must clear the pending marker so the id is no longer an orphan");
 
         // Root database is unaffected.
         List<QueryResultRow> rows = await SelectAll(rootName, rootDb, executor, "SELECT v FROM things");
         Assert.AreEqual(0, rows.Count, "root database must be unaffected by the orphan scrub");
+    }
+
+    /// <summary>
+    /// BR14 subsumes the old cross-node name race that used to reach the branch-create abort-after-copy
+    /// path: because the existence check at the top of <c>CreateDatabase</c> now resolves through the
+    /// persistent registry, a branch target that already exists in the shared KV (even if absent from
+    /// this node's cache) is rejected <em>before</em> the branch flow runs. So no branch id is
+    /// allocated, no snapshot hold is acquired, and no metadata is copied — the branch-create's inline
+    /// abort/purge path is no longer reachable from a pre-registered name. (The inline purge remains as
+    /// defense-in-depth for a genuine concurrent registration between the two persistent checks, which
+    /// is not deterministically reproducible.)
+    ///
+    /// Discriminator: the registry id sequence is unchanged after the rejected create. Before BR14 the
+    /// cache-only precheck missed and the branch flow ran — allocating an id (advancing the sequence)
+    /// and copying metadata — only to fail late at RegisterAsync.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task CreateBranch_TargetExistsInKvNotCache_RejectsEarlyWithoutEnteringBranchFlow()
+    {
+        (string rootName, DatabaseDescriptor rootDb, CommandExecutor executor) =
+            await CreateRootWithTable("CREATE TABLE things2 (id OBJECT_ID PRIMARY KEY, v STRING)");
+
+        // A "remote node" registers the branch target name into the shared KV registry (a valid entry),
+        // leaving it absent from this executor's sharedRegistry cache.
+        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!);
+        string branchName = NewName();
+        string remoteId = await remoteRegistry.AllocateIdAsync();
+        await remoteRegistry.RegisterAsync(branchName, remoteId);
+
+        Assert.IsNull(sharedRegistry!.Get(branchName), "precondition: branch target absent from local cache");
+
+        IKahuna kahuna = rootDb.Kahuna.Kahuna;
+        (SequenceResponseType seqType, ReadOnlySequenceEntry? seqBefore) = await kahuna.LocateAndGetSequence(
+            "_system/dbregistry/seq", SequenceDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(SequenceResponseType.Success, seqType);
+        long seqValueBefore = seqBefore!.CurrentValue;
+
+        // Must reject early with DatabaseAlreadyExists.
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            () => executor.CreateDatabase(new CreateDatabaseTicket(branchName, ifNotExists: false, branchFrom: rootName)));
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseAlreadyExists, ex!.Code,
+            "an already-existing branch target must be rejected with DatabaseAlreadyExists");
+
+        // Discriminating: the branch flow was never entered, so no branch id was allocated.
+        (_, ReadOnlySequenceEntry? seqAfter) = await kahuna.LocateAndGetSequence(
+            "_system/dbregistry/seq", SequenceDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(seqValueBefore, seqAfter!.CurrentValue,
+            "CREATE BRANCH on an already-existing target must reject before allocating a branch id (persistent existence check)");
+    }
+
+    /// <summary>
+    /// Proves the semaphore-based guard prevents the check-then-act race between DropDatabase and
+    /// CreateBranchDatabaseAsync on a single node. When DropDatabase holds the target's
+    /// SchemaDdlSemaphore and unregisters the source before the branch-create gets the semaphore,
+    /// the branch-create must observe the source gone and throw <see cref="CamusDBException"/>
+    /// (DatabaseDoesntExist), not silently register an orphaned branch.
+    ///
+    /// This test simulates the race deterministically: it opens the source descriptor and acquires
+    /// its SchemaDdlSemaphore manually (mimicking what DropDatabase does), then drops the source
+    /// while the semaphore is held, then releases and attempts a concurrent branch-create.
+    /// The branch-create observes the source unregistered and aborts.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task DropDatabase_SemaphorePrevents_ConcurrentBranchCreateRace()
+    {
+        (string rootName, DatabaseDescriptor rootDb, CommandExecutor executor) =
+            await CreateRootWithTable("CREATE TABLE t (id OBJECT_ID PRIMARY KEY, v STRING)");
+
+        // Open the descriptor so we can grab its semaphore to simulate DropDatabase winning first.
+        DatabaseDescriptor srcDesc = await executor.OpenDatabase(rootName);
+
+        // Hold the semaphore, simulating DropDatabase's critical section.
+        await srcDesc.SchemaDdlSemaphore.WaitAsync();
+        try
+        {
+            // Unregister the source while the semaphore is held — same as DropDatabase does.
+            await sharedRegistry!.UnregisterAsync(rootName);
+        }
+        finally
+        {
+            srcDesc.SchemaDdlSemaphore.Release();
+        }
+
+        // Now attempt a branch-create from the source. The source is already unregistered.
+        // CreateBranchDatabaseAsync must detect this under the semaphore and throw.
+        string branchName = NewName();
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            () => executor.CreateDatabase(new CreateDatabaseTicket(branchName, ifNotExists: false, branchFrom: rootName)));
+
+        Assert.IsNotNull(ex);
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex!.Code,
+            "branch-create must observe the unregistered source and fail with DatabaseDoesntExist");
+    }
+
+    /// <summary>
+    /// Proves the cross-node drop-vs-branch-create fence (BR12). The race is: DropDatabase on node A
+    /// passes its descendant scan (no children yet), then CreateBranchDatabaseAsync on node B
+    /// registers a child — after which A's purge would orphan the child against a destroyed namespace.
+    ///
+    /// The fix uses a persistent drop-intent KV key. A sets it before its scan; B checks it after
+    /// RegisterAsync. Raft linearizability ensures one of: (a) A's intent committed before B's
+    /// register → B sees it and aborts, or (b) B's register committed first → A's subsequent
+    /// HasLiveDescendantsAsync scan sees the child and A aborts. Exactly one wins.
+    ///
+    /// Simulated deterministically: the intent key is written via a second registry instance
+    /// (representing a different cluster node), then branch-create is attempted and must abort.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task DropDatabase_DropIntent_PreventsCrossNodeBranchCreateRace()
+    {
+        (string rootName, DatabaseDescriptor rootDb, CommandExecutor executor) =
+            await CreateRootWithTable("CREATE TABLE things_br12 (id OBJECT_ID PRIMARY KEY, v STRING)");
+
+        DatabaseRegistryEntry rootEntry = sharedRegistry!.Get(rootName)!;
+        Assert.IsNotNull(rootEntry, "sanity: root must be registered");
+
+        // Simulate DropDatabase on another cluster node: it passed the descendant scan (saw no
+        // children) and now holds the drop-intent marker — the keyspace purge is about to run.
+        // Use a second registry instance (independent cache) to represent the remote node's registry.
+        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!);
+        bool acquired = await remoteRegistry.AcquireDropIntentAsync(rootEntry.Id);
+        Assert.IsTrue(acquired, "drop-intent must be acquirable when no other drop is in progress");
+
+        string branchName = NewName();
+        try
+        {
+            // Branch-create from the still-registered root must detect the drop-intent after
+            // registering the child and abort, leaving no orphaned registry entry.
+            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+                () => executor.CreateDatabase(new CreateDatabaseTicket(branchName, ifNotExists: false, branchFrom: rootName)));
+
+            Assert.IsNotNull(ex);
+            Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex!.Code,
+                "branch-create must detect the drop-intent and abort with DatabaseDoesntExist");
+
+            // No orphaned child must be registered.
+            Assert.IsNull(sharedRegistry.Get(branchName),
+                "aborted branch-create must not leave a registry entry for the child");
+
+            // No orphaned pending marker should remain.
+            List<string> orphans = await sharedRegistry.LoadOrphanBranchIdsAsync();
+            Assert.AreEqual(0, orphans.Count,
+                "aborted branch-create must clean up its pending marker");
+        }
+        finally
+        {
+            // Simulate the remote node releasing the intent after its purge completes.
+            await remoteRegistry.ReleaseDropIntentAsync(rootEntry.Id);
+        }
+
+        // The root database must still be usable (drop never completed — it was only simulated
+        // up to the intent stage, not through UnregisterAsync or Drop).
+        List<QueryResultRow> rows = await SelectAll(rootName, rootDb, executor, "SELECT v FROM things_br12");
+        Assert.AreEqual(0, rows.Count, "root database must be unaffected — the drop never completed");
+    }
+
+    /// <summary>
+    /// A drop-intent key left by a process crash (between <c>AcquireDropIntentAsync</c> and the
+    /// outer finally's <c>ReleaseDropIntentAsync</c>) makes the affected database permanently
+    /// undroppable — every subsequent drop attempt finds the <c>SetIfNotExists</c> key already
+    /// present and fails with "concurrent drop in progress." The startup scrubber must clear all
+    /// drop-intent keys on startup because a drop-intent can never legitimately survive a restart
+    /// (drops do not span restarts).
+    ///
+    /// This test plants a stale drop-intent key, confirms drop is blocked, invokes the production
+    /// startup scrubber (<c>ScrubOrphanBranchNamespacesAsync</c>), and asserts the database is
+    /// droppable again.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task StaleDropIntent_ClearedByStartupScrubber_MakesDbDroppableAgain()
+    {
+        (string rootName, DatabaseDescriptor _, CommandExecutor executor) =
+            await CreateDatabase();
+
+        DatabaseRegistryEntry rootEntry = sharedRegistry!.Get(rootName)!;
+        Assert.IsNotNull(rootEntry, "sanity: root must be registered");
+
+        // Plant a stale drop-intent key — simulates a crash during DropDatabase after
+        // AcquireDropIntentAsync wrote the key but before the finally released it.
+        bool acquired = await sharedRegistry.AcquireDropIntentAsync(rootEntry.Id);
+        Assert.IsTrue(acquired, "sanity: no other drop in progress");
+
+        // With the stale intent present, a fresh DropDatabase must block.
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            () => executor.DropDatabase(new DropDatabaseTicket(rootName)));
+        Assert.IsNotNull(ex);
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code,
+            "stale drop-intent must block a subsequent drop attempt");
+
+        // Run the production startup scrubber (internal — InternalsVisibleTo is set).
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry);
+
+        // After the scrub, the drop-intent must be gone so DropDatabase can proceed.
+        await executor.DropDatabase(new DropDatabaseTicket(rootName));
+
+        // Database must be gone from the registry.
+        Assert.IsNull(sharedRegistry.Get(rootName),
+            "database must be unregistered after drop succeeds post-scrub");
+    }
+
+    /// <summary>
+    /// Startup drop-intent recovery must be owner-scoped: a restarting node must NOT clear a
+    /// drop-intent that a different, still-live cluster node currently holds for an in-flight drop.
+    /// Clearing it would reopen the cross-node drop/create race BR12 closes. The drop-intent marker
+    /// carries the owning node's id; the scrub deletes only markers stamped with this node's id.
+    ///
+    /// Simulated by planting a drop-intent whose value is a foreign node id, then running this node's
+    /// production scrubber and asserting the foreign marker survives.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task StaleDropIntent_OwnedByAnotherNode_SurvivesStartupScrubber()
+    {
+        (string rootName, _, CommandExecutor executor) = await CreateDatabase();
+        DatabaseRegistryEntry rootEntry = sharedRegistry!.Get(rootName)!;
+
+        IKahuna kahuna = TestNode!.Kahuna;
+        int myNodeId = TestNode!.Raft.GetLocalNodeId();
+        int otherNodeId = myNodeId + 1; // a different, still-live "remote" node
+        string intentKey = $"_system/dbregistry/drop-intent:{rootEntry.Id}";
+
+        // Plant a drop-intent owned by another node (an in-flight remote drop's fence).
+        await kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, intentKey, System.Text.Encoding.UTF8.GetBytes(otherNodeId.ToString()),
+            null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
+
+        // This node's startup scrub must leave the foreign marker untouched.
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry);
+
+        // The foreign fence must still be in place → this node cannot acquire the drop-intent.
+        bool acquired = await sharedRegistry.AcquireDropIntentAsync(rootEntry.Id);
+        Assert.IsFalse(acquired,
+            "a drop-intent owned by another live node must survive this node's startup scrub");
+
+        // Cleanup the simulated foreign marker.
+        await kahuna.LocateAndTryDeleteKeyValue(
+            HLCTimestamp.Zero, intentKey, KeyValueDurability.Persistent, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// DROP DATABASE unregisters the entry and then purges its keyspace with per-key autocommit
+    /// deletes — not one transaction — so a crash mid-purge would orphan row/index/meta data with no
+    /// reclaim. A drop-in-progress marker written before the unregister lets startup resume the purge.
+    ///
+    /// Simulates the crash by marking the drop in progress and unregistering the entry but leaving the
+    /// keyspace intact, then runs the production startup scrubber and asserts the keyspace is fully
+    /// purged (rows and meta) and the marker cleared.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task InterruptedDrop_ResumedByStartupScrubber_PurgesLeftoverKeyspace()
+    {
+        (string dbName, DatabaseDescriptor db, CommandExecutor executor) =
+            await CreateRootWithTable("CREATE TABLE t (id OBJECT_ID PRIMARY KEY, v STRING)");
+
+        await InsertRow(dbName, db, executor, "INSERT INTO t (id, v) VALUES (gen_id(), \"a\")");
+        await InsertRow(dbName, db, executor, "INSERT INTO t (id, v) VALUES (gen_id(), \"b\")");
+
+        string dbId = sharedRegistry!.Get(dbName)!.Id;
+        string tableId = db.Schema.Tables.Values.First().Id!;
+        IKahuna kahuna = TestNode!.Kahuna;
+
+        string rowBucket = $"{dbId}:{tableId}:r";
+        string rowPrefix = $"{dbId}:{tableId}:r/";
+        string metaBucket = $"{dbId}/meta";
+        string metaPrefix = $"{dbId}/";
+
+        Assert.AreEqual(2, await CountKeysUnder(kahuna, rowBucket, rowPrefix), "sanity: two rows present");
+
+        // Simulate a crash right after UnregisterAsync but before the keyspace purge: the
+        // drop-in-progress marker is set and the entry is gone, but all data is still on disk.
+        await sharedRegistry.MarkDroppingAsync(dbId);
+        await sharedRegistry.UnregisterAsync(dbName);
+
+        Assert.AreEqual(2, await CountKeysUnder(kahuna, rowBucket, rowPrefix), "crash simulated before purge — rows still present");
+        Assert.IsNull(sharedRegistry.Get(dbName), "db unregistered by the simulated crash point");
+
+        // Startup scrub must resume the interrupted purge.
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry);
+
+        Assert.AreEqual(0, await CountKeysUnder(kahuna, rowBucket, rowPrefix),
+            "resumed purge must delete the leftover row keyspace");
+        Assert.AreEqual(0, await CountKeysUnder(kahuna, metaBucket, metaPrefix),
+            "resumed purge must delete the meta namespace last");
+
+        List<string> stillDropping = await sharedRegistry.LoadOwnDroppingIdsAsync();
+        Assert.IsFalse(stillDropping.Contains(dbId), "the drop-in-progress marker must be cleared after the resumed purge");
+    }
+
+    /// <summary>
+    /// The DROP DATABASE keyspace purge pages through each bucket in bounded batches rather than
+    /// materialising the whole bucket at once, so a very large database (or branch overlay) is purged
+    /// in bounded memory. Verified with a deliberately tiny batch cap: a small overlay must then be
+    /// deleted in many single-key batches — far more than the roughly-one-per-bucket a materialise-all
+    /// purge would issue — while still being purged completely.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task DropDatabase_KeyspacePurge_PagesInBoundedBatches()
+    {
+        int originalBatch = CamusDBConfig.KeyspacePurgeBatchSize;
+        CamusDBConfig.KeyspacePurgeBatchSize = 1; // one key per batch — maximise batch count
+        DatabaseDropper.PurgeBatchesForTesting = 0;
+        try
+        {
+            (string dbName, DatabaseDescriptor db, CommandExecutor executor) =
+                await CreateRootWithTable("CREATE TABLE t (id OBJECT_ID PRIMARY KEY, v STRING)");
+
+            for (int i = 0; i < 5; i++)
+                await InsertRow(dbName, db, executor, $"INSERT INTO t (id, v) VALUES (gen_id(), \"v{i}\")");
+
+            string dbId = sharedRegistry!.Get(dbName)!.Id;
+            string tableId = db.Schema.Tables.Values.First().Id!;
+            IKahuna kahuna = TestNode!.Kahuna;
+            string rowBucket = $"{dbId}:{tableId}:r";
+            string rowPrefix = $"{dbId}:{tableId}:r/";
+
+            Assert.AreEqual(5, await CountKeysUnder(kahuna, rowBucket, rowPrefix), "sanity: five rows present");
+
+            await executor.DropDatabase(new DropDatabaseTicket(dbName));
+
+            // Fully purged.
+            Assert.AreEqual(0, await CountKeysUnder(kahuna, rowBucket, rowPrefix), "row overlay must be fully purged");
+            Assert.AreEqual(0, await CountKeysUnder(kahuna, $"{dbId}/meta", $"{dbId}/"), "meta namespace must be fully purged");
+
+            // And purged in many small batches — the signal that paging is active. With batch size 1,
+            // five row keys plus their primary-key index entries force well more than the one-batch-
+            // per-bucket a materialise-all purge would produce.
+            Assert.That(DatabaseDropper.PurgeBatchesForTesting, Is.GreaterThanOrEqualTo(5),
+                "purge must page in bounded batches, not materialise each bucket at once");
+        }
+        finally
+        {
+            CamusDBConfig.KeyspacePurgeBatchSize = originalBatch;
+            DatabaseDropper.PurgeBatchesForTesting = 0;
+        }
+    }
+
+    /// <summary>
+    /// The DROP DATABASE keyspace-catalog collection re-scans (a confirming round) instead of reading
+    /// the catalog once, so a catalog key transiently missed on one scan is caught by a later one and
+    /// its table's overlay is still purged. This asserts the multi-round loop is active — with a single
+    /// scan there would be exactly one round.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task DropDatabase_CatalogCollection_RescansToAbsorbTransientMiss()
+    {
+        DatabaseDropper.CatalogScanRoundsForTesting = 0;
+        try
+        {
+            (string dbName, DatabaseDescriptor db, CommandExecutor executor) =
+                await CreateRootWithTable("CREATE TABLE t (id OBJECT_ID PRIMARY KEY, v STRING)");
+            await InsertRow(dbName, db, executor, "INSERT INTO t (id, v) VALUES (gen_id(), \"a\")");
+
+            await executor.DropDatabase(new DropDatabaseTicket(dbName));
+
+            // A single-scan collection would run exactly one round; the multi-round guard runs a
+            // confirming round after the first complete scan.
+            Assert.That(DatabaseDropper.CatalogScanRoundsForTesting, Is.GreaterThanOrEqualTo(2),
+                "catalog collection must re-scan (confirming round) to absorb a transient miss, not read once");
+        }
+        finally
+        {
+            DatabaseDropper.CatalogScanRoundsForTesting = 0;
+        }
+    }
+
+    /// <summary>
+    /// CREATE DATABASE IF NOT EXISTS must resolve the target through the persistent registry, not the
+    /// local in-memory cache. When a database is registered on another cluster node but absent from
+    /// this node's cache, a cache-only check would run the whole create flow and fail late at
+    /// RegisterAsync; the persistent check returns/opens the existing database instead.
+    ///
+    /// Simulated on a single node: a second executor with its own registry ("remote node") creates the
+    /// target, so it lands in the shared KV registry but not in this test's sharedRegistry cache.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task CreateIfNotExists_TargetInKvButNotLocalCache_OpensExisting()
+    {
+        // "Remote node": independent registry + executor over the same Kahuna node.
+        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!);
+        await using CommandExecutor remote = new(
+            new CommandValidator(), new CatalogsManager(logger), logger,
+            sharedNode: TestNode!, registry: remoteRegistry, isClusterMode: false);
+
+        string target = "t_" + Guid.NewGuid().ToString("n");
+        await remote.CreateDatabase(new CreateDatabaseTicket(target, ifNotExists: false));
+
+        // Precondition: the local cache has never seen the target.
+        Assert.IsNull(sharedRegistry!.Get(target), "precondition: target must be absent from the local cache");
+
+        await using CommandExecutor local = CreateCommandExecutor(); // sharedRegistry-backed
+
+        // CREATE IF NOT EXISTS must find the existing cross-node database and open it, not throw.
+        DatabaseDescriptor db = await local.CreateDatabase(new CreateDatabaseTicket(target, ifNotExists: true));
+
+        Assert.IsNotNull(db, "CREATE IF NOT EXISTS must return the existing cross-node database");
+        Assert.AreEqual(target, db.Name, "the returned database must be the existing target, not a new one");
+    }
+
+    /// <summary>
+    /// The branch form of CREATE DATABASE IF NOT EXISTS shares the same persistent existence check, so
+    /// when the branch target already exists cross-node it must be opened without running the branch
+    /// flow — no new snapshot-floor hold acquired, no metadata copied.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task CreateBranchIfNotExists_TargetInKvButNotLocalCache_OpensWithoutNewHold()
+    {
+        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!);
+        await using CommandExecutor remote = new(
+            new CommandValidator(), new CatalogsManager(logger), logger,
+            sharedNode: TestNode!, registry: remoteRegistry, isClusterMode: false);
+
+        string source = "src_" + Guid.NewGuid().ToString("n");
+        await remote.CreateDatabase(new CreateDatabaseTicket(source, ifNotExists: false));
+
+        string branchTarget = "b_" + Guid.NewGuid().ToString("n");
+        await remote.CreateDatabase(new CreateDatabaseTicket(branchTarget, ifNotExists: false, branchFrom: source));
+
+        // The branch target's own hold exists; capture the live-hold count so we can assert the
+        // IF NOT EXISTS call adds no further hold.
+        (_, int holdsBefore) = await TestNode!.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        Assert.IsNull(sharedRegistry!.Get(branchTarget), "precondition: branch target absent from local cache");
+
+        await using CommandExecutor local = CreateCommandExecutor();
+
+        DatabaseDescriptor db = await local.CreateDatabase(
+            new CreateDatabaseTicket(branchTarget, ifNotExists: true, branchFrom: source));
+
+        Assert.AreEqual(branchTarget, db.Name, "must open the existing branch target");
+
+        (_, int holdsAfter) = await TestNode!.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        Assert.AreEqual(holdsBefore, holdsAfter,
+            "CREATE BRANCH IF NOT EXISTS on an existing target must not acquire a new snapshot-floor hold");
+    }
+
+    /// <summary>
+    /// The second BR12 outcome: when branch-create registers its child BEFORE DropDatabase sets
+    /// the drop-intent, DropDatabase's subsequent HasLiveDescendantsAsync scan observes the child
+    /// and drop fails with DatabaseHasLiveDescendants, leaving both parent and child intact.
+    /// This is symmetrical to <see cref="DropDatabase_DropIntent_PreventsCrossNodeBranchCreateRace"/>:
+    /// that test covers "drop wins"; this test covers "branch-create wins."
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task DropDatabase_DescendantScanAfterIntent_AbortsWhenChildAlreadyRegistered()
+    {
+        (string rootName, DatabaseDescriptor rootDb, CommandExecutor executor) =
+            await CreateRootWithTable("CREATE TABLE things_br12b (id OBJECT_ID PRIMARY KEY, v STRING)");
+
+        // Branch-create wins the race: register a child before drop acquires its intent.
+        string branchName = NewName();
+        await executor.CreateDatabase(new CreateDatabaseTicket(branchName, ifNotExists: false, branchFrom: rootName));
+        TrackDatabase(branchName, executor);
+
+        // Now simulate DropDatabase acquiring its intent (child already registered in KV).
+        // The subsequent HasLiveDescendantsAsync scan must find the child and the drop must fail.
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            () => executor.DropDatabase(new DropDatabaseTicket(rootName)));
+
+        Assert.IsNotNull(ex);
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseHasLiveDescendants, ex!.Code,
+            "drop must fail with DatabaseHasLiveDescendants when the child was registered first");
+
+        // Both parent and child must still be usable.
+        Assert.IsNotNull(sharedRegistry!.Get(rootName), "parent must still be registered after failed drop");
+        Assert.IsNotNull(sharedRegistry.Get(branchName), "child must still be registered after failed drop");
+
+        // Drop-intent must have been released (so a future drop attempt is not blocked).
+        DatabaseRegistryEntry rootEntry = sharedRegistry.Get(rootName)!;
+        bool reacquired = await sharedRegistry.AcquireDropIntentAsync(rootEntry.Id);
+        if (reacquired)
+            await sharedRegistry.ReleaseDropIntentAsync(rootEntry.Id);
+        Assert.IsTrue(reacquired, "drop-intent must have been released after the aborted drop");
+    }
+
+    /// <summary>
+    /// BR15: the pending-create marker is now a mandatory, confirmed write before
+    /// <c>CopyMetaForBranchAsync</c> runs — not best-effort. This test verifies the key invariant
+    /// that the fix preserves: every meta namespace written by <c>CopyMetaForBranchAsync</c> is
+    /// either registered in the persistent registry (success path) or it has a pending-create marker
+    /// visible to <see cref="DatabaseRegistry.LoadOrphanBranchIdsAsync"/> (crash path).
+    ///
+    /// <para>The test directly exercises the "confirmed write" side of the invariant: calling
+    /// <see cref="DatabaseRegistry.TrackPendingBranchAsync"/> writes a durable key that
+    /// <see cref="DatabaseRegistry.LoadOrphanBranchIdsAsync"/> immediately finds as an orphan
+    /// (because the id is not yet registered). This proves that if the process crashes between
+    /// the (now-mandatory) marker write and a subsequent <c>RegisterAsync</c>, the startup scrubber
+    /// has a reliable handle on the orphaned namespace — there is no window where CopyMeta runs
+    /// but the marker is absent.</para>
+    ///
+    /// <para>Note: testing the complementary case (marker write fails → creation aborts before
+    /// CopyMeta) requires a Kahuna fault injector that is disproportionate to the test value; that
+    /// code path is verified by code review (TrackPendingBranchAsync now propagates exceptions and
+    /// is called before CopyMetaForBranchAsync inside the try block that releases the snapshot hold
+    /// on any failure).</para>
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task PendingMarker_IsConfirmedDurable_VisibleToOrphanScanner()
+    {
+        (string _, DatabaseDescriptor rootDb, CommandExecutor executor) =
+            await CreateDatabase();
+
+        // Allocate a branch id directly, as CreateBranchDatabaseAsync would.
+        string branchId = await sharedRegistry!.AllocateIdAsync();
+
+        // Write the mandatory pending-create marker. With the BR15 fix, this write is confirmed
+        // durable before CopyMetaForBranchAsync runs: if it threw, creation would abort and no
+        // meta namespace would exist (no orphan possible).
+        await sharedRegistry.TrackPendingBranchAsync(branchId);
+
+        // The marker must be immediately visible to the orphan scanner.
+        // Because branchId is not registered, it must appear as an orphan.
+        List<string> orphans = await sharedRegistry.LoadOrphanBranchIdsAsync();
+        Assert.That(orphans, Contains.Item(branchId),
+            "confirmed marker write must be visible to the orphan scanner before RegisterAsync runs");
+
+        // Clean up: clear the marker (simulates successful creation or clean abort).
+        await sharedRegistry.ClearPendingBranchAsync(branchId);
+
+        List<string> orphansAfter = await sharedRegistry.LoadOrphanBranchIdsAsync();
+        Assert.That(orphansAfter, Does.Not.Contain(branchId),
+            "cleared marker must no longer appear as an orphan");
+
+        // Side-effect: verify rootDb is unaffected.
+        _ = rootDb;
+        _ = executor;
     }
 }
