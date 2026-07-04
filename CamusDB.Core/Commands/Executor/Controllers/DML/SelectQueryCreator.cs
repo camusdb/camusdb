@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core;
+using CamusDB.Core.Cache;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -33,6 +34,7 @@ internal sealed class SelectQueryCreator
         IReadOnlyList<OrderByItem>? orderBy = CreateOrderBy(ast.extendedTwo, projections);
         IReadOnlyList<NodeAst>? groupBy = CreateGroupBy(ast.extendedFive, projections);
         BoundPredicate? having = CreateHaving(ast.extendedSix);
+        CacheHintOptions? cacheHint = ExtractQueryCacheHint(source);
 
         return new SelectQuery(
             Source: source,
@@ -43,7 +45,8 @@ internal sealed class SelectQueryCreator
             OrderBy: orderBy,
             Limit: ast.extendedThree,
             Offset: ast.extendedFour,
-            IsDistinct: ast.yytext is not null);
+            IsDistinct: ast.yytext is not null,
+            CacheHint: cacheHint);
     }
 
     private (QuerySource Source, BoundPredicate? Where) CreateFromClause(NodeAst fromAst, NodeAst? whereAst)
@@ -90,11 +93,11 @@ internal sealed class SelectQueryCreator
         {
             string tableName = tableAst.leftAst!.yytext!;
             string? alias = tableAst.rightAst?.yytext;
-            string? forcedIndex = tableAst.extendedOne is not null
-                ? GetForcedIndex(tableAst.extendedOne)
-                : null;
+            NodeAst? hintAst = tableAst.extendedOne;
+            string? forcedIndex = hintAst is not null ? GetForcedIndex(hintAst) : null;
+            CacheHintOptions? cacheHint = hintAst is not null ? ExtractCacheHint(hintAst) : null;
 
-            return new TableSource(tableName, alias, forcedIndex);
+            return new TableSource(tableName, alias, forcedIndex, cacheHint);
         }
 
         return tableAst.nodeType switch
@@ -306,5 +309,101 @@ internal sealed class SelectQueryCreator
         }
 
         return projection;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cache hint extraction
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Scans the <paramref name="source"/> tree for <see cref="TableSource"/> nodes that carry
+    /// a cache hint. Returns null when none are found, the single hint when exactly one is present,
+    /// and throws when multiple distinct table sources carry hints (only one hint per SELECT is
+    /// allowed for v1).
+    /// </summary>
+    private static CacheHintOptions? ExtractQueryCacheHint(QuerySource source)
+    {
+        List<CacheHintOptions> found = new();
+        CollectCacheHints(source, found);
+
+        if (found.Count == 0)
+            return null;
+
+        if (found.Count > 1)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "A SELECT may carry at most one {cache=...} hint.");
+
+        return found[0];
+    }
+
+    private static void CollectCacheHints(QuerySource source, List<CacheHintOptions> found)
+    {
+        switch (source)
+        {
+            case TableSource { CacheHint: { } hint }:
+                found.Add(hint);
+                break;
+
+            case JoinSource js:
+                CollectCacheHints(js.Left, found);
+                CollectCacheHints(js.Right, found);
+                break;
+
+            case DerivedTableSource dts:
+                CollectCacheHints(dts.Query.Source, found);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Extracts a <see cref="CacheHintOptions"/> from a <see cref="NodeType.CacheHint"/> AST node.
+    /// Returns null for any other node type (including <see cref="NodeType.IdentifierWithOpts"/>
+    /// which belongs to FORCE_INDEX hints).
+    /// </summary>
+    private static CacheHintOptions? ExtractCacheHint(NodeAst hintAst)
+    {
+        if (hintAst.nodeType != NodeType.CacheHint)
+            return null;
+
+        string cacheName = hintAst.yytext!;
+        int? ttlMs = null;
+        bool isStrict = false;
+
+        if (hintAst.leftAst is not null)
+            CollectCacheHintOptions(hintAst.leftAst, ref ttlMs, ref isStrict);
+
+        return new CacheHintOptions(cacheName, ttlMs, isStrict);
+    }
+
+    private static void CollectCacheHintOptions(NodeAst node, ref int? ttlMs, ref bool isStrict)
+    {
+        if (node.nodeType == NodeType.ExprList)
+        {
+            if (node.leftAst is not null)
+                CollectCacheHintOptions(node.leftAst, ref ttlMs, ref isStrict);
+
+            if (node.rightAst is not null)
+                CollectCacheHintOptions(node.rightAst, ref ttlMs, ref isStrict);
+
+            return;
+        }
+
+        if (node.nodeType == NodeType.String && node.yytext == "strict")
+        {
+            isStrict = true;
+        }
+        else if (node.nodeType == NodeType.Integer && node.yytext is not null)
+        {
+            // The grammar already validates and normalises the TTL to milliseconds in [1, int.MaxValue],
+            // so int.TryParse should always succeed here. We keep the failure branch as a safeguard
+            // against internal misuse (e.g. a CacheHint node constructed in tests without going through
+            // the grammar).
+            if (!int.TryParse(node.yytext, out int ms) || ms <= 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "ttl value must be between 1 and " + int.MaxValue + " (ms); got: " + node.yytext);
+            ttlMs = ms;
+        }
     }
 }

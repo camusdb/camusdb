@@ -133,4 +133,11 @@ public enum NodeType
     ExplainPhysical,
     ExplainAnalyze,
     AnalyzeTable,
+    /// <summary>
+    /// Cache hint extracted from a <c>{cache=name}</c> table-reference hint.
+    /// Layout: <c>yytext</c> = cache name; <c>leftAst</c> = option list (ExprList of
+    /// String/Integer option nodes) or single option node; null when no options.
+    /// Option nodes: NodeType.String with yytext="strict"; NodeType.Integer with yytext=ttl_ms.
+    /// </summary>
+    CacheHint,
 }

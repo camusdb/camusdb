@@ -5,7 +5,7 @@
  * file that was distributed with this source code.
  */
 
-using System.Security.Cryptography;
+using System.IO.Hashing;
 using System.Text;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -22,8 +22,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// values (<c>WHERE id = 1</c> vs <c>WHERE id = 2</c>) produce the same shape; queries that
 /// reference different columns or use different operators produce different shapes.
 ///
-/// The ID is the first 16 hex characters of the SHA-256 hash of the canonical form, giving
-/// 64 bits of collision resistance — sufficient for a local plan-cache key.
+/// The ID is the 16-hex-character (64-bit) XxHash64 digest of the canonical form. XxHash is
+/// non-cryptographic, which is appropriate here: the ID keys a local plan cache, not a security
+/// boundary, so only a low accidental-collision probability is required. The exhaustive canonical
+/// form above (every child slot rendered) is what prevents structurally distinct queries from
+/// sharing a shape; the hash only guards against digest collisions.
 /// </summary>
 internal static class QueryShapeComputer
 {
@@ -180,7 +183,9 @@ internal static class QueryShapeComputer
 
     private static string HashHex16(string canonical)
     {
-        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
-        return Convert.ToHexStringLower(hash)[..16];
+        // XxHash64 produces 8 bytes → exactly 16 lowercase hex characters, matching the
+        // historical 64-bit shape-ID width without the truncation the SHA-256 path needed.
+        byte[] hash = XxHash64.Hash(Encoding.UTF8.GetBytes(canonical));
+        return Convert.ToHexStringLower(hash);
     }
 }

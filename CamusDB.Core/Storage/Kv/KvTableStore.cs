@@ -165,6 +165,13 @@ public sealed class KvTableStore
     public string IndexKeySpace(string indexId) => BuildIndexBucketPrefix(indexId);
 
     /// <summary>
+    /// Returns the full KV key for the given row: <c>{dbId}:{tableId}:r/{rowIdHex24}</c>.
+    /// Used by the dependency collector to record per-row point dependencies without exposing
+    /// the internal key-prefix fields.
+    /// </summary>
+    public string RowPointKey(ObjectIdValue rowId) => rowKeyPrefix + rowId.ToString();
+
+    /// <summary>
     /// Number of ancestor levels this store is configured to walk on a read miss.
     /// Zero for root databases (no ancestry). This is the per-read amplification factor:
     /// a point read may probe up to <c>LineageDepth</c> extra levels, and a range scan

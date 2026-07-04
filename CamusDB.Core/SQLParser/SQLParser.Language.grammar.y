@@ -352,8 +352,108 @@ opt_table_alias : TAS any_identifier { $$.n = $2.n; }
 
 opt_table_hint : TAT LBRACE identifier TEQUALS identifier RBRACE
                { $$.n = new(NodeType.IdentifierWithOpts, null, $3.n, $5.n, null, null, null, null, null); }
+               | LBRACE cache_hint_spec RBRACE
+               { $$.n = $2.n; }
                | { $$.n = null; }
                ;
+
+/* {cache=name} or {cache=name, ttl=30s} or {cache=name, strict} or combinations.
+ *
+ * NodeType.CacheHint layout:
+ *   yytext      = cache name (lowercased at reduce time by the `identifier` production's ToLowerInvariant)
+ *   leftAst     = option list: ExprList tree of option nodes, single option node, or null
+ *
+ * Option nodes:
+ *   NodeType.String  with yytext="strict"  — strict validation flag
+ *   NodeType.Integer with yytext=<ms>      — per-hint TTL override, always stored as milliseconds
+ *
+ * TTL format: ttl=<N><unit> where unit is ms | s | m | h, or bare ttl=<N> (milliseconds).
+ * The grammar normalises every form to milliseconds before storing in yytext, so the
+ * SelectQueryCreator / CollectCacheHintOptions path always reads plain integer milliseconds.
+ * Valid range: 1 … 2147483647 ms. ttl=0 and overflow both produce a CamusDBException.
+ */
+cache_hint_spec : TIDENTIFIER TEQUALS identifier
+               {
+                 if (!$1.s.Equals("cache", System.StringComparison.OrdinalIgnoreCase))
+                     throw new CamusDB.Core.CamusDBException(
+                         CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                         "Unknown table hint '" + $1.s + "'. Supported: {cache=name}");
+                 $$.n = new(NodeType.CacheHint, null, null, null, null, null, null, null, $3.n.yytext);
+               }
+               | TIDENTIFIER TEQUALS identifier TCOMMA cache_hint_options
+               {
+                 if (!$1.s.Equals("cache", System.StringComparison.OrdinalIgnoreCase))
+                     throw new CamusDB.Core.CamusDBException(
+                         CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                         "Unknown table hint '" + $1.s + "'. Supported: {cache=name}");
+                 $$.n = new(NodeType.CacheHint, $5.n, null, null, null, null, null, null, $3.n.yytext);
+               }
+               ;
+
+cache_hint_options : cache_hint_option { $$.n = $1.n; }
+                   | cache_hint_options TCOMMA cache_hint_option
+                   { $$.n = new(NodeType.ExprList, $1.n, $3.n, null, null, null, null, null, null); }
+                   ;
+
+cache_hint_option : TIDENTIFIER
+                  {
+                    if (!$1.s.Equals("strict", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "Unknown cache hint option '" + $1.s + "'. Supported: ttl=<value><unit>, strict");
+                    $$.n = new(NodeType.String, null, null, null, null, null, null, null, "strict");
+                  }
+                  | TIDENTIFIER TEQUALS TDIGIT
+                  {
+                    if (!$1.s.Equals("ttl", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "Unknown cache hint option '" + $1.s + "'. Supported: ttl=<value><unit>, strict");
+                    if (!long.TryParse($3.s, out long ttlBareMs) || ttlBareMs <= 0 || ttlBareMs > int.MaxValue)
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "ttl value must be between 1 and " + int.MaxValue + " (milliseconds); got: " + $3.s);
+                    $$.n = new(NodeType.Integer, null, null, null, null, null, null, null, ttlBareMs.ToString());
+                  }
+                  | TIDENTIFIER TEQUALS TDIGIT TIDENTIFIER
+                  {
+                    if (!$1.s.Equals("ttl", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "Unknown cache hint option '" + $1.s + "'. Supported: ttl=<value><unit>, strict");
+                    if (!long.TryParse($3.s, out long ttlRaw) || ttlRaw <= 0 || ttlRaw > int.MaxValue)
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "ttl value must be a positive integer no greater than " + int.MaxValue + "; got: " + $3.s);
+                    // ttlRaw is bounded to int.MaxValue above, so the unit multiplication cannot
+                    // overflow Int64 (max int.MaxValue * 3_600_000 stays well within long); the
+                    // post-multiply check enforces the true millisecond ceiling.
+                    long ttlUnitMs = $4.s.ToLowerInvariant() switch {
+                        "ms" => ttlRaw,
+                        "s"  => ttlRaw * 1000L,
+                        "m"  => ttlRaw * 60_000L,
+                        "h"  => ttlRaw * 3_600_000L,
+                        _    => throw new CamusDB.Core.CamusDBException(
+                                    CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                                    "Unknown ttl unit '" + $4.s + "'. Supported: ms, s, m, h"),
+                    };
+                    if (ttlUnitMs > int.MaxValue)
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "ttl value exceeds maximum (" + int.MaxValue + " ms); got: " + $3.s + $4.s);
+                    $$.n = new(NodeType.Integer, null, null, null, null, null, null, null, ttlUnitMs.ToString());
+                  }
+                  | TIDENTIFIER TEQUALS identifier
+                  {
+                    if ($1.s.Equals("ttl", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "cache hint option 'ttl' requires an integer value, optionally with a unit (ms, s, m, h); got: " + $3.n.yytext);
+                    throw new CamusDB.Core.CamusDBException(
+                        CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                        "Unknown cache hint option '" + $1.s + "'. Supported: ttl=<value><unit>, strict");
+                  }
+                  ;
 
 create_table_item_list : create_table_item_list TCOMMA create_table_item { $$.n = new(NodeType.CreateTableItemList, $1.n, $3.n, null, null, null, null, null, null); }
                        | create_table_item_list TCOMMA create_table_inline_constraint { $$.n = new(NodeType.CreateTableItemList, $1.n, $3.n, null, null, null, null, null, null); }

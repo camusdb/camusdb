@@ -72,7 +72,8 @@ internal static class QueryTicketAdapter
             isDistinct: query.IsDistinct,
             selectQuery: query,
             semiJoinSpecs: semiJoinSpecs,
-            preparedInSets: preparedInSets);
+            preparedInSets: preparedInSets,
+            cacheHint: query.CacheHint);
     }
 
     private static IReadOnlyDictionary<NodeAst, PreparedInSet>? BuildPreparedInSets(PredicateAnalysis analysis)

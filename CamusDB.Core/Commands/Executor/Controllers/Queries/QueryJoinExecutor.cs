@@ -8,6 +8,7 @@
 
 using System.IO;
 using System.Runtime.CompilerServices;
+using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
@@ -301,11 +302,20 @@ internal sealed class QueryJoinExecutor
         BoundTableSource source = joinNode.RightSource;
         TableDescriptor table = source.Table;
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
+        QueryDependencyCollector? deps = plan.DepCollector;
+
+        // Unique index probe: record the index bucket range (membership check) and schema.
+        deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
+        deps?.RecordSchema(table.Schema.Id!, GetTableSchemaVersionForAlias(plan, source.Alias));
 
         ObjectIdValue? rowId = await table.Store.LookupUnique(plan.Ticket.TxnState, joinNode.Index.KvId, lookupKey).ConfigureAwait(false);
 
         if (rowId is null)
             yield break;
+
+        // Record the row point dep whether or not it passes the execution filter — a later
+        // update to a non-indexed column could change what the join returns.
+        deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
 
         QueryResultRow? row = await LoadRightRow(source, rowId.Value, joinNode.RightExecutionFilter, plan).ConfigureAwait(false);
 
@@ -323,6 +333,12 @@ internal sealed class QueryJoinExecutor
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, joinNode.Index);
         ColumnValue lookupValue = lookupKey.Values[0];
+        QueryDependencyCollector? deps = plan.DepCollector;
+
+        // Non-unique index equality probe: the index bucket range catches phantom inserts for
+        // this key. Per-row point deps are recorded below as each row is fetched.
+        deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
+        deps?.RecordSchema(table.Schema.Id!, GetTableSchemaVersionForAlias(plan, source.Alias));
 
         await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
@@ -337,6 +353,8 @@ internal sealed class QueryJoinExecutor
 
             if (key.Values[0].CompareTo(lookupValue) != 0)
                 continue;
+
+            deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
             QueryResultRow? row = await LoadRightRow(source, rowId, joinNode.RightExecutionFilter, plan).ConfigureAwait(false);
 
@@ -439,11 +457,17 @@ internal sealed class QueryJoinExecutor
         TableDescriptor table = source.Table;
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         IReadOnlySet<string>? required = requiredColumns ?? GetRequiredColumnsForAlias(plan, source.Alias);
+        QueryDependencyCollector? deps = plan.DepCollector;
+
+        deps?.RecordRange(table.Store.RowKeySpace);
+        deps?.RecordSchema(table.Schema.Id!, GetTableSchemaVersionForAlias(plan, source.Alias));
 
         await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(plan.Ticket.TxnState).ConfigureAwait(false))
         {
             if (data.Length == 0)
                 continue;
+
+            deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
             Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
                 table.Schema,
@@ -481,8 +505,12 @@ internal sealed class QueryJoinExecutor
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         IReadOnlySet<string>? required = GetRequiredColumnsForAlias(plan, source.Alias);
+        QueryDependencyCollector? deps = plan.DepCollector;
 
         bool unique = index.Type == IndexType.Unique;
+
+        deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
+        deps?.RecordSchema(table.Schema.Id!, GetTableSchemaVersionForAlias(plan, source.Alias));
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
@@ -490,6 +518,8 @@ internal sealed class QueryJoinExecutor
             keyTypes,
             from: null, to: null, unique: unique).ConfigureAwait(false))
         {
+            deps?.RecordPoint(table.Store.RowPointKey(rowId));
+
             byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
 
             if (data is null || data.Length == 0)
@@ -530,8 +560,14 @@ internal sealed class QueryJoinExecutor
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, rangeNode.Index);
         IReadOnlySet<string>? required = GetRequiredColumnsForAlias(plan, source.Alias);
+        QueryDependencyCollector? deps = plan.DepCollector;
 
         bool unique = rangeNode.Index.Type == IndexType.Unique;
+
+        // Index range scan: the index bucket range covers membership phantoms; per-row point
+        // deps cover updates to non-indexed projected columns.
+        deps?.RecordRange(table.Store.IndexKeySpace(rangeNode.Index.KvId));
+        deps?.RecordSchema(table.Schema.Id!, GetTableSchemaVersionForAlias(plan, source.Alias));
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
@@ -543,6 +579,8 @@ internal sealed class QueryJoinExecutor
             toInclusive: rangeNode.ToInclusive,
             unique: unique).ConfigureAwait(false))
         {
+            deps?.RecordPoint(table.Store.RowPointKey(rowId));
+
             byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
 
             if (data is null || data.Length == 0)
@@ -586,6 +624,11 @@ internal sealed class QueryJoinExecutor
         IReadOnlySet<string>? required = GetRequiredColumnsForAlias(plan, source.Alias);
         bool isUnique = inListNode.Index.Type == IndexType.Unique;
         HashSet<ObjectIdValue> seen = new();
+        QueryDependencyCollector? deps = plan.DepCollector;
+
+        // IN-list scan: record the index bucket once (covers all per-value range probes) and schema.
+        deps?.RecordRange(table.Store.IndexKeySpace(inListNode.Index.KvId));
+        deps?.RecordSchema(table.Schema.Id!, GetTableSchemaVersionForAlias(plan, source.Alias));
 
         foreach (ColumnValue value in inListNode.Values)
         {
@@ -598,6 +641,8 @@ internal sealed class QueryJoinExecutor
 
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
+
+                deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
 
                 byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId.Value).ConfigureAwait(false);
                 if (data is null || data.Length == 0)
@@ -634,6 +679,8 @@ internal sealed class QueryJoinExecutor
                 {
                     if (!seen.Add(rowId))
                         continue;
+
+                    deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
                     byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
                     if (data is null || data.Length == 0)

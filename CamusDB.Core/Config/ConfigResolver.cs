@@ -116,6 +116,19 @@ public static class ConfigResolver
         CamusDBConfig.MaxIndexesPerTable = config.MaxIndexesPerTable;
         CamusDBConfig.MaxTablesPerDatabase = config.MaxTablesPerDatabase;
 
+        CamusDBConfig.QueryResultCacheEnabled = config.QueryResultCacheEnabled;
+        CamusDBConfig.QueryResultCacheDefaultTtlMs = config.QueryResultCacheDefaultTtlMs;
+        CamusDBConfig.QueryResultCacheMaxEntries = config.QueryResultCacheMaxEntries;
+        CamusDBConfig.QueryResultCacheMaxBytes = config.QueryResultCacheMaxBytes;
+        CamusDBConfig.QueryResultCacheMaxEntryBytes = config.QueryResultCacheMaxEntryBytes;
+        CamusDBConfig.QueryResultCacheMaxEntryRows = config.QueryResultCacheMaxEntryRows;
+        CamusDBConfig.QueryResultCacheMaxDeps = config.QueryResultCacheMaxDeps;
+        CamusDBConfig.QueryResultCacheMaxPointDeps = config.QueryResultCacheMaxPointDeps;
+        CamusDBConfig.QueryResultCacheMaxRanges = config.QueryResultCacheMaxRanges;
+        CamusDBConfig.QueryResultCacheSingleFlightWaitMs = config.QueryResultCacheSingleFlightWaitMs;
+        CamusDBConfig.QueryResultCacheStrictValidationMaxKeys = config.QueryResultCacheStrictValidationMaxKeys;
+        CamusDBConfig.QueryResultCacheSweepIntervalMs = config.QueryResultCacheSweepIntervalMs;
+
         CamusDBConfig.Kahuna = config.Kahuna;
     }
 }

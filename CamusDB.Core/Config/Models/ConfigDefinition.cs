@@ -196,6 +196,46 @@ public class ConfigDefinition
     /// <summary>Allow-listed Kahuna engine tunables for cluster and standalone nodes.</summary>
     public KahunaOptionsConfig Kahuna { get; set; } = new();
 
+    // ──────────────────────────────────────────────────────────────────────────
+    // Query result cache
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Enables the per-node in-memory query result cache. Default: false. Maps to <c>CamusDBConfig.QueryResultCacheEnabled</c>.</summary>
+    public bool QueryResultCacheEnabled { get; set; } = false;
+
+    /// <summary>Default TTL in milliseconds for cache entries without a per-hint override. Default: 5 000 ms. Maps to <c>CamusDBConfig.QueryResultCacheDefaultTtlMs</c>.</summary>
+    public int QueryResultCacheDefaultTtlMs { get; set; } = 5_000;
+
+    /// <summary>Maximum entries held by the cache (LRU eviction when exceeded). Default: 1 024. Maps to <c>CamusDBConfig.QueryResultCacheMaxEntries</c>.</summary>
+    public int QueryResultCacheMaxEntries { get; set; } = 1_024;
+
+    /// <summary>Maximum total bytes across all cached entries. Default: 64 MiB. Maps to <c>CamusDBConfig.QueryResultCacheMaxBytes</c>.</summary>
+    public long QueryResultCacheMaxBytes { get; set; } = 64 * 1024 * 1024;
+
+    /// <summary>Maximum bytes for a single cache entry; oversized results are bypassed. Default: 1 MiB. Maps to <c>CamusDBConfig.QueryResultCacheMaxEntryBytes</c>.</summary>
+    public long QueryResultCacheMaxEntryBytes { get; set; } = 1 * 1024 * 1024;
+
+    /// <summary>Maximum rows in a single cache entry; oversized results are bypassed. Default: 10 000. Maps to <c>CamusDBConfig.QueryResultCacheMaxEntryRows</c>.</summary>
+    public int QueryResultCacheMaxEntryRows { get; set; } = 10_000;
+
+    /// <summary>Maximum combined dep facts (range + point + schema) per entry before bypass. Default: 4 096. Maps to <c>CamusDBConfig.QueryResultCacheMaxDeps</c>.</summary>
+    public int QueryResultCacheMaxDeps { get; set; } = 4_096;
+
+    /// <summary>Maximum point-key deps per entry before promotion or bypass. Default: 2 048. Maps to <c>CamusDBConfig.QueryResultCacheMaxPointDeps</c>.</summary>
+    public int QueryResultCacheMaxPointDeps { get; set; } = 2_048;
+
+    /// <summary>Maximum range deps per entry before promotion or bypass. Default: 256. Maps to <c>CamusDBConfig.QueryResultCacheMaxRanges</c>.</summary>
+    public int QueryResultCacheMaxRanges { get; set; } = 256;
+
+    /// <summary>Single-flight waiter timeout in milliseconds before independent execution. Default: 250 ms. Maps to <c>CamusDBConfig.QueryResultCacheSingleFlightWaitMs</c>.</summary>
+    public int QueryResultCacheSingleFlightWaitMs { get; set; } = 250;
+
+    /// <summary>Max keys probed during strict validation before treating the entry as invalid. Default: 10 000. Maps to <c>CamusDBConfig.QueryResultCacheStrictValidationMaxKeys</c>.</summary>
+    public int QueryResultCacheStrictValidationMaxKeys { get; set; } = 10_000;
+
+    /// <summary>Background sweep interval in milliseconds for TTL expiry. Default: 10 000 ms. Maps to <c>CamusDBConfig.QueryResultCacheSweepIntervalMs</c>.</summary>
+    public int QueryResultCacheSweepIntervalMs { get; set; } = 10_000;
+
     public bool IsClusterMode => Mode == "cluster" || Peers.Count > 0;
 
     /// <summary>Parses <see cref="DefaultIsolationLevel"/> to the engine enum.</summary>

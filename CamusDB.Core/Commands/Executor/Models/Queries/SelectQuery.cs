@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Cache;
 using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -23,6 +24,11 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// <param name="Limit">Optional limit expression AST.</param>
 /// <param name="Offset">Optional offset expression AST.</param>
 /// <param name="IsDistinct">When true, duplicate output rows are eliminated after projection.</param>
+/// <param name="CacheHint">
+/// Query-level cache hint extracted from the first <c>{cache=name}</c> table-reference hint
+/// found in the <c>FROM</c> clause. Null when the query carries no cache hint and must
+/// follow the uncached execution path.
+/// </param>
 public sealed record SelectQuery(
     QuerySource Source,
     IReadOnlyList<ProjectionItem> Projections,
@@ -32,4 +38,5 @@ public sealed record SelectQuery(
     IReadOnlyList<OrderByItem>? OrderBy = null,
     NodeAst? Limit = null,
     NodeAst? Offset = null,
-    bool IsDistinct = false);
+    bool IsDistinct = false,
+    CacheHintOptions? CacheHint = null);

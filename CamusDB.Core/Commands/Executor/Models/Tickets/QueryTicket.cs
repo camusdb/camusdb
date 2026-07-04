@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Cache;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -88,6 +89,14 @@ public sealed class QueryTicket
     /// </summary>
     internal bool ExclusivePredicateLocks { get; }
 
+    /// <summary>
+    /// Query-result cache hint from a <c>{cache=name}</c> table-reference hint. Null when the
+    /// query carries no cache hint and must follow the uncached execution path.
+    /// Derived from <see cref="SelectQuery.CacheHint"/>; stored here for convenient access
+    /// without an extra null-check on the SelectQuery reference.
+    /// </summary>
+    public CacheHintOptions? CacheHint { get; }
+
     public QueryTicket(
         KvTransaction txnState,
         string databaseName,
@@ -110,7 +119,8 @@ public sealed class QueryTicket
         IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null,
         IReadOnlySet<string>? locateColumns = null,
         bool exclusivePredicateLocks = false,
-        IReadOnlyDictionary<NodeAst, PreparedInSet>? preparedInSets = null)
+        IReadOnlyDictionary<NodeAst, PreparedInSet>? preparedInSets = null,
+        CacheHintOptions? cacheHint = null)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -134,5 +144,6 @@ public sealed class QueryTicket
         LocateColumns = locateColumns;
         ExclusivePredicateLocks = exclusivePredicateLocks;
         PreparedInSets = preparedInSets;
+        CacheHint = cacheHint;
     }
 }

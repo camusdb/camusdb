@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Cache;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
@@ -111,6 +112,16 @@ public sealed class QueryPlan
     /// Always false during normal execution; set by EXPLAIN ANALYZE.
     /// </summary>
     public bool CollectRuntimeStats { get; internal set; }
+
+    /// <summary>
+    /// Optional dependency collector attached by the cached-read path. When non-null,
+    /// scan methods record range and point deps into this collector as rows are read. After
+    /// execution completes, <see cref="QueryDependencyCollector.Build"/> returns the
+    /// <see cref="QueryDependencySet"/> to attach to the published entry.
+    /// Null on uncached queries — all collector calls are guarded by a null check so there is
+    /// no overhead on the normal execution path.
+    /// </summary>
+    internal QueryDependencyCollector? DepCollector { get; set; }
 
 	public QueryPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
 	{

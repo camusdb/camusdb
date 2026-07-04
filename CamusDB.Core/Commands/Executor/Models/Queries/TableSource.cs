@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Cache;
+
 namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 
 /// <summary>
@@ -17,7 +19,13 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// Optional index hint from <c>@{FORCE_INDEX=name}</c>. Primary-key hints use the internal
 /// <c>~pk</c> name after ticket creation.
 /// </param>
+/// <param name="CacheHint">
+/// Optional query-result cache hint from <c>{cache=name}</c>. At most one hint is allowed
+/// per SELECT; if multiple table sources carry hints <see cref="SelectQueryCreator"/> throws.
+/// Bubbled up to <see cref="SelectQuery.CacheHint"/> after construction.
+/// </param>
 public sealed record TableSource(
     string TableName,
     string? Alias = null,
-    string? ForcedIndexName = null) : QuerySource;
+    string? ForcedIndexName = null,
+    CacheHintOptions? CacheHint = null) : QuerySource;

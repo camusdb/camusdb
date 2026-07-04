@@ -1,0 +1,52 @@
+
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
+using CamusDB.Core.CommandsExecutor.Models;
+using Kahuna.Shared.KeyValue;
+using Kommander.Time;
+
+namespace CamusDB.Core.Cache;
+
+/// <summary>
+/// A no-op <see cref="IQueryResultCache"/> used when <c>query_result_cache_enabled</c> is
+/// <c>false</c> (the default) or when a test or component does not need caching.
+///
+/// All probes miss, all publishes silently succeed with a <see cref="QueryCacheStatus.Bypass"/>
+/// status, and invalidation is a no-op. The <see cref="PublishGate"/> is a real
+/// <see cref="CachePublishGate"/> instance so write paths can always call into it safely
+/// without a null check, but since nothing ever publishes, the gate's generation counters are
+/// irrelevant.
+/// </summary>
+public sealed class NullQueryResultCache : IQueryResultCache
+{
+    public static readonly NullQueryResultCache Instance = new();
+
+    public CachePublishGate PublishGate { get; } = new();
+
+    public Task<CachedQueryResult?> TryGetAsync(
+        string databaseId,
+        string cacheName,
+        string fingerprint,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult<CachedQueryResult?>(null);
+
+    public Task<QueryCacheStatus> TryPublishAsync(
+        CachedQueryResult result,
+        CacheGenerationToken generationToken,
+        QueryDependencySet? deps = null,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(QueryCacheStatus.Bypass);
+
+    public void InvalidateByModifiedKeys(IReadOnlyCollection<(string key, KeyValueDurability durability)> modifiedKeys) { }
+
+    public void InvalidateByTableId(string databaseId, string tableId) { }
+
+    public void InvalidateDatabase(string databaseId) { }
+
+    public void InvalidateCacheName(string databaseId, string cacheName) { }
+}

@@ -438,4 +438,65 @@ public static class CamusDBConfig
     /// nodes in cluster and standalone modes.
     /// </summary>
     public static Config.Models.KahunaOptionsConfig Kahuna = new();
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Query result cache
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Enables the per-node in-memory query result cache. When <c>false</c> (default), every
+    /// <c>{cache=…}</c> hint is treated as a bypass and the <see cref="Cache.NullQueryResultCache"/>
+    /// is used throughout, so no memory or locking overhead is incurred.
+    /// Set via <c>query_result_cache_enabled</c> in <c>config.yml</c>.
+    /// </summary>
+    public static bool QueryResultCacheEnabled = false;
+
+    /// <summary>
+    /// Default TTL in milliseconds for cache entries that do not carry a per-hint TTL override.
+    /// Entries that survive this interval without an invalidating write are expired by the
+    /// background sweep. Default: 5 000 ms.
+    /// </summary>
+    public static int QueryResultCacheDefaultTtlMs = 5_000;
+
+    /// <summary>Maximum number of entries the cache may hold (LRU eviction when exceeded). Default: 1 024.</summary>
+    public static int QueryResultCacheMaxEntries = 1_024;
+
+    /// <summary>Maximum total bytes across all cached entries. Default: 64 MiB.</summary>
+    public static long QueryResultCacheMaxBytes = 64 * 1024 * 1024;
+
+    /// <summary>Maximum bytes for a single cache entry. Results larger than this are bypassed. Default: 1 MiB.</summary>
+    public static long QueryResultCacheMaxEntryBytes = 1 * 1024 * 1024;
+
+    /// <summary>Maximum rows in a single cache entry. Results larger than this are bypassed. Default: 10 000.</summary>
+    public static int QueryResultCacheMaxEntryRows = 10_000;
+
+    /// <summary>
+    /// Maximum number of dependencies (range + point + schema facts combined) per entry.
+    /// When exceeded, the implementation must either promote to a coarser range or bypass
+    /// — never store an entry with an incomplete dependency set. Default: 4 096.
+    /// </summary>
+    public static int QueryResultCacheMaxDeps = 4_096;
+
+    /// <summary>Maximum point-key dependencies per entry before promotion or bypass. Default: 2 048.</summary>
+    public static int QueryResultCacheMaxPointDeps = 2_048;
+
+    /// <summary>Maximum range dependencies per entry before promotion or bypass. Default: 256.</summary>
+    public static int QueryResultCacheMaxRanges = 256;
+
+    /// <summary>
+    /// How long, in milliseconds, a waiter in the single-flight gate may block before giving up
+    /// and executing the query independently. Default: 250 ms.
+    /// </summary>
+    public static int QueryResultCacheSingleFlightWaitMs = 250;
+
+    /// <summary>
+    /// Maximum number of keys probed during strict validation before the entry is treated as
+    /// invalid and recomputed. Default: 10 000.
+    /// </summary>
+    public static int QueryResultCacheStrictValidationMaxKeys = 10_000;
+
+    /// <summary>
+    /// How often, in milliseconds, the background sweep removes expired entries. Default: 10 000 ms.
+    /// </summary>
+    public static int QueryResultCacheSweepIntervalMs = 10_000;
 }
