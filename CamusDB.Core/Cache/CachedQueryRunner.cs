@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Config;
 
 namespace CamusDB.Core.Cache;
 
@@ -54,6 +55,9 @@ public sealed class CachedQueryRunner
     internal QueryDependencyCollector? DepCollector { get; set; }
 
     private bool _drainCompleted;
+    private bool _capBreached;
+    private long _accumulatedBytes;
+    private readonly List<QueryResultRow> _accumulatedRows = new();
 
     public CachedQueryRunner(
         IQueryResultCache cache,
@@ -75,11 +79,33 @@ public sealed class CachedQueryRunner
     /// Materializes <paramref name="source"/> row by row, accumulating into the pending entry.
     /// If enumeration is cancelled or throws, <see cref="_drainCompleted"/> stays <c>false</c>
     /// and <see cref="FinalizeAsync"/> will not publish — enforcing the no-partial-publish invariant.
+    ///
+    /// <para><b>Cap enforcement:</b> once the accumulated row count or byte estimate crosses
+    /// <see cref="CamusDBConfig.QueryResultCacheMaxEntryRows"/> or
+    /// <see cref="CamusDBConfig.QueryResultCacheMaxEntryBytes"/>, buffering stops immediately:
+    /// the accumulated list is cleared (releasing its memory), <see cref="_capBreached"/> is set
+    /// to true, and the remaining rows are yielded to the consumer without being stored.
+    /// This bounds the extra memory to at most one cap-limit's worth of rows — the spec guarantee
+    /// that "live rows are returned but no entry is published" is memory-bounded.</para>
     /// </summary>
     public async IAsyncEnumerable<QueryResultRow> DrainAsync(IAsyncEnumerable<QueryResultRow> source)
     {
         await foreach (QueryResultRow row in source.WithCancellation(_ct).ConfigureAwait(false))
         {
+            if (!_capBreached)
+            {
+                _accumulatedRows.Add(row);
+                _accumulatedBytes += QueryResultCache.EstimateRowBytes(row);
+
+                if (_accumulatedRows.Count > CamusDBConfig.QueryResultCacheMaxEntryRows ||
+                    _accumulatedBytes > CamusDBConfig.QueryResultCacheMaxEntryBytes)
+                {
+                    // Release memory immediately and stop buffering for the rest of the stream.
+                    _accumulatedRows.Clear();
+                    _capBreached = true;
+                }
+            }
+
             yield return row;
         }
 
@@ -104,6 +130,9 @@ public sealed class CachedQueryRunner
         if (!_drainCompleted)
             return QueryCacheStatus.Bypass;
 
+        if (_capBreached)
+            return QueryCacheStatus.EvictedBeforePublish;
+
         // If the dep collector hit a cap, bypass rather than storing an incomplete dep set.
         QueryDependencySet? deps = DepCollector is not null
             ? (DepCollector.CapExceeded ? null : DepCollector.Build())
@@ -112,6 +141,7 @@ public sealed class CachedQueryRunner
         if (DepCollector is not null && DepCollector.CapExceeded)
             return QueryCacheStatus.EvictedBeforePublish;
 
-        return await _cache.TryPublishAsync(_pendingResult, _token, deps, _ct).ConfigureAwait(false);
+        CachedQueryResult result = _pendingResult with { Rows = _accumulatedRows };
+        return await _cache.TryPublishAsync(result, _token, deps, _ct).ConfigureAwait(false);
     }
 }

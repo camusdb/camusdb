@@ -8,6 +8,7 @@
 
 using CamusDB;
 using CamusDB.Core;
+using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
@@ -44,6 +45,16 @@ ConfigDefinition config = new ConfigReader().Read(configYml);
 ConfigResolver.ApplyCliOverrides(config, opts.ToOverrides());
 config.Validate();
 ConfigResolver.ApplyToCamusDBConfig(config);
+
+// Build the singleton query-result cache once, after config statics are set.
+// When the feature is off we pass null (not NullQueryResultCache.Instance): every hot-path
+// guard is `_cache is not null` / `database.Cache is { }`, so null short-circuits the whole
+// cache/gate protocol on the read and write paths with zero overhead — which is what the
+// KvTransactionsManager._cache contract ("null when disabled → gate calls skipped") assumes.
+// QueryResultCache(sweepIntervalMs: 0) reads QueryResultCacheSweepIntervalMs from config.
+IQueryResultCache? queryResultCache = CamusDBConfig.QueryResultCacheEnabled
+    ? new QueryResultCache(sweepIntervalMs: 0)
+    : null;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
@@ -126,7 +137,8 @@ if (config.IsClusterMode)
             services.GetRequiredService<ILogger<ICamusDB>>(),
             services.GetRequiredService<EmbeddedKahuna>(),
             services.GetRequiredService<ISchemaDdlForwarder>(),
-            isClusterMode: true
+            isClusterMode: true,
+            cache: queryResultCache
         ));
 }
 else
@@ -146,7 +158,8 @@ else
             services.GetRequiredService<CatalogsManager>(),
             services.GetRequiredService<ILogger<ICamusDB>>(),
             services.GetRequiredService<EmbeddedKahuna>(),
-            isClusterMode: false
+            isClusterMode: false,
+            cache: queryResultCache
         ));
 }
 
@@ -268,6 +281,9 @@ finally
 
     await commandExecutor.DisposeAsync();
     shutdownLogger.LogInformation("Databases closed");
+
+    if (queryResultCache is IDisposable disposableCache)
+        disposableCache.Dispose();
 
     await app.Services.GetRequiredService<EmbeddedKahuna>().DisposeAsync();
     shutdownLogger.LogInformation("Node stopped");

@@ -47,7 +47,7 @@ internal sealed class QueryScanner
 
         // Full table scan: the entire row-bucket range is a dependency (catches phantom inserts).
         deps?.RecordRange(table.Store.RowKeySpace);
-        deps?.RecordSchema(table.Schema.Id!, table.Schema.Version);
+        deps?.RecordSchema(table.Id, table.Schema.Version);
 
         await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
         {
@@ -113,7 +113,7 @@ internal sealed class QueryScanner
 
         // Full index scan: record the index bucket range and the schema version.
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
-        deps?.RecordSchema(table.Schema.Id!, table.Schema.Version);
+        deps?.RecordSchema(table.Id, table.Schema.Version);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             ticket.TxnState,

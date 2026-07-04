@@ -8,6 +8,7 @@
 
 using Nito.AsyncEx;
 using CamusDB.Core;
+using CamusDB.Core.Cache;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using System.Collections.Concurrent;
@@ -125,6 +126,17 @@ public sealed record DatabaseDescriptor : IDisposable
     public Schema Schema { get; } = new();
 
     public SystemSchema SystemSchema { get; set; } = new();
+
+    /// <summary>
+    /// Per-database query result cache, or null when the cache is disabled. Set by
+    /// <see cref="Controllers.DatabaseOpener"/> when the database is first loaded.
+    /// Passed to <see cref="KvTransactionsManager"/> so DML commit hooks can drive the
+    /// <see cref="CachePublishGate"/> write protocol (mark in-flight → invalidate → commit).
+    /// DDL paths call <see cref="IQueryResultCache.InvalidateByTableId"/> directly after
+    /// each successful schema commit because schema meta keys do not match the row/index
+    /// keyspace bucket pattern used by the automatic key-based invalidation.
+    /// </summary>
+    public IQueryResultCache? Cache { get; internal set; }
 
     public ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> TableDescriptors { get; }
 

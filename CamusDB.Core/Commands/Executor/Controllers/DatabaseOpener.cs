@@ -8,6 +8,7 @@
 
 using Nito.AsyncEx;
 using Kommander.Time;
+using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
@@ -44,6 +45,8 @@ internal sealed class DatabaseOpener
 
     private readonly Task<DatabaseRegistry> registryTask;
 
+    private readonly IQueryResultCache? cache;
+
     public DatabaseOpener(
         CommandExecutor commandExecutor,
         DatabaseDescriptors databaseDescriptors,
@@ -51,7 +54,8 @@ internal sealed class DatabaseOpener
         ILogger<ICamusDB> logger,
         EmbeddedKahuna? sharedNode,
         Task<DatabaseRegistry> registryTask,
-        bool isClusterMode = false)
+        bool isClusterMode = false,
+        IQueryResultCache? cache = null)
     {
         this.commandExecutor = commandExecutor;
         this.databaseDescriptors = databaseDescriptors;
@@ -74,6 +78,7 @@ internal sealed class DatabaseOpener
         this.sharedNode = sharedNode ?? throw new ArgumentNullException(nameof(sharedNode), "A shared Kahuna node is required");
         this.isClusterMode = isClusterMode;
         this.registryTask = registryTask;
+        this.cache = cache;
     }
 
     public async ValueTask<DatabaseDescriptor> Open(string name, bool recoveryMode = false)
@@ -124,7 +129,7 @@ internal sealed class DatabaseOpener
             return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
         };
 
-        KvTransactionsManager transactions = new(sharedNode.Kahuna, mintLocalT, logger);
+        KvTransactionsManager transactions = new(sharedNode.Kahuna, mintLocalT, logger, cache);
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new();
 
         DatabaseDescriptor databaseDescriptor = new(
@@ -134,7 +139,10 @@ internal sealed class DatabaseOpener
             transactions: transactions,
             tableDescriptors: tableDescriptors,
             ancestors: ancestors
-        );
+        )
+        {
+            Cache = cache,
+        };
 
         await catalogs.LoadMetaAsync(databaseDescriptor).ConfigureAwait(false);
 

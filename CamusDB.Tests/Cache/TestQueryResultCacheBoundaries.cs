@@ -19,7 +19,7 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.Cache;
 
 /// <summary>
-/// Unit tests that verify the two core safety invariants required by QC0:
+/// Unit tests that verify the two core cache safety invariants:
 ///
 /// 1. A cancelled or faulted query enumeration must never populate the cache.
 /// 2. A same-node write racing a cache miss cannot leave a stale entry published
@@ -269,7 +269,7 @@ public class TestQueryResultCacheBoundaries
     public void CommitInsideStoreAction_IsRejectedOnReentrantAttempt()
     {
         // This test verifies the design intent rather than a literal concurrent race
-        // (true concurrency tests belong in QC5 with a real cache implementation).
+        // (true concurrency tests belong with a real cached read-path implementation).
         // It shows that once a token is created at gen=0 and a CommitWrite bumps to gen=1,
         // a subsequent TryPublishUnderGeneration with the gen=0 token always fails —
         // regardless of when in the call sequence the check happens.

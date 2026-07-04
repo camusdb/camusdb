@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using System.Runtime.CompilerServices;
+using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -60,7 +62,105 @@ internal sealed class QueryExecutor
     {
         QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
 
+        // Only autocommit reads are cache-eligible: IsReadOnly ensures no writes, and
+        // TransactionId == Zero distinguishes synthetic autocommit reads (CreateReadOnly /
+        // CreateSnapshotReadOnly) from explicit Serializable RO transactions opened via
+        // BeginAsync(Serializable, ReadOnly) — the latter carry a real Kahuna timestamp,
+        // have a pinned read snapshot of their own, and must not be served a cached result
+        // from a different snapshot.
+        if (ticket.CacheHint is { } hint
+                && ticket.TxnState.IsReadOnly
+                && ticket.TxnState.TransactionId == HLCTimestamp.Zero
+                && database.Cache is { } cache)
+            return QueryWithCache(database, plan, hint, cache);
+
         return ExecuteQueryPlanInternal(plan);
+    }
+
+    /// <summary>
+    /// Executes a cached-read path for autocommit SELECTs (<see cref="KvTransaction.TransactionId"/>
+    /// == <see cref="HLCTimestamp.Zero"/>) with a <c>{cache=name}</c> hint. Explicit Serializable
+    /// read-only transactions are excluded at the call site: they carry a real Kahuna timestamp and
+    /// a pinned snapshot; serving them a cached result from a different snapshot would violate their
+    /// isolation guarantee.
+    ///
+    /// <para><b>Single-table only.</b> The generation fence snapshots only the primary table's row
+    /// keyspace. Multi-source (join) plans must never be routed here — they require all involved
+    /// tables' row keyspaces to be fenced, or a write to a non-primary table would go undetected.
+    /// This invariant is enforced by routing <c>IsMultiSource</c> queries to
+    /// <c>QueryJoinExecutor.ExecuteJoinQuery</c> before this path is reachable (see
+    /// <c>CommandExecutor.ExecuteSQLQuery</c>).</para>
+    ///
+    /// <para>On a cache hit the stored rows are yielded immediately. On a miss, the real plan
+    /// executes while a <see cref="QueryDependencyCollector"/> captures range/schema deps; after the
+    /// drain the entry is published through the generation fence (see <see cref="CachePublishGate"/>).
+    /// If a write is in-flight for the table's row keyspace the live rows are served without
+    /// publishing to avoid a stale-hit window.</para>
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> QueryWithCache(
+        DatabaseDescriptor database,
+        QueryPlan plan,
+        CacheHintOptions hint,
+        IQueryResultCache cache,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        // Belt-and-suspenders: the dispatch in CommandExecutor ensures this is never called for
+        // multi-source plans, but guard here so a future misrouting fails loudly.
+        System.Diagnostics.Debug.Assert(
+            plan.Table is not null,
+            "QueryWithCache must only be called for single-table plans; join plans bypass the cache.");
+
+        string fingerprint = ResultFingerprintBuilder.Build(
+            database.Id, hint.CacheName, plan.QueryShapeId,
+            plan.Ticket.Parameters, plan.SchemaDeps, hint);
+
+        CachedQueryResult? hit = await cache.TryGetAsync(database.Id, hint.CacheName, fingerprint, ct).ConfigureAwait(false);
+        if (hit is not null)
+        {
+            foreach (QueryResultRow row in hit.Rows)
+                yield return row;
+            yield break;
+        }
+
+        // Snapshots the row keyspace for the single table in the plan. Every INSERT/UPDATE/DELETE
+        // on this table bumps this bucket's generation, so the fence catches any concurrent write
+        // during the query's execution — including writes that go through a secondary index scan.
+        string rowBucket = plan.Table.Store.RowKeySpace;
+        string[] keyspaces = [rowBucket];
+
+        CacheGenerationToken token = cache.PublishGate.SnapshotGenerations(keyspaces);
+        if (cache.PublishGate.HasInFlightWrite(keyspaces))
+        {
+            await foreach (QueryResultRow row in ExecuteQueryPlanInternal(plan).WithCancellation(ct).ConfigureAwait(false))
+                yield return row;
+            yield break;
+        }
+
+        var depCollector = new QueryDependencyCollector();
+        plan.DepCollector = depCollector;
+
+        CachedQueryResult pending = new(
+            CacheName: hint.CacheName,
+            DatabaseId: database.Id,
+            Rows: [],
+            ResultFingerprint: fingerprint,
+            CachedAt: plan.Ticket.TxnState.ReadTimestamp,
+            Status: QueryCacheStatus.Miss,
+            HintTtlMs: hint.TtlMs,
+            HintIsStrict: hint.IsStrict);
+
+        CachedQueryRunner runner = new(cache, pending, token, ct);
+        runner.DepCollector = depCollector;
+
+        try
+        {
+            await foreach (QueryResultRow row in runner.DrainAsync(ExecuteQueryPlanInternal(plan)).WithCancellation(ct).ConfigureAwait(false))
+                yield return row;
+        }
+        finally
+        {
+            await runner.FinalizeAsync().ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -264,6 +364,10 @@ internal sealed class QueryExecutor
         QueryTicket ticket = plan.Ticket;
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+        QueryDependencyCollector? deps = plan.DepCollector;
+
+        deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
+        deps?.RecordSchema(table.Id, table.Schema.Version);
 
         ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey).ConfigureAwait(false);
 
@@ -281,6 +385,8 @@ internal sealed class QueryExecutor
             scanStats.RowsRead++;
 
         ObjectIdValue resolvedRowId = rowId.Value;
+        deps?.RecordPoint(table.Store.RowPointKey(resolvedRowId));
+
         Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
             table.Schema,
             txId,
@@ -322,6 +428,10 @@ internal sealed class QueryExecutor
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+        QueryDependencyCollector? deps = plan.DepCollector;
+
+        deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
+        deps?.RecordSchema(table.Id, table.Schema.Version);
 
         // Acquire a range lock scoped to [fromBound, toBound]. Shared for SELECT; Exclusive for
         // UPDATE/DELETE so concurrent Serializable+RW readers cannot enter the mutated sub-range.
@@ -347,6 +457,8 @@ internal sealed class QueryExecutor
             byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId).ConfigureAwait(false);
             if (data is null || data.Length == 0)
                 continue;
+
+            deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
             if (scanStats is not null)
                 scanStats.RowsRead++;
@@ -382,6 +494,10 @@ internal sealed class QueryExecutor
         TableIndexSchema index = inListNode.Index;
         bool isUnique = index.Type == IndexType.Unique;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
+        QueryDependencyCollector? deps = plan.DepCollector;
+
+        deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
+        deps?.RecordSchema(table.Id, table.Schema.Version);
 
         HashSet<ObjectIdValue> seen = new();
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
@@ -422,6 +538,8 @@ internal sealed class QueryExecutor
                 if (data is null || data.Length == 0)
                     continue;
 
+                deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
+
                 if (scanStats is not null)
                     scanStats.RowsRead++;
 
@@ -459,6 +577,8 @@ internal sealed class QueryExecutor
                     byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId).ConfigureAwait(false);
                     if (data is null || data.Length == 0)
                         continue;
+
+                    deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
                     if (scanStats is not null)
                         scanStats.RowsRead++;

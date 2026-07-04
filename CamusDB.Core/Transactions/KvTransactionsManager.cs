@@ -10,6 +10,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using CamusDB.Core.Cache;
 
 namespace CamusDB.Core.Transactions;
 
@@ -52,6 +53,15 @@ public sealed class KvTransactionsManager : IDisposable
     /// </summary>
     private readonly Func<Kommander.Time.HLCTimestamp?, Kommander.Time.HLCTimestamp>? mintLocalT;
 
+    /// <summary>
+    /// Optional cache reference. When non-null, <see cref="CommitAsync"/> drives the
+    /// <see cref="CachePublishGate"/> write protocol (mark in-flight → commit/abort) and
+    /// calls <see cref="IQueryResultCache.InvalidateByModifiedKeys"/> after a successful commit
+    /// so stale entries are evicted before any subsequent cache probe on this node.
+    /// Null when the cache is disabled; all gate calls are skipped without overhead.
+    /// </summary>
+    private readonly IQueryResultCache? _cache;
+
     private readonly Lock activeSync = new();
     private readonly List<KvTransaction> activeTransactions = [];
 
@@ -60,12 +70,17 @@ public sealed class KvTransactionsManager : IDisposable
     private readonly Lock heartbeatSync = new();
     private readonly Dictionary<Kommander.Time.HLCTimestamp, CancellationTokenSource> heartbeats = [];
 
-    public KvTransactionsManager(IKahuna kahuna, Func<Kommander.Time.HLCTimestamp?, Kommander.Time.HLCTimestamp>? mintLocalT = null, ILogger<ICamusDB>? logger = null)
+    public KvTransactionsManager(
+        IKahuna kahuna,
+        Func<Kommander.Time.HLCTimestamp?, Kommander.Time.HLCTimestamp>? mintLocalT = null,
+        ILogger<ICamusDB>? logger = null,
+        IQueryResultCache? cache = null)
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         this.kahuna = kahuna;
         this.mintLocalT = mintLocalT;
         this.logger = logger ?? NullLogger<ICamusDB>.Instance;
+        _cache = cache;
     }
 
     /// <summary>
@@ -354,6 +369,27 @@ public sealed class KvTransactionsManager : IDisposable
                 $"({CamusDBConfig.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
         }
 
+        // Cache invalidation protocol — gate write path.
+        // Collect modified keys once before the commit attempt so we can invalidate after success.
+        // Mark the affected keyspace buckets in-flight so concurrent cache probes bypass rather
+        // than racing to publish against an uncommitted write.
+        List<(string key, KeyValueDurability durability)>? modKeys = null;
+        List<string>? keyspaces = null;
+        bool markedInFlight = false;
+        if (_cache is not null && !tx.IsReadOnly)
+        {
+            modKeys = tx.GetModifiedKeyPairs();
+            if (modKeys.Count > 0)
+            {
+                keyspaces = ExtractUniqueKeyspaces(modKeys);
+                if (keyspaces.Count > 0)
+                {
+                    _cache.PublishGate.MarkWriteInFlight(keyspaces);
+                    markedInFlight = true;
+                }
+            }
+        }
+
         // MustRetry from LocateAndCommitTransaction is a strictly pre-execution routing signal.
         // Kahuna returns it only when AmILeader(partitionId) was false (so no commit was attempted)
         // but WaitForLeader then resolved to the local endpoint — a transient leadership flip.
@@ -361,62 +397,111 @@ public sealed class KvTransactionsManager : IDisposable
         // still server-side Pending and commit idempotency is not required. Aborted is permanent.
         const int MaxCommitRetries = 5;
         KeyValueResponseType result = KeyValueResponseType.MustRetry;
-        for (int attempt = 0; attempt <= MaxCommitRetries; attempt++)
+        try
         {
-            result = await kahuna.LocateAndCommitTransaction(
-                tx.UniqueId,
-                tx.TransactionId,
-                tx.GetAcquiredLocks(),
-                tx.GetModifiedKeys(),
-                // CamusDB does not yet track per-transaction read keys (no read-key validation);
-                // pass an empty set to preserve current commit semantics under the new Kahuna API.
-                [],
-                cancellationToken
-            ).ConfigureAwait(false);
-
-            if (result != KeyValueResponseType.MustRetry)
-                break;
-
-            if (attempt < MaxCommitRetries)
-                await Task.Delay(25, cancellationToken).ConfigureAwait(false);
-        }
-
-        if (result == KeyValueResponseType.Committed)
-        {
-            tx.Status = KvTransactionStatus.Committed;
-            if (logger.IsEnabled(LogLevel.Debug))
+            for (int attempt = 0; attempt <= MaxCommitRetries; attempt++)
             {
-                int lockCount = tx.GetAcquiredLocks().Count;
-                Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, lockCount);
+                result = await kahuna.LocateAndCommitTransaction(
+                    tx.UniqueId,
+                    tx.TransactionId,
+                    tx.GetAcquiredLocks(),
+                    tx.GetModifiedKeys(),
+                    // CamusDB does not yet track per-transaction read keys (no read-key validation);
+                    // pass an empty set to preserve current commit semantics under the new Kahuna API.
+                    [],
+                    cancellationToken
+                ).ConfigureAwait(false);
+
+                if (result != KeyValueResponseType.MustRetry)
+                    break;
+
+                if (attempt < MaxCommitRetries)
+                    await Task.Delay(25, cancellationToken).ConfigureAwait(false);
             }
+
+            if (result == KeyValueResponseType.Committed)
+            {
+                tx.Status = KvTransactionStatus.Committed;
+                if (logger.IsEnabled(LogLevel.Debug))
+                {
+                    int lockCount = tx.GetAcquiredLocks().Count;
+                    Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, lockCount);
+                }
+
+                // Gate: bump generation, evict stale entries, clear in-flight mark — all inside
+                // the gate's write lock so no concurrent publish can insert a stale entry.
+                if (markedInFlight)
+                {
+                    _cache!.PublishGate.CommitWrite(keyspaces!, _ => _cache.InvalidateByModifiedKeys(modKeys!));
+                    markedInFlight = false;
+                }
+
+                await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
+                Untrack(tx);
+                return mintLocalT?.Invoke(null) ?? tx.TransactionId;
+            }
+
+            // Roll back the client-side transaction state so a subsequent
+            // RollbackIfNotCompletedAsync is a no-op.
+            tx.Status = KvTransactionStatus.RolledBack;
+
+            if (markedInFlight)
+            {
+                _cache!.PublishGate.AbortWrite(keyspaces!);
+                markedInFlight = false;
+            }
+
             await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
             Untrack(tx);
-            return mintLocalT?.Invoke(null) ?? tx.TransactionId;
-        }
 
-        // Roll back the client-side transaction state so a subsequent
-        // RollbackIfNotCompletedAsync is a no-op.
-        tx.Status = KvTransactionStatus.RolledBack;
-        await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
-        Untrack(tx);
+            // MustRetry after all retries exhausted = transient routing failure; caller must restart
+            // the whole operation from BeginAsync. CADB0504 (not CADB0501) signals this is transient.
+            // This is intentionally NOT auto-retried at the executor level: the operation may have been
+            // partially applied and the tx is spent (Status = RolledBack), so re-running the DML on the
+            // same tx is unsafe. Contrast with CADB0503 (fence), which fires before any write and IS
+            // auto-retried inside ExecuteNonSQLQuery on the same, still-usable transaction.
+            if (result == KeyValueResponseType.MustRetry)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    $"Transaction {tx.UniqueId} commit returned MustRetry after {MaxCommitRetries} retries; retry the operation from BeginAsync"
+                );
 
-        // MustRetry after all retries exhausted = transient routing failure; caller must restart
-        // the whole operation from BeginAsync. CADB0504 (not CADB0501) signals this is transient.
-        // This is intentionally NOT auto-retried at the executor level: the operation may have been
-        // partially applied and the tx is spent (Status = RolledBack), so re-running the DML on the
-        // same tx is unsafe. Contrast with CADB0503 (fence), which fires before any write and IS
-        // auto-retried inside ExecuteNonSQLQuery on the same, still-usable transaction.
-        if (result == KeyValueResponseType.MustRetry)
+            // Kahuna aborted — the transaction is permanently dead (conflict, timeout, etc.).
             throw new CamusDBException(
-                CamusDBErrorCodes.TransactionMustRetry,
-                $"Transaction {tx.UniqueId} commit returned MustRetry after {MaxCommitRetries} retries; retry the operation from BeginAsync"
+                CamusDBErrorCodes.TransactionAlreadyCompleted,
+                $"Transaction {tx.UniqueId} commit returned {result}"
             );
+        }
+        finally
+        {
+            // Safety net: if an unexpected exception escaped the commit body before CommitWrite or
+            // AbortWrite ran, clear the in-flight mark so concurrent probes are not blocked forever.
+            if (markedInFlight)
+                _cache!.PublishGate.AbortWrite(keyspaces!);
+        }
+    }
 
-        // Kahuna aborted — the transaction is permanently dead (conflict, timeout, etc.).
-        throw new CamusDBException(
-            CamusDBErrorCodes.TransactionAlreadyCompleted,
-            $"Transaction {tx.UniqueId} commit returned {result}"
-        );
+    /// <summary>
+    /// Extracts the unique keyspace bucket strings from a set of modified KV keys.
+    /// Row keys (<c>{dbId}:{tableId}:r/{rowId}</c>) map to <c>{dbId}:{tableId}:r</c>;
+    /// index keys (<c>{dbId}:{tableId}:i:{indexId}/...</c>) map to <c>{dbId}:{tableId}:i:{indexId}</c>.
+    /// Keys that do not match either pattern (e.g. schema meta keys) are skipped — they are
+    /// invalidated by explicit <c>InvalidateByTableId</c> calls from DDL paths instead.
+    /// Delegates to <see cref="QueryResultCache.ExtractKeyspaceBucket"/> so the bucket derivation
+    /// is defined once and all three sites (dep collector, gate keyspaces, dep-index matching) agree.
+    /// </summary>
+    private static List<string> ExtractUniqueKeyspaces(
+        List<(string key, KeyValueDurability _)> modKeys)
+    {
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        List<string> result = [];
+        foreach ((string key, _) in modKeys)
+        {
+            string bucket = QueryResultCache.ExtractKeyspaceBucket(key);
+            if (bucket.Length > 0 && seen.Add(bucket))
+                result.Add(bucket);
+        }
+        return result;
     }
 
     /// <summary>

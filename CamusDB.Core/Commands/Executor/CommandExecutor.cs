@@ -7,6 +7,7 @@
  */
 
 using System.Linq;
+using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsValidator;
@@ -121,6 +122,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <param name="schemaDdlForwarder">DDL forwarder for cluster mode; null in standalone.</param>
     /// <param name="registry">Optional pre-created registry; if supplied the executor does not own it and will not dispose it.</param>
     /// <param name="isClusterMode">True when this process is a Raft cluster node; false for standalone.</param>
+    /// <param name="cache">Optional query result cache. When non-null, DML commits drive the publish-gate invalidation
+    /// protocol and DDL operations call <see cref="IQueryResultCache.InvalidateByTableId"/> after each successful commit.</param>
     public CommandExecutor(
         CommandValidator validator,
         CatalogsManager catalogs,
@@ -128,7 +131,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         EmbeddedKahuna? sharedNode = null,
         ISchemaDdlForwarder? schemaDdlForwarder = null,
         DatabaseRegistry? registry = null,
-        bool isClusterMode = false)
+        bool isClusterMode = false,
+        IQueryResultCache? cache = null)
     {
         this.validator = validator;
         this.catalogs = catalogs;
@@ -149,7 +153,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
 
         databaseDescriptors = new();
-        databaseOpener = new(this, databaseDescriptors, catalogs, logger, sharedNode, registryTask, isClusterMode);
+        databaseOpener = new(this, databaseDescriptors, catalogs, logger, sharedNode, registryTask, isClusterMode, cache);
         databaseCloser = new(databaseDescriptors, logger);
         databaseDroper = new(databaseDescriptors, logger);
         databaseCreator = new(logger);
@@ -733,6 +737,10 @@ public sealed class CommandExecutor : IAsyncDisposable
             // Purge completed: clear the drop-in-progress marker. Left in place only if a step above
             // threw (crash/failure), so the startup scrub resumes the interrupted purge.
             await registry.ClearDroppingAsync(entry.Id).ConfigureAwait(false);
+
+            // Evict every cache entry for this database. The descriptor may no longer be available
+            // after the drop, so use the entry id directly rather than targetDescriptor?.Cache.
+            targetDescriptor?.Cache?.InvalidateDatabase(entry.Id);
         }
         finally
         {
@@ -777,10 +785,35 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// Begins a transaction, runs <paramref name="action"/>, commits on success,
     /// or rolls back (and re-throws) on any exception.
     /// </summary>
+    /// <summary>
+    /// Runs a DDL action inside a <see cref="KvTransaction"/> and commits it. Calls
+    /// <paramref name="postCommitInvalidate"/> after a successful commit so the query-result cache
+    /// evicts any entries whose schema deps reference the affected table. Schema meta keys use the
+    /// <c>{db}/meta/…</c> keyspace and do not match the row/index bucket patterns tracked by
+    /// <see cref="KvTransactionsManager"/>'s automatic key-based invalidation, so DDL paths must
+    /// supply an explicit invalidation action here rather than relying on the DML commit hook.
+    /// </summary>
+    /// <remarks>
+    /// <b>Intentional asymmetry vs DML invalidation:</b> DML commits drive
+    /// <c>CachePublishGate.MarkWriteInFlight / CommitWrite</c> so the invalidation runs inside a
+    /// critical section that also bumps the generation counter, atomically fencing concurrent
+    /// TryPublishUnderGeneration calls. DDL invalidation (<paramref name="postCommitInvalidate"/>)
+    /// runs after <c>CommitAsync</c> returns, outside that critical section — there is a narrow
+    /// window in which a concurrent SELECT could publish a stale-schema entry.
+    ///
+    /// This is a deliberate trade-off: schema meta keys cannot participate in the key-based gate
+    /// (they do not map to a table bucket), so the gate cannot be used here without a separate
+    /// schema-keyed generation counter. The window is safe in practice because cache fingerprints
+    /// capture the query text and table data at the time of execution — a reader that runs after
+    /// the DDL commit but before invalidation computes a fingerprint under the new schema and will
+    /// not hit the orphaned pre-DDL entry. The orphaned entry ages out on its TTL. A future
+    /// schema-version re-check at cache-hit time would close this window entirely.
+    /// </remarks>
     private async Task<T> ExecuteDdlInTransaction<T>(
         DatabaseDescriptor database,
         Func<KvTransaction, Task<T>> action,
-        Func<Task>? onAbort = null
+        Func<Task>? onAbort = null,
+        Action? postCommitInvalidate = null
     )
     {
         if (isClusterMode)
@@ -795,6 +828,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             T result = await action(tx).ConfigureAwait(false);
             using CancellationTokenSource cts = new(DdlCommitTimeout);
             await database.Transactions.CommitAsync(tx, cts.Token).ConfigureAwait(false);
+            postCommitInvalidate?.Invoke();
             return result;
         }
         catch (Exception ex)
@@ -864,8 +898,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (isClusterMode && ticket.Operation == AlterTableOperation.AddColumn)
             return await ExecuteClusterAddColumnAsync(database, table, ticket).ConfigureAwait(false);
 
-        return await ExecuteDdlInTransaction(database, tx =>
-            tableColumnAlterer.Alter(queryExecutor, database, table, ticket, tx)
+        return await ExecuteDdlInTransaction(database,
+            tx => tableColumnAlterer.Alter(queryExecutor, database, table, ticket, tx),
+            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
         ).ConfigureAwait(false);
     }
 
@@ -902,6 +937,8 @@ public sealed class CommandExecutor : IAsyncDisposable
                 new SchemaChangeJob(database.Name, ticket.TableName, table.Id, columnInfo.Name, SchemaElementState.Public),
                 columnDefinition: columnInfo
             ).ConfigureAwait(false);
+
+            database.Cache?.InvalidateByTableId(database.Id, table.Id);
 
             return true;
         }
@@ -1118,6 +1155,8 @@ public sealed class CommandExecutor : IAsyncDisposable
                     indexBuildInfo: indexInfo
                 ).ConfigureAwait(false);
 
+                database.Cache?.InvalidateByTableId(database.Id, table.Id);
+
                 return true;
             }
             catch
@@ -1234,7 +1273,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         // RenameIndex is metadata-only (no KV data changes); use single-phase DDL on all paths.
         if (ticket.Operation == AlterIndexOperation.RenameIndex)
             return await ExecuteDdlInTransaction(database,
-                tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx)
+                tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx),
+                postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
             ).ConfigureAwait(false);
 
         bool addIndexOperation = ticket.Operation is
@@ -1329,6 +1369,11 @@ public sealed class CommandExecutor : IAsyncDisposable
                 await database.Transactions.RollbackIfNotCompletedAsync(tx2).ConfigureAwait(false);
             }
 
+            // Schema has been replicated; evict stale cache entries for this table. Phase 1's
+            // row/index KV writes are already handled by the CommitAsync invalidation hook, but
+            // schema-dep entries (keyed by tableId, not by KV key) need an explicit call here.
+            database.Cache?.InvalidateByTableId(database.Id, table.Id);
+
             // Re-populate the descriptor cache: ReplicateIndexChangeAsync fires
             // InvalidateAppliedTableDescriptor which evicts the table. Re-opening here
             // ensures callers that rely on TableDescriptors find it immediately after DDL.
@@ -1359,8 +1404,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await ExecuteDdlInTransaction(database, tx =>
-            tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket, tx)
+        return await ExecuteDdlInTransaction(database,
+            tx => tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket, tx),
+            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
         ).ConfigureAwait(false);
     }
 
@@ -1375,8 +1421,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (forwarded is not null)
             return forwarded.Value;
 
-        return await ExecuteDdlInTransaction(database, tx =>
-            catalogs.RenameTable(database, ticket, tx)
+        TableDescriptor renameTable = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+
+        return await ExecuteDdlInTransaction(database,
+            tx => catalogs.RenameTable(database, ticket, tx),
+            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, renameTable.Id)
         ).ConfigureAwait(false);
     }
 
@@ -1671,7 +1720,9 @@ public sealed class CommandExecutor : IAsyncDisposable
                     {
                         bool ok = await tableColumnAlterer.Alter(queryExecutor, database, table, alterTableTicket, tx).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
-                    }).ConfigureAwait(false);
+                    },
+                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
+                    ).ConfigureAwait(false);
                 }
 
             case NodeType.AlterTableAddIndex:
@@ -1731,7 +1782,9 @@ public sealed class CommandExecutor : IAsyncDisposable
                     {
                         bool ok = await tableColumnAlterer.Alter(queryExecutor, database, tableForRenameCol, renameColumnTicket, tx).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
-                    }).ConfigureAwait(false);
+                    },
+                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, tableForRenameCol.Id)
+                    ).ConfigureAwait(false);
                 }
 
             case NodeType.AlterTableRenameIndex:
@@ -1749,7 +1802,9 @@ public sealed class CommandExecutor : IAsyncDisposable
                     {
                         bool ok = await tableIndexAlterer.Alter(queryExecutor, database, tableForRenameIdx, renameIndexTicket, tx).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
-                    }).ConfigureAwait(false);
+                    },
+                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, tableForRenameIdx.Id)
+                    ).ConfigureAwait(false);
                 }
 
             case NodeType.AlterTableRenameTo:
@@ -1763,11 +1818,15 @@ public sealed class CommandExecutor : IAsyncDisposable
                     if (forwarded is not null)
                         return new ExecuteDDLSQLResult(database, forwarded.Value);
 
+                    TableDescriptor renameTableDesc = await tableOpener.Open(database, oldTableName).ConfigureAwait(false);
+
                     return await ExecuteDdlInTransaction(database, async tx =>
                     {
                         bool ok = await catalogs.RenameTable(database, renameTableTicket, tx).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
-                    }).ConfigureAwait(false);
+                    },
+                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, renameTableDesc.Id)
+                    ).ConfigureAwait(false);
                 }
 
             case NodeType.DropTable:
@@ -1789,7 +1848,9 @@ public sealed class CommandExecutor : IAsyncDisposable
                     {
                         bool ok = await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, dropTableTicket, tx).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
-                    }).ConfigureAwait(false);
+                    },
+                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
+                    ).ConfigureAwait(false);
                 }
 
             default:
@@ -2079,6 +2140,10 @@ public sealed class CommandExecutor : IAsyncDisposable
                     QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(boundQuery, ticket, existsRegistry, specs);
                     PinSchemaVersions(database, boundQuery.Sources, ticket.TxnState);
 
+                    // Join queries bypass the result cache: caching a multi-table result
+                    // requires fencing ALL involved tables' row keyspaces, not just one.
+                    // Until the multi-keyspace fence is implemented, any {cache=name} hint
+                    // on a join is silently ignored — the query executes live every time.
                     if (boundQuery.IsMultiSource)
                         return (database, queryExecutor.ExecuteJoinQuery(database, boundQuery, queryTicket));
 

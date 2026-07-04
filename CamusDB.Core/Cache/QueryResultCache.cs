@@ -398,23 +398,29 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Estimates the memory cost of <paramref name="rows"/> in bytes. Intentionally
+    /// Estimates the memory cost of a single <see cref="QueryResultRow"/> in bytes. Used by
+    /// <see cref="CachedQueryRunner"/> to detect a cap breach row-by-row during accumulation,
+    /// and by <see cref="EstimateBytes"/> for the final per-entry check. Intentionally
     /// over-estimates to ensure the byte cap is never silently violated.
     /// </summary>
-    private static long EstimateBytes(IReadOnlyList<QueryResultRow> rows)
+    internal static long EstimateRowBytes(QueryResultRow row)
     {
         const int RowOverhead = 128;  // Dictionary, QueryResultRow struct, GC header, etc.
 
+        long total = RowOverhead;
+        foreach (KeyValuePair<string, ColumnValue> col in row.Row)
+        {
+            total += col.Key.Length * 2 + 32;  // column name
+            total += EstimateColumnValueBytes(col.Value);
+        }
+        return total;
+    }
+
+    private static long EstimateBytes(IReadOnlyList<QueryResultRow> rows)
+    {
         long total = 0;
         foreach (QueryResultRow row in rows)
-        {
-            total += RowOverhead;
-            foreach (KeyValuePair<string, ColumnValue> col in row.Row)
-            {
-                total += col.Key.Length * 2 + 32;  // column name
-                total += EstimateColumnValueBytes(col.Value);
-            }
-        }
+            total += EstimateRowBytes(row);
         return total;
     }
 

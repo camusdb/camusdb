@@ -21,13 +21,13 @@ using Kommander.Time;
 namespace CamusDB.Tests.Cache;
 
 /// <summary>
-/// QC2 acceptance tests: cache key fingerprinting, entry storage, LRU eviction,
+/// Cache key fingerprinting, entry storage, LRU eviction,
 /// byte/row caps, TTL expiry, and invalidation paths.
 /// These tests use <see cref="QueryResultCache"/> directly (no Kahuna / SQL layer).
 /// </summary>
 [TestFixture]
 [NonParallelizable]
-public sealed class TestQueryResultCacheQc2
+public sealed class TestQueryResultCacheCommitGate
 {
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
@@ -65,7 +65,7 @@ public sealed class TestQueryResultCacheQc2
         cache.PublishGate.SnapshotGenerations([]);
 
     // ─────────────────────────────────────────────────────────────────────────
-    // QC2-A: Fingerprint determinism and collision resistance
+    // Fingerprint determinism and collision resistance
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -258,7 +258,7 @@ public sealed class TestQueryResultCacheQc2
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // QC2-B: Hit / miss round-trip
+    // Hit / miss round-trip
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -318,7 +318,7 @@ public sealed class TestQueryResultCacheQc2
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // QC2-C: Per-entry caps bypass
+    // Per-entry caps bypass
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -374,7 +374,7 @@ public sealed class TestQueryResultCacheQc2
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // QC2-D: LRU eviction when entry count cap reached
+    // LRU eviction when entry count cap reached
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -411,7 +411,7 @@ public sealed class TestQueryResultCacheQc2
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // QC2-E: TTL expiry
+    // TTL expiry
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -543,7 +543,7 @@ public sealed class TestQueryResultCacheQc2
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // QC2-F: Invalidation paths
+    // Invalidation paths
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -606,7 +606,7 @@ public sealed class TestQueryResultCacheQc2
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // QC2-G: Generation fence — stale entry not published after concurrent write
+    // Generation fence — stale entry not published after concurrent write
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -632,7 +632,7 @@ public sealed class TestQueryResultCacheQc2
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // QC2-H: Byte accounting
+    // Byte accounting
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -652,7 +652,7 @@ public sealed class TestQueryResultCacheQc2
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // QC2-H2: ExtractKeyspaceBucket — real KV key formats
+    // ExtractKeyspaceBucket — real KV key formats
     //
     // Real formats (KvTableStore):
     //   Row:   {dbId}:{tableId}:r/{rowIdHex24}
@@ -709,9 +709,9 @@ public sealed class TestQueryResultCacheQc2
         // by exercising that a dep-registered entry gets invalidated when the matching key
         // is committed.
         //
-        // For now (QC2 — Empty deps) we assert the extraction does not panic and the API
-        // contract holds. QC3 will wire real deps; this test is a placeholder that will be
-        // strengthened then.
+        // With empty deps this only asserts the extraction path does not panic and the API
+        // contract holds. Real dependency capture is exercised by the invalidation integration
+        // tests, which drive eviction end-to-end through a committed write.
         Assert.DoesNotThrow(() =>
             cache.InvalidateByModifiedKeys([
                 (rowKey, KeyValueDurability.Persistent),
@@ -728,7 +728,8 @@ public sealed class TestQueryResultCacheQc2
 
         string indexKey = "mydb:orders:i:idx-name/0031003200330034";
 
-        // Must not throw or corrupt state; QC3 adds the dep-matching assertion.
+        // Must not throw or corrupt state; the dep-matching assertion is covered by the
+        // invalidation integration tests that drive eviction through a committed write.
         Assert.DoesNotThrow(() =>
             cache.InvalidateByModifiedKeys([
                 (indexKey, KeyValueDurability.Persistent),
@@ -779,7 +780,7 @@ public sealed class TestQueryResultCacheQc2
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // QC2-I: Config wiring — ConfigDefinition defaults match CamusDBConfig defaults
+    // Config wiring — ConfigDefinition defaults match CamusDBConfig defaults
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]

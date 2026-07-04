@@ -434,6 +434,19 @@ public sealed class KvTransaction
         return result;
     }
 
+    /// <summary>
+    /// Returns the modified-keys set as raw (key, durability) pairs. Used by the cache
+    /// invalidation path, which needs the keys in tuple form to call
+    /// <see cref="IQueryResultCache.InvalidateByModifiedKeys"/> without an extra allocation.
+    /// </summary>
+    public List<(string key, KeyValueDurability durability)> GetModifiedKeyPairs()
+    {
+        if (modifiedKeys is null)
+            return [];
+
+        return [.. modifiedKeys];
+    }
+
     private readonly record struct SchemaVersionPin(
         long SchemaVersion,
         Func<long> CurrentVersion,
