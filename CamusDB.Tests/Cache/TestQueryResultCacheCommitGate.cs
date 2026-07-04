@@ -269,7 +269,7 @@ public sealed class TestQueryResultCacheCommitGate
         CachedQueryResult result = MakeResult("db", "c", fp);
         CacheGenerationToken token = EmptyToken(cache);
 
-        QueryCacheStatus status = await cache.TryPublishAsync(result, token);
+        (QueryCacheStatus status, _) = await cache.TryPublishAsync(result, token);
         Assert.That(status, Is.EqualTo(QueryCacheStatus.Miss), "First publish must return Miss");
 
         CachedQueryResult? hit = await cache.TryGetAsync("db", "c", fp);
@@ -338,9 +338,10 @@ public sealed class TestQueryResultCacheCommitGate
             string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
             CachedQueryResult result = MakeResult("db", "c", fp, rows);
 
-            QueryCacheStatus status = await cache.TryPublishAsync(result, EmptyToken(cache));
+            (QueryCacheStatus status, QueryCacheBypassReason reason) = await cache.TryPublishAsync(result, EmptyToken(cache));
             Assert.That(status, Is.EqualTo(QueryCacheStatus.EvictedBeforePublish),
                 "Oversized row count must be bypassed");
+            Assert.That(reason, Is.EqualTo(QueryCacheBypassReason.OversizedResult));
 
             CachedQueryResult? hit = await cache.TryGetAsync("db", "c", fp);
             Assert.That(hit, Is.Null, "Bypassed entry must not be stored");
@@ -363,9 +364,10 @@ public sealed class TestQueryResultCacheCommitGate
             var rows = new List<QueryResultRow> { MakeRow("col", "hello") };
             string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
 
-            QueryCacheStatus status = await cache.TryPublishAsync(
+            (QueryCacheStatus status, QueryCacheBypassReason reason) = await cache.TryPublishAsync(
                 MakeResult("db", "c", fp, rows), EmptyToken(cache));
             Assert.That(status, Is.EqualTo(QueryCacheStatus.EvictedBeforePublish));
+            Assert.That(reason, Is.EqualTo(QueryCacheBypassReason.OversizedResult));
         }
         finally
         {
@@ -623,10 +625,12 @@ public sealed class TestQueryResultCacheCommitGate
 
         // Publish attempt must be rejected because the generation moved
         string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
-        QueryCacheStatus status = await cache.TryPublishAsync(MakeResult("db", "c", fp), token);
+        (QueryCacheStatus status, QueryCacheBypassReason reason) = await cache.TryPublishAsync(MakeResult("db", "c", fp), token);
 
         Assert.That(status, Is.EqualTo(QueryCacheStatus.EvictedBeforePublish),
             "Generation fence must block publish after a concurrent write");
+        Assert.That(reason, Is.EqualTo(QueryCacheBypassReason.InFlightWrite),
+            "Generation fence rejection must report InFlightWrite");
         Assert.That(await cache.TryGetAsync("db", "c", fp), Is.Null,
             "No stale entry must survive the generation fence");
     }

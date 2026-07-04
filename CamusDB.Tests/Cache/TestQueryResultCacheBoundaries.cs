@@ -55,13 +55,19 @@ public class TestQueryResultCacheBoundaries
         public Task<CachedQueryResult?> TryGetAsync(string databaseId, string cacheName, string fingerprint, CancellationToken ct = default)
             => Task.FromResult(Stored.TryGetValue(fingerprint, out CachedQueryResult? r) ? r : null);
 
-        public Task<QueryCacheStatus> TryPublishAsync(CachedQueryResult result, CacheGenerationToken token, QueryDependencySet? deps = null, CancellationToken ct = default)
+        public Task<(QueryCacheStatus Status, QueryCacheBypassReason Reason)> TryPublishAsync(CachedQueryResult result, CacheGenerationToken token, QueryDependencySet? deps = null, CancellationToken ct = default)
         {
             Interlocked.Increment(ref PublishAttempts);
             bool ok = PublishGate.TryPublishUnderGeneration(token, () => Stored[result.ResultFingerprint] = result);
-            return Task.FromResult(ok ? QueryCacheStatus.Miss : QueryCacheStatus.EvictedBeforePublish);
+            return Task.FromResult(ok
+                ? (QueryCacheStatus.Miss, QueryCacheBypassReason.None)
+                : (QueryCacheStatus.EvictedBeforePublish, QueryCacheBypassReason.InFlightWrite));
         }
 
+        public Task<(CachedQueryResult Result, QueryDependencySet Deps)?> TryGetWithDepsAsync(string databaseId, string cacheName, string fingerprint, CancellationToken ct = default)
+            => Task.FromResult(Stored.TryGetValue(fingerprint, out CachedQueryResult? r) ? ((CachedQueryResult, QueryDependencySet)?)(r, QueryDependencySet.Empty) : null);
+
+        public void InvalidateEntry(string databaseId, string cacheName, string fingerprint) { Stored.Remove(fingerprint); }
         public void InvalidateByModifiedKeys(IReadOnlyCollection<(string key, Kahuna.Shared.KeyValue.KeyValueDurability durability)> modifiedKeys) { }
         public void InvalidateByTableId(string databaseId, string tableId) { }
         public void InvalidateDatabase(string databaseId) { }
@@ -114,7 +120,7 @@ public class TestQueryResultCacheBoundaries
             await foreach (var _ in runner.DrainAsync(RowSource(10, ct: cts.Token))) { }
         });
 
-        QueryCacheStatus status = await runner.FinalizeAsync();
+        (QueryCacheStatus status, _) = await runner.FinalizeAsync();
         Assert.That(status, Is.EqualTo(QueryCacheStatus.Bypass),
             "A cancelled enumeration must never publish");
         Assert.That(cache.PublishAttempts, Is.Zero,
@@ -139,7 +145,7 @@ public class TestQueryResultCacheBoundaries
             break; // caller abandons enumeration early
         }
 
-        QueryCacheStatus status = await runner.FinalizeAsync();
+        (QueryCacheStatus status, _) = await runner.FinalizeAsync();
         Assert.That(status, Is.EqualTo(QueryCacheStatus.Bypass),
             "A partially-consumed enumeration must never publish");
         Assert.That(cache.PublishAttempts, Is.Zero,
@@ -161,7 +167,7 @@ public class TestQueryResultCacheBoundaries
 
         await foreach (var _ in runner.DrainAsync(RowSource(3))) { }
 
-        QueryCacheStatus status = await runner.FinalizeAsync();
+        (QueryCacheStatus status, _) = await runner.FinalizeAsync();
         Assert.That(status, Is.EqualTo(QueryCacheStatus.Miss),
             "Full drain must publish and report Miss");
         Assert.That(cache.PublishAttempts, Is.EqualTo(1), "Full drain must reach TryPublishAsync exactly once");
@@ -187,9 +193,11 @@ public class TestQueryResultCacheBoundaries
         cache.PublishGate.MarkWriteInFlight(ks);
         cache.PublishGate.CommitWrite(ks); // gen→1, stale-fences the token
 
-        QueryCacheStatus status = await runner.FinalizeAsync();
+        (QueryCacheStatus status, QueryCacheBypassReason reason) = await runner.FinalizeAsync();
         Assert.That(status, Is.EqualTo(QueryCacheStatus.EvictedBeforePublish),
             "A racing committed write must fence the publish");
+        Assert.That(reason, Is.EqualTo(QueryCacheBypassReason.InFlightWrite),
+            "A generation-fence rejection must report InFlightWrite");
         Assert.That(cache.PublishAttempts, Is.EqualTo(1), "Publish is attempted but must be rejected by the fence");
         Assert.That(cache.Stored, Is.Empty, "The stale entry must not be stored");
     }
@@ -215,7 +223,7 @@ public class TestQueryResultCacheBoundaries
             CachedAt: default,
             Status: QueryCacheStatus.Miss);
 
-        QueryCacheStatus status = await cache.TryPublishAsync(result, token);
+        (QueryCacheStatus status, _) = await cache.TryPublishAsync(result, token);
         Assert.That(status, Is.EqualTo(QueryCacheStatus.Bypass),
             "Null cache must always bypass publish");
 

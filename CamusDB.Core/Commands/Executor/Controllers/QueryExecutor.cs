@@ -9,6 +9,7 @@
 using System.Runtime.CompilerServices;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs.Models;
+using Kahuna;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
@@ -48,9 +49,17 @@ internal sealed class QueryExecutor
 
     internal readonly PlanCache PlanCache;
 
-    public QueryExecutor(ILogger<ICamusDB> logger, StatisticsManager? stats = null)
+    /// <summary>
+    /// Kahuna instance used by the strict-validation path to probe point and range deps.
+    /// Null when running in test contexts that do not inject a shared node; strict validation
+    /// fails closed (evicts the entry, serves live rows) when this is null.
+    /// </summary>
+    private readonly IKahuna? _kahuna;
+
+    public QueryExecutor(ILogger<ICamusDB> logger, StatisticsManager? stats = null, IKahuna? kahuna = null)
     {
         this.logger = logger;
+        _kahuna = kahuna;
         PlanCache = new PlanCache(CamusDBConfig.PlanCacheMaxEntries);
         queryPlanner = new QueryPlanner(stats, PlanCache);
         queryAggregator = new QueryAggregator(stats);
@@ -58,7 +67,13 @@ internal sealed class QueryExecutor
         this.queryScanner = new(logger);
     }
 
-    public IAsyncEnumerable<QueryResultRow> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+    /// <param name="metaOut">
+    /// Optional holder populated with cache resolution metadata after the returned cursor is
+    /// fully drained. Pass a <see cref="CacheMetadataHolder"/> instance when the caller needs
+    /// to surface cache status in the response envelope; pass <c>null</c> for internal callers
+    /// (DML, DDL, subquery) that do not need the metadata.
+    /// </param>
+    public IAsyncEnumerable<QueryResultRow> Query(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket, CacheMetadataHolder? metaOut = null)
     {
         QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
 
@@ -70,9 +85,21 @@ internal sealed class QueryExecutor
         // from a different snapshot.
         if (ticket.CacheHint is { } hint
                 && ticket.TxnState.IsReadOnly
-                && ticket.TxnState.TransactionId == HLCTimestamp.Zero
-                && database.Cache is { } cache)
-            return QueryWithCache(database, plan, hint, cache);
+                && ticket.TxnState.TransactionId == HLCTimestamp.Zero)
+        {
+            if (database.Cache is { } cache)
+                return QueryWithCache(database, plan, hint, cache, metaOut);
+
+            // Cache is disabled (database.Cache == null). Report CacheDisabled so the client
+            // can distinguish "hint ignored due to config" from a non-hinted query where
+            // cacheName is absent entirely.
+            if (metaOut is not null)
+            {
+                metaOut.Status = QueryCacheStatus.Bypass;
+                metaOut.BypassReason = QueryCacheBypassReason.CacheDisabled;
+                metaOut.CacheName = hint.CacheName;
+            }
+        }
 
         return ExecuteQueryPlanInternal(plan);
     }
@@ -102,6 +129,7 @@ internal sealed class QueryExecutor
         QueryPlan plan,
         CacheHintOptions hint,
         IQueryResultCache cache,
+        CacheMetadataHolder? metaOut = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         // Belt-and-suspenders: the dispatch in CommandExecutor ensures this is never called for
@@ -114,10 +142,79 @@ internal sealed class QueryExecutor
             database.Id, hint.CacheName, plan.QueryShapeId,
             plan.Ticket.Parameters, plan.SchemaDeps, hint);
 
-        CachedQueryResult? hit = await cache.TryGetAsync(database.Id, hint.CacheName, fingerprint, ct).ConfigureAwait(false);
-        if (hit is not null)
+        // Tracks that a strict entry was found but evicted as stale; live re-execution follows.
+        // Used to override the final status to StaleRevalidated rather than Miss.
+        bool wasStaleRevalidated = false;
+
+        // ── Cache probe ───────────────────────────────────────────────────────
+        // Fetch entry plus its deps so strict mode can validate before serving.
+        (CachedQueryResult Result, QueryDependencySet Deps)? hitWithDeps =
+            await cache.TryGetWithDepsAsync(database.Id, hint.CacheName, fingerprint, ct).ConfigureAwait(false);
+
+        if (hitWithDeps is { } hd)
         {
-            foreach (QueryResultRow row in hit.Rows)
+            if (hd.Result.HintIsStrict)
+            {
+                // Validate every dep against current KV state. Fail closed when Kahuna is
+                // unavailable or when the probe limit is exceeded.
+                bool valid = _kahuna is not null
+                    && await StrictValidator.ValidateAsync(hd.Result, hd.Deps, database, _kahuna, ct).ConfigureAwait(false);
+
+                if (!valid)
+                {
+                    // Stale entry — evict immediately so the next probe skips re-validation.
+                    cache.InvalidateEntry(database.Id, hd.Result.CacheName, fingerprint);
+                    wasStaleRevalidated = true;
+                    // Fall through to live execution below.
+                }
+                else
+                {
+                    if (metaOut is not null)
+                    {
+                        metaOut.Status = QueryCacheStatus.Hit;
+                        metaOut.CacheName = hint.CacheName;
+                        metaOut.CachedAtHlc = hd.Result.CachedAt;
+                        metaOut.AgeMs = hd.Result.CreatedAtMs == 0
+                            ? null : Environment.TickCount64 - hd.Result.CreatedAtMs;
+                    }
+                    foreach (QueryResultRow row in hd.Result.Rows)
+                        yield return row;
+                    yield break;
+                }
+            }
+            else
+            {
+                if (metaOut is not null)
+                {
+                    metaOut.Status = QueryCacheStatus.Hit;
+                    metaOut.CacheName = hint.CacheName;
+                    metaOut.CachedAtHlc = hd.Result.CachedAt;
+                    metaOut.AgeMs = hd.Result.CreatedAtMs == 0
+                        ? null : Environment.TickCount64 - hd.Result.CreatedAtMs;
+                }
+                foreach (QueryResultRow row in hd.Result.Rows)
+                    yield return row;
+                yield break;
+            }
+        }
+
+        // ── Strict-with-no-snapshot bypass ────────────────────────────────────
+        // For strict entries, T_cache must be a real HLC snapshot so that
+        // LastModified comparisons are meaningful. CreateReadOnly() uses
+        // HLCTimestamp.Zero as the read timestamp — storing a strict entry at Zero
+        // would make validation always fail (all rows have LastModified > Zero).
+        // Serve live rows without populating the cache in this case.
+        bool canPublishStrict = !hint.IsStrict
+            || plan.Ticket.TxnState.ReadTimestamp != HLCTimestamp.Zero;
+
+        if (!canPublishStrict)
+        {
+            if (metaOut is not null)
+            {
+                metaOut.Status = QueryCacheStatus.Bypass;
+                metaOut.CacheName = hint.CacheName;
+            }
+            await foreach (QueryResultRow row in ExecuteQueryPlanInternal(plan).WithCancellation(ct).ConfigureAwait(false))
                 yield return row;
             yield break;
         }
@@ -131,6 +228,12 @@ internal sealed class QueryExecutor
         CacheGenerationToken token = cache.PublishGate.SnapshotGenerations(keyspaces);
         if (cache.PublishGate.HasInFlightWrite(keyspaces))
         {
+            if (metaOut is not null)
+            {
+                metaOut.Status = QueryCacheStatus.Bypass;
+                metaOut.BypassReason = QueryCacheBypassReason.InFlightWrite;
+                metaOut.CacheName = hint.CacheName;
+            }
             await foreach (QueryResultRow row in ExecuteQueryPlanInternal(plan).WithCancellation(ct).ConfigureAwait(false))
                 yield return row;
             yield break;
@@ -159,7 +262,19 @@ internal sealed class QueryExecutor
         }
         finally
         {
-            await runner.FinalizeAsync().ConfigureAwait(false);
+            (QueryCacheStatus finalStatus, QueryCacheBypassReason finalReason) = await runner.FinalizeAsync().ConfigureAwait(false);
+            if (metaOut is not null)
+            {
+                // A stale strict hit that required live re-execution maps to StaleRevalidated
+                // rather than Miss/EvictedBeforePublish so the caller can distinguish "fresh miss"
+                // from "revalidation that could not re-publish". Bypass means the drain itself
+                // failed, in which case rows were never served and the revalidation signal is moot.
+                metaOut.Status = wasStaleRevalidated && finalStatus != QueryCacheStatus.Bypass
+                    ? QueryCacheStatus.StaleRevalidated
+                    : finalStatus;
+                metaOut.BypassReason = finalReason;
+                metaOut.CacheName = hint.CacheName;
+            }
         }
     }
 

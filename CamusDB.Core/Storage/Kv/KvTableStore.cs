@@ -172,6 +172,13 @@ public sealed class KvTableStore
     public string RowPointKey(ObjectIdValue rowId) => rowKeyPrefix + rowId.ToString();
 
     /// <summary>
+    /// Exposes the underlying <see cref="IKahuna"/> instance for use by the strict-validation
+    /// path, which needs direct key probes with <c>LastModified</c> timestamps. Not for general
+    /// DML/DDL use — those must go through <see cref="KvTransaction"/> to track lock and key sets.
+    /// </summary>
+    internal IKahuna Kahuna => kahuna;
+
+    /// <summary>
     /// Number of ancestor levels this store is configured to walk on a read miss.
     /// Zero for root databases (no ancestry). This is the per-read amplification factor:
     /// a point read may probe up to <c>LineageDepth</c> extra levels, and a range scan

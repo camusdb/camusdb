@@ -35,12 +35,21 @@ public sealed class NullQueryResultCache : IQueryResultCache
         CancellationToken cancellationToken = default)
         => Task.FromResult<CachedQueryResult?>(null);
 
-    public Task<QueryCacheStatus> TryPublishAsync(
+    public Task<(CachedQueryResult Result, QueryDependencySet Deps)?> TryGetWithDepsAsync(
+        string databaseId,
+        string cacheName,
+        string fingerprint,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult<(CachedQueryResult, QueryDependencySet)?>(null);
+
+    public void InvalidateEntry(string databaseId, string cacheName, string fingerprint) { }
+
+    public Task<(QueryCacheStatus Status, QueryCacheBypassReason Reason)> TryPublishAsync(
         CachedQueryResult result,
         CacheGenerationToken generationToken,
         QueryDependencySet? deps = null,
         CancellationToken cancellationToken = default)
-        => Task.FromResult(QueryCacheStatus.Bypass);
+        => Task.FromResult((QueryCacheStatus.Bypass, QueryCacheBypassReason.None));
 
     public void InvalidateByModifiedKeys(IReadOnlyCollection<(string key, KeyValueDurability durability)> modifiedKeys) { }
 

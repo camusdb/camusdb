@@ -24,6 +24,7 @@ namespace CamusDB.Core.Cache;
 /// <param name="Status">Status to surface in the response envelope for this entry.</param>
 /// <param name="HintTtlMs">Per-query TTL from the <c>{cache=…, ttl=…}</c> hint, or <c>null</c> to use <see cref="CamusDBConfig.QueryResultCacheDefaultTtlMs"/>.</param>
 /// <param name="HintIsStrict">Whether the hint requested strict (read-your-writes) validation. Carried on the entry so revalidation can apply the same strictness the original query requested.</param>
+/// <param name="CreatedAtMs">Monotonic tick count (<see cref="Environment.TickCount64"/>) stamped when the entry is stored. Used to compute <c>ageMs</c> in the response envelope. Zero for entries created before this field was added.</param>
 public sealed record CachedQueryResult(
     string CacheName,
     string DatabaseId,
@@ -32,7 +33,8 @@ public sealed record CachedQueryResult(
     HLCTimestamp CachedAt,
     QueryCacheStatus Status,
     int? HintTtlMs = null,
-    bool HintIsStrict = false);
+    bool HintIsStrict = false,
+    long CreatedAtMs = 0);
 
 /// <summary>
 /// Core contract for the per-node in-memory query result cache.
@@ -120,16 +122,43 @@ public interface IQueryResultCache
     /// (uncached paths). The implementation must bypass publish rather than store an incomplete
     /// dep set if <see cref="QueryDependencyCollector.CapExceeded"/> was true.</para>
     ///
-    /// <para>Returns the status to surface to the caller:
-    /// <see cref="QueryCacheStatus.Miss"/> if the entry was stored,
-    /// <see cref="QueryCacheStatus.EvictedBeforePublish"/> if the generation fence or a cap
-    /// rejected it.</para>
+    /// <para>Returns the status and bypass reason to surface to the caller:
+    /// <c>(Miss, None)</c> if the entry was stored;
+    /// <c>(EvictedBeforePublish, OversizedResult)</c> if a per-entry or global byte/row cap
+    /// rejected it; <c>(EvictedBeforePublish, InFlightWrite)</c> if the generation fence
+    /// rejected it (a write committed into the same keyspace during query execution).</para>
     /// </summary>
-    Task<QueryCacheStatus> TryPublishAsync(
+    Task<(QueryCacheStatus Status, QueryCacheBypassReason Reason)> TryPublishAsync(
         CachedQueryResult result,
         CacheGenerationToken generationToken,
         QueryDependencySet? deps = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Probes the cache for a result matching <paramref name="fingerprint"/> and, on a hit,
+    /// also returns the stored <see cref="QueryDependencySet"/> so the caller can run strict
+    /// validation before serving cached rows. Returns <c>null</c> on miss, expired entry, or
+    /// in-flight write bypass — identical miss semantics to <see cref="TryGetAsync"/>.
+    ///
+    /// <para>Used by the strict-validation read path, which needs deps to probe point and range
+    /// deps against current KV state. Non-strict reads should use <see cref="TryGetAsync"/>
+    /// to avoid the additional tuple allocation.</para>
+    /// </summary>
+    Task<(CachedQueryResult Result, QueryDependencySet Deps)?> TryGetWithDepsAsync(
+        string databaseId,
+        string cacheName,
+        string fingerprint,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes a single entry by its exact fingerprint. Used by the strict-validation path
+    /// when a hit is detected as stale — evicting it avoids re-validating the same stale
+    /// entry on every subsequent probe until TTL expiry.
+    ///
+    /// <para>A no-op if the entry does not exist (was already evicted by a concurrent write
+    /// or TTL sweep). Idempotent.</para>
+    /// </summary>
+    void InvalidateEntry(string databaseId, string cacheName, string fingerprint);
 
     /// <summary>
     /// Invalidates all entries whose dependency sets overlap any key in

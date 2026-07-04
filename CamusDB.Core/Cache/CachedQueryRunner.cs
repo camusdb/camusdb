@@ -124,22 +124,38 @@ public sealed class CachedQueryRunner
     /// <para>Callers should still invoke this on every non-exception path (e.g. in a
     /// <c>finally</c> block after committing the read transaction) — it is safe to call
     /// when drain did not complete.</para>
+    ///
+    /// <para>Returns both the resolved cache status and the reason the entry was not published
+    /// (when applicable). The reason is <see cref="QueryCacheBypassReason.None"/> on
+    /// <see cref="QueryCacheStatus.Miss"/> (success) and on <see cref="QueryCacheStatus.Bypass"/>
+    /// (drain did not complete). On <see cref="QueryCacheStatus.EvictedBeforePublish"/> the reason
+    /// identifies the specific gate that rejected the entry.</para>
     /// </summary>
-    public async Task<QueryCacheStatus> FinalizeAsync()
+    public async Task<(QueryCacheStatus Status, QueryCacheBypassReason Reason)> FinalizeAsync()
     {
         if (!_drainCompleted)
-            return QueryCacheStatus.Bypass;
+            return (QueryCacheStatus.Bypass, QueryCacheBypassReason.None);
 
         if (_capBreached)
-            return QueryCacheStatus.EvictedBeforePublish;
+            return (QueryCacheStatus.EvictedBeforePublish, QueryCacheBypassReason.OversizedResult);
 
-        // If the dep collector hit a cap, bypass rather than storing an incomplete dep set.
-        QueryDependencySet? deps = DepCollector is not null
-            ? (DepCollector.CapExceeded ? null : DepCollector.Build())
-            : null;
-
+        // If the total dep cap was exceeded, bypass rather than storing an incomplete dep set.
         if (DepCollector is not null && DepCollector.CapExceeded)
-            return QueryCacheStatus.EvictedBeforePublish;
+            return (QueryCacheStatus.EvictedBeforePublish, QueryCacheBypassReason.DependencyLimitExceeded);
+
+        // For strict entries, a truncated point-dep set is also unsafe: a physical delete removes
+        // the key from Kahuna entirely, so the strict validator's range scan sees nothing newer
+        // than CachedAt and wrongly reports the entry as valid. Serving stale rows that include
+        // the deleted row is incorrect. Non-strict entries are fine — same-node range invalidation
+        // catches deletes regardless of point capping.
+        if (_pendingResult.HintIsStrict
+                && DepCollector is not null
+                && DepCollector.PointDepsTruncated)
+            return (QueryCacheStatus.EvictedBeforePublish, QueryCacheBypassReason.DependencyLimitExceeded);
+
+        QueryDependencySet? deps = DepCollector is not null
+            ? DepCollector.Build()
+            : null;
 
         CachedQueryResult result = _pendingResult with { Rows = _accumulatedRows };
         return await _cache.TryPublishAsync(result, _token, deps, _ct).ConfigureAwait(false);

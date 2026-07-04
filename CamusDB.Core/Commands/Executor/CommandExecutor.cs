@@ -166,7 +166,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         rowUpdater = new(logger);
         statisticsManager = new(logger);
         rowDeleter = new(logger, statisticsManager);
-        queryExecutor = new(logger, statisticsManager);
+        queryExecutor = new(logger, statisticsManager, sharedNode?.Kahuna);
         sqlExecutor = new();
         schemaQuerier = new(catalogs, logger);
         queryBinder = new QueryBinder(tableOpener);
@@ -2070,7 +2070,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <param name="ticket"></param>
     /// <returns></returns>
     /// <exception cref="Exception"></exception>
-    public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQuery(ExecuteSQLTicket ticket)
+    public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQuery(ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut = null)
     {
         validator.Validate(ticket);
 
@@ -2149,7 +2149,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     TableDescriptor table = boundQuery.PrimaryTable;
 
-                    return (database, queryExecutor.Query(database, table, queryTicket));
+                    return (database, queryExecutor.Query(database, table, queryTicket, metaOut));
                 }
 
             case NodeType.ShowTables:

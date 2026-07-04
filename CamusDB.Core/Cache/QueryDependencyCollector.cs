@@ -22,9 +22,12 @@ namespace CamusDB.Core.Cache;
 ///     Table-scan paths record the entire row-bucket keyspace as a range dep
 ///     (<c>{dbId}:{tableId}:r</c>) plus individual row point deps for each row fetched, up to
 ///     <see cref="CamusDBConfig.QueryResultCacheMaxPointDeps"/>. When the point-dep cap is
-///     reached, further point deps are silently dropped — the range dep and the point deps
-///     collected so far are both retained, and the range dep provides conservative coverage
-///     for rows not individually tracked.
+///     reached, further point deps are silently dropped and <see cref="PointDepsTruncated"/> is
+///     set. The range dep remains for non-strict entries (it provides conservative coverage for
+///     inserts and updates). Strict entries must bypass publication when point deps were truncated
+///     because a physical delete removes the deleted key from future range scans — no
+///     <c>LastModified</c> entry exists for a deleted key, so strict validation cannot detect
+///     the deletion without the individual point dep.
 ///   </description></item>
 ///   <item><description>
 ///     Index-scan paths record the index bucket keyspace (<c>{dbId}:{tableId}:i:{indexId}</c>)
@@ -49,12 +52,30 @@ internal sealed class QueryDependencyCollector
     private readonly List<(string TableId, int SchemaVersion)> _schemaDeps = new();
 
     private bool _capExceeded;
+    private bool _pointDepsTruncated;
 
     /// <summary>
     /// True if any dep cap was exceeded. When true, <see cref="Build"/> returns
     /// <see cref="QueryDependencySet.Empty"/> and the caller must bypass publish.
     /// </summary>
     public bool CapExceeded => _capExceeded;
+
+    /// <summary>
+    /// True if <see cref="RecordPoint"/> silently dropped at least one point dep because the
+    /// per-query cap (<see cref="CamusDBConfig.QueryResultCacheMaxPointDeps"/>) was reached.
+    ///
+    /// <para>Non-strict entries: this flag is informational only. The range dep provides
+    /// conservative coverage for rows not individually tracked — inserts and updates in the
+    /// range are caught by same-node <c>InvalidateByModifiedKeys</c> range matching.</para>
+    ///
+    /// <para>Strict entries: this flag is blocking. A physical delete removes the key from
+    /// Kahuna entirely — there is no <c>LastModified</c> tombstone for the strict validator
+    /// to compare against. Without a point dep for the deleted row, the range scan sees nothing
+    /// newer than <c>CachedAt</c> and incorrectly reports the entry as valid. The caller
+    /// (<see cref="CachedQueryRunner"/>) must bypass publish for strict entries when this flag
+    /// is set.</para>
+    /// </summary>
+    public bool PointDepsTruncated => _pointDepsTruncated;
 
     /// <summary>
     /// Records a keyspace range as a dependency (table row bucket or index bucket).
@@ -79,9 +100,14 @@ internal sealed class QueryDependencyCollector
     {
         if (_capExceeded) return;
 
-        // Silently drop point deps beyond the per-query cap; range dep already covers the bucket.
+        // Drop point deps beyond the cap. For non-strict entries the range dep provides coverage;
+        // for strict entries this truncation is unsafe (deletes are invisible without the point dep)
+        // and PointDepsTruncated is set so FinalizeAsync can bypass publish for strict entries.
         if (_pointDeps.Count >= CamusDBConfig.QueryResultCacheMaxPointDeps)
+        {
+            _pointDepsTruncated = true;
             return;
+        }
 
         _pointDeps.Add(rowKey);
         CheckTotalCap();

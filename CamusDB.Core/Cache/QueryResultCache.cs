@@ -145,23 +145,66 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     }
 
     /// <inheritdoc />
-    public Task<QueryCacheStatus> TryPublishAsync(
+    public Task<(CachedQueryResult Result, QueryDependencySet Deps)?> TryGetWithDepsAsync(
+        string databaseId,
+        string cacheName,
+        string fingerprint,
+        CancellationToken cancellationToken = default)
+    {
+        lock (_lock)
+        {
+            if (!_entries.TryGetValue(fingerprint, out CacheEntry? entry))
+                return Task.FromResult<(CachedQueryResult, QueryDependencySet)?>(null);
+
+            if (Environment.TickCount64 > entry.ExpiresAtMs)
+            {
+                RemoveEntryLocked(entry);
+                return Task.FromResult<(CachedQueryResult, QueryDependencySet)?>(null);
+            }
+
+            if (entry.LruNode is not null)
+            {
+                _lruList.Remove(entry.LruNode);
+                _lruList.AddFirst(entry.LruNode);
+            }
+
+            return Task.FromResult<(CachedQueryResult, QueryDependencySet)?>((entry.Result, entry.Deps));
+        }
+    }
+
+    /// <inheritdoc />
+    public void InvalidateEntry(string databaseId, string cacheName, string fingerprint)
+    {
+        lock (_lock)
+        {
+            if (_entries.TryGetValue(fingerprint, out CacheEntry? entry))
+                RemoveEntryLocked(entry);
+        }
+    }
+
+    /// <inheritdoc />
+    public Task<(QueryCacheStatus Status, QueryCacheBypassReason Reason)> TryPublishAsync(
         CachedQueryResult result,
         CacheGenerationToken generationToken,
         QueryDependencySet? deps = null,
         CancellationToken cancellationToken = default)
     {
-        // Per-entry row and byte caps
+        // Per-entry row and byte caps — belt-and-suspenders; CachedQueryRunner's _capBreached
+        // flag catches these before TryPublishAsync is called in normal usage.
         if (result.Rows.Count > CamusDBConfig.QueryResultCacheMaxEntryRows)
-            return Task.FromResult(QueryCacheStatus.EvictedBeforePublish);
+            return Task.FromResult((QueryCacheStatus.EvictedBeforePublish, QueryCacheBypassReason.OversizedResult));
 
         long estimatedBytes = EstimateBytes(result.Rows);
         if (estimatedBytes > CamusDBConfig.QueryResultCacheMaxEntryBytes)
-            return Task.FromResult(QueryCacheStatus.EvictedBeforePublish);
+            return Task.FromResult((QueryCacheStatus.EvictedBeforePublish, QueryCacheBypassReason.OversizedResult));
 
         int ttlMs = result.HintTtlMs ?? CamusDBConfig.QueryResultCacheDefaultTtlMs;
 
-        long expiresAtMs = Environment.TickCount64 + ttlMs;
+        long now = Environment.TickCount64;
+        long expiresAtMs = now + ttlMs;
+
+        // Stamp creation time for age computation in the response envelope.
+        result = result with { CreatedAtMs = now };
 
         var entry = new CacheEntry(
             entryId:    result.ResultFingerprint,
@@ -175,7 +218,7 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
 
         bool stored = false;
 
-        PublishGate.TryPublishUnderGeneration(generationToken, () =>
+        bool gateAllowed = PublishGate.TryPublishUnderGeneration(generationToken, () =>
         {
             lock (_lock)
             {
@@ -215,7 +258,15 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
             }
         });
 
-        return Task.FromResult(stored ? QueryCacheStatus.Miss : QueryCacheStatus.EvictedBeforePublish);
+        if (stored)
+            return Task.FromResult((QueryCacheStatus.Miss, QueryCacheBypassReason.None));
+
+        // Generation fence rejected: a write committed into this keyspace during the query.
+        if (!gateAllowed)
+            return Task.FromResult((QueryCacheStatus.EvictedBeforePublish, QueryCacheBypassReason.InFlightWrite));
+
+        // Gate allowed but caps still exceeded after LRU drain.
+        return Task.FromResult((QueryCacheStatus.EvictedBeforePublish, QueryCacheBypassReason.OversizedResult));
     }
 
     /// <inheritdoc />
@@ -511,6 +562,46 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
 
     /// <summary>Current total byte estimate across all live entries.</summary>
     internal long TotalBytes { get { lock (_lock) return _totalBytes; } }
+
+    /// <summary>
+    /// Directly inserts an entry into the cache, bypassing normal publish-gate and fingerprint
+    /// checks. Used by strict-validation tests to inject stale entries that could not have been
+    /// produced by the normal miss path (e.g. an entry with <see cref="HLCTimestamp.Zero"/> as
+    /// <c>CachedAt</c> simulating a cross-node stale hit).
+    /// </summary>
+    internal void InjectEntryForTest(CachedQueryResult result, QueryDependencySet deps, int ttlMs = 60_000)
+    {
+        long byteSize = EstimateBytes(result.Rows);
+        long expiresAtMs = Environment.TickCount64 + ttlMs;
+
+        var entry = new CacheEntry(
+            entryId:     result.ResultFingerprint,
+            fingerprint: result.ResultFingerprint,
+            cacheName:   result.CacheName,
+            databaseId:  result.DatabaseId,
+            result:      result,
+            deps:        deps,
+            byteSize:    byteSize,
+            expiresAtMs: expiresAtMs);
+
+        lock (_lock)
+        {
+            if (_entries.ContainsKey(entry.Fingerprint))
+                return;
+
+            entry.LruNode = _lruList.AddFirst(entry.Fingerprint);
+            _entries[entry.Fingerprint] = entry;
+            _totalBytes += byteSize;
+
+            if (!_byCacheName.TryGetValue(entry.CacheName, out HashSet<string>? byName))
+                _byCacheName[entry.CacheName] = byName = [];
+            byName.Add(entry.Fingerprint);
+
+            if (!_byDatabaseId.TryGetValue(entry.DatabaseId, out HashSet<string>? byDb))
+                _byDatabaseId[entry.DatabaseId] = byDb = [];
+            byDb.Add(entry.Fingerprint);
+        }
+    }
 
     // ──────────────────────────────────────────────────────────────────────────
     // Dispose

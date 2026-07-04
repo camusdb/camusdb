@@ -11,6 +11,7 @@ using System.Text.Json;
 using System.Diagnostics;
 using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
+using CamusDB.Core.Cache;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -99,6 +100,7 @@ public sealed class ExecuteSQLController : CommandsController
             // resolved level is Serializable; run once for Read Committed.
             List<Dictionary<string, ColumnValue>> resultRows = [];
             Kommander.Time.HLCTimestamp causalToken = default;
+            CacheMetadataHolder cacheMeta = new();
 
             async Task AutocommitBody(CancellationToken ct)
             {
@@ -113,7 +115,7 @@ public sealed class ExecuteSQLController : CommandsController
                         parameters: request.Parameters
                     );
                     List<Dictionary<string, ColumnValue>> rows = [];
-                    (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false);
+                    (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, cacheMeta).ConfigureAwait(false);
                     await foreach (QueryResultRow row in cursor)
                         rows.Add(row.Row);
                     causalToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
@@ -132,7 +134,22 @@ public sealed class ExecuteSQLController : CommandsController
             else
                 await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
 
-            return new JsonResult(new ExecuteSQLQueryResponse("ok", resultRows.Count, resultRows) { CausalToken = causalToken.IsNull() ? null : causalToken });
+            ExecuteSQLQueryResponse queryResponse = new("ok", resultRows.Count, resultRows)
+            {
+                CausalToken = causalToken.IsNull() ? null : causalToken
+            };
+
+            // Surface cache metadata only when the query went through the cache path.
+            if (cacheMeta.CacheName is not null)
+            {
+                queryResponse.CacheStatus = CacheMetadataHolder.ToStatusString(cacheMeta.Status);
+                queryResponse.CacheBypassReason = CacheMetadataHolder.ToBypassReasonString(cacheMeta.BypassReason);
+                queryResponse.CachedAtHlc = cacheMeta.CachedAtHlc;
+                queryResponse.AgeMs = cacheMeta.AgeMs;
+                queryResponse.CacheName = cacheMeta.CacheName;
+            }
+
+            return new JsonResult(queryResponse);
         }
         catch (CamusDBException e)
         {
