@@ -29,7 +29,7 @@
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
-%token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS
+%token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT
 
 %%
 
@@ -54,6 +54,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | rollback_stmt { $$.n = $1.n; }
         | set_transaction_stmt { $$.n = $1.n; }
         | analyze_stmt { $$.n = $1.n; }
+        | evict_cache_stmt { $$.n = $1.n; }
         ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
@@ -292,6 +293,25 @@ analyze_stmt : TANALYZE any_identifier
              | TANALYZE TTABLE any_identifier
              { $$.n = new(NodeType.AnalyzeTable, $3.n, null, null, null, null, null, null, null); }
              ;
+
+evict_cache_stmt : TEVICT TIDENTIFIER TSTRING
+                 {
+                   if (!string.Equals($2.s, "cache", System.StringComparison.OrdinalIgnoreCase))
+                       throw new CamusDB.Core.CamusDBException(
+                           CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                           "Expected: EVICT CACHE '<name>' or EVICT CACHE ALL");
+                   $$.n = new(NodeType.EvictCache, null, null, null, null, null, null, null, $3.s);
+                 }
+                 | TEVICT TIDENTIFIER TIDENTIFIER
+                 {
+                   if (!string.Equals($2.s, "cache", System.StringComparison.OrdinalIgnoreCase) ||
+                       !string.Equals($3.s, "all", System.StringComparison.OrdinalIgnoreCase))
+                       throw new CamusDB.Core.CamusDBException(
+                           CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                           "Expected: EVICT CACHE '<name>' or EVICT CACHE ALL");
+                   $$.n = new(NodeType.EvictCacheAll, null, null, null, null, null, null, null, null);
+                 }
+                 ;
 
 identifier_index_list : identifier_index_list TCOMMA identifier_index { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
                       | identifier_index { $$.n = $1.n; $$.s = $1.s; }

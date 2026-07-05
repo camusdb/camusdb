@@ -140,4 +140,15 @@ public enum NodeType
     /// Option nodes: NodeType.String with yytext="strict"; NodeType.Integer with yytext=ttl_ms.
     /// </summary>
     CacheHint,
+    /// <summary>
+    /// <c>EVICT CACHE 'name'</c> — drop all entries in the named cache family for the current
+    /// database. <c>yytext</c> holds the quoted cache name; the executor strips the surrounding
+    /// quotes before calling <see cref="IQueryResultCache.InvalidateCacheName"/>.
+    /// </summary>
+    EvictCache,
+    /// <summary>
+    /// <c>EVICT CACHE ALL</c> — drop every result-cache entry for the current database.
+    /// Calls <see cref="IQueryResultCache.InvalidateDatabase"/> with the database id.
+    /// </summary>
+    EvictCacheAll,
 }

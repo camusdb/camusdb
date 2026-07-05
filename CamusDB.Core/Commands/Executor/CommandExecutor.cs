@@ -2059,6 +2059,23 @@ public sealed class CommandExecutor : IAsyncDisposable
                     }
                 }
 
+            case NodeType.EvictCache:
+                {
+                    string rawName = ast.yytext ?? string.Empty;
+                    string cacheName = rawName.Length >= 2 && rawName[0] == rawName[^1] && (rawName[0] == '\'' || rawName[0] == '"')
+                        ? rawName[1..^1]
+                        : rawName;
+                    // Normalize to lowercase to match the hint grammar's ToLowerInvariant on identifier tokens.
+                    database.Cache?.InvalidateCacheName(database.Id, cacheName.ToLowerInvariant());
+                    return default;
+                }
+
+            case NodeType.EvictCacheAll:
+                {
+                    database.Cache?.InvalidateDatabase(database.Id);
+                    return default;
+                }
+
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown non-query AST stmt: " + ast.nodeType);
         }

@@ -93,6 +93,7 @@ TBranch         (B|b)(R|r)(A|a)(N|n)(C|c)(H|h)
 TBranches       (B|b)(R|r)(A|a)(N|n)(C|c)(H|h)(E|e)(S|s)
 TAncestors      (A|a)(N|n)(C|c)(E|e)(S|s)(T|t)(O|o)(R|r)(S|s)
 TTransaction    (T|t)(R|r)(A|a)(N|n)(S|s)(A|a)(C|c)(T|t)(I|i)(O|o)(N|n)
+TEvict          (E|e)(V|v)(I|i)(C|c)(T|t)
 LParen          \(
 RParen          \)
 LBrace          \{
@@ -171,6 +172,7 @@ TDot            \.
 {TBranches} { return (int)Token.TBRANCHES; }
 {TAncestors} { return (int)Token.TANCESTORS; }
 {TBranch} { return (int)Token.TBRANCH; }
+{TEvict} { return (int)Token.TEVICT; }
 
 {TCommit} { return (int)Token.TCOMMIT; }
 

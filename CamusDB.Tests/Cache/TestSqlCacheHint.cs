@@ -350,4 +350,54 @@ public class TestSqlCacheHint
         Assert.That(ticket.CacheHint, Is.Null,
             "A query without a hint must produce a ticket with null CacheHint");
     }
+
+    // ---------------------------------------------------------------------
+    // EVICT keyword is reserved; CACHE and ALL remain valid identifiers
+    // ---------------------------------------------------------------------
+
+    [Test]
+    public void CacheUsedAsTableName_ParsesWithoutError()
+    {
+        // 'cache' is not a reserved word — schemas using it as an identifier must not break.
+        NodeAst ast = SQLParserProcessor.Parse("SELECT * FROM cache");
+        Assert.That(ast.nodeType, Is.EqualTo(NodeType.Select));
+    }
+
+    [Test]
+    public void AllUsedAsColumnName_ParsesWithoutError()
+    {
+        // 'all' is not a reserved word — schemas using it as an identifier must not break.
+        NodeAst ast = SQLParserProcessor.Parse("SELECT all FROM perms");
+        Assert.That(ast.nodeType, Is.EqualTo(NodeType.Select));
+    }
+
+    [Test]
+    public void EvictCacheByName_ParsesAsEvictCacheNode()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("EVICT CACHE 'robots-by-date'");
+        Assert.That(ast.nodeType, Is.EqualTo(NodeType.EvictCache));
+        Assert.That(ast.yytext, Is.EqualTo("'robots-by-date'"),
+            "yytext carries the raw quoted string; executor strips quotes");
+    }
+
+    [Test]
+    public void EvictCacheAll_ParsesAsEvictCacheAllNode()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("EVICT CACHE ALL");
+        Assert.That(ast.nodeType, Is.EqualTo(NodeType.EvictCacheAll));
+    }
+
+    [Test]
+    public void EvictCacheAll_CaseInsensitive()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("evict cache all");
+        Assert.That(ast.nodeType, Is.EqualTo(NodeType.EvictCacheAll));
+    }
+
+    [Test]
+    public void EvictWrongKeyword_ThrowsHelpfulError()
+    {
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("EVICT NOTHING 'x'"),
+            "A wrong contextual keyword after EVICT should throw a parse error");
+    }
 }
