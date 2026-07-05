@@ -35,7 +35,7 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Information, Message = "Applied schema change {SchemaOp} for database {DbName}: {FromVersion}->{ToVersion}")]
     public static partial void LogSchemaChangeApplied(ILogger logger, SchemaOp schemaOp, string dbName, long fromVersion, long toVersion);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "F1b: schema checkpoint re-persisted at version {Version} for database {DbName} after log restore")]
+    [LoggerMessage(Level = LogLevel.Information, Message = "Schema checkpoint re-persisted at version {Version} for database {DbName} after log restore")]
     public static partial void LogSchemaCheckpointRepersisted(ILogger logger, long version, string dbName);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Restored schema change {SchemaOp} for database {DbName}: {FromVersion}->{ToVersion}")]

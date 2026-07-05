@@ -47,8 +47,8 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public SemaphoreSlim SystemSchemaSemaphore { get; } = new(1, 1);
 
-    // F1a: set when persist-checkpoint exhausts all retries after a committed DDL.
-    // Gates further DDL proposals on this node until the node recovers (F1b restart replay).
+    // Set when persist-checkpoint exhausts all retries after a committed DDL.
+    // Gates further DDL proposals on this node until the node recovers via restart-replay.
     private volatile int _schemaSubsystemDegraded;
 
     public bool SchemaSubsystemDegraded => _schemaSubsystemDegraded != 0;
@@ -59,7 +59,7 @@ public sealed record DatabaseDescriptor : IDisposable
     public void ClearSchemaSubsystemDegraded()
         => Interlocked.Exchange(ref _schemaSubsystemDegraded, 0);
 
-    // F1a: step-down is deferred until the in-flight DDL transaction's CommitAsync completes,
+    // Step-down is deferred until the in-flight DDL transaction's CommitAsync completes,
     // so the KV commit succeeds before leadership changes (important when schema and KV share a
     // single Raft partition, as in single-partition test clusters).
     private volatile int _deferredSchemaStepDown;
@@ -73,7 +73,7 @@ public sealed record DatabaseDescriptor : IDisposable
         => Interlocked.Exchange(ref _deferredSchemaStepDown, 0);
 
     /// <summary>
-    /// If a deferred step-down was requested (F1a persist exhaustion), clears the flag and
+    /// If a deferred step-down was requested due to checkpoint-persist exhaustion, clears the flag and
     /// steps down schema-partition leadership. Throws on step-down failure — callers should
     /// catch and log with their own logger. No-op if no step-down was requested.
     /// </summary>

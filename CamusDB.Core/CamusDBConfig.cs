@@ -264,6 +264,47 @@ public static class CamusDBConfig
     public static int MaxSerializableTransactionLifetimeMs = 3_600_000;
 
     /// <summary>
+    /// How long, in milliseconds, an explicit (client-driven) transaction may sit idle — no
+    /// statement issued against it — before the background reaper rolls it back and releases its
+    /// locks. "Idle" is measured from the last time the client referenced the transaction (its
+    /// last statement, or its begin), using a monotonic clock immune to wall-clock jumps.
+    ///
+    /// <para>This targets abandoned transactions: a client that opens a transaction and then
+    /// disconnects, crashes, or forgets to commit/rollback. Such a transaction is otherwise never
+    /// finalized, so its Serializable+RW range-lock heartbeat would renew its locks forever and
+    /// every conflicting transaction would keep aborting. The reaper reclaims it — freeing the
+    /// locks, rolling back the Kahuna transaction, and dropping it from the in-flight map.</para>
+    ///
+    /// <para>Only transactions tracked by the HTTP transaction coordinator (explicit
+    /// <c>/start-transaction</c> sessions and promoted read-only scans) are subject to the reaper;
+    /// single-statement autocommit requests finalize within their own request and are never
+    /// tracked. A pause longer than this window inside an interactive session is treated as
+    /// abandonment and rolled back.</para>
+    ///
+    /// <para><c>&lt;= 0</c> disables the reaper entirely. Even when disabled, an abandoned
+    /// Serializable+RW transaction's locks are still bounded by
+    /// <see cref="MaxSerializableTransactionLifetimeMs"/> — the heartbeat stops renewing once that
+    /// cap is passed — so a disabled reaper degrades the worst case from "prompt cleanup" to
+    /// "reclaimed at the next TTL after the lifetime cap", never back to a permanent hold.</para>
+    ///
+    /// Default: 300 000 ms (5 minutes).
+    /// </summary>
+    public static int TransactionIdleTimeoutMs = 300_000;
+
+    /// <summary>
+    /// How often, in milliseconds, the background reaper sweeps the in-flight transaction map for
+    /// entries idle longer than <see cref="TransactionIdleTimeoutMs"/>. A single timer scans all
+    /// tracked transactions, so this cost is one periodic pass regardless of transaction count —
+    /// it does not add a timer per transaction.
+    ///
+    /// <para>Must be positive. Set it well under <see cref="TransactionIdleTimeoutMs"/> so an
+    /// abandoned transaction is caught within roughly one sweep of crossing the idle threshold.</para>
+    ///
+    /// Default: 30 000 ms (30 s).
+    /// </summary>
+    public static int TransactionReaperIntervalMs = 30_000;
+
+    /// <summary>
     /// Per-bucket shared-point-lock count at which a Serializable+RW transaction escalates from
     /// individual singleton <c>[key,key]</c> range locks to one whole-bucket <c>[null,null)</c>
     /// Shared range lock. Once escalated, subsequent reads on the same bucket need no additional

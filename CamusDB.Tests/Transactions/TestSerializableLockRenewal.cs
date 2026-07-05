@@ -306,4 +306,52 @@ public sealed class TestSerializableLockRenewal : SharedNodeBaseTest
         Assert.AreEqual(restored, savedMaxLifetimeMs,
             "MaxSerializableTransactionLifetimeMs default must be 1 hour (3 600 000 ms), not 25 s");
     }
+
+    // -----------------------------------------------------------------------
+    // 7. The heartbeat self-terminates once the transaction passes its absolute
+    //    lifetime cap. An ABANDONED Serializable+RW transaction (opened, read a
+    //    row, then never committed or rolled back) must NOT keep renewing its
+    //    range lock forever — otherwise the lock is held permanently and every
+    //    conflicting write aborts indefinitely. Once renewal stops, the lock
+    //    lapses at its next TTL and a foreign write succeeds. This is the exact
+    //    opposite of case 2, where the cap is disabled (-1) and the foreign
+    //    write stays blocked because renewal keeps the lock alive.
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task HeartbeatSelfTerminatesPastLifetimeCap_ForeignWriteSucceeds()
+    {
+        // Short absolute cap: the heartbeat must stop renewing shortly after 200 ms.
+        CamusDBConfig.MaxSerializableTransactionLifetimeMs = 200;
+
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupTableAsync();
+
+        string id = ObjectIdGenerator.Generate().ToString();
+        await InsertRowAsync(dbname, db, executor, id, 100L);
+
+        // Alice reads the row (acquires an S range lock) and is then abandoned — no commit/rollback.
+        KvTransaction alice = await db.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        await ReadBalanceAsync(dbname, executor, alice, id);
+
+        // Wait past the lifetime cap (200 ms) plus a full lock TTL (300 ms): the heartbeat has
+        // self-terminated and the un-renewed range lock has expired.
+        await Task.Delay(CamusDBConfig.RangeLockExpiresMs * 3 + 300);
+
+        // Bob writes the same row. With Alice's heartbeat stopped and her lock lapsed, he succeeds.
+        KvTransaction bob = await db.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        await executor.Update(new UpdateTicket(
+            txnState: bob, databaseName: dbname, tableName: "accounts",
+            plainValues: new() { { "balance", new(ColumnType.Integer64, 555L) } },
+            exprValues: null, where: null,
+            filters: new() { new("id", "=", new(ColumnType.Id, id)) },
+            parameters: null));
+
+        Assert.DoesNotThrowAsync(async () => await db.Transactions.CommitAsync(bob),
+            "Past the lifetime cap the heartbeat must stop renewing, so the abandoned tx's range lock lapses and a foreign write succeeds");
+
+        // Clean up the abandoned transaction (its heartbeat has already stopped).
+        await db.Transactions.RollbackIfNotCompletedAsync(alice);
+    }
 }

@@ -88,6 +88,8 @@ public static class ConfigResolver
         CamusDBConfig.RangeLockExpiresMs = config.RangeLockExpiresMs;
         CamusDBConfig.RangeLockHeartbeatIntervalMs = config.RangeLockHeartbeatIntervalMs;
         CamusDBConfig.MaxSerializableTransactionLifetimeMs = config.MaxSerializableTransactionLifetimeMs;
+        CamusDBConfig.TransactionIdleTimeoutMs = config.TransactionIdleTimeoutMs;
+        CamusDBConfig.TransactionReaperIntervalMs = config.TransactionReaperIntervalMs;
         CamusDBConfig.LockEscalationThreshold = config.LockEscalationThreshold;
         CamusDBConfig.LockWaitDeadlineMs = config.LockWaitDeadlineMs;
 

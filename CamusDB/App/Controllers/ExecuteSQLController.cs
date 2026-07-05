@@ -41,7 +41,7 @@ public sealed class ExecuteSQLController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
-            Log.LogRequestBody(logger, body);
+            //Log.LogRequestBody(logger, body);
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)
@@ -51,6 +51,8 @@ public sealed class ExecuteSQLController : CommandsController
 
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
+
+            Console.WriteLine("sql: {0}", sql.Replace("\n", " "));
 
             // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no
             // database context or transaction.
@@ -174,11 +176,13 @@ public sealed class ExecuteSQLController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
-            Log.LogRequestBody(logger, body);
+            //Log.LogRequestBody(logger, body);
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
+
+            Console.WriteLine("sql: {0}", request.Sql?.Replace("\n", " ") ?? "");
 
             (CamusIsolationLevel? reqLevel2, CamusTransactionMode? reqMode2) = ParseRequestLevelMode(request);
 

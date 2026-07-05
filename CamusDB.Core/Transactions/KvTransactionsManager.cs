@@ -703,6 +703,17 @@ public sealed class KvTransactionsManager : IDisposable
                 if (ct.IsCancellationRequested || tx.Status != KvTransactionStatus.Active)
                     break;
 
+                // Self-terminate once the transaction has outlived its absolute lifetime cap. A
+                // committed/rolled-back transaction stops the loop via StopHeartbeat, but an
+                // *abandoned* transaction (a client that opened it and never committed/rolled back,
+                // and never issues another operation) is never finalized — nothing else cancels this
+                // loop. Without this guard the heartbeat would renew the range locks every interval
+                // forever, holding them indefinitely and starving every conflicting transaction.
+                // Stopping renewal here lets the locks lapse at their next TTL, bounding the leak to
+                // one TTL past the lifetime cap even if no reaper reclaims the transaction first.
+                if (tx.IsExpired(CamusDBConfig.MaxSerializableTransactionLifetimeMs))
+                    break;
+
                 IReadOnlyList<RangeLockBounds> locks = tx.GetAcquiredRangeLocks();
                 foreach (RangeLockBounds b in locks)
                 {

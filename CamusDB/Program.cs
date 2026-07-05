@@ -171,6 +171,10 @@ if (config.IsClusterMode)
 
 builder.Services.AddSingleton<HttpTransactionCoordinator>();
 
+// Reclaims abandoned explicit transactions (client opened one and never committed/rolled back) so
+// their locks — renewed forever by the range-lock heartbeat — cannot be held indefinitely.
+builder.Services.AddHostedService<AbandonedTransactionReaper>();
+
 if (config.IsClusterMode)
 {
     builder.Services.AddSingleton<EmbeddedKahuna>(services =>

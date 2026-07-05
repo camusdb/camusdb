@@ -62,6 +62,13 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 # lock_wait_deadline_ms: 500              # per-operation Serializable conflict cap (> 0)
 # key_range_sharding: false               # opt tables into Kahuna key-range routing
 
+# Abandoned explicit-transaction reaper. A client that opens a transaction (/start-transaction)
+# and never commits/rolls back would otherwise hold its locks indefinitely (a Serializable+RW
+# transaction's heartbeat renews them forever). The reaper rolls back any explicit transaction
+# idle — no statement issued — for longer than transaction_idle_timeout_ms.
+# transaction_idle_timeout_ms: 300000     # idle cutoff before rollback; <= 0 disables the reaper
+# transaction_reaper_interval_ms: 30000   # sweep interval; must be > 0
+
 # ── Advisory table statistics ─────────────────────────────────────────────────
 # Row-count estimates are updated in memory on every DML and flushed to durable storage
 # at most once per this interval (milliseconds), per table.

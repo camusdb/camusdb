@@ -146,6 +146,15 @@ public class ConfigDefinition
     /// <summary>Absolute Serializable+RW transaction lifetime cap in milliseconds. &lt;= 0 disables.</summary>
     public int MaxSerializableTransactionLifetimeMs { get; set; } = 3_600_000;
 
+    /// <summary>
+    /// Idle timeout in milliseconds for explicit (client-driven) transactions before the background
+    /// reaper rolls them back. &lt;= 0 disables the reaper. Default 300 000 (5 min).
+    /// </summary>
+    public int TransactionIdleTimeoutMs { get; set; } = 300_000;
+
+    /// <summary>Reaper sweep interval in milliseconds. Must be &gt; 0. Default 30 000 (30 s).</summary>
+    public int TransactionReaperIntervalMs { get; set; } = 30_000;
+
     /// <summary>Per-bucket shared-point-lock count before whole-bucket escalation. Default 50.</summary>
     public int LockEscalationThreshold { get; set; } = 50;
 
@@ -318,6 +327,9 @@ public class ConfigDefinition
 
         if (LockWaitDeadlineMs <= 0)
             throw Invalid($"'lock_wait_deadline_ms' must be > 0, got {LockWaitDeadlineMs}");
+
+        if (TransactionReaperIntervalMs <= 0)
+            throw Invalid($"'transaction_reaper_interval_ms' must be > 0, got {TransactionReaperIntervalMs}");
 
         if (SpillThresholdRows <= 0)
             throw Invalid($"'spill_threshold_rows' must be > 0, got {SpillThresholdRows}");

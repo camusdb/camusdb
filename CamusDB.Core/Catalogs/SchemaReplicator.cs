@@ -28,9 +28,9 @@ namespace CamusDB.Core.Catalogs;
 /// optimization. Acks (per node, per database) are recorded only after a delta is actually
 /// applied — they drive the two-version invariant gate in <see cref="SchemaAckTracker"/>.
 ///
-/// F1b (restart-replay durability): <see cref="OnSchemaRestoreFinishedAsync"/> re-persists the
-/// KV checkpoint after WAL replay so a node whose checkpoint was behind (F1a persist exhaustion)
-/// recovers without manual intervention. The callback reaches <see cref="OnSchemaRestoreFinishedAsync"/>
+/// Restart-replay durability: <see cref="OnSchemaRestoreFinishedAsync"/> re-persists the
+/// KV checkpoint after WAL replay so a node whose checkpoint was behind (e.g. after
+/// checkpoint-persist exhaustion during a prior run) recovers without manual intervention. The callback reaches <see cref="OnSchemaRestoreFinishedAsync"/>
 /// via <see cref="EmbeddedKahuna.RegisterSchemaApply"/>'s late-subscriber buffer: Raft WAL restore
 /// fires <c>OnLogRestored</c>/<c>OnRestoreFinished</c> during <c>StartAsync</c> before any
 /// <c>OpenDatabase</c> subscriber exists; <see cref="EmbeddedKahuna"/> buffers those entries and
@@ -74,7 +74,7 @@ public sealed class SchemaReplicator
                     }
                     finally
                     {
-                        // F1a: if persist exhaustion occurred during resume, fire the deferred
+                        // If persist exhaustion occurred during resume, fire the deferred
                         // step-down so a healthy peer can take over via the next leader election.
                         try
                         {
@@ -220,14 +220,14 @@ public sealed class SchemaReplicator
     /// <c>OnRestoreFinished</c> fired, or via the late-subscriber buffer in
     /// <see cref="EmbeddedKahuna.RegisterSchemaApply"/> otherwise). Re-persists the full
     /// in-memory schema to bring the KV checkpoint up to the committed WAL head, then clears
-    /// <see cref="DatabaseDescriptor.SchemaSubsystemDegraded"/> so F1a-degraded nodes recover
-    /// on the next open without manual intervention.
+    /// <see cref="DatabaseDescriptor.SchemaSubsystemDegraded"/> so nodes that degraded due to
+    /// checkpoint-persist exhaustion recover on the next open without manual intervention.
     /// </summary>
     private async Task OnSchemaRestoreFinishedAsync(DatabaseDescriptor database)
     {
         long restoredVersion = database.Schema.SchemaVersion;
 
-        // Nothing was replayed → nothing to checkpoint. The F1b re-persist exists to bring the
+        // Nothing was replayed → nothing to checkpoint. This re-persist exists to bring the
         // durable KV checkpoint up to the head a WAL *replay* reached. On a fresh node / empty WAL,
         // OnRestoreFinished still fires but the schema is untouched at version 0 (replaying schema
         // deltas only ever advances the version from 0, so version 0 ⟺ no replay). Running the
@@ -274,7 +274,7 @@ public sealed class SchemaReplicator
         {
             logger.LogWarning(
                 ex,
-                "F1b: failed to re-persist schema checkpoint after restore for database {DbName}; node will retry on next restart",
+                "Failed to re-persist schema checkpoint after restore for database {DbName}; node will retry on next restart",
                 database.Name
             );
         }
@@ -311,7 +311,7 @@ public sealed class SchemaReplicator
                 // A FromVersion mismatch here is a genuine gap — data corruption or a bug — not
                 // a normal condition. Throw so the caller (Kommander) fires a replication-error
                 // event and the node is left in a visibly inconsistent state rather than silently
-                // behind. F1b does NOT silently skip: the committed log is the source of truth
+                // behind. This path does NOT silently skip: the committed log is the source of truth
                 // and a missing delta must surface loudly.
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,

@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -26,7 +27,26 @@ public sealed class HttpTransactionCoordinator
 
     private readonly ConcurrentDictionary<(long L, uint C), ActiveTransaction> active = new();
 
-    private sealed record ActiveTransaction(KvTransactionsManager Manager, KvTransaction Transaction);
+    /// <summary>
+    /// A tracked in-flight transaction plus a monotonic marker of when the client last touched it.
+    /// The marker is a <see cref="Stopwatch.GetTimestamp"/> tick (not wall-clock) so idle detection
+    /// is immune to NTP/clock jumps, consistent with the rest of the transaction machinery. It is
+    /// refreshed on begin and on every <see cref="GetState"/> (i.e. every statement issued against
+    /// the transaction), and read by the abandoned-transaction reaper.
+    /// </summary>
+    private sealed class ActiveTransaction(KvTransactionsManager manager, KvTransaction transaction)
+    {
+        public KvTransactionsManager Manager { get; } = manager;
+        public KvTransaction Transaction { get; } = transaction;
+
+        private long lastActivityTicks = Stopwatch.GetTimestamp();
+
+        /// <summary>Marks the transaction as just-used, resetting its idle timer.</summary>
+        public void Touch() => Volatile.Write(ref lastActivityTicks, Stopwatch.GetTimestamp());
+
+        /// <summary>Elapsed monotonic time since the transaction was last touched.</summary>
+        public TimeSpan IdleTime => Stopwatch.GetElapsedTime(Volatile.Read(ref lastActivityTicks));
+    }
 
     public HttpTransactionCoordinator(CommandExecutor executor)
     {
@@ -93,7 +113,59 @@ public sealed class HttpTransactionCoordinator
         if (!active.TryGetValue((txnIdPT, txnIdCounter), out ActiveTransaction? entry))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown transaction");
 
+        // Every statement issued against an explicit transaction resolves it through here; refresh
+        // the idle timer so the reaper only reclaims transactions the client has genuinely stopped
+        // using, not ones that are actively doing work between requests.
+        entry.Touch();
         return entry.Transaction;
+    }
+
+    /// <summary>
+    /// Rolls back every tracked transaction that has been idle (no statement issued against it)
+    /// for at least <paramref name="idleTimeout"/>, releasing its locks and dropping it from the
+    /// in-flight map. Called periodically by the background reaper to reclaim abandoned
+    /// transactions — a client that opened a transaction and never committed/rolled back. Returns
+    /// the number of transactions reaped.
+    ///
+    /// <para>Best-effort per entry: a rollback that throws (e.g. the transaction just committed on
+    /// another thread, or a transient Kahuna error) is swallowed so one stuck entry cannot stall
+    /// the sweep. A concurrent commit/rollback simply wins the <c>TryRemove</c> race; the loser
+    /// no-ops via <see cref="KvTransactionsManager.RollbackIfNotCompletedAsync"/>.</para>
+    /// </summary>
+    public async Task<int> ReapIdleAsync(TimeSpan idleTimeout, CancellationToken cancellationToken = default)
+    {
+        int reaped = 0;
+
+        foreach (KeyValuePair<(long L, uint C), ActiveTransaction> pair in active)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            ActiveTransaction entry = pair.Value;
+            if (entry.IdleTime < idleTimeout)
+                continue;
+
+            // Remove first so a client racing in with a commit/rollback for the same id either
+            // already removed it (we skip) or finds it gone (its lookup fails cleanly). Only the
+            // thread that wins the removal drives the rollback, so we never double-finalize.
+            if (!active.TryRemove(pair.Key, out _))
+                continue;
+
+            try
+            {
+                await entry.Manager.RollbackIfNotCompletedAsync(entry.Transaction, cancellationToken).ConfigureAwait(false);
+                reaped++;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                // Best-effort: the transaction's lock TTL / lifetime cap is the ultimate backstop.
+            }
+        }
+
+        return reaped;
     }
 
     public async Task<HLCTimestamp> CommitAsync(DatabaseDescriptor database, KvTransaction tx, CancellationToken cancellationToken = default)
