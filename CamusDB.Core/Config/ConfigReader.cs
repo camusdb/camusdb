@@ -58,6 +58,18 @@ public class ConfigReader
         "spill_enabled",
         "spill_threshold_rows",
         "spill_merge_fan_in",
+        "query_result_cache_enabled",
+        "query_result_cache_default_ttl_ms",
+        "query_result_cache_max_entries",
+        "query_result_cache_max_bytes",
+        "query_result_cache_max_entry_bytes",
+        "query_result_cache_max_entry_rows",
+        "query_result_cache_max_deps",
+        "query_result_cache_max_point_deps",
+        "query_result_cache_max_ranges",
+        "query_result_cache_singleflight_wait_ms",
+        "query_result_cache_strict_validation_max_keys",
+        "query_result_cache_sweep_interval_ms",
         "kahuna",
     };
 

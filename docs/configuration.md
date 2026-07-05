@@ -48,9 +48,24 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `spill_enabled` | — | `false` |
 | `spill_threshold_rows` | — | `500000` |
 | `spill_merge_fan_in` | — | `16` |
+| `query_result_cache_enabled` | — | `true` |
+| `query_result_cache_default_ttl_ms` | — | `5000` |
+| `query_result_cache_max_entries` | — | `1024` |
+| `query_result_cache_max_bytes` | — | `67108864` |
+| `query_result_cache_max_entry_bytes` | — | `1048576` |
+| `query_result_cache_max_entry_rows` | — | `10000` |
+| `query_result_cache_max_deps` | — | `4096` |
+| `query_result_cache_max_point_deps` | — | `2048` |
+| `query_result_cache_max_ranges` | — | `256` |
+| `query_result_cache_singleflight_wait_ms` | — | `250` |
+| `query_result_cache_strict_validation_max_keys` | — | `10000` |
+| `query_result_cache_sweep_interval_ms` | — | `10000` |
 | `kahuna.*` | — | mode-specific baseline |
 
-Parser-cache and lock/isolation knobs are YAML-only (operational tuning, not per-node startup flags).
+Parser-cache, lock/isolation, spill, and query-result-cache knobs are YAML-only (operational tuning,
+not per-node startup flags). The result cache is **on by default** (opt-in per query via a
+`{cache=…}` hint); set `query_result_cache_enabled: false` to turn it off entirely. See
+[query-result-cache.md](query-result-cache.md) for what each knob does and operator guidance.
 
 ## Kahuna engine section
 

@@ -20,7 +20,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.Cache;
 
 /// <summary>
-/// Tests for <c>EVICT CACHE 'name'</c> and <c>EVICT CACHE ALL</c> (QC8 manual eviction).
+/// Tests for <c>EVICT CACHE 'name'</c> and <c>EVICT CACHE ALL</c> manual eviction.
 ///
 /// Verifies that the SQL statements drop the expected cache entries, leave unrelated
 /// entries intact, and are safe to call when the cache is disabled (null).

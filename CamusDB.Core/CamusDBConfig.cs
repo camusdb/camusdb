@@ -444,12 +444,14 @@ public static class CamusDBConfig
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Enables the per-node in-memory query result cache. When <c>false</c> (default), every
-    /// <c>{cache=…}</c> hint is treated as a bypass and the <see cref="Cache.NullQueryResultCache"/>
-    /// is used throughout, so no memory or locking overhead is incurred.
-    /// Set via <c>query_result_cache_enabled</c> in <c>config.yml</c>.
+    /// Enables the per-node in-memory query result cache (default <c>true</c>). The cache is
+    /// opt-in per query — only a <c>SELECT</c> carrying a <c>{cache=…}</c> hint is ever cached —
+    /// so with the feature on, hints work without extra configuration. When set to <c>false</c>,
+    /// every <c>{cache=…}</c> hint is a bypass and no cache is constructed, so no per-write gate
+    /// bookkeeping or cache memory is incurred. Set via <c>query_result_cache_enabled</c> in
+    /// <c>config.yml</c>.
     /// </summary>
-    public static bool QueryResultCacheEnabled = false;
+    public static bool QueryResultCacheEnabled = true;
 
     /// <summary>
     /// Default TTL in milliseconds for cache entries that do not carry a per-hint TTL override.

@@ -150,6 +150,24 @@ Use it for cheap staging clones of production, schema-migration dry-runs, per-PR
 
 See [docs/database-branching.md](docs/database-branching.md) for a full developer/operator reference: the ancestry model and read lineage, the copy-on-write overlay and tombstones, frozen-view durability, crash-recovery, and operator guidance (metrics, config knobs, limitations).
 
+Query Result Cache
+------------------
+
+Opt a read into an in-memory, per-node result cache with an inline hint: `SELECT * FROM orders {cache=recent_orders}`. An identical later query — same shape, same bound values, same schema — is served from memory without touching storage. The cache is correct before it is fast: a committed write on the same node evicts every dependent entry before it becomes visible to a later read, so a same-node reader never sees stale data. Writes on other nodes are bounded by a per-entry TTL, or eliminated per-hit with `{cache=…, strict}`. Options include `ttl=30s` (units `ms`/`s`/`m`/`h`) and `strict`; entries are dropped manually with `EVICT CACHE 'name'` or `EVICT CACHE ALL`. The feature is on by default (opt-in per query via the hint — nothing without a `{cache=…}` hint is cached) and applies to autocommit single-table `SELECT`s; set `query_result_cache_enabled: false` to disable it entirely.
+
+```sql
+-- Cache this result under the "recent_orders" family, expiring after 30 seconds
+SELECT id, total FROM orders {cache=recent_orders, ttl=30s} WHERE status = 1;
+
+-- Validate against live storage on every hit (no cross-node staleness window)
+SELECT * FROM inventory {cache=stock, strict} WHERE sku = 'ABC-123';
+
+EVICT CACHE 'recent_orders';   -- drop one family for the current database
+EVICT CACHE ALL;               -- drop every result-cache entry for the current database
+```
+
+See [docs/query-result-cache.md](docs/query-result-cache.md) for a full operator/developer reference: the hint syntax and response metadata, the read/publish path, dependency capture and same-node invalidation, the commit-safe publish gate, TTL and strict validation, fingerprinting, the `query_result_cache_*` config knobs, and known limitations.
+
 Configuration
 -------------
 

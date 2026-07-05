@@ -371,7 +371,23 @@ opt_table_alias : TAS any_identifier { $$.n = $2.n; }
                 ;
 
 opt_table_hint : TAT LBRACE identifier TEQUALS identifier RBRACE
-               { $$.n = new(NodeType.IdentifierWithOpts, null, $3.n, $5.n, null, null, null, null, null); }
+               {
+                 // The at-brace hint with a cache key is an accepted alias of the bare cache hint;
+                 // any other key (e.g. FORCE_INDEX) stays an index-style table hint resolved later.
+                 if ($3.n.yytext!.Equals("cache", System.StringComparison.Ordinal))
+                     $$.n = new(NodeType.CacheHint, null, null, null, null, null, null, null, $5.n.yytext);
+                 else
+                     $$.n = new(NodeType.IdentifierWithOpts, null, $3.n, $5.n, null, null, null, null, null);
+               }
+               | TAT LBRACE identifier TEQUALS identifier TCOMMA cache_hint_options RBRACE
+               {
+                 // ttl/strict options are only meaningful for the cache hint, never for FORCE_INDEX.
+                 if (!$3.n.yytext!.Equals("cache", System.StringComparison.Ordinal))
+                     throw new CamusDB.Core.CamusDBException(
+                         CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                         "Table hint options (ttl, strict) are only valid for the cache hint; got '" + $3.n.yytext + "'");
+                 $$.n = new(NodeType.CacheHint, $7.n, null, null, null, null, null, null, $5.n.yytext);
+               }
                | LBRACE cache_hint_spec RBRACE
                { $$.n = $2.n; }
                | { $$.n = null; }

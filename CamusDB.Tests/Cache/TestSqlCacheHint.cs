@@ -400,4 +400,56 @@ public class TestSqlCacheHint
         Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("EVICT NOTHING 'x'"),
             "A wrong contextual keyword after EVICT should throw a parse error");
     }
+
+    // ---------------------------------------------------------------------
+    // The @{cache=name} form is an accepted alias of {cache=name}
+    // ---------------------------------------------------------------------
+
+    [Test]
+    public void AtBraceCacheHint_ParsesAsCacheHint()
+    {
+        // @{cache=name} must produce the same CacheHint as {cache=name}, not a forced-index hint.
+        SelectQuery q = ParseSelect("SELECT * FROM orders @{cache=recent_orders}");
+        Assert.That(q.CacheHint, Is.Not.Null, "@{cache=...} must be recognised as a cache hint");
+        Assert.That(q.CacheHint!.CacheName, Is.EqualTo("recent_orders"));
+        Assert.That(q.CacheHint.TtlMs, Is.Null);
+        Assert.That(q.CacheHint.IsStrict, Is.False);
+        Assert.That((q.Source as TableSource)?.ForcedIndexName, Is.Null,
+            "A cache hint must not be mistaken for a forced index");
+    }
+
+    [Test]
+    public void AtBraceCacheHint_WithOptions_ParsesOptions()
+    {
+        SelectQuery q = ParseSelect("SELECT * FROM orders @{cache=hot, ttl=30s, strict}");
+        Assert.That(q.CacheHint!.CacheName, Is.EqualTo("hot"));
+        Assert.That(q.CacheHint.TtlMs, Is.EqualTo(30_000));
+        Assert.That(q.CacheHint.IsStrict, Is.True);
+    }
+
+    [Test]
+    public void AtBraceCacheHint_CaseInsensitiveKeyAndLowercasedName()
+    {
+        SelectQuery q = ParseSelect("SELECT * FROM orders @{CACHE=RecentOrders}");
+        Assert.That(q.CacheHint!.CacheName, Is.EqualTo("recentorders"),
+            "The cache key is case-insensitive and the name is lowercased, matching the bare form");
+    }
+
+    [Test]
+    public void AtBraceForceIndex_StillWorks_NoCacheHint()
+    {
+        // Regression: the non-cache key path (FORCE_INDEX) must be unchanged.
+        SelectQuery q = ParseSelect("SELECT * FROM orders @{FORCE_INDEX=idx_created_at}");
+        Assert.That(q.CacheHint, Is.Null);
+        Assert.That((q.Source as TableSource)?.ForcedIndexName, Is.EqualTo("idx_created_at"));
+    }
+
+    [Test]
+    public void AtBraceForceIndex_WithOptions_Throws()
+    {
+        // Options are only meaningful for the cache hint; a forced index with ttl/strict must error.
+        var ex = Assert.Throws<CamusDBException>(() =>
+            ParseSelect("SELECT * FROM orders @{FORCE_INDEX=idx, ttl=1s}"));
+        Assert.That(ex!.Message, Does.Contain("cache").And.Contain("FORCE_INDEX").IgnoreCase);
+    }
 }

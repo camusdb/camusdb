@@ -200,8 +200,8 @@ public class ConfigDefinition
     // Query result cache
     // ──────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Enables the per-node in-memory query result cache. Default: false. Maps to <c>CamusDBConfig.QueryResultCacheEnabled</c>.</summary>
-    public bool QueryResultCacheEnabled { get; set; } = false;
+    /// <summary>Enables the per-node in-memory query result cache. Default: true. Maps to <c>CamusDBConfig.QueryResultCacheEnabled</c>.</summary>
+    public bool QueryResultCacheEnabled { get; set; } = true;
 
     /// <summary>Default TTL in milliseconds for cache entries without a per-hint override. Default: 5 000 ms. Maps to <c>CamusDBConfig.QueryResultCacheDefaultTtlMs</c>.</summary>
     public int QueryResultCacheDefaultTtlMs { get; set; } = 5_000;

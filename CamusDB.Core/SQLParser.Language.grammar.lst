@@ -1,9 +1,9 @@
 
 // ==========================================================================
-//  GPPG error listing for yacc source file <SQLParser/SQLParser.Language.grammar.y - 5/06/2026 9:03:18 PM>
+//  GPPG error listing for yacc source file <SQLParser/SQLParser.Language.grammar.y - 4/07/2026 10:30:48 PM>
 // ==========================================================================
 //  Version:  1.5.3
-//  DateTime: 5/06/2026 9:03:31 PM
+//  DateTime: 4/07/2026 10:30:50 PM
 // ==========================================================================
 
 
@@ -23,6 +23,7 @@
 
 %left TOR
 %left TAND
+%right TNOT
 %left TLIKE TILIKE
 %left TEQUALS TNOTEQUALS TBETWEEN
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
@@ -33,9 +34,11 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
 %token TTRUE TFALSE TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
 %token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL TCAST TINTEGER TDOUBLE
+%token TTYPE_FLOAT32 TTYPE_BYTES TTYPE_DATE TTYPE_DATETIME TTYPE_ARRAY
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT
-%token TCOLUMNS TTABLES TDESCRIBE TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
+%token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
+%token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT
 
 %%
 
@@ -49,12 +52,18 @@ stat    : select_stmt { $$.n = $1.n; }
         | insert_stmt { $$.n = $1.n; }
         | create_table_stmt { $$.n = $1.n; }
         | drop_table_stmt { $$.n = $1.n; }
+        | create_database_stmt { $$.n = $1.n; }
+        | drop_database_stmt { $$.n = $1.n; }
+        | rename_database_stmt { $$.n = $1.n; }
         | alter_table_stmt { $$.n = $1.n; }
         | show_stmt { $$.n = $1.n; }
         | create_index_stmt { $$.n = $1.n; }
         | begin_stmt { $$.n = $1.n; }
         | commit_stmt { $$.n = $1.n; }
         | rollback_stmt { $$.n = $1.n; }
+        | set_transaction_stmt { $$.n = $1.n; }
+        | analyze_stmt { $$.n = $1.n; }
+        | evict_cache_stmt { $$.n = $1.n; }
         ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
@@ -65,14 +74,14 @@ select_stmt : TSELECT opt_distinct select_field_list TFROM select_table opt_wher
             { $$.n = new(NodeType.Select, $3.n, $5.n, $6.n, $9.n, $10.n, $11.n, $7.n, $2.s, $8.n); }
             ;
 
-/* EXPLAIN [( LOGICAL | PHYSICAL )] select_stmt
-   LOGICAL and PHYSICAL are plain identifiers — no new reserved words needed.
-   The grammar action dispatches on the identifier text and rejects anything else
-   with an InvalidInput error so typos (e.g. ANALYZ, VERBOOSE) don't silently
-   degrade to a plain EXPLAIN. ANALYZE is reserved for R5; it is rejected here
-   intentionally until that feature is implemented. */
+/* EXPLAIN [( LOGICAL | PHYSICAL | ANALYZE )] select_stmt
+   LOGICAL and PHYSICAL are plain identifiers dispatched at runtime.
+   ANALYZE is a reserved keyword (TANALYZE) since ANALYZE TABLE was added, so it
+   gets its own grammar alternative instead of going through the TIDENTIFIER branch. */
 explain_stmt : TEXPLAIN select_stmt
              { $$.n = new(NodeType.Explain, $2.n, null, null, null, null, null, null, null); }
+             | TEXPLAIN LPAREN TANALYZE RPAREN select_stmt
+             { $$.n = new(NodeType.ExplainAnalyze, $5.n, null, null, null, null, null, null, null); }
              | TEXPLAIN LPAREN TIDENTIFIER RPAREN select_stmt
              {
                string opt = $3.s.ToUpperInvariant();
@@ -83,12 +92,7 @@ explain_stmt : TEXPLAIN select_stmt
                else
                    throw new CamusDB.Core.CamusDBException(
                        CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                       $"Unknown EXPLAIN option '{$3.s}'. Valid options are: LOGICAL, PHYSICAL.");
-//--------------------^^^
-// Error: Unknown special marker in semantic action
-// Error: Literal string terminated by end of line
-// Error: Literal string terminated by end of line
-// ------------------------------------------------
+                       "Unknown EXPLAIN option '" + $3.s + "'. Valid options are: LOGICAL, PHYSICAL, ANALYZE.");
              }
              ;
 
@@ -142,15 +146,92 @@ delete_stmt : TDELETE TFROM any_identifier TWHERE condition opt_limit
             { $$.n = new(NodeType.Delete, $3.n, $5.n, $6.n, null, null, null, null, null); }
 			;
 
-begin_stmt : TBEGIN { $$.n = new(NodeType.Begin, null, null, null, null, null, null, null, null); }
-           | TSTART TTRANSACTION { $$.n = new(NodeType.Begin, null, null, null, null, null, null, null, null); }
+begin_stmt : TBEGIN { $$.n = NodeAst.Begin; }
+           | TSTART TTRANSACTION { $$.n = NodeAst.Begin; }
            ;
 
-commit_stmt : TCOMMIT { $$.n = new(NodeType.Commit, null, null, null, null, null, null, null, null); }             
+commit_stmt : TCOMMIT { $$.n = NodeAst.Commit; }             
             ;
 
-rollback_stmt : TROLLBACK { $$.n = new(NodeType.Rollback, null, null, null, null, null, null, null, null); }             
+rollback_stmt : TROLLBACK { $$.n = NodeAst.Rollback; }
               ;
+
+/* SET TRANSACTION ISOLATION LEVEL SERIALIZABLE [READ ONLY | READ WRITE]
+ *
+ * Layout of the resulting NodeAst:
+ *   yytext   = isolation level string ("Serializable" or "ReadCommitted")
+ *   leftAst  = NodeType.String whose yytext is the mode ("ReadOnly" or "ReadWrite")
+ *
+ * The 5-identifier form covers:
+ *     SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+ * The 7-identifier form covers:
+ *     SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY
+ *     SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ WRITE
+ *
+ * gppg resolves the shift/reduce conflict between the two productions by preferring shift,
+ * so the 5-identifier rule fires only when the 6th token is NOT an identifier (i.e. end of
+ * statement), and the 7-identifier rule fires when it is.
+ */
+set_transaction_stmt
+    : TSET TTRANSACTION TIDENTIFIER TIDENTIFIER TIDENTIFIER
+      {
+          if (!string.Equals($3.s, "isolation", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($4.s, "level", StringComparison.OrdinalIgnoreCase))
+              throw new CamusDBException(
+                  CamusDBErrorCodes.InvalidInput,
+                  "Expected: SET TRANSACTION ISOLATION LEVEL {SERIALIZABLE | READ COMMITTED}");
+          string level = $5.s.ToUpperInvariant() switch {
+              "SERIALIZABLE"   => "Serializable",
+              _ => throw new CamusDBException(
+                      CamusDBErrorCodes.InvalidInput,
+                      "Unknown isolation level '" + $5.s + "'. Expected: SERIALIZABLE or READ COMMITTED")
+          };
+          $$.n = new(NodeType.SetTransaction,
+                     NodeAst.TransactionModeReadWrite,
+                     null, null, null, null, null, null, level);
+      }
+    | TSET TTRANSACTION TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER
+      {
+          // SET TRANSACTION ISOLATION LEVEL READ COMMITTED — the two-word level opts down from
+          // the Serializable default. Read Committed is read-write; there is no READ ONLY|WRITE variant.
+          if (!string.Equals($3.s, "isolation", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($4.s, "level", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($5.s, "read", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($6.s, "committed", StringComparison.OrdinalIgnoreCase))
+              throw new CamusDBException(
+                  CamusDBErrorCodes.InvalidInput,
+                  "Expected: SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+          $$.n = new(NodeType.SetTransaction,
+                     NodeAst.TransactionModeReadWrite,
+                     null, null, null, null, null, null, "ReadCommitted");
+      }
+    | TSET TTRANSACTION TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER
+      {
+          if (!string.Equals($3.s, "isolation", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($4.s, "level", StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($5.s, "serializable", StringComparison.OrdinalIgnoreCase))
+              throw new CamusDBException(
+                  CamusDBErrorCodes.InvalidInput,
+                  "Expected: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ {ONLY|WRITE}");
+          if (!string.Equals($6.s, "read", StringComparison.OrdinalIgnoreCase))
+              throw new CamusDBException(
+                  CamusDBErrorCodes.InvalidInput,
+                  "Expected READ ONLY or READ WRITE after isolation level");
+          string mode = $7.s.ToUpperInvariant() switch {
+              "ONLY"  => "ReadOnly",
+              "WRITE" => "ReadWrite",
+              _ => throw new CamusDBException(
+                      CamusDBErrorCodes.InvalidInput,
+                      "Expected ONLY or WRITE after READ, got '" + $7.s + "'")
+          };
+          NodeAst modeAst = mode == "ReadOnly"
+              ? NodeAst.TransactionModeReadOnly
+              : NodeAst.TransactionModeReadWrite;
+          $$.n = new(NodeType.SetTransaction,
+                     modeAst,
+                     null, null, null, null, null, null, "Serializable");
+      }
+    ;
 
 create_table_stmt : TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, null, null, null, null, null); }
                   | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, null, null, null, null, null, null); }
@@ -160,11 +241,25 @@ create_table_stmt : TCREATE TTABLE any_identifier LPAREN create_table_item_list 
 
 drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null, null); }
                 | TDROP TTABLE TIF TEXISTS any_identifier { $$.n = new(NodeType.DropTableIfExists, $5.n, null, null, null, null, null, null, null); }
+                ;
+
+create_database_stmt : TCREATE TDATABASE any_identifier { $$.n = new(NodeType.CreateDatabase, $3.n, null, null, null, null, null, null, null); }
+                     | TCREATE TDATABASE TIF TNOT TEXISTS any_identifier { $$.n = new(NodeType.CreateDatabaseIfNotExists, $6.n, null, null, null, null, null, null, null); }
+                     | TCREATE TDATABASE any_identifier TBRANCH TFROM any_identifier { $$.n = new(NodeType.CreateDatabaseBranch, $3.n, $6.n, null, null, null, null, null, null); }
+                     | TCREATE TDATABASE TIF TNOT TEXISTS any_identifier TBRANCH TFROM any_identifier { $$.n = new(NodeType.CreateDatabaseBranchIfNotExists, $6.n, $9.n, null, null, null, null, null, null); }
+                     ;
+
+drop_database_stmt : TDROP TDATABASE any_identifier { $$.n = new(NodeType.DropDatabase, $3.n, null, null, null, null, null, null, null); }
+                   | TDROP TDATABASE TIF TEXISTS any_identifier { $$.n = new(NodeType.DropDatabaseIfExists, $5.n, null, null, null, null, null, null, null); }
 				;
 
+rename_database_stmt : TRENAME TDATABASE any_identifier TTO any_identifier { $$.n = new(NodeType.RenameDatabase, $3.n, $5.n, null, null, null, null, null, null); }
+                     ;
+
 alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, $6.n, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, $6.n, $7.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, null, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type create_table_field_constraint { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, $8.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, $8.n, null, null, null, null); }
 				 | TALTER TTABLE any_identifier TDROP any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $5.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TCOLUMN any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TINDEX any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $3.n, $6.n, $8.n, null, null, null, null, null); }
@@ -176,6 +271,9 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TDROP TINDEX any_identifier { $$.n = new(NodeType.AlterTableDropIndex, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddPrimaryKey, $3.n, $8.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TPRIMARY TKEY { $$.n = new(NodeType.AlterTableDropPrimaryKey, $3.n, null, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TRENAME TTO any_identifier { $$.n = new(NodeType.AlterTableRenameTo, $3.n, $6.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TRENAME TCOLUMN any_identifier TTO any_identifier { $$.n = new(NodeType.AlterTableRenameColumn, $3.n, $6.n, $8.n, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TRENAME TINDEX any_identifier TTO any_identifier { $$.n = new(NodeType.AlterTableRenameIndex, $3.n, $6.n, $8.n, null, null, null, null, null); }
 				 ;
 
 create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $7.n, null, null, null, null, null); }
@@ -185,14 +283,44 @@ create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN iden
                   ;
 
 show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null, null); }
-          | TSHOW TTABLES { $$.n = new(NodeType.ShowTables, null, null, null, null, null, null, null, null); }
+          | TSHOW TTABLES { $$.n = NodeAst.ShowTables; }
+          | TSHOW TTABLES TLIKE string { $$.n = new(NodeType.ShowTables, $4.n, null, null, null, null, null, null, null); }
           | TDESCRIBE any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null, null); }
           | TDESC any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null, null); }
           | TSHOW TCREATE TTABLE any_identifier { $$.n = new(NodeType.ShowCreateTable, $4.n, null, null, null, null, null, null, null); }
-          | TSHOW TDATABASE { $$.n = new(NodeType.ShowDatabase, null, null, null, null, null, null, null, null); }
+          | TSHOW TDATABASE { $$.n = NodeAst.ShowDatabase; }
+          | TSHOW TDATABASES { $$.n = NodeAst.ShowDatabases; }
+          | TSHOW TDATABASES TLIKE string { $$.n = new(NodeType.ShowDatabases, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TINDEXES TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TINDEX TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null, null); }
+          | TSHOW TBRANCHES TFROM any_identifier { $$.n = new(NodeType.ShowBranches, $4.n, null, null, null, null, null, null, null); }
+          | TSHOW TANCESTORS TFROM any_identifier { $$.n = new(NodeType.ShowAncestors, $4.n, null, null, null, null, null, null, null); }
           ;
+
+analyze_stmt : TANALYZE any_identifier
+             { $$.n = new(NodeType.AnalyzeTable, $2.n, null, null, null, null, null, null, null); }
+             | TANALYZE TTABLE any_identifier
+             { $$.n = new(NodeType.AnalyzeTable, $3.n, null, null, null, null, null, null, null); }
+             ;
+
+evict_cache_stmt : TEVICT TIDENTIFIER TSTRING
+                 {
+                   if (!string.Equals($2.s, "cache", System.StringComparison.OrdinalIgnoreCase))
+                       throw new CamusDB.Core.CamusDBException(
+                           CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                           "Expected: EVICT CACHE '<name>' or EVICT CACHE ALL");
+                   $$.n = new(NodeType.EvictCache, null, null, null, null, null, null, null, $3.s);
+                 }
+                 | TEVICT TIDENTIFIER TIDENTIFIER
+                 {
+                   if (!string.Equals($2.s, "cache", System.StringComparison.OrdinalIgnoreCase) ||
+                       !string.Equals($3.s, "all", System.StringComparison.OrdinalIgnoreCase))
+                       throw new CamusDB.Core.CamusDBException(
+                           CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                           "Expected: EVICT CACHE '<name>' or EVICT CACHE ALL");
+                   $$.n = new(NodeType.EvictCacheAll, null, null, null, null, null, null, null, null);
+                 }
+                 ;
 
 identifier_index_list : identifier_index_list TCOMMA identifier_index { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
                       | identifier_index { $$.n = $1.n; $$.s = $1.s; }
@@ -252,9 +380,131 @@ opt_table_alias : TAS any_identifier { $$.n = $2.n; }
                 ;
 
 opt_table_hint : TAT LBRACE identifier TEQUALS identifier RBRACE
-               { $$.n = new(NodeType.IdentifierWithOpts, null, $3.n, $5.n, null, null, null, null, null); }
+               {
+                 // @{cache=name} is an accepted alias of {cache=name}; any other key (e.g. FORCE_INDEX)
+//-----------------^^^
+// Error: Unknown special marker in semantic action
+// ------------------------------------------------
+                 // remains an index-style table hint that the executor resolves later.
+                 if ($3.n.yytext!.Equals("cache", System.StringComparison.Ordinal))
+                     $$.n = new(NodeType.CacheHint, null, null, null, null, null, null, null, $5.n.yytext);
+                 else
+                     $$.n = new(NodeType.IdentifierWithOpts, null, $3.n, $5.n, null, null, null, null, null);
+               }
+               | TAT LBRACE identifier TEQUALS identifier TCOMMA cache_hint_options RBRACE
+               {
+                 // ttl/strict options are only meaningful for the cache hint; @{FORCE_INDEX=x, ...} is invalid.
+//----------------------------------------------------------------------------^^
+// Error: Unknown special marker in semantic action
+// ------------------------------------------------
+                 if (!$3.n.yytext!.Equals("cache", System.StringComparison.Ordinal))
+                     throw new CamusDB.Core.CamusDBException(
+                         CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                         "Table hint options (ttl, strict) are only valid for the cache hint; got '" + $3.n.yytext + "'");
+                 $$.n = new(NodeType.CacheHint, $7.n, null, null, null, null, null, null, $5.n.yytext);
+               }
+               | LBRACE cache_hint_spec RBRACE
+               { $$.n = $2.n; }
                | { $$.n = null; }
                ;
+
+/* {cache=name} or {cache=name, ttl=30s} or {cache=name, strict} or combinations.
+ *
+ * NodeType.CacheHint layout:
+ *   yytext      = cache name (lowercased at reduce time by the `identifier` production's ToLowerInvariant)
+ *   leftAst     = option list: ExprList tree of option nodes, single option node, or null
+ *
+ * Option nodes:
+ *   NodeType.String  with yytext="strict"  — strict validation flag
+ *   NodeType.Integer with yytext=<ms>      — per-hint TTL override, always stored as milliseconds
+ *
+ * TTL format: ttl=<N><unit> where unit is ms | s | m | h, or bare ttl=<N> (milliseconds).
+ * The grammar normalises every form to milliseconds before storing in yytext, so the
+ * SelectQueryCreator / CollectCacheHintOptions path always reads plain integer milliseconds.
+ * Valid range: 1 … 2147483647 ms. ttl=0 and overflow both produce a CamusDBException.
+ */
+cache_hint_spec : TIDENTIFIER TEQUALS identifier
+               {
+                 if (!$1.s.Equals("cache", System.StringComparison.OrdinalIgnoreCase))
+                     throw new CamusDB.Core.CamusDBException(
+                         CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                         "Unknown table hint '" + $1.s + "'. Supported: {cache=name}");
+                 $$.n = new(NodeType.CacheHint, null, null, null, null, null, null, null, $3.n.yytext);
+               }
+               | TIDENTIFIER TEQUALS identifier TCOMMA cache_hint_options
+               {
+                 if (!$1.s.Equals("cache", System.StringComparison.OrdinalIgnoreCase))
+                     throw new CamusDB.Core.CamusDBException(
+                         CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                         "Unknown table hint '" + $1.s + "'. Supported: {cache=name}");
+                 $$.n = new(NodeType.CacheHint, $5.n, null, null, null, null, null, null, $3.n.yytext);
+               }
+               ;
+
+cache_hint_options : cache_hint_option { $$.n = $1.n; }
+                   | cache_hint_options TCOMMA cache_hint_option
+                   { $$.n = new(NodeType.ExprList, $1.n, $3.n, null, null, null, null, null, null); }
+                   ;
+
+cache_hint_option : TIDENTIFIER
+                  {
+                    if (!$1.s.Equals("strict", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "Unknown cache hint option '" + $1.s + "'. Supported: ttl=<value><unit>, strict");
+                    $$.n = new(NodeType.String, null, null, null, null, null, null, null, "strict");
+                  }
+                  | TIDENTIFIER TEQUALS TDIGIT
+                  {
+                    if (!$1.s.Equals("ttl", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "Unknown cache hint option '" + $1.s + "'. Supported: ttl=<value><unit>, strict");
+                    if (!long.TryParse($3.s, out long ttlBareMs) || ttlBareMs <= 0 || ttlBareMs > int.MaxValue)
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "ttl value must be between 1 and " + int.MaxValue + " (milliseconds); got: " + $3.s);
+                    $$.n = new(NodeType.Integer, null, null, null, null, null, null, null, ttlBareMs.ToString());
+                  }
+                  | TIDENTIFIER TEQUALS TDIGIT TIDENTIFIER
+                  {
+                    if (!$1.s.Equals("ttl", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "Unknown cache hint option '" + $1.s + "'. Supported: ttl=<value><unit>, strict");
+                    if (!long.TryParse($3.s, out long ttlRaw) || ttlRaw <= 0 || ttlRaw > int.MaxValue)
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "ttl value must be a positive integer no greater than " + int.MaxValue + "; got: " + $3.s);
+                    // ttlRaw is bounded to int.MaxValue above, so the unit multiplication cannot
+                    // overflow Int64 (max int.MaxValue * 3_600_000 stays well within long); the
+                    // post-multiply check enforces the true millisecond ceiling.
+                    long ttlUnitMs = $4.s.ToLowerInvariant() switch {
+                        "ms" => ttlRaw,
+                        "s"  => ttlRaw * 1000L,
+                        "m"  => ttlRaw * 60_000L,
+                        "h"  => ttlRaw * 3_600_000L,
+                        _    => throw new CamusDB.Core.CamusDBException(
+                                    CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                                    "Unknown ttl unit '" + $4.s + "'. Supported: ms, s, m, h"),
+                    };
+                    if (ttlUnitMs > int.MaxValue)
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "ttl value exceeds maximum (" + int.MaxValue + " ms); got: " + $3.s + $4.s);
+                    $$.n = new(NodeType.Integer, null, null, null, null, null, null, null, ttlUnitMs.ToString());
+                  }
+                  | TIDENTIFIER TEQUALS identifier
+                  {
+                    if ($1.s.Equals("ttl", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "cache hint option 'ttl' requires an integer value, optionally with a unit (ms, s, m, h); got: " + $3.n.yytext);
+                    throw new CamusDB.Core.CamusDBException(
+                        CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                        "Unknown cache hint option '" + $1.s + "'. Supported: ttl=<value><unit>, strict");
+                  }
+                  ;
 
 create_table_item_list : create_table_item_list TCOMMA create_table_item { $$.n = new(NodeType.CreateTableItemList, $1.n, $3.n, null, null, null, null, null, null); }
                        | create_table_item_list TCOMMA create_table_inline_constraint { $$.n = new(NodeType.CreateTableItemList, $1.n, $3.n, null, null, null, null, null, null); }
@@ -263,6 +513,9 @@ create_table_item_list : create_table_item_list TCOMMA create_table_item { $$.n 
 
 create_table_inline_constraint : TCONSTRAINT any_identifier TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $6.n, null, null, null, null, null, null, null); }
                                | TCONSTRAINT TSTRING TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $6.n, null, null, null, null, null, null, null); }
+                               | TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $4.n, null, null, null, null, null, null, null); }
+                               | TKEY any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintMultiIndex, $2.n, $4.n, null, null, null, null, null, null); }
+                               | TUNIQUE TKEY any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintUniqueIndex, $3.n, $5.n, null, null, null, null, null, null); }
                                ;
 
 create_table_item : any_identifier field_type { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, null, null, null, null, null, null); }
@@ -276,10 +529,10 @@ create_table_field_constraint_list : create_table_field_constraint_list create_t
                                    | create_table_field_constraint { $$.n = $1.n; $$.s = $1.s; }
                                    ;
 
-create_table_field_constraint : TNULL { $$.n = new(NodeType.ConstraintNull, null, null, null, null, null, null, null, null); }
-                        | TNOT TNULL { $$.n = new(NodeType.ConstraintNotNull, null, null, null, null, null, null, null, null); }
-						| TPRIMARY TKEY { $$.n = new(NodeType.ConstraintPrimaryKey, null, null, null, null, null, null, null, null); }
-                        | TUNIQUE { $$.n = new(NodeType.ConstraintUnique, null, null, null, null, null, null, null, null); }
+create_table_field_constraint : TNULL { $$.n = NodeAst.ConstraintNull; }
+                        | TNOT TNULL { $$.n = NodeAst.ConstraintNotNull; }
+						| TPRIMARY TKEY { $$.n = NodeAst.ConstraintPrimaryKey; }
+                        | TUNIQUE { $$.n = NodeAst.ConstraintUnique; }
                         | TDEFAULT LPAREN default_expr RPAREN { $$.n = new(NodeType.ConstraintDefault, $3.n, null, null, null, null, null, null, null); }
                         ;
 
@@ -290,16 +543,22 @@ default_expr : int { $$.n = $1.n; $$.s = $1.s; }
              | null { $$.n = $1.n; $$.s = $1.s; }             
 			 ;
 
-field_type : TTYPE_OBJECT_ID { $$.n = new(NodeType.TypeObjectId, null, null, null, null, null, null, null, null); }
-           | TTYPE_STRING { $$.n = new(NodeType.TypeString, null, null, null, null, null, null, null, null); }
-           | TTYPE_INT64 { $$.n = new(NodeType.TypeInteger64, null, null, null, null, null, null, null, null); }
-           | TTYPE_FLOAT64 { $$.n = new(NodeType.TypeFloat64, null, null, null, null, null, null, null, null); }
-           | TTYPE_BOOL { $$.n = new(NodeType.TypeBool, null, null, null, null, null, null, null, null); } 
+field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }
+           | TTYPE_STRING { $$.n = NodeAst.TypeString; }
+           | TTYPE_STRING LPAREN TDIGIT RPAREN { $$.n = new(NodeType.TypeStringSized, null, null, null, null, null, null, null, $3.s); }
+           | TTYPE_INT64 { $$.n = NodeAst.TypeInteger64; }
+           | TTYPE_FLOAT64 { $$.n = NodeAst.TypeFloat64; }
+           | TTYPE_BOOL { $$.n = NodeAst.TypeBool; }
+           | TTYPE_FLOAT32 { $$.n = NodeAst.TypeFloat32; }
+           | TTYPE_BYTES { $$.n = NodeAst.TypeBytes; }
+           | TTYPE_DATE { $$.n = NodeAst.TypeDate; }
+           | TTYPE_DATETIME { $$.n = NodeAst.TypeDateTime; }
+           | TTYPE_ARRAY LPAREN field_type RPAREN { $$.n = new(NodeType.TypeArray, $3.n, null, null, null, null, null, null, null); }
            ;
 
 cast_target_type : field_type { $$.n = $1.n; $$.s = $1.s; }
-                 | TINTEGER { $$.n = new(NodeType.TypeInteger64, null, null, null, null, null, null, null, null); }
-                 | TDOUBLE { $$.n = new(NodeType.TypeFloat64, null, null, null, null, null, null, null, null); }
+                 | TINTEGER { $$.n = NodeAst.TypeInteger64; }
+                 | TDOUBLE { $$.n = NodeAst.TypeFloat64; }
                  | TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $$.s.ToLowerInvariant()); }
                  ;
 
@@ -357,6 +616,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | between_expr { $$.n = $1.n; }
            | and_expr { $$.n = $1.n; }
            | or_expr { $$.n = $1.n; }
+           | not_expr { $$.n = $1.n; }
            | add_expr { $$.n = $1.n; }
            | sub_expr { $$.n = $1.n; }
            | mult_expr { $$.n = $1.n; }
@@ -380,6 +640,9 @@ and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, 
           ; 
 
 or_expr   : condition TOR condition { $$.n = new(NodeType.ExprOr, $1.n, $3.n, null, null, null, null, null, null); }
+          ;
+
+not_expr  : TNOT condition { $$.n = new(NodeType.ExprNot, $2.n, null, null, null, null, null, null, null); }
           ;
 
 equals_expr : condition TEQUALS condition { $$.n = new(NodeType.ExprEquals, $1.n, $3.n, null, null, null, null, null, null); }
@@ -418,17 +681,26 @@ like_expr : condition TLIKE condition { $$.n = new(NodeType.ExprLike, $1.n, $3.n
 ilike_expr : condition TILIKE condition { $$.n = new(NodeType.ExprILike, $1.n, $3.n, null, null, null, null, null, null); }
            ;
 
-is_null_expr : condition TIS TNULL { $$.n = new(NodeType.ExprIsNull, $1.n, $3.n, null, null, null, null, null, null); }
+is_null_expr : condition TIS TNULL { $$.n = new(NodeType.ExprIsNull, $1.n, NodeAst.Null, null, null, null, null, null, null); }
              ;
 
 is_not_null_expr : condition TIS TNOT TNULL { $$.n = new(NodeType.ExprIsNotNull, $1.n, $3.n, null, null, null, null, null, null); }
                  ;
 
 in_subquery_expr : condition TIN query_expr { $$.n = new(NodeType.ExprInSubquery, $1.n, $3.n, null, null, null, null, null, null); }
+                 | condition TIN LPAREN in_value_list RPAREN { $$.n = new(NodeType.ExprInMembership, $1.n, $4.n, null, null, null, null, null, null); }
                  ;
 
 not_in_subquery_expr : condition TNOT TIN query_expr { $$.n = new(NodeType.ExprNotInSubquery, $1.n, $4.n, null, null, null, null, null, null); }
+                     | condition TNOT TIN LPAREN in_value_list RPAREN { $$.n = new(NodeType.ExprNotInMembership, $1.n, $5.n, null, null, null, null, null, null); }
                      ;
+
+in_value_list : in_value_list TCOMMA in_value_item { $$.n = new(NodeType.ExprList, $1.n, $3.n, null, null, null, null, null, null); }
+              | in_value_item { $$.n = $1.n; $$.s = $1.s; }
+              ;
+
+in_value_item : simple_expr { $$.n = $1.n; $$.s = $1.s; }
+              ;
 
 exists_subquery_expr : TEXISTS query_expr { $$.n = new(NodeType.ExprExistsSubquery, $2.n, null, null, null, null, null, null, null); }
                      ;
@@ -462,10 +734,10 @@ simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
             | placeholder { $$.n = $1.n; $$.s = $1.s; }
 			;
 
-use_default_expr : TDEFAULT { $$.n = new(NodeType.ExprDefault, null, null, null, null, null, null, null, null); }
+use_default_expr : TDEFAULT { $$.n = NodeAst.ExprDefault; }
                  ;
 
-projection_all : TMULT { $$.n = new(NodeType.ExprAllFields, null, null, null, null, null, null, null, null); }
+projection_all : TMULT { $$.n = NodeAst.ExprAllFields; }
                ;
 
 any_identifier : qualified_identifier { $$.n = $1.n; $$.s = $1.s; }
@@ -492,11 +764,11 @@ float    : TFLOAT { $$.n = new(NodeType.Float, null, null, null, null, null, nul
 string  : TSTRING { $$.n = new(NodeType.String, null, null, null, null, null, null, null, $$.s); }
         ;
 
-bool    : TTRUE { $$.n = new(NodeType.Bool, null, null, null, null, null, null, null, "true"); }
-        | TFALSE { $$.n = new(NodeType.Bool, null, null, null, null, null, null, null, "false"); }
+bool    : TTRUE { $$.n = NodeAst.True; }
+        | TFALSE { $$.n = NodeAst.False; }
         ;
 
-null    : TNULL { $$.n = new(NodeType.Null, null, null, null, null, null, null, null, "null"); }
+null    : TNULL { $$.n = NodeAst.Null; }
         ;
 
 placeholder : TPLACEHOLDER { $$.n = new(NodeType.Placeholder, null, null, null, null, null, null, null, $$.s); }

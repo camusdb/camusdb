@@ -97,6 +97,18 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 # plan_cache_enabled: false               # SQL plan cache (reuse parsed+planned queries)
 # plan_cache_max_entries: 512             # max LRU entries in the plan cache
 
+# ── Query result cache ────────────────────────────────────────────────────────
+# On by default; opt-in per query via a {cache=name} hint. Nothing without a hint is cached.
+# See docs/query-result-cache.md for the full reference.
+# query_result_cache_enabled: true              # master switch; set false to disable entirely
+# query_result_cache_default_ttl_ms: 5000       # TTL for entries without a per-hint ttl=
+# query_result_cache_max_entries: 1024          # entry-count cap (LRU beyond it)
+# query_result_cache_max_bytes: 67108864        # total byte budget across entries (64 MiB)
+# query_result_cache_max_entry_bytes: 1048576   # per-entry byte cap; larger results not stored
+# query_result_cache_max_entry_rows: 10000      # per-entry row cap; larger results not stored
+# query_result_cache_strict_validation_max_keys: 10000  # probe budget for strict validation
+# query_result_cache_sweep_interval_ms: 10000   # background TTL-sweep interval
+
 # ── Kahuna engine (cluster and standalone) ────────────────────────────────────
 # Allow-listed passthrough to EmbeddedKahunaOptions. Omit the section or any key to
 # keep the mode-specific CamusDB baseline (cluster: sqlite + election 2000/4000 ms;

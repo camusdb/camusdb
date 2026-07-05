@@ -123,6 +123,30 @@ The examples below focus on the `stage` / `node` / `detail` columns (the stable 
 output). Every row also carries `estimated_rows` / `estimated_cost` as described above; the
 `EXPLAIN ANALYZE` examples show the full column set.
 
+## Trailing informational rows
+
+After the plan-node rows, `EXPLAIN` may append a few informational rows. They are not plan
+operators — `estimated_rows` / `estimated_cost` are `NULL` — but they surface plan-level facts.
+
+| Node name   | When it appears | Detail |
+|-------------|-----------------|--------|
+| `plan-info` | When the plan carries a shape id (plan-cache metadata) | `shape=<id>, schema-deps=[table@version, ...]` |
+| `cache`     | When the query carries a `{cache=…}` (or `@{cache=…}`) result-cache hint | `family=<name>, eligible=<true\|false>[, reason=<why>], ttl=<n>ms\|default, strict=<true\|false>` |
+
+The `cache` row answers **"will this result be cached?"** as a static plan property — it does
+**not** probe the cache or reveal whether a live entry currently exists (that is inherently racy;
+the authoritative run-time outcome is in the query response's `cacheStatus`). `eligible=true` means
+the query is a cacheable shape and the feature is on. `eligible=false` names why the hint will be
+ignored:
+
+- `reason=join` — the query is a join; only single-table results are cached, so the hint is inert.
+- `reason=cache-disabled` — the result cache is off (`query_result_cache_enabled: false`).
+
+`ttl` and `strict` echo the hint's options (`ttl=default` when no `ttl=` was given). Eligibility
+here is the plan-level view; at run time the cache additionally applies only to autocommit reads —
+an explicit transaction always reads live storage. A query with no `{cache=…}` hint emits no
+`cache` row. See [`docs/query-result-cache.md`](./query-result-cache.md) for the full feature.
+
 ---
 
 ## Worked examples

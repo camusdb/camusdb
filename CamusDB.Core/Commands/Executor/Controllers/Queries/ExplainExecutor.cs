@@ -7,6 +7,7 @@
  */
 
 using System.Diagnostics;
+using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -126,6 +127,49 @@ internal sealed class ExplainExecutor
                 { "estimated_cost", ColumnValue.Null },
             });
         }
+
+        // Emit a cache-eligibility row when the query carries a {cache=...} hint, so EXPLAIN
+        // surfaces whether the result will be cached — and, when a hint is present but ignored
+        // (a join, or the cache disabled), why. This is a static plan property with no side
+        // effects: it never probes or populates the cache.
+        if (plan.Ticket.CacheHint is { } cacheHint)
+        {
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>
+            {
+                { "stage",          new ColumnValue(ColumnType.String, stage) },
+                { "node",           new ColumnValue(ColumnType.String, "cache") },
+                { "detail",         new ColumnValue(ColumnType.String, DescribeCacheEligibility(plan, cacheHint)) },
+                { "estimated_rows", ColumnValue.Null },
+                { "estimated_cost", ColumnValue.Null },
+            });
+        }
+    }
+
+    /// <summary>
+    /// Describes, at plan time, whether this query's result is eligible for the result cache.
+    /// A pure plan property with no side effects — it does not probe the cache or reveal whether
+    /// a live entry currently exists (that is inherently racy; the authoritative run-time outcome
+    /// is reported in the query response's <c>cacheStatus</c> instead).
+    ///
+    /// <para>A hint that is present but will be ignored is reported as <c>eligible=false</c> with
+    /// the reason, so a silently-dropped hint is visible: joins bypass the cache (they set
+    /// <see cref="QueryPlan.BoundQuery"/>), and a disabled cache ignores every hint. Eligibility
+    /// here is the plan-level view; at run time the cache additionally applies only to autocommit
+    /// reads (an explicit transaction reads live storage).</para>
+    /// </summary>
+    private static string DescribeCacheEligibility(QueryPlan plan, CacheHintOptions hint)
+    {
+        string opts =
+            $"ttl={(hint.TtlMs is { } ms ? ms + "ms" : "default")}, " +
+            $"strict={hint.IsStrict.ToString().ToLowerInvariant()}";
+
+        if (plan.BoundQuery is not null)
+            return $"family={hint.CacheName}, eligible=false, reason=join, {opts}";
+
+        if (!CamusDBConfig.QueryResultCacheEnabled)
+            return $"family={hint.CacheName}, eligible=false, reason=cache-disabled, {opts}";
+
+        return $"family={hint.CacheName}, eligible=true, {opts}";
     }
 
     /// <summary>

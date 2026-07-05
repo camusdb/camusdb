@@ -792,7 +792,7 @@ public sealed class TestQueryResultCacheCommitGate
     {
         var def = new CamusDB.Core.Config.Models.ConfigDefinition();
 
-        Assert.That(def.QueryResultCacheEnabled,              Is.EqualTo(false));
+        Assert.That(def.QueryResultCacheEnabled,              Is.EqualTo(true));
         Assert.That(def.QueryResultCacheDefaultTtlMs,         Is.EqualTo(5_000));
         Assert.That(def.QueryResultCacheMaxEntries,           Is.EqualTo(1_024));
         Assert.That(def.QueryResultCacheMaxBytes,             Is.EqualTo(64 * 1024 * 1024));
