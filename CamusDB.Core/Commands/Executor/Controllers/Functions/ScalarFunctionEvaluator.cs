@@ -58,4 +58,39 @@ internal static class ScalarFunctionEvaluator
     {
         return Registry.InferReturnType(functionName, argumentTypes);
     }
+
+    /// <summary>
+    /// Returns <c>true</c> if <paramref name="ast"/> or any descendant contains a call to a
+    /// volatile scalar function (one whose result changes across evaluations: <c>random</c>,
+    /// <c>now</c>/<c>current_timestamp</c>, <c>current_date</c>, <c>unix_timestamp</c>,
+    /// <c>gen_id</c>). Used to gate cache eligibility: a query whose projection, WHERE,
+    /// HAVING, or GROUP BY contains a volatile call must bypass the result cache.
+    ///
+    /// <para><b>Registration invariant:</b> correctness depends on every volatile function
+    /// having <see cref="ScalarFunctionDescriptor.IsVolatile"/> set to <c>true</c> in its
+    /// <see cref="ScalarFunctionRegistry"/> registration. Unregistered names throw at
+    /// execution, so the only silent gap is a newly-added volatile function whose descriptor
+    /// omits the flag — it would be cached incorrectly. Set <c>IsVolatile = true</c> whenever
+    /// a new non-deterministic function is registered.</para>
+    /// </summary>
+    internal static bool ContainsVolatileFunction(NodeAst? ast)
+    {
+        if (ast is null)
+            return false;
+
+        if (ast.nodeType == NodeType.ExprFuncCall)
+        {
+            string name = ast.leftAst?.yytext?.ToLowerInvariant() ?? string.Empty;
+            if (Registry.TryGet(name, out ScalarFunctionDescriptor? descriptor) && descriptor.IsVolatile)
+                return true;
+        }
+
+        return ContainsVolatileFunction(ast.leftAst)
+            || ContainsVolatileFunction(ast.rightAst)
+            || ContainsVolatileFunction(ast.extendedOne)
+            || ContainsVolatileFunction(ast.extendedTwo)
+            || ContainsVolatileFunction(ast.extendedThree)
+            || ContainsVolatileFunction(ast.extendedFour)
+            || ContainsVolatileFunction(ast.extendedFive);
+    }
 }

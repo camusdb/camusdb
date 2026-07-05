@@ -15,7 +15,9 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Statistics;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
@@ -87,6 +89,17 @@ internal sealed class QueryExecutor
                 && ticket.TxnState.IsReadOnly
                 && ticket.TxnState.TransactionId == HLCTimestamp.Zero)
         {
+            if (HasVolatileFunction(ticket))
+            {
+                if (metaOut is not null)
+                {
+                    metaOut.Status = QueryCacheStatus.Bypass;
+                    metaOut.BypassReason = QueryCacheBypassReason.NonDeterministic;
+                    metaOut.CacheName = hint.CacheName;
+                }
+                return ExecuteQueryPlanInternal(plan);
+            }
+
             if (database.Cache is { } cache)
                 return QueryWithCache(database, plan, hint, cache, metaOut);
 
@@ -754,5 +767,40 @@ internal sealed class QueryExecutor
         }
 
         return types;
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> when any projection, WHERE, HAVING, or GROUP BY expression in
+    /// <paramref name="ticket"/> contains a call to a volatile scalar function. Such queries
+    /// must not be served from or stored in the result cache because repeated executions are
+    /// expected to return different rows.
+    /// </summary>
+    private static bool HasVolatileFunction(QueryTicket ticket)
+    {
+        if (ticket.Projection is { } projections)
+        {
+            foreach (NodeAst proj in projections)
+            {
+                if (ScalarFunctionEvaluator.ContainsVolatileFunction(proj))
+                    return true;
+            }
+        }
+
+        if (ScalarFunctionEvaluator.ContainsVolatileFunction(ticket.Where))
+            return true;
+
+        if (ScalarFunctionEvaluator.ContainsVolatileFunction(ticket.Having))
+            return true;
+
+        if (ticket.GroupBy is { } groupBy)
+        {
+            foreach (NodeAst expr in groupBy)
+            {
+                if (ScalarFunctionEvaluator.ContainsVolatileFunction(expr))
+                    return true;
+            }
+        }
+
+        return false;
     }
 }
