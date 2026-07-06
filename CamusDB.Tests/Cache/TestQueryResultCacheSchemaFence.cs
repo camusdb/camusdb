@@ -17,6 +17,7 @@ using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Transactions;
@@ -244,5 +245,72 @@ public sealed class TestQueryResultCacheSchemaFence : CommandsExecutor.BaseTest
         Assert.That((await SelectItems(dbname, executor)).Status, Is.EqualTo(QueryCacheStatus.Miss));
         Assert.That((await SelectItems(dbname, executor)).Status, Is.EqualTo(QueryCacheStatus.Hit),
             "non-strict hit must succeed when schema has not changed");
+    }
+
+    // ── 5. Promoted autocommit read (key-range sharding) is cache-eligible ──────
+    //
+    // When KeyRangeShardingEnabled is true, BeginReadOnlyAsync(promote: true) mints a
+    // real Kahuna transaction identity so a shared range lock can be held, but
+    // ReadTimestamp stays Zero (no pinned snapshot). The cache gate must admit this
+    // transaction because it is semantically equivalent to a zero-snapshot autocommit
+    // read for caching purposes. Without the fix, the gate's TransactionId == Zero check
+    // rejects the promoted read and every HTTP autocommit SELECT under key-range sharding
+    // silently bypasses the cache.
+    [Test]
+    public async Task PromotedAutocommitRead_KeyRangeSharding_HitMissCycle()
+    {
+        const string cacheName = "promoted_cache";
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateItems(dbname, database, executor);
+        await InsertItem(dbname, database, executor, "p1", 100);
+
+        bool origSharding = CamusDBConfig.KeyRangeShardingEnabled;
+        try
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = true;
+
+            CacheMetadataHolder miss = await SelectItemsPromoted(dbname, database, executor, cacheName);
+            Assert.That(miss.Status, Is.EqualTo(QueryCacheStatus.Miss),
+                "first promoted-read query must execute live and populate the cache");
+
+            CacheMetadataHolder hit = await SelectItemsPromoted(dbname, database, executor, cacheName);
+            Assert.That(hit.Status, Is.EqualTo(QueryCacheStatus.Hit),
+                "second promoted-read query must be served from cache: " +
+                "the promoted read has ReadTimestamp == Zero so the gate admits it");
+        }
+        finally
+        {
+            CamusDBConfig.KeyRangeShardingEnabled = origSharding;
+        }
+    }
+
+    /// <summary>
+    /// Runs <c>SELECT * FROM items{cache=<paramref name="cacheName"/>}</c> under a
+    /// promoted autocommit read transaction and returns cache metadata.
+    /// The promoted transaction is committed after the cursor is fully drained so its
+    /// shared range locks are released (matching the HTTP-path single-statement lifecycle).
+    /// </summary>
+    private static async Task<CacheMetadataHolder> SelectItemsPromoted(
+        string dbname,
+        DatabaseDescriptor database,
+        CommandExecutor executor,
+        string cacheName)
+    {
+        var meta = new CacheMetadataHolder();
+        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote: true);
+        try
+        {
+            (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
+                new ExecuteSQLTicket(tx, dbname, $"SELECT * FROM items{{cache={cacheName}}}", null), meta);
+            await foreach (QueryResultRow _ in cursor) { }
+            await database.Transactions.CommitAsync(tx);
+        }
+        catch
+        {
+            await database.Transactions.RollbackAsync(tx);
+            throw;
+        }
+        return meta;
     }
 }

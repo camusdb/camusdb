@@ -734,6 +734,7 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
             }
             catch (CamusDBException)
             {
+                await database.Transactions.RollbackAsync(tx);
                 return false;
             }
         }

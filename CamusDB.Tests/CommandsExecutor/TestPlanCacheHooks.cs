@@ -189,7 +189,7 @@ public sealed class TestPlanCacheHooks : BaseTest
     }
 
     [Test]
-    public async Task R10_SchemaDeps_ContainsTableNameAndVersion()
+    public async Task R10_SchemaDeps_ContainsTableIdAndVersion()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableAsync();
 
@@ -198,8 +198,9 @@ public sealed class TestPlanCacheHooks : BaseTest
 
         string detail = rows[^1].Row["detail"].StrValue!;
 
-        // detail = "shape=<hex>, schema-deps=[robots@<version>]"
-        Assert.IsTrue(detail.Contains("robots@"), $"Expected 'robots@<version>' in schema-deps, got: {detail}");
+        // detail = "shape=<hex>, schema-deps=[<tableId>@<version>]"
+        // The dep uses the immutable table id, not the mutable table name.
+        Assert.IsTrue(detail.Contains("@"), $"Expected '<tableId>@<version>' in schema-deps, got: {detail}");
     }
 
     [Test]
@@ -266,9 +267,10 @@ public sealed class TestPlanCacheHooks : BaseTest
 
         string detail = infoRow.Row["detail"].StrValue!;
         Assert.IsTrue(detail.StartsWith("shape="), $"Expected 'shape=' prefix, got: {detail}");
-        // Both tables must appear in schema-deps.
-        Assert.IsTrue(detail.Contains("robots@") || detail.Contains("parts@"),
-            $"Expected joined table names in schema-deps, got: {detail}");
+        // Both tables must appear in schema-deps (as immutable table ids, not names).
+        int depCount = detail.Split('@').Length - 1;
+        Assert.IsTrue(depCount >= 2,
+            $"Expected at least two schema-deps (one per joined table), got: {detail}");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

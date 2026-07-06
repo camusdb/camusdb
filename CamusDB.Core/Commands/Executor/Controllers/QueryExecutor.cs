@@ -79,15 +79,32 @@ internal sealed class QueryExecutor
     {
         QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
 
-        // Only autocommit reads are cache-eligible: IsReadOnly ensures no writes, and
-        // TransactionId == Zero distinguishes synthetic autocommit reads (CreateReadOnly /
-        // CreateSnapshotReadOnly) from explicit Serializable RO transactions opened via
-        // BeginAsync(Serializable, ReadOnly) — the latter carry a real Kahuna timestamp,
-        // have a pinned read snapshot of their own, and must not be served a cached result
-        // from a different snapshot.
+        // Only autocommit reads are cache-eligible (IsReadOnly ensures no writes). Two
+        // kinds are admitted:
+        //
+        // 1. Synthetic zero-snapshot reads (TransactionId == Zero): CreateReadOnly() and
+        //    CreateSnapshotReadOnly(T). These have no Kahuna identity and read at the latest
+        //    committed value per key — the standard single-node / hash-mode fast path.
+        //
+        // 2. Promoted single-statement autocommit reads (TransactionId != Zero, but
+        //    ReadTimestamp == Zero): BeginReadOnlyAsync(promote: true) under key-range
+        //    sharding. These mint a real Kahuna transaction identity so a shared range lock
+        //    can be held for phantom-free reads, but they do not pin a read snapshot
+        //    (ReadTimestamp stays Zero). Semantically they are equivalent to a zero-snapshot
+        //    autocommit read for caching: both read at the current latest committed state,
+        //    and both are single-statement (no cross-statement snapshot to protect).
+        //    Admitting them keeps the result cache effective in key-range sharding mode;
+        //    excluding them would silently disable caching for every HTTP autocommit SELECT
+        //    in that mode.
+        //
+        // Excluded: explicit Serializable RO transactions (TransactionId != Zero AND
+        //    ReadTimestamp != Zero), opened via BeginAsync(Serializable, ReadOnly). These
+        //    pin a specific read snapshot; serving a cached result from a different snapshot
+        //    would violate their isolation guarantee.
         if (ticket.CacheHint is { } hint
                 && ticket.TxnState.IsReadOnly
-                && ticket.TxnState.TransactionId == HLCTimestamp.Zero)
+                && (ticket.TxnState.TransactionId == HLCTimestamp.Zero
+                    || ticket.TxnState.ReadTimestamp == HLCTimestamp.Zero))
         {
             if (HasVolatileFunction(ticket))
             {
@@ -118,11 +135,13 @@ internal sealed class QueryExecutor
     }
 
     /// <summary>
-    /// Executes a cached-read path for autocommit SELECTs (<see cref="KvTransaction.TransactionId"/>
-    /// == <see cref="HLCTimestamp.Zero"/>) with a <c>{cache=name}</c> hint. Explicit Serializable
-    /// read-only transactions are excluded at the call site: they carry a real Kahuna timestamp and
-    /// a pinned snapshot; serving them a cached result from a different snapshot would violate their
-    /// isolation guarantee.
+    /// Executes a cached-read path for autocommit SELECTs with a <c>{cache=name}</c> hint.
+    /// Admitted are synthetic zero-snapshot reads (<see cref="KvTransaction.TransactionId"/> ==
+    /// <see cref="HLCTimestamp.Zero"/>) and promoted single-statement autocommit reads
+    /// (<see cref="KvTransaction.TransactionId"/> != Zero but <see cref="KvTransaction.ReadTimestamp"/>
+    /// == Zero). Excluded are explicit Serializable RO transactions, which have a pinned read
+    /// snapshot (<see cref="KvTransaction.ReadTimestamp"/> != Zero); serving them a cached result
+    /// from a different snapshot would violate their isolation guarantee.
     ///
     /// <para><b>Single-table only.</b> The generation fence snapshots only the primary table's row
     /// keyspace. Multi-source (join) plans must never be routed here — they require all involved
