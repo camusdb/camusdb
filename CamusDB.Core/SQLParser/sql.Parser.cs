@@ -6,8 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Text;
-
 namespace CamusDB.Core.SQLParser;
 
 /// <summary>
@@ -19,10 +17,12 @@ internal partial class sqlParser
 
     public NodeAst Parse(string sqlStatement)
     {
-        byte[] inputBuffer = Encoding.Default.GetBytes(sqlStatement);
-
-        MemoryStream stream = new(inputBuffer);
-        var scanner = new sqlScanner(stream);
+        // Feed the SQL string straight into the scanner via SetSource(string). This avoids the
+        // per-parse Encoding.Default.GetBytes(...) byte[] copy plus MemoryStream that the previous
+        // path allocated, and reads the statement's chars directly — which also sidesteps the
+        // Encoding.Default round-trip that could mangle non-ASCII identifiers/string literals.
+        var scanner = new sqlScanner();
+        scanner.SetSource(sqlStatement, 0);
 
         Scanner = scanner;
 
