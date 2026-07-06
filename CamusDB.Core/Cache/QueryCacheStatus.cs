@@ -99,4 +99,18 @@ public enum QueryCacheBypassReason
 
     /// <summary>The statement type is not eligible for result caching (e.g. DML, DDL, EXPLAIN).</summary>
     UnsupportedStatementType,
+
+    /// <summary>
+    /// The query is a multi-source JOIN. The result cache fences only a single table's row
+    /// keyspace per entry; caching a join result would require fencing all joined tables.
+    /// Until multi-keyspace fencing is implemented, all hinted join queries bypass the cache.
+    /// </summary>
+    Join,
+
+    /// <summary>
+    /// A <c>{cache=name}</c> hint appeared inside a WHERE-clause subquery but not on the outer
+    /// SELECT. SubqueryRewriter executes inner subqueries live and discards inner cache hints;
+    /// the outer response carries this bypass reason so the hint is visible rather than silent.
+    /// </summary>
+    InnerHint,
 }

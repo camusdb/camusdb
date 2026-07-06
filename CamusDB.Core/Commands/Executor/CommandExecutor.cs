@@ -2129,6 +2129,22 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
 
+                    // Detect an inner subquery that carries a {cache=name} hint when the outer
+                    // SELECT has none. SubqueryRewriter executes all inner subqueries live and
+                    // discards inner cache hints — they are inert. Surface the bypass in the
+                    // outer response so the caller sees an explicit "inner-hint" bypass rather
+                    // than silence (which looks identical to an un-hinted outer query).
+                    if (selectQuery.CacheHint is null && metaOut is not null)
+                    {
+                        CacheHintOptions? innerHint = FindInnerSubqueryCacheHint(selectQuery.Where?.Expression);
+                        if (innerHint is not null)
+                        {
+                            metaOut.CacheName = innerHint.CacheName;
+                            metaOut.Status = QueryCacheStatus.Bypass;
+                            metaOut.BypassReason = QueryCacheBypassReason.InnerHint;
+                        }
+                    }
+
                     // Extract eligible IN / NOT IN subqueries as semi/anti-join specs
                     // before SubqueryRewriter materialises them.
                     (selectQuery, List<SemiJoinSpec> semiJoinSpecs) = await semiJoinAnalyzer
@@ -2159,9 +2175,18 @@ public sealed class CommandExecutor : IAsyncDisposable
                     // Join queries bypass the result cache: caching a multi-table result
                     // requires fencing ALL involved tables' row keyspaces, not just one.
                     // Until the multi-keyspace fence is implemented, any {cache=name} hint
-                    // on a join is silently ignored — the query executes live every time.
+                    // on a join executes live every time. Surface the bypass so the response
+                    // is not silently identical to an unhinted query.
                     if (boundQuery.IsMultiSource)
+                    {
+                        if (queryTicket.CacheHint is { } joinHint && metaOut is not null)
+                        {
+                            metaOut.CacheName = joinHint.CacheName;
+                            metaOut.Status = QueryCacheStatus.Bypass;
+                            metaOut.BypassReason = QueryCacheBypassReason.Join;
+                        }
                         return (database, queryExecutor.ExecuteJoinQuery(database, boundQuery, queryTicket));
+                    }
 
                     TableDescriptor table = boundQuery.PrimaryTable;
 
@@ -2287,6 +2312,49 @@ public sealed class CommandExecutor : IAsyncDisposable
             () => database.Schema.Tables.TryGetValue(table.Name, out TableSchema? current)
                   && current.Id == table.Id
         );
+    }
+
+    /// <summary>
+    /// Walks a WHERE-clause predicate AST looking for an IN/NOT IN/scalar subquery node whose
+    /// inner SELECT carries a <c>{cache=name}</c> table-reference hint.
+    /// Returns the first such <see cref="CacheHintOptions"/> found, or <c>null</c> if none.
+    ///
+    /// <para>Used to detect the "inner subquery hint" case, where the outer SELECT has no
+    /// cache hint but a subquery in its WHERE clause does. SubqueryRewriter executes such
+    /// subqueries live and silently discards the inner hint; calling this method before
+    /// SubqueryRewriter runs lets <c>ExecuteSQLQuery</c> surface an explicit
+    /// <see cref="QueryCacheBypassReason.InnerHint"/> bypass in the response metadata.</para>
+    ///
+    /// <para><b>Scope limitation:</b> this walks only the WHERE-clause predicate. A
+    /// <c>{cache=name}</c> hint on a subquery in the projection list, a FROM-derived table,
+    /// or a HAVING clause is <em>not</em> detected here and still produces a silent bypass
+    /// (the hint is discarded by SubqueryRewriter with no <c>InnerHint</c> metadata). WHERE is
+    /// the common case and the one the surfacing contract currently covers; extend this walk
+    /// if inner hints in those other positions need to be surfaced too.</para>
+    /// </summary>
+    private static CacheHintOptions? FindInnerSubqueryCacheHint(NodeAst? node)
+    {
+        if (node is null)
+            return null;
+
+        // ExprInSubquery / ExprNotInSubquery: rightAst is the inner SELECT.
+        // ExprScalarSubquery: leftAst is the inner SELECT.
+        NodeAst? subSelect = node.nodeType switch
+        {
+            NodeType.ExprInSubquery or NodeType.ExprNotInSubquery => node.rightAst,
+            NodeType.ExprScalarSubquery                           => node.leftAst,
+            _                                                     => null,
+        };
+
+        if (subSelect is not null)
+        {
+            SelectQuery inner = new SelectQueryCreator().CreateSelectQuery(subSelect);
+            if (inner.CacheHint is not null)
+                return inner.CacheHint;
+        }
+
+        return FindInnerSubqueryCacheHint(node.leftAst)
+            ?? FindInnerSubqueryCacheHint(node.rightAst);
     }
 
     public async ValueTask DisposeAsync()

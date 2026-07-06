@@ -130,6 +130,17 @@ internal sealed class QueryExecutor
                 metaOut.CacheName = hint.CacheName;
             }
         }
+        else if (ticket.CacheHint is { CacheName: { } txCacheName } && metaOut is not null)
+        {
+            // The hint was present but the gate rejected the transaction: either a write
+            // transaction (IsReadOnly == false) or an explicit Serializable RO transaction
+            // with a pinned read snapshot (TransactionId != Zero && ReadTimestamp != Zero).
+            // Execute live without caching and surface the bypass so the caller can
+            // distinguish "hint seen but ineligible" from "query had no hint at all."
+            metaOut.CacheName = txCacheName;
+            metaOut.Status = QueryCacheStatus.Bypass;
+            metaOut.BypassReason = QueryCacheBypassReason.InTransaction;
+        }
 
         return ExecuteQueryPlanInternal(plan);
     }
@@ -841,12 +852,28 @@ internal sealed class QueryExecutor
     /// current in-memory schema of <paramref name="database"/>: the table exists and its
     /// <see cref="TableSchema.Version"/> equals the version recorded at cache time.
     ///
-    /// <para>This is a cheap, lock-free check against the in-memory schema snapshot. It is
-    /// used on every cache hit — including non-strict hits — to detect schema changes that
-    /// occurred between the time an entry was computed and the time it is probed. A DDL
-    /// operation that manages to publish a stale entry (e.g. due to the post-commit
-    /// invalidation window) is caught here on the very next probe, preventing the stale
-    /// entry from being served even once.</para>
+    /// <para><b>This is a concurrency-only defense, not the primary schema fence.</b> The
+    /// schema version is already folded into the result fingerprint (see
+    /// <c>ResultFingerprintBuilder.Build</c>), and the planner always stamps the fingerprint
+    /// from the current live schema version. So in a single-threaded sequence a schema change
+    /// yields a different fingerprint — a natural miss — and this method is never reached; and
+    /// a fingerprint hit implies the versions already match, so this returns <c>true</c>. It
+    /// cannot evict on any non-concurrent path.</para>
+    ///
+    /// <para>It earns its keep as defense-in-depth for two states the fingerprint fence alone
+    /// does not cover. First, a TOCTOU race: a committing DDL can bump the version and run its
+    /// <c>InvalidateByTableId</c> in the window <em>after</em> the planner stamped the
+    /// fingerprint at the old version and <em>after</em> this probe already fetched the entry,
+    /// but before its rows are yielded — re-reading the live version here evicts rather than
+    /// serving a snapshot a concurrent commit just invalidated. Second, an entry whose stored
+    /// deps and fingerprint disagree (e.g. one that published after its <c>InvalidateByTableId</c>
+    /// already fired, so it is absent from the dependency index and a later
+    /// <c>InvalidateByTableId</c> cannot find it) — this re-check still catches it on the next
+    /// probe. The eviction logic is covered deterministically by
+    /// <c>TestQueryResultCacheSchemaFence.SchemaDepsCurrent_StaleDepVersion_EvictsEntryOnHit</c>
+    /// (via a test injection seam), and the primary version/id fingerprint fence that makes this
+    /// path almost never necessary is covered by the <c>Fingerprint_*</c> tests in the same
+    /// fixture.</para>
     /// </summary>
     private static bool SchemaDepsCurrent(QueryDependencySet deps, DatabaseDescriptor database)
     {

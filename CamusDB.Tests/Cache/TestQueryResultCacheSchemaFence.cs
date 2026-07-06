@@ -21,6 +21,7 @@ using CamusDB.Core;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Transactions;
+using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
 
 namespace CamusDB.Tests.Cache;
@@ -312,5 +313,58 @@ public sealed class TestQueryResultCacheSchemaFence : CommandsExecutor.BaseTest
             throw;
         }
         return meta;
+    }
+
+    // ── 6. Fingerprint fence (deterministic): table id + schema version are folded
+    //      into the digest ────────────────────────────────────────────────────────
+    //
+    // These isolate the mechanism that actually makes a stale entry unhittable in
+    // single-threaded flow. The result fingerprint includes both the immutable table
+    // id and the schema version (ResultFingerprintBuilder.Build), and QueryPlanner
+    // always stamps the fingerprint from the CURRENT live schema version. So any
+    // schema change produces a different fingerprint — a natural miss — before the
+    // on-hit SchemaDepsCurrent re-check is ever consulted. (That re-check cannot fire on
+    // the normal publish path — an entry's fingerprint and its stored deps always share the
+    // same version — so it is defense-in-depth for a concurrent DDL race or a dep-index-
+    // bypassing entry; its eviction logic is covered by SchemaDepsCurrent_StaleDepVersion_
+    // EvictsEntryOnHit via a test injection seam.) Unlike the DROP/ALTER end-to-end tests
+    // above — where InvalidateByTableId also evicts the entry and masks which guard
+    // fires — these assert the fingerprint fence in isolation.
+
+    private static string BuildFingerprint(string tableId, int schemaVersion)
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT * FROM items{cache=items_cache}");
+        SelectQuery select = new SelectQueryCreator().CreateSelectQuery(ast);
+        string? shape = QueryShapeComputer.Compute(select);
+        CacheHintOptions hint = new("items_cache", null, IsStrict: false);
+        List<(string, int)> deps = [(tableId, schemaVersion)];
+        return ResultFingerprintBuilder.Build("db1", "items_cache", shape, null, deps, hint);
+    }
+
+    [Test]
+    public void Fingerprint_SchemaVersionBump_ChangesDigest()
+    {
+        string tableId = ObjectIdGenerator.Generate().ToString();
+        string fpV1 = BuildFingerprint(tableId, 1);
+        string fpV2 = BuildFingerprint(tableId, 2);
+
+        Assert.That(fpV2, Is.Not.EqualTo(fpV1),
+            "a schema version bump must change the fingerprint so an entry cached at the " +
+            "old version can no longer be hit (the fence behind acceptance: schema change → miss)");
+    }
+
+    [Test]
+    public void Fingerprint_SameNameNewTableId_ChangesDigest()
+    {
+        // Same table name and same schema version, but a fresh table id — a DROP + CREATE
+        // of the same name. The immutable id in the digest must still force a different
+        // fingerprint, so the new incarnation cannot collide with the dropped table's entry.
+        string oldId = ObjectIdGenerator.Generate().ToString();
+        string newId = ObjectIdGenerator.Generate().ToString();
+        string fpOld = BuildFingerprint(oldId, 1);
+        string fpNew = BuildFingerprint(newId, 1);
+
+        Assert.That(fpNew, Is.Not.EqualTo(fpOld),
+            "drop+recreate at the same name and schema version must still differ by table id");
     }
 }

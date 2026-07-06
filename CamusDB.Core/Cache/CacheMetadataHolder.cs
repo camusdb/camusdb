@@ -86,6 +86,8 @@ public sealed class CacheMetadataHolder
         QueryCacheBypassReason.InFlightWrite         => "in-flight-write",
         QueryCacheBypassReason.StrictValidationLimit => "strict-validation-limit",
         QueryCacheBypassReason.UnsupportedStatementType => "unsupported-statement-type",
+        QueryCacheBypassReason.Join                  => "join",
+        QueryCacheBypassReason.InnerHint             => "inner-hint",
         _                                            => null,
     };
 }
