@@ -81,6 +81,48 @@ internal sealed class TestDatabaseRegistryMultiPartition
     }
 
     [Test]
+    public async Task OpenRegistry_ImmediatelyAfterStart_NoWarmup_Succeeds()
+    {
+        // Reproduces the production boot race as closely as a test can: a fresh 3-partition node is
+        // started and the registry is opened immediately, WITHOUT waiting for leader election. Some
+        // partitions may still be coming online, so the registry scan can transiently hit
+        // "Invalid partition" — the load's bounded retry must ride over that and open successfully
+        // instead of caching a permanent fault.
+        string dir = Path.Combine(Path.GetTempPath(), "camusdb-registry-coldopen-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        CamusConfig.DataDirectory = dir;
+
+        EmbeddedKahuna coldNode = new(new EmbeddedKahunaOptions
+        {
+            NodeName = "registry-coldopen-test",
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = 3
+        });
+
+        try
+        {
+            await coldNode.StartAsync(CancellationToken.None);
+
+            // Note: no WaitForLeaderAsync here — open while the node is still electing leaders.
+            await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(coldNode);
+
+            // Prove it's usable after a cold open.
+            string name = NewName();
+            string id = NewId();
+            await registry.RegisterAsync(name, id);
+            Assert.IsTrue(registry.TryResolveId(name, out string resolvedId));
+            Assert.AreEqual(id, resolvedId);
+        }
+        finally
+        {
+            await coldNode.DisposeAsync();
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Test]
     public async Task RegisterMany_ThenReopen_LoadsAllEntries()
     {
         // Register several databases whose ids/keys spread across the 3-partition hash pool.

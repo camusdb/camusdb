@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
@@ -15,6 +16,7 @@ using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Sequences;
+using Kommander;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
@@ -188,20 +190,54 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     // byId is rebuilt entirely from the db:{name} entries — each entry carries its Id.
     // There is no separate persisted id→name key; the in-memory byId is authoritative.
+    /// <summary>
+    /// Loads all registry entries into the in-memory caches at open time.
+    ///
+    /// <para>The registry is opened exactly once per process into a cached task, so a single failure
+    /// here would stick for the node's lifetime and fail every later <c>SHOW DATABASES</c> /
+    /// <c>OpenDatabase</c>. Startup is inherently racy: the shared node brings its Raft partitions
+    /// online asynchronously (leader election takes a second or two after <c>StartAsync</c>), and the
+    /// registry open is kicked off eagerly during construction. The scan can therefore reach the
+    /// node before the partition owning the registry bucket is registered and fail with
+    /// <see cref="Kommander.RaftException"/> ("Invalid partition"). That is transient — the partition
+    /// appears shortly after — so the scan is retried over a bounded window rather than cached as a
+    /// permanent fault. Once the window elapses the last error propagates, since a persistent failure
+    /// is a real one.</para>
+    /// </summary>
     private async Task LoadAsync()
     {
-        // The registry load is a pure read of committed entries, so it runs as a zero-identity
-        // read-only snapshot (HLCTimestamp.Zero): the scan reads each key's latest committed value
-        // and there is no Kahuna transaction to start, commit, or roll back. This matters at
-        // startup. A real read-write transaction hash-routes its commit/rollback by transaction id
-        // to a user partition in [1, InitialPartitions]; during boot the node brings those
-        // partitions online asynchronously, so a rollback can route to a partition not yet
-        // registered and throw (RaftException: Invalid partition). Because the registry is opened
-        // once into a cached task, that transient fault would otherwise stick for the process
-        // lifetime and fail every later SHOW DATABASES / OpenDatabase. A zero-identity read has no
-        // rollback to route, sidestepping the race entirely.
-        KvTransaction tx = KvTransaction.CreateReadOnly();
+        Stopwatch sw = Stopwatch.StartNew();
+        const int retryDelayMs = 200;
+        const int maxWaitMs = 30_000;
 
+        while (true)
+        {
+            try
+            {
+                await LoadOnceAsync().ConfigureAwait(false);
+                return;
+            }
+            catch (RaftException) when (sw.ElapsedMilliseconds < maxWaitMs)
+            {
+                // Partition still coming online during boot; wait and re-scan from a clean slate.
+                await Task.Delay(retryDelayMs).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Performs a single registry scan into the in-memory caches. Runs as a zero-identity read-only
+    /// snapshot (<see cref="HLCTimestamp.Zero"/>): the scan reads each key's latest committed value
+    /// with no Kahuna transaction to start, commit, or roll back — a read-write transaction would
+    /// hash-route its rollback to a user partition and could throw during the same startup race.
+    /// Clears the caches first so a retried attempt after a partial scan starts clean.
+    /// </summary>
+    private async Task LoadOnceAsync()
+    {
+        byName.Clear();
+        byId.Clear();
+
+        KvTransaction tx = KvTransaction.CreateReadOnly();
         string namePrefix = NameKeyPrefix;
 
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
