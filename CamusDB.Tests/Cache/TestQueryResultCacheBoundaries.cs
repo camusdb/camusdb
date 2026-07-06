@@ -72,6 +72,8 @@ public class TestQueryResultCacheBoundaries
         public void InvalidateByTableId(string databaseId, string tableId) { }
         public void InvalidateDatabase(string databaseId) { }
         public void InvalidateCacheName(string databaseId, string cacheName) { }
+        public SingleFlightSlot EnterSingleFlight(string fingerprint) => new(isOwner: true, Task.FromResult<CachedQueryResult?>(null));
+        public void ExitSingleFlight(string fingerprint, CachedQueryResult? result) { }
     }
 
     /// <summary>Yields <paramref name="count"/> rows, then cancels if a token was provided.</summary>

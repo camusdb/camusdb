@@ -275,6 +275,56 @@ internal sealed class QueryExecutor
             yield break;
         }
 
+        // ── Single-flight gate ────────────────────────────────────────────────
+        // If another concurrent request is already computing this fingerprint, block until it
+        // publishes a result and serve that result directly — avoiding redundant plan execution
+        // under a thundering-herd cold-cache burst. If the wait times out or the owner fails,
+        // fall through and execute independently.
+        //
+        // The gate is entered BEFORE SnapshotGenerations so a waiter that gets a result never
+        // needs to take a generation snapshot. The owner takes the snapshot and executes normally
+        // in the code that follows.
+        SingleFlightSlot sfSlot = cache.EnterSingleFlight(fingerprint);
+        bool isSingleFlightOwner = sfSlot.IsOwner;
+
+        if (!isSingleFlightOwner)
+        {
+            // We are a waiter. Block until the owner publishes or the timeout elapses.
+            CachedQueryResult? sfResult = await sfSlot.WaitAsync(
+                CamusDBConfig.QueryResultCacheSingleFlightWaitMs, ct).ConfigureAwait(false);
+
+            if (sfResult is not null)
+            {
+                // Owner published a good result — serve it directly without touching storage.
+                if (metaOut is not null)
+                {
+                    metaOut.Status = QueryCacheStatus.Hit;
+                    metaOut.CacheName = hint.CacheName;
+                    metaOut.CachedAtHlc = sfResult.CachedAt;
+                    metaOut.AgeMs = sfResult.CreatedAtMs == 0
+                        ? null : Environment.TickCount64 - sfResult.CreatedAtMs;
+                }
+                foreach (QueryResultRow row in sfResult.Rows)
+                    yield return row;
+                yield break;
+            }
+
+            // Timeout or owner failure: execute independently. We are not the single-flight
+            // owner, so we must NOT call ExitSingleFlight. The owner will signal when done.
+        }
+
+        // ── Owner liveness guard ──────────────────────────────────────────────
+        // The code from here to the inner try/finally (SnapshotGenerations, HasInFlightWrite,
+        // runner setup) is in-memory and rarely throws, but if it does and we are the owner,
+        // the TCS stays in _inFlight permanently — every future request for this fingerprint
+        // becomes a waiter and blocks for SingleFlightWaitMs on a dead TCS. The outer
+        // try/finally below is the safety net: ExitSingleFlight is idempotent (the second call
+        // from the inner finally is a no-op because _inFlight.Remove returns false), so
+        // composing both is always correct.
+        try
+        {
+
+        // ── Generation snapshot ───────────────────────────────────────────────
         // Snapshots the row keyspace for the single table in the plan. Every INSERT/UPDATE/DELETE
         // on this table bumps this bucket's generation, so the fence catches any concurrent write
         // during the query's execution — including writes that go through a secondary index scan.
@@ -284,6 +334,12 @@ internal sealed class QueryExecutor
         CacheGenerationToken token = cache.PublishGate.SnapshotGenerations(keyspaces);
         if (cache.PublishGate.HasInFlightWrite(keyspaces))
         {
+            // An in-flight write is detected: serve live rows without caching. If we are the
+            // single-flight owner, wake waiters immediately with null so they execute
+            // independently rather than blocking until our timeout.
+            if (isSingleFlightOwner)
+                cache.ExitSingleFlight(fingerprint, null);
+
             if (metaOut is not null)
             {
                 metaOut.Status = QueryCacheStatus.Bypass;
@@ -319,6 +375,19 @@ internal sealed class QueryExecutor
         finally
         {
             (QueryCacheStatus finalStatus, QueryCacheBypassReason finalReason) = await runner.FinalizeAsync().ConfigureAwait(false);
+
+            if (isSingleFlightOwner)
+            {
+                // Signal waiters. Pass the published entry when the result was stored so
+                // waiters can serve it directly. Pass null on any failure (generation fence
+                // rejected, byte cap exceeded, drain cancelled) so waiters execute independently.
+                CachedQueryResult? published = null;
+                if (finalStatus == QueryCacheStatus.Miss)
+                    published = await cache.TryGetAsync(database.Id, hint.CacheName, fingerprint, ct)
+                        .ConfigureAwait(false);
+                cache.ExitSingleFlight(fingerprint, published);
+            }
+
             if (metaOut is not null)
             {
                 // A stale strict hit that required live re-execution maps to StaleRevalidated
@@ -331,6 +400,17 @@ internal sealed class QueryExecutor
                 metaOut.BypassReason = finalReason;
                 metaOut.CacheName = hint.CacheName;
             }
+        }
+
+        } // end outer try
+        finally
+        {
+            // Safety net: if an exception escaped the inner finally without calling
+            // ExitSingleFlight (e.g. a throw in SnapshotGenerations or runner setup), and
+            // we are the owner, wake waiters with null so they execute independently.
+            // No-op when ExitSingleFlight was already called (idempotent _inFlight.Remove).
+            if (isSingleFlightOwner)
+                cache.ExitSingleFlight(fingerprint, null);
         }
     }
 

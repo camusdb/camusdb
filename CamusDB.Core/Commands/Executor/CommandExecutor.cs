@@ -2066,13 +2066,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                         : rawName;
                     // Normalize to lowercase to match the hint grammar's ToLowerInvariant on identifier tokens.
                     database.Cache?.InvalidateCacheName(database.Id, cacheName.ToLowerInvariant());
-                    return default;
+                    return new(database, null!, 0);
                 }
 
             case NodeType.EvictCacheAll:
                 {
                     database.Cache?.InvalidateDatabase(database.Id);
-                    return default;
+                    return new(database, null!, 0);
                 }
 
             default:

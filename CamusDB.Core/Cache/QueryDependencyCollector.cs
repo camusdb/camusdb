@@ -41,6 +41,12 @@ namespace CamusDB.Core.Cache;
 ///     <see cref="Build"/> returns <see cref="QueryDependencySet.Empty"/> — the caller must
 ///     bypass publish rather than store an incomplete dep set.
 ///   </description></item>
+///   <item><description>
+///     <see cref="CamusDBConfig.QueryResultCacheMaxRanges"/> caps the number of distinct range
+///     deps. Unlike point deps, a truncated range set cannot provide conservative coverage —
+///     a missing range means writes into that keyspace go undetected. Overflow sets
+///     <see cref="CapExceeded"/> and the caller must bypass publish.
+///   </description></item>
 /// </list>
 ///
 /// <para><b>Thread safety:</b> not thread-safe; one instance per request.</para>
@@ -81,10 +87,27 @@ internal sealed class QueryDependencyCollector
     /// Records a keyspace range as a dependency (table row bucket or index bucket).
     /// The bucket string must use the real KvTableStore format:
     /// <c>{dbId}:{tableId}:r</c> for rows, <c>{dbId}:{tableId}:i:{indexId}</c> for indexes.
+    ///
+    /// <para>Unlike the point-dep cap, a range-dep overflow cannot be silently truncated: dropping
+    /// a range dep means any write into that keyspace would go undetected, violating the
+    /// "dependency-complete or bypass" invariant. When <see cref="CamusDBConfig.QueryResultCacheMaxRanges"/>
+    /// is reached, <see cref="CapExceeded"/> is set and <see cref="Build"/> returns
+    /// <see cref="QueryDependencySet.Empty"/> so the caller bypasses publish.</para>
     /// </summary>
     public void RecordRange(string keyspaceBucket)
     {
         if (_capExceeded) return;
+
+        // If the bucket is already recorded, adding it to the HashSet is a no-op — skip the cap
+        // check to avoid counting duplicates as new additions.
+        if (_rangeDeps.Contains(keyspaceBucket))
+            return;
+
+        if (_rangeDeps.Count >= CamusDBConfig.QueryResultCacheMaxRanges)
+        {
+            _capExceeded = true;
+            return;
+        }
 
         _rangeDeps.Add(keyspaceBucket);
         CheckTotalCap();

@@ -58,4 +58,15 @@ public sealed class NullQueryResultCache : IQueryResultCache
     public void InvalidateDatabase(string databaseId) { }
 
     public void InvalidateCacheName(string databaseId, string cacheName) { }
+
+    /// <summary>
+    /// Always returns an owner slot — no single-flight tracking occurs when the cache is
+    /// disabled. Every caller executes the plan independently, which is the correct no-op
+    /// behavior for the null object.
+    /// </summary>
+    public SingleFlightSlot EnterSingleFlight(string fingerprint)
+        => new SingleFlightSlot(isOwner: true, Task.FromResult<CachedQueryResult?>(null));
+
+    /// <summary>No-op: the null cache never registers an in-flight slot.</summary>
+    public void ExitSingleFlight(string fingerprint, CachedQueryResult? result) { }
 }

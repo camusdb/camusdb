@@ -189,4 +189,37 @@ public interface IQueryResultCache
     /// <paramref name="databaseId"/>. Called by explicit <c>EVICT CACHE '<name>'</c>.
     /// </summary>
     void InvalidateCacheName(string databaseId, string cacheName);
+
+    /// <summary>
+    /// Attempts to register <paramref name="fingerprint"/> as the single in-flight execution.
+    /// The first concurrent caller for a given fingerprint becomes the <em>owner</em>
+    /// (<see cref="SingleFlightSlot.IsOwner"/> == <c>true</c>); all subsequent concurrent
+    /// callers become <em>waiters</em> (<c>IsOwner</c> == <c>false</c>) and should call
+    /// <see cref="SingleFlightSlot.WaitAsync"/> to block until the owner publishes a result.
+    ///
+    /// <para>The owner <b>must</b> call <see cref="ExitSingleFlight"/> exactly once — on
+    /// success or failure — to wake waiters and remove the in-flight registration. Failing to
+    /// call <see cref="ExitSingleFlight"/> leaves waiters blocked until their timeout.</para>
+    ///
+    /// <para>Implementations that do not track in-flight state (e.g. <see cref="NullQueryResultCache"/>)
+    /// always return a slot with <see cref="SingleFlightSlot.IsOwner"/> == <c>true</c> so the
+    /// caller always executes the plan — single-flight is simply a no-op.</para>
+    /// </summary>
+    SingleFlightSlot EnterSingleFlight(string fingerprint);
+
+    /// <summary>
+    /// Signals all waiters for <paramref name="fingerprint"/> and removes the in-flight
+    /// registration. Must be called exactly once by the owner after
+    /// <see cref="EnterSingleFlight"/> returned a slot with <see cref="SingleFlightSlot.IsOwner"/>
+    /// == <c>true</c>.
+    ///
+    /// <para>Pass the published <see cref="CachedQueryResult"/> when the owner successfully
+    /// materialized and stored a result, so waiters can serve it directly. Pass <c>null</c>
+    /// when the owner failed (exception, cancellation, generation fence rejected, byte cap
+    /// exceeded) — waiters will then execute the plan independently.</para>
+    ///
+    /// <para>A no-op when <paramref name="fingerprint"/> is not registered (e.g. after
+    /// <see cref="NullQueryResultCache"/> returned an always-owner slot).</para>
+    /// </summary>
+    void ExitSingleFlight(string fingerprint, CachedQueryResult? result);
 }

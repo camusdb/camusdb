@@ -210,6 +210,77 @@ public sealed class TestQueryDependencyCollector
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Range dep cap — overflow fails closed (CapExceeded), not truncated
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [Test]
+    public void RangeDepCap_SetsCapExceeded()
+    {
+        int origMax = CamusDBConfig.QueryResultCacheMaxRanges;
+        try
+        {
+            CamusDBConfig.QueryResultCacheMaxRanges = 2;
+            var col = new QueryDependencyCollector();
+            col.RecordRange("db:tbl1:r");
+            col.RecordRange("db:tbl2:r");
+            col.RecordRange("db:tbl3:r");  // exceeds cap
+
+            Assert.That(col.CapExceeded, Is.True,
+                "Exceeding the range-dep cap must set CapExceeded — a truncated range set is not safe to publish");
+        }
+        finally
+        {
+            CamusDBConfig.QueryResultCacheMaxRanges = origMax;
+        }
+    }
+
+    [Test]
+    public void RangeDepCap_BuildReturnsEmpty()
+    {
+        int origMax = CamusDBConfig.QueryResultCacheMaxRanges;
+        try
+        {
+            CamusDBConfig.QueryResultCacheMaxRanges = 1;
+            var col = new QueryDependencyCollector();
+            col.RecordRange("db:tbl1:r");
+            col.RecordRange("db:tbl2:r");  // triggers cap
+
+            QueryDependencySet deps = col.Build();
+            Assert.That(deps.RangeDeps.Count, Is.EqualTo(0),
+                "Build() must return QueryDependencySet.Empty when the range cap is exceeded");
+        }
+        finally
+        {
+            CamusDBConfig.QueryResultCacheMaxRanges = origMax;
+        }
+    }
+
+    [Test]
+    public void RangeDepCap_DuplicatesDoNotCountTowardCap()
+    {
+        int origMax = CamusDBConfig.QueryResultCacheMaxRanges;
+        try
+        {
+            CamusDBConfig.QueryResultCacheMaxRanges = 1;
+            var col = new QueryDependencyCollector();
+            col.RecordRange("db:tbl1:r");
+            col.RecordRange("db:tbl1:r");  // duplicate — must not count
+            col.RecordRange("db:tbl1:r");  // duplicate — must not count
+
+            // Only one distinct bucket was recorded; cap is 1 so it must not be exceeded.
+            Assert.That(col.CapExceeded, Is.False,
+                "Duplicate range buckets must not count toward the range-dep cap");
+
+            QueryDependencySet deps = col.Build();
+            Assert.That(deps.RangeDeps.Count, Is.EqualTo(1));
+        }
+        finally
+        {
+            CamusDBConfig.QueryResultCacheMaxRanges = origMax;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Round-trip through QueryDependencySet
     // ─────────────────────────────────────────────────────────────────────────
 

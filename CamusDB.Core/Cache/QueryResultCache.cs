@@ -90,6 +90,12 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
 
     private readonly DependencyIndex _depIndex = new();
 
+    // Single-flight: fingerprint → (TCS, waiterCount). The TCS is what owners signal and waiters
+    // await. waiterCount is incremented each time a non-owner caller picks up the slot; it lets
+    // tests poll until at least one waiter is blocking in WaitAsync. Protected by _lock.
+    private readonly Dictionary<string, (TaskCompletionSource<CachedQueryResult?> Tcs, int WaiterCount)> _inFlight =
+        new(StringComparer.Ordinal);
+
     private readonly Timer _sweepTimer;
 
     /// <param name="sweepIntervalMs">
@@ -560,6 +566,48 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     /// <summary>Current count of live (non-expired) entries in the cache.</summary>
     internal int EntryCount { get { lock (_lock) return _entries.Count; } }
 
+    /// <summary>
+    /// Returns <c>true</c> when <paramref name="fingerprint"/> is currently registered as an
+    /// in-flight owner (i.e. <see cref="EnterSingleFlight"/> was called and
+    /// <see cref="ExitSingleFlight"/> has not yet been called for it).
+    /// </summary>
+    internal bool HasInFlightSlot(string fingerprint)
+    {
+        lock (_lock)
+            return _inFlight.ContainsKey(fingerprint);
+    }
+
+    /// <summary>
+    /// Returns the number of callers that have called <see cref="EnterSingleFlight"/> as a
+    /// waiter (IsOwner == false) for <paramref name="fingerprint"/> and have not yet been
+    /// signalled. Used by tests to poll until at least one waiter has reached
+    /// <see cref="SingleFlightSlot.WaitAsync"/>, eliminating the fixed-delay race.
+    /// </summary>
+    internal int WaiterCount(string fingerprint)
+    {
+        lock (_lock)
+            return _inFlight.TryGetValue(fingerprint, out var e) ? e.WaiterCount : 0;
+    }
+
+    /// <summary>
+    /// Returns the fingerprint of any live entry stored under <paramref name="cacheName"/> for
+    /// <paramref name="databaseId"/>, or <c>null</c> if none exists. Used by tests to discover
+    /// the fingerprint after an initial cold miss so they can pre-occupy the in-flight slot for
+    /// the same fingerprint in subsequent single-flight tests.
+    /// </summary>
+    internal string? GetFirstFingerprintByCacheName(string databaseId, string cacheName)
+    {
+        string compositeKey = databaseId + ":" + cacheName;
+        lock (_lock)
+        {
+            if (!_byCacheName.TryGetValue(compositeKey, out HashSet<string>? fps))
+                return null;
+            foreach (string fp in fps)
+                return fp;
+            return null;
+        }
+    }
+
     /// <summary>Current total byte estimate across all live entries.</summary>
     internal long TotalBytes { get { lock (_lock) return _totalBytes; } }
 
@@ -601,6 +649,48 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
                 _byDatabaseId[entry.DatabaseId] = byDb = [];
             byDb.Add(entry.Fingerprint);
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Single-flight
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <inheritdoc />
+    public SingleFlightSlot EnterSingleFlight(string fingerprint)
+    {
+        lock (_lock)
+        {
+            if (_inFlight.TryGetValue(fingerprint, out (TaskCompletionSource<CachedQueryResult?> Tcs, int WaiterCount) existing))
+            {
+                // Another request is already computing this fingerprint. Return a distinct waiter
+                // slot backed by the owner's Task so WaitAsync will unblock when ExitSingleFlight
+                // signals. IsOwner=false so the caller does NOT call ExitSingleFlight.
+                _inFlight[fingerprint] = (existing.Tcs, existing.WaiterCount + 1);
+                return new SingleFlightSlot(isOwner: false, existing.Tcs.Task);
+            }
+
+            // First caller: become the owner. The TCS stays in _inFlight; ExitSingleFlight
+            // removes it and calls TrySetResult to wake all waiters.
+            var tcs = new TaskCompletionSource<CachedQueryResult?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _inFlight[fingerprint] = (tcs, 0);
+            return new SingleFlightSlot(isOwner: true, tcs.Task);
+        }
+    }
+
+    /// <inheritdoc />
+    public void ExitSingleFlight(string fingerprint, CachedQueryResult? result)
+    {
+        TaskCompletionSource<CachedQueryResult?>? tcs;
+        lock (_lock)
+        {
+            if (!_inFlight.Remove(fingerprint, out (TaskCompletionSource<CachedQueryResult?> Tcs, int) entry))
+                return;
+            tcs = entry.Tcs;
+        }
+
+        // Signal outside the lock: continuations run asynchronously (RunContinuationsAsynchronously)
+        // so they cannot re-enter _lock on this thread.
+        tcs.TrySetResult(result);
     }
 
     // ──────────────────────────────────────────────────────────────────────────
