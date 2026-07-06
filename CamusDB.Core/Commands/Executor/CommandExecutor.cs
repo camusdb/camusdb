@@ -2307,8 +2307,21 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         if (ownsRegistry)
         {
-            DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
-            await registry.DisposeAsync().ConfigureAwait(false);
+            // Disposal must never crash graceful shutdown. Awaiting registryTask here can re-throw a
+            // fault the registry-open captured earlier — e.g. its startup scan's rollback tried to
+            // reach a Raft partition that was not yet ready at boot or is already torn down at
+            // shutdown (RaftException: Invalid partition). A registry that never opened successfully
+            // has nothing to clean up, and a rollback against a vanishing node is moot, so log and
+            // swallow rather than aborting the rest of the shutdown sequence.
+            try
+            {
+                DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+                await registry.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Registry cleanup during shutdown failed; continuing teardown");
+            }
         }
     }
 }

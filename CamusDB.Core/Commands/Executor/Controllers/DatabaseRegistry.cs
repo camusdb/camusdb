@@ -190,36 +190,38 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // There is no separate persisted id→name key; the in-memory byId is authoritative.
     private async Task LoadAsync()
     {
-        KvTransaction tx = await transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
+        // The registry load is a pure read of committed entries, so it runs as a zero-identity
+        // read-only snapshot (HLCTimestamp.Zero): the scan reads each key's latest committed value
+        // and there is no Kahuna transaction to start, commit, or roll back. This matters at
+        // startup. A real read-write transaction hash-routes its commit/rollback by transaction id
+        // to a user partition in [1, InitialPartitions]; during boot the node brings those
+        // partitions online asynchronously, so a rollback can route to a partition not yet
+        // registered and throw (RaftException: Invalid partition). Because the registry is opened
+        // once into a cached task, that transient fault would otherwise stick for the process
+        // lifetime and fail every later SHOW DATABASES / OpenDatabase. A zero-identity read has no
+        // rollback to route, sidestepping the race entirely.
+        KvTransaction tx = KvTransaction.CreateReadOnly();
+
+        string namePrefix = NameKeyPrefix;
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            tx.TransactionId,
+            RegistryBucket,
+            null, true,
+            null, true,
+            1000,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            CancellationToken.None).ConfigureAwait(false))
         {
-            string namePrefix = NameKeyPrefix;
+            if (!key.StartsWith(namePrefix, StringComparison.Ordinal) || entry.Value is null)
+                continue;
 
-            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-                tx.TransactionId,
-                RegistryBucket,
-                null, true,
-                null, true,
-                1000,
-                HLCTimestamp.Zero,
-                KeyValueDurability.Persistent,
-                CancellationToken.None).ConfigureAwait(false))
-            {
-                if (!key.StartsWith(namePrefix, StringComparison.Ordinal) || entry.Value is null)
-                    continue;
+            DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
+                entry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
 
-                DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
-                    entry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
-
-                byName[loaded.Name] = loaded;
-                byId[loaded.Id] = loaded;
-            }
-        }
-        finally
-        {
-            await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            byName[loaded.Name] = loaded;
+            byId[loaded.Id] = loaded;
         }
     }
 
