@@ -40,8 +40,10 @@ namespace CamusDB.Core.Cache;
 ///     Parameter dictionaries are serialized in sorted key order for determinism.
 ///   </description></item>
 ///   <item><description>
-///     Schema versions are included so a drop-and-recreate of a table with the same name
-///     produces a different fingerprint even when no other parameter changed.
+///     Immutable table IDs (not mutable table names) and schema versions are both included so a
+///     drop-and-recreate of a table with the same name produces a different fingerprint: the new
+///     table receives a fresh ID regardless of whether its schema version happens to match the
+///     dropped table.
 ///   </description></item>
 ///   <item><description>
 ///     The fingerprint is a lowercase 128-bit XxHash128 hex digest of an injective,
@@ -68,7 +70,7 @@ public static class ResultFingerprintBuilder
         string cacheName,
         string? queryShapeId,
         Dictionary<string, ColumnValue>? parameters,
-        IReadOnlyList<(string TableName, int SchemaVersion)>? schemaDeps,
+        IReadOnlyList<(string TableId, int SchemaVersion)>? schemaDeps,
         CacheHintOptions hint)
     {
         var sb = new StringBuilder(256);

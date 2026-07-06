@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.IO;
 using System.Runtime.CompilerServices;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs.Models;
@@ -44,7 +43,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 internal sealed class QueryJoinExecutor
 {
     private readonly QueryExecutor queryExecutor;
+
     private readonly DerivedTableExecutor derivedTableExecutor;
+
     private readonly QueryFilterer queryFilterer = new(new ExistsSubqueryExecutor());
 
     private readonly QuerySorter querySorter = new();
@@ -58,6 +59,7 @@ internal sealed class QueryJoinExecutor
     private readonly QueryDistincter queryDistincter = new();
 
     private readonly StatisticsManager? _stats;
+
     private readonly PlanCache? _planCache;
 
     public QueryJoinExecutor(QueryExecutor queryExecutor, StatisticsManager? stats = null, PlanCache? planCache = null)
@@ -97,7 +99,8 @@ internal sealed class QueryJoinExecutor
             queryAggregator,
             queryProjector,
             queryDistincter,
-            queryLimiter);
+            queryLimiter
+    );
 
         return WithDerivedMaterializationCleanup(cursor, plan);
     }
@@ -165,8 +168,8 @@ internal sealed class QueryJoinExecutor
 
             case SortNode { Input: not null } sortNode when sortNode.OrderBy is { Count: > 0 }:
             {
-                IAsyncEnumerable<QueryResultRow> sorted = querySorter.SortByKeys(
-                    ExecuteJoinTree(sortNode.Input!, plan), sortNode.OrderBy);
+                IAsyncEnumerable<QueryResultRow> sorted = querySorter.SortByKeys(ExecuteJoinTree(sortNode.Input!, plan), sortNode.OrderBy);
+                
                 await foreach (QueryResultRow row in sorted.ConfigureAwait(false))
                     yield return row;
 

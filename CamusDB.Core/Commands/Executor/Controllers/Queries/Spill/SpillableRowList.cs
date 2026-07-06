@@ -51,10 +51,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 /// </summary>
 internal sealed class SpillableRowList : IAsyncDisposable
 {
-    private readonly List<QueryResultRow> _memoryRows = new();
+    private readonly List<QueryResultRow> _memoryRows = [];
+
     private SpillScope? _scope;
+
     private string? _spillPath;
+
     private FileStream? _spillWriter;
+    
     private bool _overflowed;
 
     /// <summary>Total row count (memory + spill).</summary>

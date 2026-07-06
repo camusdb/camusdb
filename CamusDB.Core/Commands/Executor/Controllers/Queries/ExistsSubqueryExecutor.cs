@@ -7,7 +7,6 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
@@ -21,14 +20,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <summary>
 /// Executes uncorrelated and correlated EXISTS subqueries.
 /// </summary>
-internal sealed class ExistsSubqueryExecutor
+internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecutor = null)
 {
-    private readonly SubqueryQueryExecutor? queryExecutor;
-
-    public ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecutor = null)
-    {
-        this.queryExecutor = queryExecutor;
-    }
+    private readonly SubqueryQueryExecutor? queryExecutor = queryExecutor;
 
     public async Task<bool> ExecuteUncorrelatedAsync(
         DatabaseDescriptor database,
@@ -43,8 +37,7 @@ internal sealed class ExistsSubqueryExecutor
                 "Uncorrelated EXISTS execution requires a subquery executor");
         }
 
-        await foreach (QueryResultRow _ in queryExecutor.ExecuteExistsSelectAsync(
-            database, selectAst, txnState, parameters).ConfigureAwait(false))
+        await foreach (QueryResultRow _ in queryExecutor.ExecuteExistsSelectAsync(database, selectAst, txnState, parameters).ConfigureAwait(false))
         {
             return true;
         }
@@ -70,14 +63,13 @@ internal sealed class ExistsSubqueryExecutor
         TableDescriptor innerTable = innerSource.Table;
         HLCTimestamp txId = txnState.TransactionId;
 
-        List<BoundTableSource> combinedTableSources = new(prepared.InnerBound.Sources.Count + prepared.OuterSources.Count);
-        combinedTableSources.AddRange(prepared.InnerBound.Sources);
-        combinedTableSources.AddRange(prepared.OuterSources);
+        List<BoundTableSource> combinedTableSources = [.. prepared.InnerBound.Sources, .. prepared.OuterSources];
 
         List<BoundDerivedTableSource> combinedDerivedSources =
-            new(prepared.InnerBound.DerivedSources.Count + prepared.OuterDerivedSources.Count);
-        combinedDerivedSources.AddRange(prepared.InnerBound.DerivedSources);
-        combinedDerivedSources.AddRange(prepared.OuterDerivedSources);
+        [
+            .. prepared.InnerBound.DerivedSources,
+            .. prepared.OuterDerivedSources,
+        ];
 
         QueryRowNameResolver combinedResolver = new(combinedTableSources, combinedDerivedSources);
 
@@ -92,6 +84,7 @@ internal sealed class ExistsSubqueryExecutor
                 rowId,
                 data,
                 visibilitySchemaVersion: innerTable.Schema.Version).ConfigureAwait(false);
+                
             Dictionary<string, ColumnValue> evalRow = CorrelatedRowMerger.MergeForEvaluation(
                 innerRow,
                 innerSource,

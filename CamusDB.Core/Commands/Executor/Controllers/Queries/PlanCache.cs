@@ -59,7 +59,7 @@ internal sealed class PlanCache
     public bool TryGet(
         string databaseId,
         string shapeId,
-        IReadOnlyList<(string TableName, int SchemaVersion)> currentDeps,
+        IReadOnlyList<(string TableId, int SchemaVersion)> currentDeps,
         out PlanCacheEntry? entry)
     {
         string key = MakeKey(databaseId, shapeId);
@@ -165,7 +165,7 @@ internal sealed class PlanCache
 /// and silently return wrong rows for subsequent queries with the same shape but different ON literals.
 /// </summary>
 internal sealed record PlanCacheEntry(
-    IReadOnlyList<(string TableName, int SchemaVersion)> SchemaDeps,
+    IReadOnlyList<(string TableId, int SchemaVersion)> SchemaDeps,
     SingleTableDecision? SingleTable,
     IReadOnlyList<string>? JoinAliasOrder);
 

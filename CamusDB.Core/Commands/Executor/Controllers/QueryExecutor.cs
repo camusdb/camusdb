@@ -197,17 +197,30 @@ internal sealed class QueryExecutor
             }
             else
             {
-                if (metaOut is not null)
+                // Even for non-strict hits, validate schema deps in-memory before serving rows.
+                // This is a cheap lock-free check (no I/O) that closes the DDL publish window:
+                // an in-flight miss that published after a DROP/ALTER invalidation will be
+                // detected here on the very next probe and evicted rather than replayed until TTL.
+                if (!SchemaDepsCurrent(hd.Deps, database))
                 {
-                    metaOut.Status = QueryCacheStatus.Hit;
-                    metaOut.CacheName = hint.CacheName;
-                    metaOut.CachedAtHlc = hd.Result.CachedAt;
-                    metaOut.AgeMs = hd.Result.CreatedAtMs == 0
-                        ? null : Environment.TickCount64 - hd.Result.CreatedAtMs;
+                    cache.InvalidateEntry(database.Id, hd.Result.CacheName, fingerprint);
+                    wasStaleRevalidated = true;
+                    // Fall through to live execution below.
                 }
-                foreach (QueryResultRow row in hd.Result.Rows)
-                    yield return row;
-                yield break;
+                else
+                {
+                    if (metaOut is not null)
+                    {
+                        metaOut.Status = QueryCacheStatus.Hit;
+                        metaOut.CacheName = hint.CacheName;
+                        metaOut.CachedAtHlc = hd.Result.CachedAt;
+                        metaOut.AgeMs = hd.Result.CreatedAtMs == 0
+                            ? null : Environment.TickCount64 - hd.Result.CreatedAtMs;
+                    }
+                    foreach (QueryResultRow row in hd.Result.Rows)
+                        yield return row;
+                    yield break;
+                }
             }
         }
 
@@ -802,5 +815,34 @@ internal sealed class QueryExecutor
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> if every schema dep in <paramref name="deps"/> still matches the
+    /// current in-memory schema of <paramref name="database"/>: the table exists and its
+    /// <see cref="TableSchema.Version"/> equals the version recorded at cache time.
+    ///
+    /// <para>This is a cheap, lock-free check against the in-memory schema snapshot. It is
+    /// used on every cache hit — including non-strict hits — to detect schema changes that
+    /// occurred between the time an entry was computed and the time it is probed. A DDL
+    /// operation that manages to publish a stale entry (e.g. due to the post-commit
+    /// invalidation window) is caught here on the very next probe, preventing the stale
+    /// entry from being served even once.</para>
+    /// </summary>
+    private static bool SchemaDepsCurrent(QueryDependencySet deps, DatabaseDescriptor database)
+    {
+        foreach ((string tableId, int expectedVersion) in deps.SchemaDeps)
+        {
+            TableSchema? schema = null;
+            foreach (TableSchema s in database.Schema.Tables.Values)
+            {
+                if (s.Id == tableId) { schema = s; break; }
+            }
+            if (schema is null)
+                return false;  // table was dropped
+            if (schema.Version != expectedVersion)
+                return false;  // schema changed (column add/drop/rename, index add/drop)
+        }
+        return true;
     }
 }

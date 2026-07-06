@@ -115,7 +115,7 @@ internal sealed class ExplainExecutor
         if (plan.QueryShapeId is not null)
         {
             string schemaDepsStr = plan.SchemaDeps is { Count: > 0 }
-                ? "[" + string.Join(", ", plan.SchemaDeps.Select(d => $"{d.TableName}@{d.SchemaVersion}")) + "]"
+                ? "[" + string.Join(", ", plan.SchemaDeps.Select(d => $"{d.TableId}@{d.SchemaVersion}")) + "]"
                 : "[]";
 
             yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>
@@ -260,7 +260,7 @@ internal sealed class ExplainExecutor
         if (plan.QueryShapeId is not null)
         {
             string schemaDepsStr = plan.SchemaDeps is { Count: > 0 }
-                ? "[" + string.Join(", ", plan.SchemaDeps.Select(d => $"{d.TableName}@{d.SchemaVersion}")) + "]"
+                ? "[" + string.Join(", ", plan.SchemaDeps.Select(d => $"{d.TableId}@{d.SchemaVersion}")) + "]"
                 : "[]";
 
             yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>

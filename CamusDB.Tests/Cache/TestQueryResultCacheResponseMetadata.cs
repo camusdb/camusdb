@@ -339,7 +339,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
         SelectQuery selectQuery = new SelectQueryCreator().CreateSelectQuery(ast);
         string? shapeId = QueryShapeComputer.Compute(selectQuery);
         TableSchema ordersSchema = database.Schema.Tables["orders"];
-        List<(string, int)> schemaDeps = [(ordersSchema.Name!, ordersSchema.Version)];
+        List<(string, int)> schemaDeps = [(ordersSchema.Id!, ordersSchema.Version)];
         CacheHintOptions strictHint = new(cacheName, null, IsStrict: true);
         return ResultFingerprintBuilder.Build(database.Id, cacheName, shapeId, null, schemaDeps, strictHint);
     }

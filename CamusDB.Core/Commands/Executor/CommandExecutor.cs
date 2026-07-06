@@ -801,13 +801,12 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// runs after <c>CommitAsync</c> returns, outside that critical section — there is a narrow
     /// window in which a concurrent SELECT could publish a stale-schema entry.
     ///
-    /// This is a deliberate trade-off: schema meta keys cannot participate in the key-based gate
-    /// (they do not map to a table bucket), so the gate cannot be used here without a separate
-    /// schema-keyed generation counter. The window is safe in practice because cache fingerprints
-    /// capture the query text and table data at the time of execution — a reader that runs after
-    /// the DDL commit but before invalidation computes a fingerprint under the new schema and will
-    /// not hit the orphaned pre-DDL entry. The orphaned entry ages out on its TTL. A future
-    /// schema-version re-check at cache-hit time would close this window entirely.
+    /// This asymmetry is acceptable: schema meta keys cannot participate in the key-based gate
+    /// (they do not map to a table bucket). However, the window is closed at the read side:
+    /// <see cref="QueryExecutor"/> performs an in-memory schema dep re-check on every hit
+    /// (non-strict and strict alike). An entry that manages to publish in this narrow window
+    /// will be evicted on the very first subsequent probe when its schema version is found stale,
+    /// so it can never be served.
     /// </remarks>
     private async Task<T> ExecuteDdlInTransaction<T>(
         DatabaseDescriptor database,

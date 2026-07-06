@@ -47,6 +47,7 @@ internal sealed class JoinQueryPlanner
     private const long MergeJoinPreferenceThreshold = 100;
 
     private readonly StatisticsManager? _stats;
+
     private readonly PlanCache? _cache;
 
     public JoinQueryPlanner(StatisticsManager? stats = null) : this(stats, null) { }
@@ -132,10 +133,12 @@ internal sealed class JoinQueryPlanner
         return plan;
     }
 
-    // Recursively collects (TableName, SchemaVersion) pairs from every table referenced in
+    // Recursively collects (TableId, SchemaVersion) pairs from every table referenced in
     // the bound query, including tables that appear only inside derived-table subqueries.
     // Without the recursion, a schema change to such a table would not invalidate a cached plan.
-    private static List<(string TableName, int SchemaVersion)> CollectSchemaDeps(BoundSelectQuery bound)
+    // Uses the immutable table id (not the name) so a DROP TABLE t + CREATE TABLE t at the same
+    // schema version produces a different fingerprint and does not produce a false cache hit.
+    private static List<(string TableId, int SchemaVersion)> CollectSchemaDeps(BoundSelectQuery bound)
     {
         var deps = new List<(string, int)>();
         CollectSchemaDepsInto(bound, deps);
@@ -144,10 +147,10 @@ internal sealed class JoinQueryPlanner
 
     private static void CollectSchemaDepsInto(
         BoundSelectQuery bound,
-        List<(string TableName, int SchemaVersion)> deps)
+        List<(string TableId, int SchemaVersion)> deps)
     {
         foreach (BoundTableSource s in bound.Sources)
-            deps.Add((s.Table.Name, s.Table.Schema.Version));
+            deps.Add((s.Table.Id, s.Table.Schema.Version));
 
         foreach (BoundDerivedTableSource d in bound.DerivedSources)
             CollectSchemaDepsInto(d.InnerBound, deps);
@@ -447,9 +450,7 @@ internal sealed class JoinQueryPlanner
     /// <see cref="CamusDB.Core.Catalogs.Models.TableSchema.Indexes"/> (which stores
     /// raw column IDs before name resolution). Returns the first match or null.
     /// </summary>
-    private static TableIndexSchema? FindIndexForJoinKey(
-        TableDescriptor table,
-        IReadOnlyList<string> bareKeyColumns)
+    private static TableIndexSchema? FindIndexForJoinKey(TableDescriptor table, IReadOnlyList<string> bareKeyColumns)
     {
         foreach (TableIndexSchema index in table.Indexes.Values)
         {
@@ -465,10 +466,14 @@ internal sealed class JoinQueryPlanner
                 continue;
 
             bool match = true;
+
             for (int i = 0; i < bareKeyColumns.Count; i++)
             {
                 if (!string.Equals(index.Columns[i], bareKeyColumns[i], StringComparison.Ordinal))
-                { match = false; break; }
+                { 
+                    match = false; 
+                    break; 
+                }
             }
 
             if (match)
@@ -623,7 +628,12 @@ internal sealed class JoinQueryPlanner
         if (rightScanFilter is not null)
         {
             double sel = CardinalityEstimator.EstimateFilterSelectivity(
-                rightScanFilter, database, rightSource.Table.Table, stats);
+                rightScanFilter, 
+                database, 
+                rightSource.Table.Table, 
+                stats
+            );
+
             return Math.Max(1L, (long)(tableRows * sel));
         }
 
@@ -651,10 +661,16 @@ internal sealed class JoinQueryPlanner
             {
                 long tableRows = stats?.GetRowCountEstimate(database, boundSource.Table)
                                  ?? CostEstimator.DefaultTableRowCount;
+
                 if (tsn.ExecutionFilter is not null && stats is not null)
                 {
                     double sel = CardinalityEstimator.EstimateFilterSelectivity(
-                        tsn.ExecutionFilter, database, boundSource.Table, stats);
+                        tsn.ExecutionFilter, 
+                        database, 
+                        boundSource.Table, 
+                        stats
+                    );
+
                     return Math.Max(1L, (long)(tableRows * sel));
                 }
                 return tableRows;
@@ -667,8 +683,10 @@ internal sealed class JoinQueryPlanner
             {
                 long tableRows = stats?.GetRowCountEstimate(database, rangeBound.Table)
                                  ?? CostEstimator.DefaultTableRowCount;
+
                 // Estimate index range selectivity via the cost model.
                 long rangeRows = CostEstimator.EstimateRangeScanRows(rsn, tableRows, stats, database, rangeBound.Table);
+
                 // Add residual filter on top if present.
                 if (rsn.ExecutionFilter is not null && stats is not null)
                 {
@@ -712,9 +730,11 @@ internal sealed class JoinQueryPlanner
             case TableSource ts:
                 aliases.Add(ts.Alias ?? ts.TableName);
                 break;
+
             case DerivedTableSource ds:
                 aliases.Add(ds.Alias!);
                 break;
+
             case JoinSource js:
                 CollectAliasOrderInto(js.Left, aliases);
                 CollectAliasOrderInto(js.Right, aliases);
@@ -737,6 +757,7 @@ internal sealed class JoinQueryPlanner
         StatisticsManager stats)
     {
         PredicateAnalysis raw = PredicateAnalyzer.Analyze(scanFilter, null);
+        
         // Strip "alias." prefix so bare index column names match (e.g. "o.status" → "status").
         PredicateAnalysis analysis = JoinEnumerator.StripAliasPrefix(raw, boundSource.Alias);
 
@@ -770,8 +791,8 @@ internal sealed class JoinQueryPlanner
                         {
                             BoundSource = boundSource,
                             ExecutionFilter = residual,
+                            Distribution = PlacementReader.Instance.GetIndexScanDistribution(rsn.Index)
                         };
-                        indexNode.Distribution = PlacementReader.Instance.GetIndexScanDistribution(rsn.Index);
                         return indexNode;
                     }
                 }
@@ -794,12 +815,16 @@ internal sealed class JoinQueryPlanner
                 bool bestIsUnique = false;
                 foreach (TableIndexSchema idx in boundSource.Table.Indexes.Values)
                 {
-                    if (!SchemaElementStateRules.IsReadableIndex(boundSource.Table.Schema, idx)) continue;
-                    if (idx.Columns.Length == 0 ||
-                        !string.Equals(idx.Columns[0], inList.ColumnName, StringComparison.Ordinal))
+                    if (!SchemaElementStateRules.IsReadableIndex(boundSource.Table.Schema, idx)) 
                         continue;
+
+                    if (idx.Columns.Length == 0 || !string.Equals(idx.Columns[0], inList.ColumnName, StringComparison.Ordinal))
+                        continue;
+                        
                     bool isUnique = idx.Type == IndexType.Unique;
-                    if (isUnique && idx.Columns.Length != 1) continue;
+                    if (isUnique && idx.Columns.Length != 1) 
+                        continue;
+
                     if (bestIndex is null || (isUnique && !bestIsUnique))
                     {
                         bestIndex = idx;
@@ -807,13 +832,16 @@ internal sealed class JoinQueryPlanner
                     }
                 }
 
-                if (bestIndex is null) continue;
+                if (bestIndex is null) 
+                    continue;
 
                 long inListRows = CardinalityEstimator.EstimateInListRows(
                     inList.ColumnName, inList.Values, bestIsUnique,
                     trc, database, boundSource.Table, stats);
+
                 long breakeven = (long)Math.Ceiling(trc * CostEstimator.BreakevenFraction);
-                if (inListRows >= breakeven) continue;
+                if (inListRows >= breakeven) 
+                    continue;
 
                 NodeAst? residual = PredicateAnalyzer.BuildExecutionFilter(
                     analysis, scanStep: null, boundSource.Table, inList.Conjunct);
@@ -822,8 +850,8 @@ internal sealed class JoinQueryPlanner
                 {
                     BoundSource = boundSource,
                     ExecutionFilter = residual,
+                    Distribution = PlacementReader.GetLookupDistribution()
                 };
-                inListNode.Distribution = PlacementReader.GetLookupDistribution();
                 return inListNode;
             }
         }

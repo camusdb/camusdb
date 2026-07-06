@@ -32,8 +32,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 internal sealed class SpillRunReader : IAsyncDisposable
 {
     private readonly FileStream _stream;
+
     private readonly byte[] _lenBuf = new byte[4];
+
     private QueryResultRow _current;
+    
     private bool _exhausted;
 
     private SpillRunReader(FileStream stream) => _stream = stream;

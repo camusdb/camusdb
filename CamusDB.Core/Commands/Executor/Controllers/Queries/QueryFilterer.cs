@@ -80,15 +80,11 @@ internal sealed class QueryFilterer
         Dictionary<string, ColumnValue> row,
         QueryTicket ticket)
     {
-        if (expr.nodeType is NodeType.ExprAnd)
-        {
-            return EvaluateHavingAndAsync(expr, row, ticket);
-        }
+        if (expr.nodeType is NodeType.ExprAnd)        
+            return EvaluateHavingAndAsync(expr, row, ticket);        
 
-        if (expr.nodeType is NodeType.ExprOr)
-        {
-            return EvaluateHavingOrAsync(expr, row, ticket);
-        }
+        if (expr.nodeType is NodeType.ExprOr)        
+            return EvaluateHavingOrAsync(expr, row, ticket);        
 
         return ValueTask.FromResult(QueryHavingEvaluator.Evaluate(expr, row, ticket, ticket.Parameters));
     }

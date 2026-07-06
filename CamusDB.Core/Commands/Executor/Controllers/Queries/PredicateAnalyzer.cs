@@ -24,13 +24,13 @@ public static class PredicateAnalyzer
         if (where is null)
             return PredicateAnalysis.Empty;
 
-        List<NodeAst> conjuncts = new();
+        List<NodeAst> conjuncts = [];
         CollectAndConjuncts(where, conjuncts);
 
-        List<AnalyzedComparison> indexable = new();
-        List<AnalyzedColumnComparison> columnComparisons = new();
-        List<AnalyzedInList> inListComparisons = new();
-        List<NodeAst> residual = new();
+        List<AnalyzedComparison> indexable = [];
+        List<AnalyzedColumnComparison> columnComparisons = [];
+        List<AnalyzedInList> inListComparisons = [];
+        List<NodeAst> residual = [];
 
         foreach (NodeAst conjunct in conjuncts)
         {
@@ -95,21 +95,13 @@ public static class PredicateAnalyzer
             && left.InListComparisons.Count == 0)
             return right;
 
-        List<AnalyzedComparison> indexable = new(left.IndexableComparisons.Count + right.IndexableComparisons.Count);
-        indexable.AddRange(left.IndexableComparisons);
-        indexable.AddRange(right.IndexableComparisons);
+        List<AnalyzedComparison> indexable = [.. left.IndexableComparisons, .. right.IndexableComparisons];
 
-        List<AnalyzedColumnComparison> columnComparisons = new(left.ColumnComparisons.Count + right.ColumnComparisons.Count);
-        columnComparisons.AddRange(left.ColumnComparisons);
-        columnComparisons.AddRange(right.ColumnComparisons);
+        List<AnalyzedColumnComparison> columnComparisons = [.. left.ColumnComparisons, .. right.ColumnComparisons];
 
-        List<NodeAst> residual = new(left.ResidualConjuncts.Count + right.ResidualConjuncts.Count);
-        residual.AddRange(left.ResidualConjuncts);
-        residual.AddRange(right.ResidualConjuncts);
+        List<NodeAst> residual = [.. left.ResidualConjuncts, .. right.ResidualConjuncts];
 
-        List<AnalyzedInList> inList = new(left.InListComparisons.Count + right.InListComparisons.Count);
-        inList.AddRange(left.InListComparisons);
-        inList.AddRange(right.InListComparisons);
+        List<AnalyzedInList> inList = [.. left.InListComparisons, .. right.InListComparisons];
 
         return new PredicateAnalysis(indexable, columnComparisons, residual, inList);
     }
@@ -211,7 +203,7 @@ public static class PredicateAnalyzer
         if (conjunct.rightAst is null)
             return false;
 
-        List<ColumnValue> values = new();
+        List<ColumnValue> values = [];
         if (!TryExtractInListValues(conjunct.rightAst, parameters, values))
             return false;
 
@@ -230,8 +222,10 @@ public static class PredicateAnalyzer
         {
             if (node.leftAst is not null && !TryExtractInListValues(node.leftAst, parameters, values))
                 return false;
+
             if (node.rightAst is not null && !TryExtractInListValues(node.rightAst, parameters, values))
                 return false;
+                
             return true;
         }
 
@@ -242,7 +236,7 @@ public static class PredicateAnalyzer
         ColumnValue? value;
         try
         {
-            value = SqlExecutor.EvalExpr(node, new(), parameters);
+            value = SqlExecutor.EvalExpr(node, [], parameters);
         }
         catch (CamusDBException)
         {

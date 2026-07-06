@@ -253,9 +253,7 @@ internal static class QueryHavingWorkspace
         if (ticket.Projection is null)
             return false;
 
-        List<ProjectionItem> projectionItems = ticket.Projection
-            .Select((nodeAst, index) => new ProjectionItem(nodeAst, TryGetOutputName(nodeAst)))
-            .ToList();
+        List<ProjectionItem> projectionItems = [.. ticket.Projection.Select((nodeAst, index) => new ProjectionItem(nodeAst, TryGetOutputName(nodeAst)))];
 
         if (!QueryProjectionResolver.TryResolvePostAggregateOrderColumn(
             expression,

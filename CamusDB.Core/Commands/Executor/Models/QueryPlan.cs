@@ -98,7 +98,7 @@ public sealed class QueryPlan
     /// the schema version the plan was built against. Used to detect stale cached plans.
     /// Null until set by the planner.
     /// </summary>
-    public IReadOnlyList<(string TableName, int SchemaVersion)>? SchemaDeps { get; internal set; }
+    public IReadOnlyList<(string TableId, int SchemaVersion)>? SchemaDeps { get; internal set; }
 
     /// <summary>
     /// Optional scan-level row cap for LIMIT pushdown.

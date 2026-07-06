@@ -64,10 +64,13 @@ public sealed class QueryPlanner
             ? QueryShapeComputer.Compute(ticket.SelectQuery)
             : null;
 
-        List<(string, int)> schemaDeps = [(table.Name, table.Schema.Version)];
+        List<(string, int)> schemaDeps = [(table.Id, table.Schema.Version)];
+        
         if (ticket.SemiJoinSpecs is { Count: > 0 })
+        {
             foreach (SemiJoinSpec spec in ticket.SemiJoinSpecs)
-                schemaDeps.Add((spec.InnerTable.Name, spec.InnerTable.Schema.Version));
+                schemaDeps.Add((spec.InnerTable.Id, spec.InnerTable.Schema.Version));
+        }
 
         plan.QueryShapeId = shapeId;
         plan.SchemaDeps = schemaDeps;

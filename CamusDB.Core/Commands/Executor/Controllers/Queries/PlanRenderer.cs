@@ -49,7 +49,7 @@ public static class PlanRenderer
             sb.Append("-- shape=").Append(plan.QueryShapeId);
             if (plan.SchemaDeps is { Count: > 0 })
             {
-                string deps = string.Join(", ", plan.SchemaDeps.Select(d => $"{d.TableName}@{d.SchemaVersion}"));
+                string deps = string.Join(", ", plan.SchemaDeps.Select(d => $"{d.TableId}@{d.SchemaVersion}"));
                 sb.Append(" schema-deps=[").Append(deps).Append(']');
             }
             sb.Append('\n');

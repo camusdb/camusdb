@@ -47,10 +47,14 @@ internal sealed class SpillableValueList : IAsyncDisposable
     // Column name used when encoding a ColumnValue as a single-column QueryResultRow for SpillRowCodec.
     private const string SpillColumn = "v";
 
-    private readonly List<ColumnValue> _memoryValues = new();
+    private readonly List<ColumnValue> _memoryValues = [];
+
     private SpillScope? _scope;
+
     private string? _spillPath;
+
     private FileStream? _spillWriter;
+    
     private bool _overflowed;
 
     /// <summary>Total value count (memory + spill).</summary>
