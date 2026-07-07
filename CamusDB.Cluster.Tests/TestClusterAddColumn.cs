@@ -61,7 +61,7 @@ public sealed class TestClusterAddColumn
         });
     }
 
-    private static async Task<List<Dictionary<string, ColumnValue>>> QueryAllRowsAsync(
+    private static async Task<List<IReadOnlyDictionary<string, ColumnValue>>> QueryAllRowsAsync(
         InProcessSchemaCluster.Node node,
         string db
     )
@@ -83,7 +83,7 @@ public sealed class TestClusterAddColumn
             )
         );
 
-        List<Dictionary<string, ColumnValue>> rows = [];
+        List<IReadOnlyDictionary<string, ColumnValue>> rows = [];
         await foreach (QueryResultRow row in cursor)
             rows.Add(row.Row);
 
@@ -159,11 +159,11 @@ public sealed class TestClusterAddColumn
             Assert.AreEqual(SchemaElementState.Public, col!.State,
                 $"Column 'score' must be Public on node {node.Index}");
 
-            List<Dictionary<string, ColumnValue>> rows = await QueryAllRowsAsync(node, db);
+            List<IReadOnlyDictionary<string, ColumnValue>> rows = await QueryAllRowsAsync(node, db);
             Assert.AreEqual(3, rows.Count,
                 $"All 3 pre-existing rows must be readable on node {node.Index}");
 
-            foreach (Dictionary<string, ColumnValue> row in rows)
+            foreach (IReadOnlyDictionary<string, ColumnValue> row in rows)
             {
                 Assert.IsTrue(row.ContainsKey("score"),
                     $"Row on node {node.Index} must contain the new 'score' column");
@@ -287,11 +287,11 @@ public sealed class TestClusterAddColumn
             Assert.AreEqual(SchemaElementState.Public, col!.State,
                 $"Column 'score' must be Public on node {node.Index} after resumed add");
 
-            List<Dictionary<string, ColumnValue>> rows = await QueryAllRowsAsync(node, db);
+            List<IReadOnlyDictionary<string, ColumnValue>> rows = await QueryAllRowsAsync(node, db);
             Assert.AreEqual(3, rows.Count,
                 $"All 3 pre-existing rows must be readable on node {node.Index}");
 
-            foreach (Dictionary<string, ColumnValue> row in rows)
+            foreach (IReadOnlyDictionary<string, ColumnValue> row in rows)
             {
                 Assert.IsTrue(row.ContainsKey("score"),
                     $"Row on node {node.Index} must contain 'score' after resumed add");

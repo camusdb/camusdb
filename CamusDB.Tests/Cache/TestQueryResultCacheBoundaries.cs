@@ -84,7 +84,7 @@ public class TestQueryResultCacheBoundaries
         for (int i = 0; i < count; i++)
         {
             ct.ThrowIfCancellationRequested();
-            yield return new QueryResultRow(ObjectIdGenerator.Generate(), new());
+            yield return new QueryResultRow(ObjectIdGenerator.Generate(), new Dictionary<string, ColumnValue>());
             if (cancelAfterFirst && i == 0)
                 yield break; // simulate early stop (caller breaks out / cancels)
         }

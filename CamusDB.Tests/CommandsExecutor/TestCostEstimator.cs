@@ -391,7 +391,7 @@ public sealed class TestCostEstimator : BaseTest
         // old path would instead fall back to a fixed selectivity that coincidentally also lands
         // near rows/KeyNdv, hiding the bug.) The fix must price the whole tuple via KeyNdv before
         // ever reaching this range path.
-        await executor.Statistics.SetHistogramsAsync(database, table, new()
+        await executor.Statistics.SetHistogramsAsync(database, table, new Dictionary<string, ColumnHistogram>()
         {
             {
                 "status",

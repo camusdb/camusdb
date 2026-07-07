@@ -135,7 +135,7 @@ internal sealed class TestRowMultiInsertor : SharedNodeBaseTest
 
         for (int i = 0; i < 10; i++)
         {
-            Dictionary<string, ColumnValue> row = result[i].Row;
+            IReadOnlyDictionary<string, ColumnValue> row = result[i].Row;
             Assert.AreEqual(3, row.Count);
 
             Assert.AreEqual(ColumnType.Id, row["id"].Type);
@@ -199,7 +199,7 @@ internal sealed class TestRowMultiInsertor : SharedNodeBaseTest
 
         for (int i = 0; i < 10; i++)
         {
-            Dictionary<string, ColumnValue> row = result[i].Row;
+            IReadOnlyDictionary<string, ColumnValue> row = result[i].Row;
             Assert.AreEqual(3, row.Count);
 
             Assert.AreEqual(row["id"].Type, ColumnType.Id);

@@ -313,7 +313,7 @@ public sealed class QueryPlanner
         if (ticket.OrderBy is { Count: > 0 } && !scanSatisfiesOrderBy)
             return null;
 
-        ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new(), ticket.Parameters);
+        ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
         if (limit.Type != ColumnType.Integer64)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Limit is not Integer64");
 
@@ -321,7 +321,7 @@ public sealed class QueryPlanner
 
         if (ticket.Offset is not null)
         {
-            ColumnValue offset = SqlExecutor.EvalExpr(ticket.Offset, new(), ticket.Parameters);
+            ColumnValue offset = SqlExecutor.EvalExpr(ticket.Offset, new Dictionary<string, ColumnValue>(), ticket.Parameters);
             if (offset.Type != ColumnType.Integer64)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Offset is not Integer64");
 
@@ -880,7 +880,7 @@ public sealed class QueryPlanner
         if (expr is null)
             return null;
 
-        ColumnValue val = SqlExecutor.EvalExpr(expr, new(), ticket.Parameters);
+        ColumnValue val = SqlExecutor.EvalExpr(expr, new Dictionary<string, ColumnValue>(), ticket.Parameters);
         return val.Type == ColumnType.Integer64 ? val.LongValue : null;
     }
 

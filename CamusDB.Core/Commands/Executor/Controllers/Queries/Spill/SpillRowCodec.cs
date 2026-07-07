@@ -121,7 +121,7 @@ public static class SpillRowCodec
     {
         WriteRowId(buf, row.RowId, ref pos);
 
-        Dictionary<string, ColumnValue> columns = row.Row;
+        IReadOnlyDictionary<string, ColumnValue> columns = row.Row;
         WriteInt32(buf, columns.Count, ref pos);
 
         foreach (KeyValuePair<string, ColumnValue> kv in columns)

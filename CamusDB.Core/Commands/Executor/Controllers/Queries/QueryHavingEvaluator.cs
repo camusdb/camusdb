@@ -20,7 +20,7 @@ internal static class QueryHavingEvaluator
 {
     public static ColumnValue Evaluate(
         NodeAst expression,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket,
         Dictionary<string, ColumnValue>? parameters)
     {
@@ -116,7 +116,7 @@ internal static class QueryHavingEvaluator
     }
 
     private static ColumnValue Compare(
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket,
         Dictionary<string, ColumnValue>? parameters,
         NodeAst expression,
@@ -127,7 +127,7 @@ internal static class QueryHavingEvaluator
         return ColumnValue.FromBool(compare(leftValue, rightValue));
     }
 
-    private static ColumnValue LookupRowValue(Dictionary<string, ColumnValue> row, string key)
+    private static ColumnValue LookupRowValue(IReadOnlyDictionary<string, ColumnValue> row, string key)
     {
         if (row.TryGetValue(key, out ColumnValue? value))
             return value;

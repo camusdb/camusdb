@@ -14,9 +14,9 @@ public readonly struct QueryResultRow
 {
     public ObjectIdValue RowId { get; }
 
-    public Dictionary<string, ColumnValue> Row { get; }
+    public IReadOnlyDictionary<string, ColumnValue> Row { get; }
 
-    public QueryResultRow(ObjectIdValue rowId, Dictionary<string, ColumnValue> row)
+    public QueryResultRow(ObjectIdValue rowId, IReadOnlyDictionary<string, ColumnValue> row)
 	{
         RowId = rowId;
         Row = row;

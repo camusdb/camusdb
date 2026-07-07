@@ -111,7 +111,7 @@ internal sealed class SqlExecutor()
     /// <returns></returns>
     public static ColumnValue EvalExpr(
         NodeAst expr,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
         QueryRowNameResolver? rowNameResolver = null)
     {

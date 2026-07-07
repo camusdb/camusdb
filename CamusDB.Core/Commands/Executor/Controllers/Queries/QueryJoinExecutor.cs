@@ -399,7 +399,7 @@ internal sealed class QueryJoinExecutor
         if (data is null || data.Length == 0)
             return null;
 
-        Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+        IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
             source.Table.Schema,
             plan.Ticket.TxnState.TransactionId,
             rowId,
@@ -494,7 +494,7 @@ internal sealed class QueryJoinExecutor
 
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+            IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
                 table.Schema,
                 txId,
                 rowId,
@@ -550,7 +550,7 @@ internal sealed class QueryJoinExecutor
             if (data is null || data.Length == 0)
                 continue;
 
-            Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+            IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
                 table.Schema,
                 txId,
                 rowId,
@@ -611,7 +611,7 @@ internal sealed class QueryJoinExecutor
             if (data is null || data.Length == 0)
                 continue;
 
-            Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+            IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
                 table.Schema,
                 txId,
                 rowId,
@@ -673,7 +673,7 @@ internal sealed class QueryJoinExecutor
                 if (data is null || data.Length == 0)
                     continue;
 
-                Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
                     table.Schema, txId, rowId.Value, data,
                     required,
                     GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
@@ -711,7 +711,7 @@ internal sealed class QueryJoinExecutor
                     if (data is null || data.Length == 0)
                         continue;
 
-                    Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                    IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
                         table.Schema, txId, rowId, data,
                         required,
                         GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
@@ -842,12 +842,12 @@ internal sealed class QueryJoinExecutor
     /// column names such as <c>o.id</c>). Stored rows are already qualified — at probe
     /// time they are passed directly as the left arg to <c>MergeRows</c>.
     /// </summary>
-    private async Task<Dictionary<CompositeColumnValue, List<Dictionary<string, ColumnValue>>>?> BuildHashTable(
+    private async Task<Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>>?> BuildHashTable(
         HashJoinNode joinNode,
         QueryPlan plan,
         HashJoinBuildSide buildSide)
     {
-        Dictionary<CompositeColumnValue, List<Dictionary<string, ColumnValue>>> table =
+        Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>> table =
             new(CompositeColumnValueComparer.Instance);
 
         // With spill enabled, cap at SpillEffectiveThreshold so the Grace path is triggered
@@ -881,7 +881,7 @@ internal sealed class QueryJoinExecutor
                 if (hasNull) continue;
 
                 CompositeColumnValue key = new(keyValues);
-                if (!table.TryGetValue(key, out List<Dictionary<string, ColumnValue>>? bucket))
+                if (!table.TryGetValue(key, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
                 { bucket = []; table[key] = bucket; }
 
                 bucket.Add(row.Row);
@@ -914,7 +914,7 @@ internal sealed class QueryJoinExecutor
                 if (hasNull) continue;
 
                 CompositeColumnValue key = new(keyValues);
-                if (!table.TryGetValue(key, out List<Dictionary<string, ColumnValue>>? bucket))
+                if (!table.TryGetValue(key, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
                 { bucket = []; table[key] = bucket; }
 
                 bucket.Add(qualified);
@@ -932,7 +932,7 @@ internal sealed class QueryJoinExecutor
     {
         HashJoinBuildSide buildSide = joinNode.BuildSide;
 
-        Dictionary<CompositeColumnValue, List<Dictionary<string, ColumnValue>>>? hashTable =
+        Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>>? hashTable =
             await BuildHashTable(joinNode, plan, buildSide).ConfigureAwait(false);
 
         if (hashTable is null)
@@ -987,10 +987,10 @@ internal sealed class QueryJoinExecutor
                 if (hasNull) continue;
 
                 CompositeColumnValue probeKey = new(probeKeyValues);
-                if (!hashTable.TryGetValue(probeKey, out List<Dictionary<string, ColumnValue>>? bucket))
+                if (!hashTable.TryGetValue(probeKey, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
                     continue;
 
-                foreach (Dictionary<string, ColumnValue> buildRow in bucket)
+                foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
                 {
                     Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(leftQualified, buildRow, rightAlias);
 
@@ -1025,10 +1025,10 @@ internal sealed class QueryJoinExecutor
                 if (hasNull) continue;
 
                 CompositeColumnValue probeKey = new(probeKeyValues);
-                if (!hashTable.TryGetValue(probeKey, out List<Dictionary<string, ColumnValue>>? bucket))
+                if (!hashTable.TryGetValue(probeKey, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
                     continue;
 
-                foreach (Dictionary<string, ColumnValue> leftBuildRow in bucket)
+                foreach (IReadOnlyDictionary<string, ColumnValue> leftBuildRow in bucket)
                 {
                     Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(leftBuildRow, rightRow.Row, rightAlias);
 
@@ -1068,7 +1068,7 @@ internal sealed class QueryJoinExecutor
         string rightAlias = joinNode.RightSource.Alias;
 
         // ── Materialise left side (qualify each row immediately) ────────────
-        List<(ColumnValue[] Key, Dictionary<string, ColumnValue> QualifiedRow)> leftRows = new();
+        List<(ColumnValue[] Key, IReadOnlyDictionary<string, ColumnValue> QualifiedRow)> leftRows = new();
 
         await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
         {
@@ -1086,7 +1086,7 @@ internal sealed class QueryJoinExecutor
             leftRows.Sort((a, b) => CompareMergeKeys(a.Key, b.Key));
 
         // ── Materialise right side (unqualified; MergeRows qualifies at emit time) ──
-        List<(ColumnValue[] Key, Dictionary<string, ColumnValue> Row)> rightRows = new();
+        List<(ColumnValue[] Key, IReadOnlyDictionary<string, ColumnValue> Row)> rightRows = new();
 
         if (joinNode.RightIsOrdered && joinNode.RightPhysicalNode is not null)
         {
@@ -1194,7 +1194,7 @@ internal sealed class QueryJoinExecutor
 
             // Equal keys — buffer the right equal-key run.
             ColumnValue[] runKey = leftKey;
-            List<Dictionary<string, ColumnValue>> rightRun = [];
+            List<IReadOnlyDictionary<string, ColumnValue>> rightRun = [];
             while (rightHasMore)
             {
                 ColumnValue[]? rk = ExtractMergeKey(rightEnum.Current.Row, joinNode.RightKeyColumns);
@@ -1207,7 +1207,7 @@ internal sealed class QueryJoinExecutor
             // Current left row is already qualified; loop advances after each emission.
             while (true)
             {
-                foreach (Dictionary<string, ColumnValue> rightRow in rightRun)
+                foreach (IReadOnlyDictionary<string, ColumnValue> rightRow in rightRun)
                 {
                     Dictionary<string, ColumnValue> merged =
                         QueryRowMerger.MergeRows(leftQualified, rightRow, rightAlias);
@@ -1450,7 +1450,7 @@ internal sealed class QueryJoinExecutor
         // Load build partition into an in-memory hash table, stopping early whenever
         // the threshold is exceeded regardless of depth — the depth determines the
         // overflow strategy, not whether we detect the overflow.
-        Dictionary<CompositeColumnValue, List<Dictionary<string, ColumnValue>>> hashTable =
+        Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>> hashTable =
             new(CompositeColumnValueComparer.Instance);
         int buildCount = 0;
         bool overflow = false;
@@ -1471,7 +1471,7 @@ internal sealed class QueryJoinExecutor
             }
 
             CompositeColumnValue key = new(keyVals);
-            if (!hashTable.TryGetValue(key, out List<Dictionary<string, ColumnValue>>? bucket))
+            if (!hashTable.TryGetValue(key, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
             { bucket = []; hashTable[key] = bucket; }
             bucket.Add(buildRow.Row);
             buildCount++;
@@ -1521,9 +1521,9 @@ internal sealed class QueryJoinExecutor
             if (probeKeyVals is null) continue;
 
             CompositeColumnValue probeKey = new(probeKeyVals);
-            if (!hashTable.TryGetValue(probeKey, out List<Dictionary<string, ColumnValue>>? bucket)) continue;
+            if (!hashTable.TryGetValue(probeKey, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket)) continue;
 
-            foreach (Dictionary<string, ColumnValue> buildRow in bucket)
+            foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
             {
                 // Build rows are always the qualified left-side; probe rows are always the
                 // unqualified right-side — regardless of which physical side is BuildSide.

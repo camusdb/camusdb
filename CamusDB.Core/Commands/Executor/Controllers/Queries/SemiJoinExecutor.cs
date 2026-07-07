@@ -83,7 +83,7 @@ internal sealed class SemiJoinExecutor
         }
     }
 
-    private static ColumnValue? ResolveColumnValue(Dictionary<string, ColumnValue> row, string columnName)
+    private static ColumnValue? ResolveColumnValue(IReadOnlyDictionary<string, ColumnValue> row, string columnName)
     {
         if (row.TryGetValue(columnName, out ColumnValue? value))
             return value;
@@ -267,7 +267,7 @@ internal sealed class SemiJoinExecutor
 
     private static bool EvalFilter(
         NodeAst filter,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters)
     {
         ColumnValue result = SqlExecutor.EvalExpr(filter, row, parameters);

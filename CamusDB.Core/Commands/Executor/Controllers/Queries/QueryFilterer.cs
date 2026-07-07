@@ -25,7 +25,7 @@ internal sealed class QueryFilterer
 
     internal async ValueTask<bool> MeetPlanFilterAsync(
         QueryPlan plan,
-        Dictionary<string, ColumnValue> row)
+        IReadOnlyDictionary<string, ColumnValue> row)
     {
         NodeAst? filter = plan.ExecutionFilter;
 
@@ -37,7 +37,7 @@ internal sealed class QueryFilterer
 
     internal async ValueTask<bool> MeetHavingAsync(
         NodeAst having,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket)
     {
         ColumnValue evaluatedExpr = await EvaluateHavingAsync(having, row, ticket).ConfigureAwait(false);
@@ -46,7 +46,7 @@ internal sealed class QueryFilterer
 
     internal async ValueTask<bool> MeetWhereAsync(
         NodeAst where,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket,
         DatabaseDescriptor database)
     {
@@ -77,7 +77,7 @@ internal sealed class QueryFilterer
 
     private ValueTask<ColumnValue> EvaluateHavingAsync(
         NodeAst expr,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket)
     {
         if (expr.nodeType is NodeType.ExprAnd)        
@@ -91,7 +91,7 @@ internal sealed class QueryFilterer
 
     private async ValueTask<ColumnValue> EvaluateHavingAndAsync(
         NodeAst expr,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket)
     {
         ColumnValue leftValue = QueryHavingEvaluator.Evaluate(expr.leftAst!, row, ticket, ticket.Parameters);
@@ -104,7 +104,7 @@ internal sealed class QueryFilterer
 
     private async ValueTask<ColumnValue> EvaluateHavingOrAsync(
         NodeAst expr,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket)
     {
         ColumnValue leftValue = QueryHavingEvaluator.Evaluate(expr.leftAst!, row, ticket, ticket.Parameters);
@@ -117,7 +117,7 @@ internal sealed class QueryFilterer
 
     private async ValueTask<ColumnValue> EvaluatePredicateAsync(
         NodeAst expr,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket,
         DatabaseDescriptor database)
     {

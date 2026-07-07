@@ -9,6 +9,7 @@
 using System.Text;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Serializer.Models;
 using CamusDB.Core.Util.ObjectIds;
@@ -42,7 +43,7 @@ public static class RowEncoder
         Writable
     }
 
-    public static byte[] Encode(TableSchema schema, Dictionary<string, ColumnValue> row, ObjectIdValue rowId)
+    public static byte[] Encode(TableSchema schema, IReadOnlyDictionary<string, ColumnValue> row, ObjectIdValue rowId)
     {
         ArgumentNullException.ThrowIfNull(schema);
         ArgumentNullException.ThrowIfNull(row);
@@ -236,6 +237,196 @@ public static class RowEncoder
             requiredColumns,
             ColumnVisibility.Writable,
             injectMissingCurrentColumns: visibilitySchemaVersion is not null);
+    }
+
+    /// <summary>
+    /// Decodes a stored row byte buffer into a layout-backed <see cref="QueryRow"/> rather than
+    /// a plain dictionary. Values are stored in an ordinal <c>ColumnValue[]</c>, allowing O(1)
+    /// access by position.
+    ///
+    /// <para>
+    /// <paramref name="layoutCache"/> is a per-scan memoisation table keyed by the stored schema
+    /// version embedded in each row's bytes. Because <paramref name="requiredColumns"/> and
+    /// <paramref name="visibilitySchemaVersion"/> are constant for the life of a single scan, every
+    /// row written under the same stored version produces the same <see cref="RowLayout"/>. Passing
+    /// a non-null dictionary causes the layout to be built once and reused for all subsequent rows
+    /// with that stored version — the common case is one entry, built on the first decoded row.
+    /// Pass <see langword="null"/> when a stable per-scan dictionary is unavailable (e.g. one-off
+    /// decodes outside a scan loop).
+    /// </para>
+    ///
+    /// <para>
+    /// The <see cref="QueryRow"/> implements <see cref="IReadOnlyDictionary{TKey,TValue}"/>, so
+    /// unmigrated consumers that access values by string key continue to work correctly during the
+    /// incremental pipeline migration.
+    /// </para>
+    ///
+    /// <para>
+    /// Output is value-identical to <see cref="DecodeAsync"/>: same column names, same values, for
+    /// the same byte buffer and schema parameters.
+    /// </para>
+    /// </summary>
+    public static async ValueTask<QueryRow> DecodeToQueryRowAsync(
+        TableSchema schema,
+        HLCTimestamp txId,
+        ObjectIdValue rowId,
+        byte[] data,
+        IReadOnlySet<string>? requiredColumns = null,
+        long? visibilitySchemaVersion = null,
+        Dictionary<int, RowLayout>? layoutCache = null)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+        ArgumentNullException.ThrowIfNull(data);
+
+        int pointer = 0;
+
+        Serializator.ReadType(data, ref pointer);                    // schema type marker
+        int schemaVersion = Serializator.ReadInt32(data, ref pointer);
+
+        Serializator.ReadType(data, ref pointer);                    // rowId type marker
+        Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
+
+        List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
+        List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
+            ? columns
+            : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
+
+        bool injectMissing = visibilitySchemaVersion is not null;
+
+        // Resolve or build the layout for this stored schema version. The layout is identical for
+        // every row at the same stored version when requiredColumns and visibilitySchemaVersion
+        // are constant (which they always are within a single scan).
+        RowLayout layout;
+        if (layoutCache is null || !layoutCache.TryGetValue(schemaVersion, out layout!))
+        {
+            layout = BuildRowLayout(columns, visibilityColumns, requiredColumns, ColumnVisibility.PublicOnly, injectMissing);
+            layoutCache?.Add(schemaVersion, layout);
+        }
+
+        return DecodeColumnsToQueryRow(
+            layout,
+            columns,
+            visibilityColumns,
+            data,
+            ref pointer,
+            requiredColumns,
+            ColumnVisibility.PublicOnly,
+            injectMissing,
+            rowId);
+    }
+
+    /// <summary>
+    /// Builds the <see cref="RowLayout"/> for a given combination of history columns, visibility
+    /// columns, required-column filter, and visibility mode. This is the first pass of the decode:
+    /// it determines which column names will appear in the output and in what order, without
+    /// touching the byte buffer. The result can be cached and reused for every row that shares the
+    /// same stored schema version within a scan.
+    /// </summary>
+    private static RowLayout BuildRowLayout(
+        List<TableColumnSchema> columns,
+        List<TableColumnSchema>? currentColumns,
+        IReadOnlySet<string>? requiredColumns,
+        ColumnVisibility visibility,
+        bool injectMissingCurrentColumns)
+    {
+        bool decodeAll = requiredColumns is null;
+
+        List<string> outputNames = new(columns.Count);
+        for (int i = 0; i < columns.Count; i++)
+        {
+            TableColumnSchema column = columns[i];
+            if (IsVisible(column, currentColumns, visibility) &&
+                (decodeAll || requiredColumns!.Contains(column.Name)))
+                outputNames.Add(column.Name);
+        }
+
+        if (injectMissingCurrentColumns && currentColumns is not null)
+        {
+            // Use a set over outputNames to avoid O(n²) Contains checks.
+            HashSet<string> included = new(outputNames, StringComparer.Ordinal);
+
+            foreach (TableColumnSchema current in currentColumns)
+            {
+                if (included.Contains(current.Name)) continue;
+                if (FindCurrentColumn(current, columns) is not null) continue;
+
+                bool visible = visibility switch
+                {
+                    ColumnVisibility.PublicOnly => SchemaElementStateRules.IsReadable(current),
+                    ColumnVisibility.Writable   => SchemaElementStateRules.IsWritable(current),
+                    _ => false
+                };
+                if (!visible) continue;
+                if (!decodeAll && !requiredColumns!.Contains(current.Name)) continue;
+
+                outputNames.Add(current.Name);
+            }
+        }
+
+        return RowLayout.ForColumns(outputNames);
+    }
+
+    private static QueryRow DecodeColumnsToQueryRow(
+        RowLayout layout,
+        List<TableColumnSchema> columns,
+        List<TableColumnSchema>? currentColumns,
+        byte[] data,
+        ref int pointer,
+        IReadOnlySet<string>? requiredColumns,
+        ColumnVisibility visibility,
+        bool injectMissingCurrentColumns,
+        ObjectIdValue rowId)
+    {
+        bool decodeAll = requiredColumns is null;
+        ColumnValue[] values = new ColumnValue[layout.Count];
+
+        // Decode the byte stream, filling each included column's ordinal slot.
+        for (int i = 0; i < columns.Count; i++)
+        {
+            TableColumnSchema column = columns[i];
+
+            if (!IsVisible(column, currentColumns, visibility))
+            {
+                SkipColumnValue(column.Type, data, ref pointer);
+                continue;
+            }
+
+            if (decodeAll || requiredColumns!.Contains(column.Name))
+            {
+                int ord = layout.IndexOf(column.Name);
+                if (ord >= 0)
+                    values[ord] = ReadColumnValue(column, data, ref pointer);
+                else
+                    SkipColumnValue(column.Type, data, ref pointer);
+            }
+            else
+                SkipColumnValue(column.Type, data, ref pointer);
+        }
+
+        // Inject default values for columns added after this row was written (absent from bytes).
+        if (injectMissingCurrentColumns && currentColumns is not null)
+        {
+            foreach (TableColumnSchema current in currentColumns)
+            {
+                int ord = layout.IndexOf(current.Name);
+                if (ord < 0) continue;
+                if (values[ord] is not null) continue; // already decoded from bytes
+                if (FindCurrentColumn(current, columns) is not null) continue; // present in history, not a new column
+
+                bool visible = visibility switch
+                {
+                    ColumnVisibility.PublicOnly => SchemaElementStateRules.IsReadable(current),
+                    ColumnVisibility.Writable   => SchemaElementStateRules.IsWritable(current),
+                    _ => false
+                };
+                if (!visible) continue;
+                if (!decodeAll && !requiredColumns!.Contains(current.Name)) continue;
+
+                values[ord] = current.DefaultValue ?? new(ColumnType.Null, 0L);
+            }
+        }
+
+        return new QueryRow(rowId, layout, values);
     }
 
     private static async ValueTask<List<TableColumnSchema>?> GetVisibilityColumnsAsync(
@@ -733,7 +924,7 @@ public static class RowEncoder
         }
     }
 
-    private static int CalculateBufferLength(TableSchema schema, Dictionary<string, ColumnValue> row)
+    private static int CalculateBufferLength(TableSchema schema, IReadOnlyDictionary<string, ColumnValue> row)
     {
         int length = 20; // header: 1+4 (schema version) + 1+12 (rowId) + 2 padding
 

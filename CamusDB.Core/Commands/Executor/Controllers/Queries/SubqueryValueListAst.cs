@@ -229,6 +229,6 @@ internal static class SubqueryValueListAst
             yield break;
         }
 
-        yield return SQLExecutorBaseCreator.EvalExpr(ast, new(), parameters);
+        yield return SQLExecutorBaseCreator.EvalExpr(ast, new Dictionary<string, ColumnValue>(), parameters);
     }
 }

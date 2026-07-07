@@ -1186,7 +1186,7 @@ public sealed class TestCardinalityEstimator : BaseTest
             });
         }
 
-        await executor.Statistics.SetHistogramsAsync(database, table, new()
+        await executor.Statistics.SetHistogramsAsync(database, table, new Dictionary<string, ColumnHistogram>()
         {
             { "value", new ColumnHistogram { Buckets = buckets, TotalRows = totalRows } }
         });

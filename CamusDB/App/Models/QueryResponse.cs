@@ -17,7 +17,7 @@ public sealed class QueryResponse
 
     public int Total { get; set; }
 
-    public List<Dictionary<string, ColumnValue>> Rows { get; set; }
+    public List<IReadOnlyDictionary<string, ColumnValue>> Rows { get; set; }
 
     public string? Code { get; set; }
 
@@ -25,7 +25,7 @@ public sealed class QueryResponse
 
     public HLCTimestamp? CausalToken { get; set; }
 
-    public QueryResponse(string status, int total, List<Dictionary<string, ColumnValue>> rows)
+    public QueryResponse(string status, int total, List<IReadOnlyDictionary<string, ColumnValue>> rows)
     {
         Status = status;
         Total = total;

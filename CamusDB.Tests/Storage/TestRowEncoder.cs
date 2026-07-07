@@ -8,13 +8,16 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 using NUnit.Framework;
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Util.ObjectIds;
+using Kommander.Time;
 
 namespace CamusDB.Tests.Storage;
 
@@ -132,7 +135,7 @@ public sealed class TestRowEncoder
             Col("id", ColumnType.Id),
             Col("shadow", ColumnType.String));
         ObjectIdValue rowId = RowId();
-        byte[] bytes = RowEncoder.Encode(schema, new()
+        byte[] bytes = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>()
         {
             ["id"] = new(ColumnType.Id, rowId.ToString()),
             ["shadow"] = new(ColumnType.String, "hidden")
@@ -159,7 +162,7 @@ public sealed class TestRowEncoder
             Col("write_col", ColumnType.String, state: SchemaElementState.WriteOnly),
             Col("delete_col", ColumnType.String, state: SchemaElementState.DeleteOnly));
         ObjectIdValue rowId = RowId();
-        byte[] bytes = RowEncoder.Encode(schema, new()
+        byte[] bytes = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>()
         {
             ["public_col"] = new(ColumnType.String, "visible"),
             ["write_col"] = new(ColumnType.String, "internal"),
@@ -193,7 +196,7 @@ public sealed class TestRowEncoder
             notNull: false,
             defaultValue: null));
         ObjectIdValue rowId = RowId();
-        byte[] bytes = RowEncoder.Encode(schema, new()
+        byte[] bytes = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>()
         {
             ["x"] = new(ColumnType.String, "old-bytes")
         }, rowId);
@@ -219,7 +222,7 @@ public sealed class TestRowEncoder
             notNull: false,
             defaultValue: null));
         ObjectIdValue rowId = RowId();
-        byte[] bytes = RowEncoder.Encode(schema, new()
+        byte[] bytes = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>()
         {
             ["legacy"] = new(ColumnType.String, "kept")
         }, rowId);
@@ -593,5 +596,151 @@ public sealed class TestRowEncoder
         Assert.AreEqual(1L, decoded["a"].LongValue);
         Assert.IsTrue(decoded["c"].BoolValue);
         Assert.IsFalse(decoded.ContainsKey("b"));
+    }
+
+    // ---- DecodeToQueryRowAsync round-trip tests ----------------------------
+
+    /// <summary>
+    /// DecodeToQueryRowAsync must return a QueryRow whose IReadOnlyDictionary adapter yields
+    /// the same values as the synchronous Decode path for every column in the row.
+    /// </summary>
+    [Test]
+    public async Task DecodeToQueryRow_FullRow_AdapterValueEqualsDictionary()
+    {
+        TableSchema schema = MakeSchema(0,
+            Col("id",    ColumnType.Id),
+            Col("name",  ColumnType.String),
+            Col("score", ColumnType.Integer64));
+        ObjectIdValue rowId = RowId();
+
+        string idStr = rowId.ToString();
+        Dictionary<string, ColumnValue> source = new()
+        {
+            ["id"]    = new(ColumnType.Id,        idStr),
+            ["name"]  = new(ColumnType.String,     "Alice"),
+            ["score"] = new(ColumnType.Integer64,  42L),
+        };
+
+        byte[] bytes = RowEncoder.Encode(schema, source, rowId);
+
+        // Synchronous decode — the reference result.
+        Dictionary<string, ColumnValue> dictRow = RowEncoder.Decode(schema, rowId, bytes);
+
+        // Async QueryRow decode — the new path under test.
+        QueryRow qr = await RowEncoder.DecodeToQueryRowAsync(schema, default(HLCTimestamp), rowId, bytes);
+
+        // The adapter must expose the same column set with identical values.
+        Assert.AreEqual(dictRow.Count, qr.Count, "Column count must match");
+        foreach (KeyValuePair<string, ColumnValue> kv in dictRow)
+        {
+            Assert.IsTrue(qr.ContainsKey(kv.Key), $"Column '{kv.Key}' missing from QueryRow");
+            Assert.AreEqual(kv.Value.Type,     qr[kv.Key].Type,      $"Type mismatch for '{kv.Key}'");
+            Assert.AreEqual(kv.Value.LongValue,  qr[kv.Key].LongValue,  $"LongValue mismatch for '{kv.Key}'");
+            Assert.AreEqual(kv.Value.StrValue,   qr[kv.Key].StrValue,   $"StrValue mismatch for '{kv.Key}'");
+        }
+    }
+
+    /// <summary>
+    /// When requiredColumns is provided, DecodeToQueryRowAsync must return a QueryRow that
+    /// contains only the requested columns, omitting the rest.
+    /// </summary>
+    [Test]
+    public async Task DecodeToQueryRow_ProjectedColumns_ReturnsSubset()
+    {
+        TableSchema schema = MakeSchema(0,
+            Col("a", ColumnType.Integer64),
+            Col("b", ColumnType.String),
+            Col("c", ColumnType.Bool));
+        ObjectIdValue rowId = RowId(4, 5, 6);
+
+        byte[] bytes = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>()
+        {
+            ["a"] = new(ColumnType.Integer64, 10L),
+            ["b"] = new(ColumnType.String,    "hello"),
+            ["c"] = new(ColumnType.Bool,      true),
+        }, rowId);
+
+        HashSet<string> required = ["a", "c"];
+        QueryRow qr = await RowEncoder.DecodeToQueryRowAsync(
+            schema, default(HLCTimestamp), rowId, bytes, required);
+
+        Assert.AreEqual(2, qr.Count, "Only requested columns should be present");
+        Assert.AreEqual(10L, qr["a"].LongValue);
+        Assert.IsTrue(qr["c"].BoolValue);
+        Assert.IsFalse(qr.ContainsKey("b"), "Non-requested column must be absent");
+    }
+
+    /// <summary>
+    /// Nullable columns that are absent in the encoded row must appear as Null-typed values
+    /// in the QueryRow returned by DecodeToQueryRowAsync, matching Decode behaviour.
+    /// </summary>
+    [Test]
+    public async Task DecodeToQueryRow_NullableColumns_HandledCorrectly()
+    {
+        TableSchema schema = MakeSchema(0,
+            Col("id",    ColumnType.Id),
+            Col("notes", ColumnType.String, notNull: false));
+        ObjectIdValue rowId = RowId(7, 8, 9);
+
+        // Encode a row where "notes" is absent (null in the source dict).
+        byte[] bytes = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>()
+        {
+            ["id"]    = new(ColumnType.Id, rowId.ToString()),
+            ["notes"] = ColumnValue.Null,
+        }, rowId);
+
+        // Synchronous reference.
+        Dictionary<string, ColumnValue> dictRow = RowEncoder.Decode(schema, rowId, bytes);
+
+        QueryRow qr = await RowEncoder.DecodeToQueryRowAsync(schema, default(HLCTimestamp), rowId, bytes);
+
+        // "notes" must be present and typed Null in both paths.
+        Assert.IsTrue(qr.ContainsKey("notes"), "Null column must appear in QueryRow");
+        Assert.AreEqual(dictRow["notes"].Type, qr["notes"].Type,
+            "Null column type must match synchronous Decode");
+    }
+
+    /// <summary>
+    /// When a column is added to the schema after a row was written (schema-history injection),
+    /// DecodeToQueryRowAsync must inject the column's default value for the new column,
+    /// matching the behaviour of DecodeAsync with schema-version forwarding.
+    /// </summary>
+    [Test]
+    public async Task DecodeToQueryRow_SchemaHistory_InjectsMissingColumn()
+    {
+        // Version-0 schema: two columns.
+        TableSchema schema = MakeSchema(0,
+            Col("id",   ColumnType.Id),
+            Col("name", ColumnType.String));
+        ObjectIdValue rowId = RowId(10, 11, 12);
+
+        byte[] bytes = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>()
+        {
+            ["id"]   = new(ColumnType.Id,     rowId.ToString()),
+            ["name"] = new(ColumnType.String, "Bob"),
+        }, rowId);
+
+        // Upgrade schema to version 1: add "score" column with a default.
+        TableColumnSchema scoreCol = new("score", "score", ColumnType.Integer64, false,
+            new ColumnValue(ColumnType.Integer64, 99L), SchemaElementState.Public);
+
+        schema.Version = 1;
+        schema.Columns = [schema.SchemaHistory![0].Columns![0], schema.SchemaHistory[0].Columns[1], scoreCol];
+        schema.SchemaHistory!.Add(new TableSchemaHistory
+        {
+            Version  = 1,
+            Columns  = schema.Columns
+        });
+
+        // Decode using the v1 schema with visibilitySchemaVersion = 1 so injection fires.
+        QueryRow qr = await RowEncoder.DecodeToQueryRowAsync(
+            schema, default(HLCTimestamp), rowId, bytes,
+            requiredColumns: null, visibilitySchemaVersion: 1);
+
+        Assert.IsTrue(qr.ContainsKey("score"), "Injected column must appear in QueryRow");
+        Assert.AreEqual(ColumnType.Integer64, qr["score"].Type,
+            "Injected column must carry the column's default type");
+        Assert.AreEqual(99L, qr["score"].LongValue,
+            "Injected column must carry the column's default value");
     }
 }

@@ -19,7 +19,7 @@ internal static class ScalarFunctionEvaluator
 
     public static ColumnValue Evaluate(
         NodeAst funcCallExpr,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
         QueryRowNameResolver? rowNameResolver,
         ScalarFunctionArguments.EvaluateExpressionDelegate evaluateExpression)

@@ -169,7 +169,7 @@ internal sealed class TableAnalyzer
             ? $"sampled {rowCount} rows (table larger than {CamusDBConfig.StatsAnalyzeSampleRows})"
             : $"analyzed {rowCount} rows";
 
-        return new QueryResultRow(default, new()
+        return new QueryResultRow(default, new Dictionary<string, ColumnValue>
         {
             { "table",   new ColumnValue(ColumnType.String, table.Name) },
             { "status",  new ColumnValue(ColumnType.String, status) },

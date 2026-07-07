@@ -59,7 +59,7 @@ public sealed class QueryController : CommandsController
                         offset: null,
                         parameters: null
                     );
-                    List<Dictionary<string, ColumnValue>> rows = new();
+                    List<IReadOnlyDictionary<string, ColumnValue>> rows = new();
                     (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
                     await foreach (QueryResultRow row in cursor)
                         rows.Add(row.Row);
@@ -75,7 +75,7 @@ public sealed class QueryController : CommandsController
 
             // Autocommit: retry transparently on transient serialization failures when the
             // resolved level is Serializable; run once for Read Committed.
-            List<Dictionary<string, ColumnValue>> resultRows = [];
+            List<IReadOnlyDictionary<string, ColumnValue>> resultRows = [];
             Kommander.Time.HLCTimestamp causalToken = default;
 
             async Task AutocommitBody(CancellationToken ct)
@@ -97,7 +97,7 @@ public sealed class QueryController : CommandsController
                         offset: null,
                         parameters: null
                     );
-                    List<Dictionary<string, ColumnValue>> rows = [];
+                    List<IReadOnlyDictionary<string, ColumnValue>> rows = [];
                     (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
                     await foreach (QueryResultRow row in cursor)
                         rows.Add(row.Row);
@@ -159,7 +159,7 @@ public sealed class QueryController : CommandsController
                 id: request.Id ?? ""
             );
 
-            List<Dictionary<string, ColumnValue>> rows = new();
+            List<IReadOnlyDictionary<string, ColumnValue>> rows = new();
 
             await foreach (Dictionary<string, ColumnValue> row in await executor.QueryById(ticket))
                 rows.Add(row);

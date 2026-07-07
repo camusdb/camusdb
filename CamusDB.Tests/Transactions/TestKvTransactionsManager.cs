@@ -124,7 +124,7 @@ public sealed class TestKvTransactionsManager
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(1, 0, 0);
-        byte[] data = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 99L) }, rowId);
+        byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["v"] = new(ColumnType.Integer64, 99L) }, rowId);
 
         KvTransaction tx = await mgr.BeginAsync();
         await store.InsertRow(tx, rowId, data);
@@ -143,7 +143,7 @@ public sealed class TestKvTransactionsManager
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(2, 0, 0);
-        byte[] data = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 42L) }, rowId);
+        byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["v"] = new(ColumnType.Integer64, 42L) }, rowId);
 
         KvTransaction tx = await mgr.BeginAsync();
         await store.InsertRow(tx, rowId, data);
@@ -227,8 +227,8 @@ public sealed class TestKvTransactionsManager
         CamusDB.Core.Util.ObjectIds.ObjectIdValue id1 = new(10, 0, 0);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue id2 = new(20, 0, 0);
 
-        byte[] data1 = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 1L) }, id1);
-        byte[] data2 = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 2L) }, id2);
+        byte[] data1 = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["v"] = new(ColumnType.Integer64, 1L) }, id1);
+        byte[] data2 = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["v"] = new(ColumnType.Integer64, 2L) }, id2);
 
         // tx1 commits; tx2 rolls back.
         KvTransaction tx1 = await mgr.BeginAsync();
@@ -255,7 +255,7 @@ public sealed class TestKvTransactionsManager
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(99, 0, 0);
-        byte[] data = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 7L) }, rowId);
+        byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["v"] = new(ColumnType.Integer64, 7L) }, rowId);
 
         KvTransaction tx = await mgr.BeginAsync();
         try
@@ -281,7 +281,7 @@ public sealed class TestKvTransactionsManager
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(100, 0, 0);
-        byte[] data = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 9L) }, rowId);
+        byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["v"] = new(ColumnType.Integer64, 9L) }, rowId);
 
         KvTransaction tx1 = await mgr.BeginAsync();
         KvTransaction tx2 = await mgr.BeginAsync();
@@ -355,7 +355,7 @@ public sealed class TestKvTransactionsManager
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(200, 0, 0);
-        byte[] data = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 42L) }, rowId);
+        byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["v"] = new(ColumnType.Integer64, 42L) }, rowId);
 
         KvTransaction tx = await mgr.BeginAsync();
         await store.InsertRow(tx, rowId, data);
@@ -387,7 +387,7 @@ public sealed class TestKvTransactionsManager
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(201, 0, 0);
-        byte[] data = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 99L) }, rowId);
+        byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["v"] = new(ColumnType.Integer64, 99L) }, rowId);
 
         KvTransaction tx = await mgr.BeginAsync();
         await store.InsertRow(tx, rowId, data);

@@ -38,7 +38,7 @@ internal sealed class SchemaQuerier
             if (pattern is not null && !LikeMatch(table.Key, pattern))
                 continue;
 
-            yield return new QueryResultRow(default, new()
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>()
             {
                 { "tables", new ColumnValue(ColumnType.String, table.Key) }
             });
@@ -54,7 +54,7 @@ internal sealed class SchemaQuerier
             if (!SchemaElementStateRules.IsReadable(column))
                 continue;
 
-            yield return new QueryResultRow(default, new()
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>()
             {
                 { "Field", new ColumnValue(ColumnType.String, column.Name) },
                 { "Type", new ColumnValue(ColumnType.String, GetSQLType(column)) },
@@ -107,7 +107,7 @@ internal sealed class SchemaQuerier
             if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index.Value))
                 continue;
 
-            yield return new QueryResultRow(default, new()
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>()
             {
                 { "Table", new ColumnValue(ColumnType.String, table.Name) },
                 { "Non_unique", new ColumnValue(ColumnType.String, index.Value.Type == IndexType.Unique ? "0" : "1") },
@@ -167,7 +167,7 @@ internal sealed class SchemaQuerier
 
         createTableSql.Append(");");
 
-        yield return new QueryResultRow(default, new()
+        yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>()
         {
             { "Table", new ColumnValue(ColumnType.String, table.Name) },
             { "Create Table", new ColumnValue(ColumnType.String, createTableSql.ToString()) }
@@ -178,7 +178,7 @@ internal sealed class SchemaQuerier
     {
         await Task.CompletedTask;
 
-        yield return new QueryResultRow(default, new()
+        yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>()
         {
             { "database", new ColumnValue(ColumnType.String, database.Name) }
         });
@@ -230,7 +230,7 @@ internal sealed class SchemaQuerier
                 ? e.Ancestors[0].ForkTimestamp.ToString()
                 : "";
 
-            yield return new QueryResultRow(default, new()
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>()
             {
                 { "database",       new ColumnValue(ColumnType.String, e.Name) },
                 { "id",             new ColumnValue(ColumnType.String, e.Id) },
@@ -262,7 +262,7 @@ internal sealed class SchemaQuerier
             DatabaseBranchAncestor anc = target.Ancestors[i];
             idToName.TryGetValue(anc.DatabaseId, out string? ancestorName);
 
-            yield return new QueryResultRow(default, new()
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>()
             {
                 { "database",       new ColumnValue(ColumnType.String, ancestorName ?? anc.DatabaseId) },
                 { "id",             new ColumnValue(ColumnType.String, anc.DatabaseId) },
@@ -281,7 +281,7 @@ internal sealed class SchemaQuerier
             if (pattern is not null && !LikeMatch(entry.Name, pattern))
                 continue;
 
-            yield return new QueryResultRow(default, new()
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>()
             {
                 { "Database", new ColumnValue(ColumnType.String, entry.Name) }
             });

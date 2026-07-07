@@ -43,7 +43,7 @@ internal abstract class SQLExecutorBaseCreator
 
     public static ColumnValue EvalExpr(
         NodeAst expr,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
         QueryRowNameResolver? rowNameResolver = null)
     {
@@ -358,7 +358,7 @@ internal abstract class SQLExecutorBaseCreator
 
         if (constraintsList.nodeType == NodeType.ConstraintDefault)
         {
-            constraintTypes.Add((ColumnConstraintType.Default, EvalExpr(constraintsList.leftAst!, new(), null)));
+            constraintTypes.Add((ColumnConstraintType.Default, EvalExpr(constraintsList.leftAst!, new Dictionary<string, ColumnValue>(), null)));
             return;
         }
 

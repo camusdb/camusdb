@@ -139,7 +139,7 @@ public sealed class TestRowUpdaterUnique : SharedNodeBaseTest
 
         foreach (QueryResultRow resultRow in result)
         {
-            Dictionary<string, ColumnValue> row = resultRow.Row;
+            IReadOnlyDictionary<string, ColumnValue> row = resultRow.Row;
 
             Assert.AreEqual(row["name"].Type, ColumnType.String);
             Assert.AreEqual(row["name"].Value, "updated value");
@@ -162,7 +162,7 @@ public sealed class TestRowUpdaterUnique : SharedNodeBaseTest
 
         foreach (QueryResultRow resultRow in result)
         {
-            Dictionary<string, ColumnValue> row = resultRow.Row;
+            IReadOnlyDictionary<string, ColumnValue> row = resultRow.Row;
 
             Assert.AreEqual(row["name"].Type, ColumnType.String);
             Assert.AreNotEqual(row["name"].Value, "updated value");

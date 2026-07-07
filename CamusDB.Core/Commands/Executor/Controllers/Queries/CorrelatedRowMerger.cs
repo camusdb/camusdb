@@ -17,7 +17,7 @@ internal static class CorrelatedRowMerger
     public static Dictionary<string, ColumnValue> MergeForEvaluation(
         Dictionary<string, ColumnValue> innerRow,
         BoundTableSource innerSource,
-        Dictionary<string, ColumnValue> outerRow,
+        IReadOnlyDictionary<string, ColumnValue> outerRow,
         IReadOnlyList<BoundTableSource> outerTableSources,
         IReadOnlyList<BoundDerivedTableSource> outerDerivedSources)
     {
@@ -60,7 +60,7 @@ internal static class CorrelatedRowMerger
 
     private static void MergeOuterColumns(
         Dictionary<string, ColumnValue> merged,
-        Dictionary<string, ColumnValue> outerRow,
+        IReadOnlyDictionary<string, ColumnValue> outerRow,
         string alias,
         IEnumerable<string> columnNames,
         bool useQualifiedOuterKeys)

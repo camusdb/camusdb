@@ -51,7 +51,7 @@ internal sealed class QueryDistincter
     private static async IAsyncEnumerable<QueryResultRow> StreamingRows(
         IAsyncEnumerable<QueryResultRow> dataCursor)
     {
-        Dictionary<string, ColumnValue>? lastRow = null;
+        IReadOnlyDictionary<string, ColumnValue>? lastRow = null;
         string[]? sortedNames = null;
 
         await foreach (QueryResultRow row in dataCursor.ConfigureAwait(false))

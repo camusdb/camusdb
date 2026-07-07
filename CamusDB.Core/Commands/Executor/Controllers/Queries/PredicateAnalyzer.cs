@@ -236,7 +236,7 @@ public static class PredicateAnalyzer
         ColumnValue? value;
         try
         {
-            value = SqlExecutor.EvalExpr(node, [], parameters);
+            value = SqlExecutor.EvalExpr(node, new Dictionary<string, ColumnValue>(), parameters);
         }
         catch (CamusDBException)
         {
@@ -400,7 +400,7 @@ public static class PredicateAnalyzer
     {
         try
         {
-            columnValue = SqlExecutor.EvalExpr(nodeAst, new(), parameters);
+            columnValue = SqlExecutor.EvalExpr(nodeAst, new Dictionary<string, ColumnValue>(), parameters);
             if (columnValue.Type != ColumnType.Null)
                 return true;
         }

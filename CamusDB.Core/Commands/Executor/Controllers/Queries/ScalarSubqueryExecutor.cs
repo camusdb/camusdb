@@ -66,7 +66,7 @@ internal sealed class ScalarSubqueryExecutor
         if (subquery.Limit is null)
             return false;
 
-        ColumnValue limit = SqlExecutor.EvalExpr(subquery.Limit, new(), parameters);
+        ColumnValue limit = SqlExecutor.EvalExpr(subquery.Limit, new Dictionary<string, ColumnValue>(), parameters);
 
         return limit.Type == ColumnType.Integer64 && limit.LongValue == 1;
     }

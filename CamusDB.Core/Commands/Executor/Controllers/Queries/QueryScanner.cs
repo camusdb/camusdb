@@ -11,6 +11,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
@@ -49,6 +50,12 @@ internal sealed class QueryScanner
         deps?.RecordRange(table.Store.RowKeySpace);
         deps?.RecordSchema(table.Id, table.Schema.Version);
 
+        // One RowLayout per stored schema version. Most scans touch only one version so this
+        // holds one entry; mixed-version scans hold a handful. The layout is identical for all
+        // rows at the same stored version (requiredColumns and visibilityVersion are constant
+        // for the life of a scan), so building it once and reusing it is safe.
+        Dictionary<int, RowLayout> layoutCache = new();
+
         await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
         {
             if (data.Length == 0)
@@ -60,19 +67,20 @@ internal sealed class QueryScanner
             // Record the point dep for every fetched row — catches updates to non-indexed columns.
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+            QueryRow queryRow = await RowEncoder.DecodeToQueryRowAsync(
                 table.Schema,
                 txId,
                 rowId,
                 data,
                 plan.ScanRequiredColumns,
-                visibilityVersion).ConfigureAwait(false);
+                visibilityVersion,
+                layoutCache).ConfigureAwait(false);
 
             if (scanStats is not null)
                 scanStats.RowsRead++;
 
-            if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
-                yield return new(rowId, row);
+            if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
+                yield return new QueryResultRow(rowId, queryRow);
         }
     }
 
@@ -115,6 +123,9 @@ internal sealed class QueryScanner
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, table.Schema.Version);
 
+        // Per-scan layout cache: one entry per stored schema version (constant for a scan).
+        Dictionary<int, RowLayout> layoutCache = new();
+
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             ticket.TxnState,
             index.KvId,
@@ -142,16 +153,17 @@ internal sealed class QueryScanner
             if (scanStats is not null)
                 scanStats.RowsRead++;
 
-            Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+            QueryRow queryRow = await RowEncoder.DecodeToQueryRowAsync(
                 table.Schema,
                 txId,
                 rowId,
                 data,
                 plan.ScanRequiredColumns,
-                visibilityVersion).ConfigureAwait(false);
+                visibilityVersion,
+                layoutCache).ConfigureAwait(false);
 
-            if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
-                yield return new(rowId, row);
+            if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
+                yield return new QueryResultRow(rowId, queryRow);
         }
     }
 

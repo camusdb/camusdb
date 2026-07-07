@@ -31,7 +31,7 @@ internal sealed class QueryLimiter
         if (ticket.Limit is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal limit context");
 
-        ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new(), ticket.Parameters);
+        ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
         if (limit.Type != ColumnType.Integer64)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Limit is not Integer64");
 
@@ -56,11 +56,11 @@ internal sealed class QueryLimiter
         if (ticket.Offset is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal offset context");
 
-        ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new(), ticket.Parameters);
+        ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
         if (limit.Type != ColumnType.Integer64)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Limit is not Integer64");
 
-        ColumnValue offset = SqlExecutor.EvalExpr(ticket.Offset, new(), ticket.Parameters);
+        ColumnValue offset = SqlExecutor.EvalExpr(ticket.Offset, new Dictionary<string, ColumnValue>(), ticket.Parameters);
         if (offset.Type != ColumnType.Integer64)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Offset is not Integer64");
 

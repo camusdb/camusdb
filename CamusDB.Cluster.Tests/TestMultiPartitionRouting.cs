@@ -726,7 +726,7 @@ public sealed class TestMultiPartitionRouting
                 seededRowId,
                 RowEncoder.Encode(
                     version0Schema,
-                    new()
+                    new Dictionary<string, ColumnValue>()
                     {
                         ["id"] = new(ColumnType.Id, seededRowId.ToString()),
                         ["name"] = new(ColumnType.String, "bender")
@@ -744,7 +744,7 @@ public sealed class TestMultiPartitionRouting
 
             txn = await reopened.Transactions.BeginAsync();
             KvTableStore store = new(reopened.Kahuna.Kahuna, reopened.Id, reopenedTable.Id!);
-            List<Dictionary<string, ColumnValue>> rows = new();
+            List<IReadOnlyDictionary<string, ColumnValue>> rows = new();
 
             await foreach ((ObjectIdValue rowId, byte[] data) in store.ScanRows(txn))
                 rows.Add(await RowEncoder.DecodeAsync(reopenedTable, txn.TransactionId, rowId, data));

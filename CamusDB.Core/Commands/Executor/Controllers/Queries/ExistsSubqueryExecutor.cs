@@ -48,7 +48,7 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
     public async Task<bool> ExecuteCorrelatedAsync(
         DatabaseDescriptor database,
         PreparedExistsSubquery prepared,
-        Dictionary<string, ColumnValue> outerRow,
+        IReadOnlyDictionary<string, ColumnValue> outerRow,
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? parameters)
     {

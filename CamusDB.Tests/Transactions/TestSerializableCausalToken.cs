@@ -87,13 +87,13 @@ public sealed class TestSerializableCausalToken : SharedNodeBaseTest
             index: null, projection: null, where: null, filters: null, orderBy: null,
             limit: null, offset: null, parameters: null
         );
-        List<Dictionary<string, ColumnValue>> rows = [];
+        List<IReadOnlyDictionary<string, ColumnValue>> rows = [];
         (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket);
         await foreach (QueryResultRow row in cursor)
             rows.Add(row.Row);
         HLCTimestamp token = await db.Transactions.CommitAsync(tx);
         long bal = -1;
-        foreach (Dictionary<string, ColumnValue> row in rows)
+        foreach (IReadOnlyDictionary<string, ColumnValue> row in rows)
         {
             if (row["id"].StrValue == id)
             {

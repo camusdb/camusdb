@@ -79,7 +79,7 @@ public sealed class TestBranchKvTombstone
 
         TableSchema schema = MakeSchema(Col("name", ColumnType.String));
         ObjectIdValue rowId = new(11, 22, 33);
-        byte[] data = RowEncoder.Encode(schema, new() { ["name"] = new(ColumnType.String, "alice") }, rowId);
+        byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["name"] = new(ColumnType.String, "alice") }, rowId);
 
         KvTransaction insertTx = await BeginTransaction(node.Kahuna, "tomb1-insert");
         await store.InsertRow(insertTx, rowId, data);
@@ -108,8 +108,8 @@ public sealed class TestBranchKvTombstone
         ObjectIdValue doomed = new(2, 0, 0);
 
         KvTransaction insertTx = await BeginTransaction(node.Kahuna, "tomb2-insert");
-        await store.InsertRow(insertTx, live, RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 1L) }, live));
-        await store.InsertRow(insertTx, doomed, RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, 2L) }, doomed));
+        await store.InsertRow(insertTx, live, RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["v"] = new(ColumnType.Integer64, 1L) }, live));
+        await store.InsertRow(insertTx, doomed, RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["v"] = new(ColumnType.Integer64, 2L) }, doomed));
         await CommitTransaction(node.Kahuna, insertTx);
 
         KvTransaction tombTx = await BeginTransaction(node.Kahuna, "tomb2-tombstone");

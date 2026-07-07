@@ -661,7 +661,7 @@ internal sealed class TestRowInsertor : SharedNodeBaseTest
 
         await foreach (QueryResultRow resultRow in cursor)
         {
-            Dictionary<string, ColumnValue> row = resultRow.Row;
+            IReadOnlyDictionary<string, ColumnValue> row = resultRow.Row;
 
             Assert.AreEqual(row["id"].Type, ColumnType.Id);
             Assert.AreEqual(row["id"].StrValue!.Length, 24);
@@ -793,7 +793,7 @@ internal sealed class TestRowInsertor : SharedNodeBaseTest
 
         for (int i = 0; i < 50; i++)
         {
-            Dictionary<string, ColumnValue> row = result[i].Row;
+            IReadOnlyDictionary<string, ColumnValue> row = result[i].Row;
 
             Assert.AreEqual(ColumnType.Id, row["id"].Type);
             Assert.AreEqual(24, row["id"].StrValue!.Length);

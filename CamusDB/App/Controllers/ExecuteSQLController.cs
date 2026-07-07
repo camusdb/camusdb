@@ -65,7 +65,7 @@ public sealed class ExecuteSQLController : CommandsController
                     parameters: request.Parameters
                 );
                 (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false);
-                List<Dictionary<string, ColumnValue>> rows = [];
+                List<IReadOnlyDictionary<string, ColumnValue>> rows = [];
                 await foreach (QueryResultRow row in cursor)
                     rows.Add(row.Row);
                 return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
@@ -84,7 +84,7 @@ public sealed class ExecuteSQLController : CommandsController
                         sql: sql,
                         parameters: request.Parameters
                     );
-                    List<Dictionary<string, ColumnValue>> rows = [];
+                    List<IReadOnlyDictionary<string, ColumnValue>> rows = [];
                     (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false);
                     await foreach (QueryResultRow row in cursor)
                         rows.Add(row.Row);
@@ -100,7 +100,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             // Autocommit: retry transparently on transient serialization failures when the
             // resolved level is Serializable; run once for Read Committed.
-            List<Dictionary<string, ColumnValue>> resultRows = [];
+            List<IReadOnlyDictionary<string, ColumnValue>> resultRows = [];
             Kommander.Time.HLCTimestamp causalToken = default;
             CacheMetadataHolder cacheMeta = new();
 
@@ -116,7 +116,7 @@ public sealed class ExecuteSQLController : CommandsController
                         sql: sql,
                         parameters: request.Parameters
                     );
-                    List<Dictionary<string, ColumnValue>> rows = [];
+                    List<IReadOnlyDictionary<string, ColumnValue>> rows = [];
                     (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, cacheMeta).ConfigureAwait(false);
                     await foreach (QueryResultRow row in cursor)
                         rows.Add(row.Row);

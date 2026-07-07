@@ -17,13 +17,13 @@ internal static class ScalarFunctionArguments
 {
     public delegate ColumnValue EvaluateExpressionDelegate(
         NodeAst expression,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
         QueryRowNameResolver? rowNameResolver);
 
     public static IReadOnlyList<ColumnValue> EvaluateArgumentList(
         NodeAst? argumentAst,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
         QueryRowNameResolver? rowNameResolver,
         EvaluateExpressionDelegate evaluateExpression)
@@ -111,7 +111,7 @@ internal static class ScalarFunctionArguments
 
     private static void CollectArguments(
         NodeAst argumentAst,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
         QueryRowNameResolver? rowNameResolver,
         EvaluateExpressionDelegate evaluateExpression,

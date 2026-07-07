@@ -95,7 +95,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithSizedString(10);
         string val = new('x', 10);
 
-        InsertResult rows = await Insert(executor, db, "t", new()
+        InsertResult rows = await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
         {
             { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
             { "v",  new(ColumnType.String, val) }
@@ -112,7 +112,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
         string val = new('x', 11);
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await Insert(executor, db, "t", new()
+            await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
             {
                 { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
                 { "v",  new(ColumnType.String, val) }
@@ -130,7 +130,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithSizedString(5);
 
-        InsertResult rows = await Insert(executor, db, "t", new()
+        InsertResult rows = await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
         {
             { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
             { "v",  ColumnValue.Null }
@@ -148,7 +148,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithBareString();
         string val = new('a', CamusDBConfig.DefaultStringMaxLength);
 
-        InsertResult rows = await Insert(executor, db, "t", new()
+        InsertResult rows = await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
         {
             { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
             { "v",  new(ColumnType.String, val) }
@@ -165,7 +165,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
         string val = new('a', CamusDBConfig.DefaultStringMaxLength + 1);
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await Insert(executor, db, "t", new()
+            await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
             {
                 { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
                 { "v",  new(ColumnType.String, val) }
@@ -183,7 +183,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithBareBytes();
         byte[] val = new byte[CamusDBConfig.DefaultBytesMaxLength];
 
-        InsertResult rows = await Insert(executor, db, "t", new()
+        InsertResult rows = await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
         {
             { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
             { "v",  new(val) }
@@ -200,7 +200,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
         byte[] val = new byte[CamusDBConfig.DefaultBytesMaxLength + 1];
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await Insert(executor, db, "t", new()
+            await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
             {
                 { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
                 { "v",  new(val) }
@@ -216,7 +216,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithBareBytes();
 
-        InsertResult rows = await Insert(executor, db, "t", new()
+        InsertResult rows = await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
         {
             { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
             { "v",  ColumnValue.Null }
@@ -233,7 +233,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithSizedString(20);
 
-        await Insert(executor, db, "t", new()
+        await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
         {
             { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
             { "v",  new(ColumnType.String, "short") }
@@ -251,7 +251,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithSizedString(20);
 
-        await Insert(executor, db, "t", new()
+        await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
         {
             { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
             { "v",  new(ColumnType.String, "short") }

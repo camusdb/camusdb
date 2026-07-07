@@ -339,7 +339,7 @@ internal sealed class QueryAggregator
 
     private static CompositeColumnValue BuildGroupKey(
         IReadOnlyList<NodeAst> groupBy,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket)
     {
         ColumnValue[] values = new ColumnValue[groupBy.Count];
@@ -494,7 +494,7 @@ internal sealed class QueryAggregator
 
     private static bool TryGetAggregationValue(
         NodeAst funcCall,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket,
         out ColumnValue? value)
     {
@@ -540,7 +540,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new() { { GetGlobalAggregateOutputName(ticket, 0), new ColumnValue(ColumnType.Integer64, count) } });
+            new Dictionary<string, ColumnValue> { { GetGlobalAggregateOutputName(ticket, 0), new ColumnValue(ColumnType.Integer64, count) } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalSum(
@@ -585,7 +585,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new() { { GetGlobalAggregateOutputName(ticket, 0), result } });
+            new Dictionary<string, ColumnValue> { { GetGlobalAggregateOutputName(ticket, 0), result } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalAverage(
@@ -624,7 +624,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new() { { GetGlobalAggregateOutputName(ticket, 0), result } });
+            new Dictionary<string, ColumnValue> { { GetGlobalAggregateOutputName(ticket, 0), result } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalMin(
@@ -644,7 +644,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new() { { GetGlobalAggregateOutputName(ticket, 0), min ?? ColumnValue.Null } });
+            new Dictionary<string, ColumnValue> { { GetGlobalAggregateOutputName(ticket, 0), min ?? ColumnValue.Null } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalMax(
@@ -664,7 +664,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new() { { GetGlobalAggregateOutputName(ticket, 0), max ?? ColumnValue.Null } });
+            new Dictionary<string, ColumnValue> { { GetGlobalAggregateOutputName(ticket, 0), max ?? ColumnValue.Null } });
     }
 
     private static string GetGlobalAggregateOutputName(QueryTicket ticket, int index)
@@ -700,7 +700,7 @@ internal sealed class QueryAggregator
             }
         }
 
-        public void AddRow(Dictionary<string, ColumnValue> row, QueryTicket ticket)
+        public void AddRow(IReadOnlyDictionary<string, ColumnValue> row, QueryTicket ticket)
         {
             if (!capturedGroupValues)
             {
@@ -766,7 +766,7 @@ internal sealed class QueryAggregator
             aggregationType = GetAggregationType(funcCall);
         }
 
-        public void AddRow(Dictionary<string, ColumnValue> row, QueryTicket ticket)
+        public void AddRow(IReadOnlyDictionary<string, ColumnValue> row, QueryTicket ticket)
         {
             switch (aggregationType)
             {

@@ -17,7 +17,7 @@ public sealed class ExecuteSQLQueryResponse
 
     public int Total { get; set; }
 
-    public List<Dictionary<string, ColumnValue>>? Rows { get; set; }
+    public List<IReadOnlyDictionary<string, ColumnValue>>? Rows { get; set; }
 
     public string? Code { get; set; }
 
@@ -47,7 +47,7 @@ public sealed class ExecuteSQLQueryResponse
     /// <summary>Logical cache family name from the query hint. Non-null when the cache path was entered.</summary>
     public string? CacheName { get; set; }
 
-    public ExecuteSQLQueryResponse(string status, int total, List<Dictionary<string, ColumnValue>> rows)
+    public ExecuteSQLQueryResponse(string status, int total, List<IReadOnlyDictionary<string, ColumnValue>> rows)
     {
         Status = status;
         Total = total;

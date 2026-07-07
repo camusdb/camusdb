@@ -92,7 +92,7 @@ internal sealed class QueryProjector
     private static ColumnValue EvalOrProjectExpr(
         QueryTicket ticket,
         NodeAst ast,
-        Dictionary<string, ColumnValue> row,
+        IReadOnlyDictionary<string, ColumnValue> row,
         int projectionIndex)
     {
         if (QueryExpressionClassifier.IsAggregateProjection(ast))

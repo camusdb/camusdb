@@ -1470,7 +1470,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         TableDescriptor lineItemsBase = await dbBase.TableDescriptors["line_items"];
         execBase.Statistics.SeedRowCountForTesting(dbBase, ordersBase,    1_000);
         execBase.Statistics.SeedRowCountForTesting(dbBase, lineItemsBase, 10_000);
-        await execBase.Statistics.SetNdvAsync(dbBase, lineItemsBase, new() { { "product", 100L } }, keyNdv: null);
+        await execBase.Statistics.SetNdvAsync(dbBase, lineItemsBase, new Dictionary<string, long>() { { "product", 100L } }, keyNdv: null);
 
         QueryPlan planBase = new JoinQueryPlanner(execBase.Statistics).GetPlan(dbBase, boundBase, ticketBase);
         Assert.IsInstanceOf<IndexNestedLoopJoinNode>(planBase.Root,
@@ -1489,7 +1489,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         TableDescriptor lineItemsFilt = await dbFilt.TableDescriptors["line_items"];
         execFilt.Statistics.SeedRowCountForTesting(dbFilt, ordersFilt,    1_000);
         execFilt.Statistics.SeedRowCountForTesting(dbFilt, lineItemsFilt, 10_000);
-        await execFilt.Statistics.SetNdvAsync(dbFilt, lineItemsFilt, new() { { "product", 100L } }, keyNdv: null);
+        await execFilt.Statistics.SetNdvAsync(dbFilt, lineItemsFilt, new Dictionary<string, long>() { { "product", 100L } }, keyNdv: null);
 
         QueryPlan planFilt = new JoinQueryPlanner(execFilt.Statistics).GetPlan(dbFilt, boundFilt, ticketFilt);
         Assert.IsInstanceOf<HashJoinNode>(planFilt.Root,

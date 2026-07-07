@@ -182,7 +182,7 @@ public sealed class TableColumnAdder
             // injectMissingCurrentColumns skips it. Explicitly inject the default so that
             // RowEncoder.Encode writes the value rather than TypeNull.
             if (!row.Row.ContainsKey(ticket.Column.Name))
-                row.Row[ticket.Column.Name] = ticket.Column.Default ?? new(ColumnType.Null, 0L);
+                ((Dictionary<string, ColumnValue>)row.Row)[ticket.Column.Name] = ticket.Column.Default ?? new(ColumnType.Null, 0L);
 
             byte[] buffer = RowEncoder.Encode(table.Schema, row.Row, row.RowId);
             await table.Store.UpdateRow(tx, row.RowId, buffer).ConfigureAwait(false);

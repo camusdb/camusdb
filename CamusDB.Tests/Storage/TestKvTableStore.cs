@@ -115,7 +115,7 @@ public sealed class TestKvTableStore
 
         TableSchema schema = MakeSchema(Col("name", ColumnType.String));
         ObjectIdValue rowId = new(10, 20, 30);
-        byte[] data = RowEncoder.Encode(schema, new() { ["name"] = new(ColumnType.String, "alice") }, rowId);
+        byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["name"] = new(ColumnType.String, "alice") }, rowId);
 
         KvTransaction tx = await BeginTransaction(node.Kahuna, "t2-insert");
         await store.InsertRow(tx, rowId, data);
@@ -136,8 +136,8 @@ public sealed class TestKvTableStore
         TableSchema schema = MakeSchema(Col("n", ColumnType.Integer64));
         ObjectIdValue rowId = new(1, 1, 1);
 
-        byte[] v1 = RowEncoder.Encode(schema, new() { ["n"] = new(ColumnType.Integer64, 1L) }, rowId);
-        byte[] v2 = RowEncoder.Encode(schema, new() { ["n"] = new(ColumnType.Integer64, 2L) }, rowId);
+        byte[] v1 = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["n"] = new(ColumnType.Integer64, 1L) }, rowId);
+        byte[] v2 = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["n"] = new(ColumnType.Integer64, 2L) }, rowId);
 
         KvTransaction tx1 = await BeginTransaction(node.Kahuna, "t3-insert");
         await store.InsertRow(tx1, rowId, v1);
@@ -161,7 +161,7 @@ public sealed class TestKvTableStore
 
         TableSchema schema = MakeSchema(Col("x", ColumnType.Bool));
         ObjectIdValue rowId = new(5, 5, 5);
-        byte[] data = RowEncoder.Encode(schema, new() { ["x"] = new(ColumnType.Bool, true) }, rowId);
+        byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["x"] = new(ColumnType.Bool, true) }, rowId);
 
         KvTransaction tx1 = await BeginTransaction(node.Kahuna, "t4-insert");
         await store.InsertRow(tx1, rowId, data);
@@ -187,7 +187,7 @@ public sealed class TestKvTableStore
         KvTransaction tx = await BeginTransaction(node.Kahuna, "t5-insert");
         foreach (ObjectIdValue id in ids)
         {
-            byte[] data = RowEncoder.Encode(schema, new() { ["v"] = new(ColumnType.Integer64, (long)id.a) }, id);
+            byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["v"] = new(ColumnType.Integer64, (long)id.a) }, id);
             await store.InsertRow(tx, id, data);
         }
         await CommitTransaction(node.Kahuna, tx);
@@ -230,7 +230,7 @@ public sealed class TestKvTableStore
         KvTransaction tx = await BeginTransaction(node.Kahuna, "t7-insert");
         foreach (ObjectIdValue id in ids)
         {
-            byte[] data = RowEncoder.Encode(schema, new() { ["n"] = new(ColumnType.Integer64, (long)id.a) }, id);
+            byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["n"] = new(ColumnType.Integer64, (long)id.a) }, id);
             await store.InsertRow(tx, id, data);
         }
         await CommitTransaction(node.Kahuna, tx);
@@ -277,7 +277,7 @@ public sealed class TestKvTableStore
         for (int i = ids.Length - 1; i >= 0; i--)
         {
             ObjectIdValue id = ids[i];
-            byte[] data = RowEncoder.Encode(schema, new() { ["n"] = new(ColumnType.Integer64, 1L) }, id);
+            byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["n"] = new(ColumnType.Integer64, 1L) }, id);
             await store.InsertRow(tx, id, data);
         }
         await CommitTransaction(node.Kahuna, tx);
@@ -313,7 +313,7 @@ public sealed class TestKvTableStore
         KvTransaction tx = await BeginTransaction(node.Kahuna, "t7-max-insert");
         foreach (ObjectIdValue id in ids)
         {
-            byte[] data = RowEncoder.Encode(schema, new() { ["n"] = new(ColumnType.Integer64, (long)id.a) }, id);
+            byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["n"] = new(ColumnType.Integer64, (long)id.a) }, id);
             await store.InsertRow(tx, id, data);
         }
         await CommitTransaction(node.Kahuna, tx);
@@ -333,7 +333,7 @@ public sealed class TestKvTableStore
 
         TableSchema schema = MakeSchema(Col("k", ColumnType.Integer64));
         ObjectIdValue rowId = new(7, 8, 9);
-        byte[] data = RowEncoder.Encode(schema, new() { ["k"] = new(ColumnType.Integer64, 42L) }, rowId);
+        byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["k"] = new(ColumnType.Integer64, 42L) }, rowId);
 
         KvTransaction tx = await BeginTransaction(node.Kahuna, "t8-track");
         await store.InsertRow(tx, rowId, data);

@@ -72,7 +72,7 @@ internal sealed class DerivedTableExecutor
         {
             if (executionFilter is not null)
             {
-                Dictionary<string, ColumnValue> evalRow = outerTicket.RowNameResolver is { } resolver
+                IReadOnlyDictionary<string, ColumnValue> evalRow = outerTicket.RowNameResolver is { } resolver
                                                          && resolver.UsesQualifiedRowKeys()
                     ? QueryRowMerger.QualifyRow(row.Row, source.Alias)
                     : row.Row;

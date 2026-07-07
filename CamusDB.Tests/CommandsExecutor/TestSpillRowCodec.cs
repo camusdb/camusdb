@@ -122,7 +122,7 @@ public sealed class TestSpillRowCodec
     [Test]
     public void RoundTrip_Null()
     {
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = ColumnValue.Null });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = ColumnValue.Null });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -130,28 +130,28 @@ public sealed class TestSpillRowCodec
     public void RoundTrip_Id()
     {
         string idStr = ObjectId.ToString(ObjectIdGenerator.Generate());
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new(ColumnType.Id, idStr) });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new(ColumnType.Id, idStr) });
         AssertRowEqual(row, RoundTrip(row));
     }
 
     [Test]
     public void RoundTrip_Integer64()
     {
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new(ColumnType.Integer64, long.MinValue) });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new(ColumnType.Integer64, long.MinValue) });
         AssertRowEqual(row, RoundTrip(row));
     }
 
     [Test]
     public void RoundTrip_Integer64_MaxValue()
     {
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new(ColumnType.Integer64, long.MaxValue) });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new(ColumnType.Integer64, long.MaxValue) });
         AssertRowEqual(row, RoundTrip(row));
     }
 
     [Test]
     public void RoundTrip_Float64()
     {
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new(ColumnType.Float64, Math.PI) });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new(ColumnType.Float64, Math.PI) });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -159,7 +159,7 @@ public sealed class TestSpillRowCodec
     public void RoundTrip_Float32()
     {
         float f = 3.14159f;
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new(ColumnType.Float32, (double)f) });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new(ColumnType.Float32, (double)f) });
         QueryResultRow decoded = RoundTrip(row);
         Assert.That((float)decoded.Row["col"].FloatValue, Is.EqualTo(f));
     }
@@ -167,28 +167,28 @@ public sealed class TestSpillRowCodec
     [Test]
     public void RoundTrip_Bool_True()
     {
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = ColumnValue.True });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = ColumnValue.True });
         AssertRowEqual(row, RoundTrip(row));
     }
 
     [Test]
     public void RoundTrip_Bool_False()
     {
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = ColumnValue.False });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = ColumnValue.False });
         AssertRowEqual(row, RoundTrip(row));
     }
 
     [Test]
     public void RoundTrip_String_Empty()
     {
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new(ColumnType.String, "") });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new(ColumnType.String, "") });
         AssertRowEqual(row, RoundTrip(row));
     }
 
     [Test]
     public void RoundTrip_String_Unicode()
     {
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new(ColumnType.String, "héllo wörld 日本語") });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new(ColumnType.String, "héllo wörld 日本語") });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -196,7 +196,7 @@ public sealed class TestSpillRowCodec
     public void RoundTrip_Date()
     {
         long ticks = new DateTime(2025, 3, 15, 0, 0, 0, DateTimeKind.Utc).Ticks;
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new(ColumnType.Date, ticks) });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new(ColumnType.Date, ticks) });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -204,14 +204,14 @@ public sealed class TestSpillRowCodec
     public void RoundTrip_DateTime()
     {
         long ticks = new DateTime(2025, 6, 29, 12, 34, 56, DateTimeKind.Utc).Ticks;
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new(ColumnType.DateTime, ticks) });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new(ColumnType.DateTime, ticks) });
         AssertRowEqual(row, RoundTrip(row));
     }
 
     [Test]
     public void RoundTrip_Bytes_Empty()
     {
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new ColumnValue([]) });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new ColumnValue([]) });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -219,7 +219,7 @@ public sealed class TestSpillRowCodec
     public void RoundTrip_Bytes_NonEmpty()
     {
         byte[] data = [0x00, 0xFF, 0x42, 0x01, 0xDE, 0xAD];
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new ColumnValue(data) });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new ColumnValue(data) });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -229,7 +229,7 @@ public sealed class TestSpillRowCodec
         byte[] data = new byte[1024 * 64];
         for (int i = 0; i < data.Length; i++)
             data[i] = (byte)(i & 0xFF);
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["col"] = new ColumnValue(data) });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new ColumnValue(data) });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -245,7 +245,7 @@ public sealed class TestSpillRowCodec
             new(ColumnType.Integer64, -99L),
             new(ColumnType.Integer64, long.MaxValue),
         ]);
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["arr"] = arr });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["arr"] = arr });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -257,7 +257,7 @@ public sealed class TestSpillRowCodec
             new(ColumnType.String, "β"),
             new(ColumnType.String, ""),
         ]);
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["arr"] = arr });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["arr"] = arr });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -269,7 +269,7 @@ public sealed class TestSpillRowCodec
             ColumnValue.Null,
             new(ColumnType.Integer64, 3L),
         ]);
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["arr"] = arr });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["arr"] = arr });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -277,7 +277,7 @@ public sealed class TestSpillRowCodec
     public void RoundTrip_Array_Empty()
     {
         var arr = ColumnValue.FromArray(ColumnType.Float64, []);
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["arr"] = arr });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["arr"] = arr });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -287,7 +287,7 @@ public sealed class TestSpillRowCodec
         var arr = ColumnValue.FromArray(ColumnType.Bool, [
             ColumnValue.True, ColumnValue.False, ColumnValue.True
         ]);
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["arr"] = arr });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["arr"] = arr });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -298,7 +298,7 @@ public sealed class TestSpillRowCodec
             new(ColumnType.Float32, (double)1.5f),
             new(ColumnType.Float32, (double)-99.9f),
         ]);
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["arr"] = arr });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["arr"] = arr });
         QueryResultRow decoded = RoundTrip(row);
         IReadOnlyList<ColumnValue> orig = arr.ArrayValues!;
         IReadOnlyList<ColumnValue> got = decoded.Row["arr"].ArrayValues!;
@@ -316,7 +316,7 @@ public sealed class TestSpillRowCodec
             new(ColumnType.Id, ObjectId.ToString(ObjectIdGenerator.Generate())),
             new(ColumnType.Id, ObjectId.ToString(ObjectIdGenerator.Generate())),
         ]);
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["arr"] = arr });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["arr"] = arr });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -328,7 +328,7 @@ public sealed class TestSpillRowCodec
             new(ColumnType.Float64, -2.5),
             new(ColumnType.Float64, 0.0),
         ]);
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["arr"] = arr });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["arr"] = arr });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -339,7 +339,7 @@ public sealed class TestSpillRowCodec
         long dt = new DateTime(2023, 12, 25, 18, 5, 1, DateTimeKind.Utc).Ticks;
         var dates = ColumnValue.FromArray(ColumnType.Date, [new(ColumnType.Date, d)]);
         var dts   = ColumnValue.FromArray(ColumnType.DateTime, [new(ColumnType.DateTime, dt)]);
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["dates"] = dates, ["dts"] = dts });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["dates"] = dates, ["dts"] = dts });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -351,7 +351,7 @@ public sealed class TestSpillRowCodec
             new ColumnValue(System.Array.Empty<byte>()),
             ColumnValue.Null,
         ]);
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["arr"] = arr });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["arr"] = arr });
         AssertRowEqual(row, RoundTrip(row));
     }
 
@@ -425,9 +425,9 @@ public sealed class TestSpillRowCodec
     {
         var rows = new List<QueryResultRow>
         {
-            MakeRow(new ObjectIdValue(1,0,0), new() { ["a"] = new(ColumnType.Integer64, 1L) }),
-            MakeRow(new ObjectIdValue(2,0,0), new() { ["a"] = new(ColumnType.Integer64, 2L) }),
-            MakeRow(new ObjectIdValue(3,0,0), new() { ["a"] = new(ColumnType.Integer64, 3L) }),
+            MakeRow(new ObjectIdValue(1,0,0), new Dictionary<string, ColumnValue>() { ["a"] = new(ColumnType.Integer64, 1L) }),
+            MakeRow(new ObjectIdValue(2,0,0), new Dictionary<string, ColumnValue>() { ["a"] = new(ColumnType.Integer64, 2L) }),
+            MakeRow(new ObjectIdValue(3,0,0), new Dictionary<string, ColumnValue>() { ["a"] = new(ColumnType.Integer64, 3L) }),
         };
 
         using var ms = new System.IO.MemoryStream();
@@ -456,7 +456,7 @@ public sealed class TestSpillRowCodec
     [Test]
     public void Decode_TruncatedFrame_Throws()
     {
-        var row = MakeRow(ObjectIdValue.Empty, new() { ["x"] = new(ColumnType.Integer64, 1L) });
+        var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["x"] = new(ColumnType.Integer64, 1L) });
         byte[] frame = SpillRowCodec.Encode(row);
 
         // Truncate the frame to half
