@@ -8,6 +8,7 @@
 using System.Buffers.Binary;
 using System.IO;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 
@@ -36,10 +37,18 @@ internal sealed class SpillRunReader : IAsyncDisposable
     private readonly byte[] _lenBuf = new byte[4];
 
     private QueryResultRow _current;
-    
+
     private bool _exhausted;
 
-    private SpillRunReader(FileStream stream) => _stream = stream;
+    // When non-null the run was written in value-only format (no per-row column names);
+    // AdvanceAsync reconstructs each row as a QueryRow using this layout.
+    private readonly RowLayout? _layout;
+
+    private SpillRunReader(FileStream stream, RowLayout? layout = null)
+    {
+        _stream = stream;
+        _layout = layout;
+    }
 
     /// <summary>Whether all records have been consumed from the underlying file.</summary>
     public bool IsExhausted => _exhausted;
@@ -54,11 +63,17 @@ internal sealed class SpillRunReader : IAsyncDisposable
     /// Opens a spill file and positions the reader at the first record by calling
     /// <see cref="AdvanceAsync"/> once. Returns <c>null</c> when the file is empty.
     /// The caller owns the returned reader and must dispose it.
+    /// <para>
+    /// When <paramref name="layout"/> is non-null the file was written in value-only format
+    /// (no per-row column names); <see cref="AdvanceAsync"/> decodes each record using the
+    /// supplied layout and returns a <see cref="QueryRow"/>. When null the file is schema-less
+    /// (the legacy format where each record embeds column names).
+    /// </para>
     /// Throws <see cref="CamusDBException"/> with
     /// <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> if the file cannot be opened,
     /// matching the fail-loud contract of <see cref="SpillScope.OpenReader"/>.
     /// </summary>
-    internal static async ValueTask<SpillRunReader?> OpenAsync(string path, CancellationToken ct = default)
+    internal static async ValueTask<SpillRunReader?> OpenAsync(string path, RowLayout? layout = null, CancellationToken ct = default)
     {
         FileStream fs;
         try
@@ -72,7 +87,7 @@ internal sealed class SpillRunReader : IAsyncDisposable
                 $"Cannot open spill run file '{path}': {ex.Message}");
         }
 
-        SpillRunReader reader = new(fs);
+        SpillRunReader reader = new(fs, layout);
         try
         {
             if (!await reader.AdvanceAsync(ct).ConfigureAwait(false))
@@ -118,7 +133,15 @@ internal sealed class SpillRunReader : IAsyncDisposable
             byte[] payload = new byte[payloadLen];
             await _stream.ReadExactlyAsync(payload, ct).ConfigureAwait(false);
 
-            _current = SpillRowCodec.DecodePayload(payload);
+            if (_layout is not null)
+            {
+                QueryRow qr = SpillRowCodec.DecodeValueOnlyPayload(payload, _layout);
+                _current = new QueryResultRow(qr.RowId, qr);
+            }
+            else
+            {
+                _current = SpillRowCodec.DecodePayload(payload);
+            }
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)

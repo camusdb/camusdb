@@ -260,7 +260,7 @@ internal sealed class QueryAggregator
     {
         int threshold = CamusDBConfig.SpillEffectiveThreshold;
 
-        SpillRunReader? reader = await SpillRunReader.OpenAsync(path, ct).ConfigureAwait(false);
+        SpillRunReader? reader = await SpillRunReader.OpenAsync(path, ct: ct).ConfigureAwait(false);
         if (reader is null) yield break;
 
         Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
@@ -310,7 +310,7 @@ internal sealed class QueryAggregator
         for (int i = 0; i < K; i++)
             subPaths[i] = scope.OpenWriter(out subWriters[i]);
 
-        SpillRunReader? rdr2 = await SpillRunReader.OpenAsync(path, ct).ConfigureAwait(false);
+        SpillRunReader? rdr2 = await SpillRunReader.OpenAsync(path, ct: ct).ConfigureAwait(false);
         if (rdr2 is not null)
         {
             await using (rdr2)
@@ -344,13 +344,15 @@ internal sealed class QueryAggregator
     {
         ColumnValue[] values = new ColumnValue[groupBy.Count];
 
-        for (int i = 0; i < groupBy.Count; i++)
+        if (row is QueryRow qr)
         {
-            values[i] = SqlExecutor.EvalExpr(
-                groupBy[i],
-                row,
-                ticket.Parameters,
-                ticket.RowNameResolver);
+            for (int i = 0; i < groupBy.Count; i++)
+                values[i] = SqlExecutor.EvalExpr(groupBy[i], qr, ticket.Parameters, ticket.RowNameResolver);
+        }
+        else
+        {
+            for (int i = 0; i < groupBy.Count; i++)
+                values[i] = SqlExecutor.EvalExpr(groupBy[i], row, ticket.Parameters, ticket.RowNameResolver);
         }
 
         return new CompositeColumnValue(values);
@@ -512,7 +514,9 @@ internal sealed class QueryAggregator
             return false;
         }
 
-        value = SqlExecutor.EvalExpr(argument, row, ticket.Parameters, ticket.RowNameResolver);
+        value = row is QueryRow qr
+            ? SqlExecutor.EvalExpr(argument, qr, ticket.Parameters, ticket.RowNameResolver)
+            : SqlExecutor.EvalExpr(argument, row, ticket.Parameters, ticket.RowNameResolver);
         return true;
     }
 
@@ -704,17 +708,16 @@ internal sealed class QueryAggregator
         {
             if (!capturedGroupValues)
             {
+                QueryRow? qr = row as QueryRow;
                 for (int i = 0; i < projections.Count; i++)
                 {
                     if (projections[i].IsAggregate)
                         continue;
 
                     NodeAst expression = QueryExpressionClassifier.UnwrapAlias(projections[i].Expression);
-                    outputValues[projections[i].OutputName] = SqlExecutor.EvalExpr(
-                        expression,
-                        row,
-                        ticket.Parameters,
-                        ticket.RowNameResolver);
+                    outputValues[projections[i].OutputName] = qr is not null
+                        ? SqlExecutor.EvalExpr(expression, qr, ticket.Parameters, ticket.RowNameResolver)
+                        : SqlExecutor.EvalExpr(expression, row, ticket.Parameters, ticket.RowNameResolver);
                 }
 
                 capturedGroupValues = true;

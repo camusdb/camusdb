@@ -116,7 +116,7 @@ internal sealed class SpillableValueList : IAsyncDisposable
             yield break;
         }
 
-        SpillRunReader? reader = await SpillRunReader.OpenAsync(_spillPath!, ct).ConfigureAwait(false);
+        SpillRunReader? reader = await SpillRunReader.OpenAsync(_spillPath!, ct: ct).ConfigureAwait(false);
         if (reader is null)
             yield break;
 

@@ -14,6 +14,7 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
@@ -135,6 +136,40 @@ public class TestQuerySorter
             limit: null,
             offset: null,
             parameters: null);
+    }
+
+    /// <summary>
+    /// Verifies that the sort comparator degrades safely to the dictionary path when two
+    /// QueryRow inputs carry different RowLayout instances (same column names, different ordinal
+    /// order). Without the ReferenceEquals guard the comparator would reuse ordinals from the
+    /// first layout for rows whose Values[] is ordered differently, silently comparing wrong columns.
+    /// </summary>
+    [Test]
+    public async Task SortResultset_MixedLayoutQueryRows_sortsByCorrectColumnValues()
+    {
+        // Layout A: [name=0, score=1]
+        RowLayout layoutA = RowLayout.ForColumns(["name", "score"]);
+        // Layout B: [score=0, name=1]  — column order reversed, same names
+        RowLayout layoutB = RowLayout.ForColumns(["score", "name"]);
+
+        // Build QueryRows whose Values[] match their layout's ordinal order.
+        QueryResultRow MakeA(string name, long score) =>
+            new(default, new QueryRow(default, layoutA, [new(ColumnType.String, name), new(ColumnType.Integer64, score)]));
+        QueryResultRow MakeB(string name, long score) =>
+            new(default, new QueryRow(default, layoutB, [new(ColumnType.Integer64, score), new(ColumnType.String, name)]));
+
+        // Mix rows from both layouts; ORDER BY name ascending.
+        List<QueryResultRow> rows = [MakeA("robot-c", 3L), MakeB("robot-a", 1L), MakeA("robot-b", 2L)];
+
+        QueryTicket ticket = MakeTicket(new QueryOrderBy("name", OrderType.Ascending));
+        QuerySorter sorter = new();
+        List<QueryResultRow> sorted = await sorter.SortResultset(ticket, ToAsync(rows)).ToListAsync();
+
+        Assert.AreEqual(3, sorted.Count);
+        // Each row must resolve "name" correctly regardless of which layout it carries.
+        Assert.AreEqual("robot-a", sorted[0].Row["name"].StrValue);
+        Assert.AreEqual("robot-b", sorted[1].Row["name"].StrValue);
+        Assert.AreEqual("robot-c", sorted[2].Row["name"].StrValue);
     }
 
     private static QueryResultRow Row(params (string name, object value)[] columns)

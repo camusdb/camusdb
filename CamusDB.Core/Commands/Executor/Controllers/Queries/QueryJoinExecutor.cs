@@ -237,6 +237,7 @@ internal sealed class QueryJoinExecutor
     {
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.RightSource.Alias;
+        RowLayout? joinLayout = null;
 
         await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
         {
@@ -258,10 +259,8 @@ internal sealed class QueryJoinExecutor
                 lookupKey,
                 plan).ConfigureAwait(false))
             {
-                Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(
-                    leftQualified,
-                    rightRow.Row,
-                    rightAlias);
+                joinLayout ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
+                QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, rightRow.Row, rightAlias, joinLayout);
 
                 if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
@@ -277,6 +276,7 @@ internal sealed class QueryJoinExecutor
     {
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.RightSource.Alias;
+        RowLayout? joinLayout = null;
 
         await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
         {
@@ -289,10 +289,8 @@ internal sealed class QueryJoinExecutor
                 joinNode.RightExecutionFilter,
                 plan).ConfigureAwait(false))
             {
-                Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(
-                    leftQualified,
-                    rightRow.Row,
-                    rightAlias);
+                joinLayout ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
+                QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, rightRow.Row, rightAlias, joinLayout);
 
                 if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
@@ -961,11 +959,12 @@ internal sealed class QueryJoinExecutor
 
         string rightAlias = joinNode.BuildSource.Alias;
         QueryTicket ticket = plan.Ticket;
+        RowLayout? joinLayout = null;
 
         if (buildSide == HashJoinBuildSide.Right)
         {
             // Standard path: probe = left subtree, build = right source.
-            // Hash table rows are unqualified; MergeRows qualifies them with rightAlias.
+            // Hash table rows are unqualified; MergeRowsAsQueryRow qualifies them with rightAlias.
             IReadOnlyList<string> probeKeys = joinNode.ProbeKeyColumns;
 
             await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
@@ -992,7 +991,8 @@ internal sealed class QueryJoinExecutor
 
                 foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
                 {
-                    Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(leftQualified, buildRow, rightAlias);
+                    joinLayout ??= QueryRowMerger.BuildJoinLayout(leftQualified, buildRow, rightAlias);
+                    QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, buildRow, rightAlias, joinLayout);
 
                     if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
@@ -1005,7 +1005,7 @@ internal sealed class QueryJoinExecutor
         {
             // Build-left path: build = left subtree (stored qualified in hash table),
             // probe = right source (scanned unqualified).
-            // MergeRows(leftQualifiedBuildRow, rightUnqualifiedProbeRow, rightAlias) is the
+            // MergeRowsAsQueryRow(leftQualifiedBuildRow, rightUnqualifiedProbeRow, rightAlias) is the
             // same call shape as the standard path — output column naming is identical.
             IReadOnlyList<string> buildKeys = joinNode.BuildKeyColumns;
 
@@ -1030,7 +1030,8 @@ internal sealed class QueryJoinExecutor
 
                 foreach (IReadOnlyDictionary<string, ColumnValue> leftBuildRow in bucket)
                 {
-                    Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(leftBuildRow, rightRow.Row, rightAlias);
+                    joinLayout ??= QueryRowMerger.BuildJoinLayout(leftBuildRow, rightRow.Row, rightAlias);
+                    QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(leftBuildRow, rightRow.Row, rightAlias, joinLayout);
 
                     if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
@@ -1114,6 +1115,7 @@ internal sealed class QueryJoinExecutor
         // ── Two-pointer sort-merge ────────────────────────────────────────────
         int li = 0;
         int ri = 0;
+        RowLayout? joinLayout = null;
 
         while (li < leftRows.Count && ri < rightRows.Count)
         {
@@ -1134,8 +1136,9 @@ internal sealed class QueryJoinExecutor
             {
                 for (int r = rightRunStart; r < ri; r++)
                 {
-                    Dictionary<string, ColumnValue> merged = QueryRowMerger.MergeRows(
-                        leftRows[l].QualifiedRow, rightRows[r].Row, rightAlias);
+                    joinLayout ??= QueryRowMerger.BuildJoinLayout(leftRows[l].QualifiedRow, rightRows[r].Row, rightAlias);
+                    QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(
+                        leftRows[l].QualifiedRow, rightRows[r].Row, rightAlias, joinLayout);
 
                     if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
@@ -1159,6 +1162,7 @@ internal sealed class QueryJoinExecutor
     {
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.RightSource.Alias;
+        RowLayout? joinLayout = null;
 
         await using IAsyncEnumerator<QueryResultRow> leftEnum  =
             ExecuteJoinTree(joinNode.Input!, plan).GetAsyncEnumerator(ct);
@@ -1209,8 +1213,8 @@ internal sealed class QueryJoinExecutor
             {
                 foreach (IReadOnlyDictionary<string, ColumnValue> rightRow in rightRun)
                 {
-                    Dictionary<string, ColumnValue> merged =
-                        QueryRowMerger.MergeRows(leftQualified, rightRow, rightAlias);
+                    joinLayout ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow, rightAlias);
+                    QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, rightRow, rightAlias, joinLayout);
 
                     if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
@@ -1262,7 +1266,7 @@ internal sealed class QueryJoinExecutor
         string path,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        SpillRunReader? reader = await SpillRunReader.OpenAsync(path, ct).ConfigureAwait(false);
+        SpillRunReader? reader = await SpillRunReader.OpenAsync(path, ct: ct).ConfigureAwait(false);
         if (reader is null) yield break;
         await using (reader)
         {

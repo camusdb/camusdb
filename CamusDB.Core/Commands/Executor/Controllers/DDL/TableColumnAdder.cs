@@ -180,11 +180,18 @@ public sealed class TableColumnAdder
         {
             // The query runs while the column is still WriteOnly (not yet readable), so
             // injectMissingCurrentColumns skips it. Explicitly inject the default so that
-            // RowEncoder.Encode writes the value rather than TypeNull.
-            if (!row.Row.ContainsKey(ticket.Column.Name))
-                ((Dictionary<string, ColumnValue>)row.Row)[ticket.Column.Name] = ticket.Column.Default ?? new(ColumnType.Null, 0L);
+            // RowEncoder.Encode writes the value rather than TypeNull. The scanned row may be a
+            // QueryRow (ordinal-backed, read-only) rather than a Dictionary, so build a new dict
+            // from the adapter instead of mutating in place.
+            IReadOnlyDictionary<string, ColumnValue> rowValues = row.Row;
+            if (!rowValues.ContainsKey(ticket.Column.Name))
+            {
+                Dictionary<string, ColumnValue> withDefault = new(rowValues, StringComparer.Ordinal);
+                withDefault[ticket.Column.Name] = ticket.Column.Default ?? new(ColumnType.Null, 0L);
+                rowValues = withDefault;
+            }
 
-            byte[] buffer = RowEncoder.Encode(table.Schema, row.Row, row.RowId);
+            byte[] buffer = RowEncoder.Encode(table.Schema, rowValues, row.RowId);
             await table.Store.UpdateRow(tx, row.RowId, buffer).ConfigureAwait(false);
             modifiedRows++;
         }

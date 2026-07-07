@@ -10,6 +10,7 @@ using System.Text;
 using System.Buffers.Binary;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
@@ -450,6 +451,61 @@ public static class SpillRowCodec
         int v = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(pos));
         pos += 4;
         return v;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Layout-header (value-only) encode / decode
+    //
+    // When all rows in a spill run are QueryRow, column names are written once
+    // per run (carried in the SpillRun record, not in the file itself) and each
+    // row record contains only RowId + values — no per-row name strings.
+    // Wire format per record: [int32 payloadLen][12-byte RowId][value0]…[valueN-1].
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Appends a value-only framed record to <paramref name="stream"/>.
+    /// Encodes only the RowId and column values (in layout ordinal order) — column names are
+    /// omitted because the <see cref="RowLayout"/> is carried alongside the run path and passed
+    /// to <see cref="DecodeValueOnlyPayload"/> at read time.
+    /// </summary>
+    public static void EncodeValueOnlyToStream(Stream stream, QueryRow row)
+    {
+        int payloadSize = MeasureValueOnlyPayload(row);
+        byte[] frame = new byte[4 + payloadSize];
+        int pos = 0;
+
+        WriteInt32(frame, payloadSize, ref pos);
+        WriteRowId(frame, row.RowId, ref pos);
+        for (int i = 0; i < row.Values.Length; i++)
+            WriteColumnValue(frame, row.Values[i], ref pos);
+
+        stream.Write(frame, 0, frame.Length);
+    }
+
+    /// <summary>
+    /// Decodes a value-only payload (produced by <see cref="EncodeValueOnlyToStream"/>) using
+    /// the supplied <paramref name="layout"/> to reconstruct column names and ordinal positions.
+    /// Returns a <see cref="QueryRow"/> that shares <paramref name="layout"/> with every other
+    /// row in the same run.
+    /// </summary>
+    public static QueryRow DecodeValueOnlyPayload(byte[] payload, RowLayout layout)
+    {
+        int pos = 0;
+        ObjectIdValue rowId = ReadRowId(payload, ref pos);
+
+        ColumnValue[] values = new ColumnValue[layout.Count];
+        for (int i = 0; i < layout.Count; i++)
+            values[i] = ReadColumnValue(payload, ref pos);
+
+        return new QueryRow(rowId, layout, values);
+    }
+
+    private static int MeasureValueOnlyPayload(QueryRow row)
+    {
+        int size = 12; // RowId
+        for (int i = 0; i < row.Values.Length; i++)
+            size += MeasureColumnValue(row.Values[i]);
+        return size;
     }
 
     // ──────────────────────────────────────────────────────────────────────────

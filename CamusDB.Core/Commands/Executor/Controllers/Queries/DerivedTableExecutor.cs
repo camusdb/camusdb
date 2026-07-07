@@ -13,7 +13,6 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
-using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -85,7 +84,7 @@ internal sealed class DerivedTableExecutor
                 }
             }
 
-            await rows.AddAsync(new QueryResultRow(default(ObjectIdValue), new Dictionary<string, ColumnValue>(row.Row))).ConfigureAwait(false);
+            await rows.AddAsync(row).ConfigureAwait(false);
         }
 
         await rows.SealAsync().ConfigureAwait(false);

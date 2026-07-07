@@ -17,6 +17,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
@@ -478,5 +479,111 @@ public sealed class TestDistinctStreaming : BaseTest
         // WHERE code = 'A' → range scan on code_idx; code_idx covers DISTINCT code → streaming.
         Assert.That(plan, Does.Contain("distinct(streaming: true)"),
             "Predicate range scan on code_idx already covers DISTINCT code → streaming");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // G. Mixed-layout guard — streaming dedup with heterogeneous RowLayout instances
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Verifies that the streaming dedup path in <see cref="QueryDistincter"/> degrades safely
+    /// to the dictionary path when the input stream contains <see cref="QueryRow"/> instances
+    /// whose <see cref="RowLayout"/> instances differ (same column names, columns in different
+    /// ordinal order). Without the <c>ReferenceEquals</c> guard the comparator would reuse
+    /// ordinals from the first row's layout for subsequent rows whose <c>Values[]</c> is ordered
+    /// differently, silently comparing the wrong columns and producing incorrect DISTINCT output.
+    /// </summary>
+    [Test]
+    public async Task StreamingDistinct_MixedLayoutQueryRows_deduplicatesCorrectly()
+    {
+        // Layout A: [name=0, score=1]
+        RowLayout layoutA = RowLayout.ForColumns(["name", "score"]);
+        // Layout B: [score=0, name=1]  — column order is reversed relative to layoutA
+        RowLayout layoutB = RowLayout.ForColumns(["score", "name"]);
+
+        QueryResultRow MakeA(string name, long score) =>
+            new(default, new QueryRow(default, layoutA,
+                [new(ColumnType.String, name), new(ColumnType.Integer64, score)]));
+        QueryResultRow MakeB(string name, long score) =>
+            new(default, new QueryRow(default, layoutB,
+                [new(ColumnType.Integer64, score), new(ColumnType.String, name)]));
+
+        // The stream is pre-sorted by name (as streaming dedup requires). "robot-a" appears
+        // twice — once from each layout — and must collapse to one output row.
+        List<QueryResultRow> input =
+        [
+            MakeA("robot-a", 1L),
+            MakeB("robot-a", 1L),
+            MakeA("robot-b", 2L),
+        ];
+
+        QueryDistincter distincter = new();
+        List<QueryResultRow> output = await distincter
+            .StreamingDistinctRows(ToAsync(input))
+            .ToListAsync();
+
+        Assert.AreEqual(2, output.Count, "Duplicate robot-a rows must collapse to one");
+        Assert.AreEqual("robot-a", output[0].Row["name"].StrValue);
+        Assert.AreEqual("robot-b", output[1].Row["name"].StrValue);
+    }
+
+    /// <summary>
+    /// Same mixed-layout hazard as <see cref="StreamingDistinct_MixedLayoutQueryRows_deduplicatesCorrectly"/>,
+    /// but exercises the non-streaming hash/sort dedup path (<c>SpillEnabled = true</c> routes
+    /// DISTINCT through the sort-based comparer rather than adjacent-row streaming). The sort
+    /// comparer must apply the same ReferenceEquals layout guard: rows whose RowLayout instance
+    /// differs from the one the ordinals were resolved from degrade to the dictionary path instead
+    /// of reading the wrong column ordinals.
+    /// </summary>
+    [Test]
+    public async Task HashDistinct_MixedLayoutQueryRows_deduplicatesCorrectly()
+    {
+        bool savedSpill = CamusDBConfig.SpillEnabled;
+        CamusDBConfig.SpillEnabled = true; // routes DistinctResultset → sort-based DistinctRowComparer
+
+        try
+        {
+            // Layout A: [name=0, score=1]; Layout B: [score=0, name=1] — reversed ordinal order.
+            RowLayout layoutA = RowLayout.ForColumns(["name", "score"]);
+            RowLayout layoutB = RowLayout.ForColumns(["score", "name"]);
+
+            QueryResultRow MakeA(string name, long score) =>
+                new(default, new QueryRow(default, layoutA,
+                    [new(ColumnType.String, name), new(ColumnType.Integer64, score)]));
+            QueryResultRow MakeB(string name, long score) =>
+                new(default, new QueryRow(default, layoutB,
+                    [new(ColumnType.Integer64, score), new(ColumnType.String, name)]));
+
+            // Unsorted input; the sort-based dedup orders internally. "robot-a" (name+score equal)
+            // appears once from each layout and must collapse to a single output row.
+            List<QueryResultRow> input =
+            [
+                MakeA("robot-a", 1L),
+                MakeB("robot-a", 1L),
+                MakeA("robot-b", 2L),
+            ];
+
+            QueryDistincter distincter = new();
+            // DistinctResultset ignores the ticket (both branches take only the cursor).
+            List<QueryResultRow> output = await distincter
+                .DistinctResultset(null!, ToAsync(input))
+                .ToListAsync();
+
+            Assert.AreEqual(2, output.Count, "duplicate robot-a across layouts must collapse to one");
+            List<string> names = output.Select(static r => r.Row["name"].StrValue!).OrderBy(static n => n).ToList();
+            Assert.AreEqual("robot-a", names[0]);
+            Assert.AreEqual("robot-b", names[1]);
+        }
+        finally
+        {
+            CamusDBConfig.SpillEnabled = savedSpill;
+        }
+    }
+
+    private static async IAsyncEnumerable<QueryResultRow> ToAsync(IEnumerable<QueryResultRow> rows)
+    {
+        foreach (QueryResultRow row in rows)
+            yield return row;
+        await Task.CompletedTask;
     }
 }

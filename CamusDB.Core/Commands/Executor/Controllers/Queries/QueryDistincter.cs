@@ -9,6 +9,7 @@
 using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -53,6 +54,13 @@ internal sealed class QueryDistincter
     {
         IReadOnlyDictionary<string, ColumnValue>? lastRow = null;
         string[]? sortedNames = null;
+        // Ordinal-parallel array resolved from the first row's RowLayout. The fast path is
+        // guarded on ReferenceEquals(row layout, resolvedLayout) so that rows carrying a
+        // different layout instance (different schema version, join node, future DDL reorder)
+        // degrade safely to the dictionary path rather than reading the wrong column ordinals.
+        int[]? sortedOrdinals = null;
+        RowLayout? resolvedLayout = null;
+        QueryRow? lastQr = null;
 
         await foreach (QueryResultRow row in dataCursor.ConfigureAwait(false))
         {
@@ -61,24 +69,47 @@ internal sealed class QueryDistincter
                 // Hoist sorted column names on first row — schema is fixed across the cursor.
                 sortedNames = row.Row.Keys.OrderBy(static n => n, StringComparer.Ordinal).ToArray();
                 lastRow = row.Row;
+                if (row.Row is QueryRow qrFirst)
+                {
+                    lastQr = qrFirst;
+                    resolvedLayout = qrFirst.Layout;
+                    sortedOrdinals = BuildSortedOrdinals(sortedNames, resolvedLayout);
+                }
                 yield return row;
                 continue;
             }
 
             bool equal = true;
-            for (int i = 0; i < sortedNames!.Length; i++)
+
+            if (sortedOrdinals is not null
+                && row.Row  is QueryRow qrCurr && ReferenceEquals(qrCurr.Layout, resolvedLayout)
+                && lastQr is not null          && ReferenceEquals(lastQr.Layout,  resolvedLayout))
             {
-                string name = sortedNames[i];
-                if (!DistinctValuesEqual(row.Row[name], lastRow[name]))
+                for (int i = 0; i < sortedOrdinals.Length; i++)
                 {
-                    equal = false;
-                    break;
+                    int ord = sortedOrdinals[i];
+                    ColumnValue cv = ord >= 0 ? qrCurr.Values[ord] : ((IReadOnlyDictionary<string, ColumnValue>)qrCurr)[sortedNames![i]];
+                    ColumnValue lv = ord >= 0 ? lastQr.Values[ord]  : ((IReadOnlyDictionary<string, ColumnValue>)lastQr)[sortedNames![i]];
+                    if (!DistinctValuesEqual(cv, lv)) { equal = false; break; }
+                }
+            }
+            else
+            {
+                for (int i = 0; i < sortedNames!.Length; i++)
+                {
+                    string name = sortedNames[i];
+                    if (!DistinctValuesEqual(row.Row[name], lastRow[name]))
+                    {
+                        equal = false;
+                        break;
+                    }
                 }
             }
 
             if (!equal)
             {
                 lastRow = row.Row;
+                lastQr = row.Row as QueryRow;
                 yield return row;
             }
         }
@@ -106,18 +137,53 @@ internal sealed class QueryDistincter
     /// after sorting if and only if they would be considered equal by
     /// <see cref="DistinctValuesEqual"/>, so streaming dedup correctly deduplicates them.
     ///
-    /// Column names are hoisted on the first call and reused for subsequent comparisons because
-    /// the schema is fixed across all rows produced by a single query.
+    /// <para>Column names are hoisted on the first call and reused for subsequent comparisons.
+    /// When the first row is a <see cref="QueryRow"/>, ordinals into
+    /// <see cref="QueryRow.Values"/> are resolved once and used for all subsequent comparisons,
+    /// replacing per-row dictionary lookups with direct array access.</para>
     /// </summary>
     private sealed class DistinctRowComparer : IComparer<QueryResultRow>
     {
         private string[]? _sortedNames;
+        private int[]? _sortedOrdinals;
+
+        // The RowLayout instance the ordinals were resolved from. The fast path is only taken
+        // when both rows carry this exact instance — different layouts silently degrade to the
+        // dictionary path, which is always correct via the IReadOnlyDictionary adapter.
+        private RowLayout? _resolvedLayout;
 
         public int Compare(QueryResultRow x, QueryResultRow y)
         {
-            _sortedNames ??= x.Row.Keys.OrderBy(static n => n, StringComparer.Ordinal).ToArray();
+            if (_sortedNames is null)
+            {
+                _sortedNames = x.Row.Keys.OrderBy(static n => n, StringComparer.Ordinal).ToArray();
+                if (x.Row is QueryRow qrInit)
+                {
+                    _resolvedLayout = qrInit.Layout;
+                    _sortedOrdinals = BuildSortedOrdinals(_sortedNames, _resolvedLayout);
+                }
+            }
 
-            foreach (string name in _sortedNames)
+            if (_sortedOrdinals is not null
+                && x.Row is QueryRow qrX && ReferenceEquals(qrX.Layout, _resolvedLayout)
+                && y.Row is QueryRow qrY && ReferenceEquals(qrY.Layout, _resolvedLayout))
+            {
+                for (int i = 0; i < _sortedOrdinals.Length; i++)
+                {
+                    int ord = _sortedOrdinals[i];
+                    ColumnValue xv = ord >= 0 ? qrX.Values[ord] : (((IReadOnlyDictionary<string, ColumnValue>)qrX).TryGetValue(_sortedNames[i], out ColumnValue? xf) ? xf : ColumnValue.Null);
+                    ColumnValue yv = ord >= 0 ? qrY.Values[ord] : (((IReadOnlyDictionary<string, ColumnValue>)qrY).TryGetValue(_sortedNames[i], out ColumnValue? yf) ? yf : ColumnValue.Null);
+
+                    if (xv.Type == ColumnType.Null && yv.Type == ColumnType.Null) continue;
+                    if (xv.Type == ColumnType.Null) return -1;
+                    if (yv.Type == ColumnType.Null) return 1;
+                    int cmp = xv.CompareTo(yv);
+                    if (cmp != 0) return cmp;
+                }
+                return 0;
+            }
+
+            foreach (string name in _sortedNames!)
             {
                 ColumnValue xv = x.Row.TryGetValue(name, out ColumnValue? xval) ? xval : ColumnValue.Null;
                 ColumnValue yv = y.Row.TryGetValue(name, out ColumnValue? yval) ? yval : ColumnValue.Null;
@@ -132,6 +198,14 @@ internal sealed class QueryDistincter
 
             return 0;
         }
+    }
+
+    private static int[] BuildSortedOrdinals(string[] sortedNames, RowLayout layout)
+    {
+        int[] ordinals = new int[sortedNames.Length];
+        for (int i = 0; i < sortedNames.Length; i++)
+            ordinals[i] = layout.IndexOf(sortedNames[i]);
+        return ordinals;
     }
 
     private static bool DistinctValuesEqual(ColumnValue left, ColumnValue right)
@@ -185,13 +259,26 @@ internal sealed class QueryDistincter
 
         public static DistinctRowKey FromRow(QueryResultRow row)
         {
-            string[] names = row.Row.Keys.OrderBy(static name => name, StringComparer.Ordinal).ToArray();
-            (string Name, ColumnValue Value)[] values = new (string Name, ColumnValue Value)[names.Length];
+            if (row.Row is QueryRow qr)
+            {
+                // Use layout ordinal order for names so the key is consistent with the
+                // ordinal-based comparers in DistinctRowComparer and StreamingRows.
+                string[] names = qr.Layout.OutputNames.OrderBy(static n => n, StringComparer.Ordinal).ToArray();
+                (string Name, ColumnValue Value)[] values = new (string Name, ColumnValue Value)[names.Length];
+                for (int i = 0; i < names.Length; i++)
+                {
+                    int ord = qr.Layout.IndexOf(names[i]);
+                    values[i] = (names[i], ord >= 0 ? qr.Values[ord] : ColumnValue.Null);
+                }
+                return new DistinctRowKey(values);
+            }
 
-            for (int i = 0; i < names.Length; i++)
-                values[i] = (names[i], row.Row[names[i]]);
+            string[] dictNames = row.Row.Keys.OrderBy(static name => name, StringComparer.Ordinal).ToArray();
+            (string Name, ColumnValue Value)[] dictValues = new (string Name, ColumnValue Value)[dictNames.Length];
+            for (int i = 0; i < dictNames.Length; i++)
+                dictValues[i] = (dictNames[i], row.Row[dictNames[i]]);
 
-            return new DistinctRowKey(values);
+            return new DistinctRowKey(dictValues);
         }
 
         public bool Equals(DistinctRowKey? other)
