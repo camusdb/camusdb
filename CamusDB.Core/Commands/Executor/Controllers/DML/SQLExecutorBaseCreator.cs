@@ -41,11 +41,21 @@ internal abstract class SQLExecutorBaseCreator
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid order by clause");
     }
 
+    /// <summary>
+    /// Evaluates an expression AST against a row, resolving column identifiers via the
+    /// <paramref name="row"/> dictionary. When <paramref name="queryRow"/> is non-null the
+    /// <see cref="NodeType.Identifier"/> branch bypasses the <see cref="IReadOnlyDictionary{TKey,TValue}"/>
+    /// adapter and reads <see cref="QueryRow.Values"/> by ordinal through
+    /// <see cref="RowLayout.IndexOf"/>, avoiding virtual dispatch on the interface call.
+    /// All other expression types are unaffected — only the column-reference lookup differs
+    /// between the two paths, keeping a single shared implementation body.
+    /// </summary>
     public static ColumnValue EvalExpr(
         NodeAst expr,
         IReadOnlyDictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
-        QueryRowNameResolver? rowNameResolver = null)
+        QueryRowNameResolver? rowNameResolver = null,
+        QueryRow? queryRow = null)
     {
         switch (expr.nodeType)
         {
@@ -90,6 +100,17 @@ internal abstract class SQLExecutorBaseCreator
                 {
                     string lookupKey = rowNameResolver?.ResolveRowLookupKey(expr.yytext!) ?? expr.yytext!;
 
+                    // Ordinal fast path: when the caller supplies a QueryRow directly, bypass the
+                    // IReadOnlyDictionary adapter and read Values[ordinal] without virtual dispatch.
+                    // Falls through to the dictionary path for any key not found in the layout
+                    // (e.g. a parameter alias or a column absent from this row's schema version).
+                    if (queryRow is not null)
+                    {
+                        int ordinal = queryRow.Layout.IndexOf(lookupKey);
+                        if (ordinal >= 0)
+                            return queryRow.Values[ordinal];
+                    }
+
                     if (row.TryGetValue(lookupKey, out ColumnValue? columnValue))
                         return columnValue;
 
@@ -109,57 +130,57 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprEquals:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     return ColumnValue.FromBool(leftValue.CompareTo(rightValue) == 0);
                 }
 
             case NodeType.ExprNotEquals:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     return ColumnValue.FromBool(leftValue.CompareTo(rightValue) != 0);
                 }
 
             case NodeType.ExprLessThan:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     return ColumnValue.FromBool(leftValue.CompareTo(rightValue) < 0);
                 }
 
             case NodeType.ExprGreaterThan:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     return ColumnValue.FromBool(leftValue.CompareTo(rightValue) > 0);
                 }
 
             case NodeType.ExprLessEqualsThan:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     return ColumnValue.FromBool(leftValue.CompareTo(rightValue) <= 0);
                 }
 
             case NodeType.ExprGreaterEqualsThan:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     return ColumnValue.FromBool(leftValue.CompareTo(rightValue) >= 0);
                 }
 
             case NodeType.ExprBetween:
                 {
-                    ColumnValue subject = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue low = EvalExpr(expr.extendedOne!, row, parameters, rowNameResolver);
-                    ColumnValue high = EvalExpr(expr.extendedTwo!, row, parameters, rowNameResolver);
+                    ColumnValue subject = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue low = EvalExpr(expr.extendedOne!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue high = EvalExpr(expr.extendedTwo!, row, parameters, rowNameResolver, queryRow);
 
                     if (subject.Type == ColumnType.Null || low.Type == ColumnType.Null || high.Type == ColumnType.Null)
                         return ColumnValue.False;
@@ -170,8 +191,8 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprOr:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator OR for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -181,8 +202,8 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprAnd:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator AND for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -192,7 +213,7 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprNot:
                 {
-                    ColumnValue value = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue value = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
 
                     // Three-valued logic: NOT NULL is NULL (unknown), which the predicate filter
                     // treats as non-matching.
@@ -207,8 +228,8 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprAdd:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator + for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -218,8 +239,8 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprSub:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator - for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -229,8 +250,8 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprMult:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator * for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -239,33 +260,41 @@ internal abstract class SQLExecutorBaseCreator
                 }
 
             case NodeType.ExprFuncCall:
-                return ScalarFunctionEvaluator.Evaluate(expr, row, parameters, rowNameResolver, EvalExpr);
+                // The static lambda pins the 4-param (IReadOnlyDictionary) overload because the
+                // optional queryRow param makes the method group ambiguous for delegate conversion.
+                // Column refs inside function arguments therefore go through the IReadOnlyDictionary
+                // adapter rather than the ordinal fast path. This is correctness-neutral (QueryRow
+                // implements the interface) but leaves a small per-argument hashing cost on the
+                // table. Passing queryRow through EvaluateExpressionDelegate would require changing
+                // its signature, which is a broader refactor deferred to RL3.2.
+                return ScalarFunctionEvaluator.Evaluate(expr, row, parameters, rowNameResolver,
+                    static (e, r, p, rnr) => EvalExpr(e, r, p, rnr));
 
             case NodeType.ExprCast:
                 {
-                    ColumnValue input = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue input = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     return CastScalarFunctions.CastExpression("cast", input, expr.rightAst!);
                 }
 
             case NodeType.ExprIsNull:
                 {
-                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
 
                     return ColumnValue.FromBool(columnValue.Type == ColumnType.Null);
                 }
 
             case NodeType.ExprIsNotNull:
                 {
-                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
 
                     return ColumnValue.FromBool(columnValue.Type != ColumnType.Null);
                 }
 
             case NodeType.ExprLike:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
-                    
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
+
                     if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator LIKE for argument types: {leftValue.Type}, {rightValue.Type}");
 
@@ -274,8 +303,8 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprILike:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
                     if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator ILIKE for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -300,7 +329,7 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprInMembership:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
 
                     return ColumnValue.FromBool(
                         SubqueryValueListAst.ContainsValue(leftValue, expr.rightAst, parameters));
@@ -308,7 +337,7 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprNotInMembership:
                 {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver);
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     bool? result = SubqueryValueListAst.EvaluateNotInMembership(leftValue, expr, parameters);
 
                     return ColumnValue.FromBool(result ?? false);

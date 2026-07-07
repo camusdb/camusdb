@@ -9,6 +9,7 @@
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
 
@@ -146,7 +147,9 @@ internal sealed class QueryFilterer
             {
                 if (ticket.PreparedInSets is not null && ticket.PreparedInSets.TryGetValue(expr, out PreparedInSet? prepared))
                 {
-                    ColumnValue lhs = SqlExecutor.EvalExpr(expr.leftAst!, row, ticket.Parameters, ticket.RowNameResolver);
+                    ColumnValue lhs = row is QueryRow qrIn
+                        ? SqlExecutor.EvalExpr(expr.leftAst!, qrIn, ticket.Parameters, ticket.RowNameResolver)
+                        : SqlExecutor.EvalExpr(expr.leftAst!, row, ticket.Parameters, ticket.RowNameResolver);
                     return ColumnValue.FromBool(prepared.Contains(lhs));
                 }
                 goto default;
@@ -173,7 +176,12 @@ internal sealed class QueryFilterer
             }
 
             default:
-                return SqlExecutor.EvalExpr(expr, row, ticket.Parameters, ticket.RowNameResolver);
+                // Use ordinal fast path when the row is a QueryRow (emitted by the scanner
+                // via RowEncoder.DecodeToQueryRowAsync). Falls back to the dictionary overload
+                // for intermediate rows produced by joins or aggregation.
+                return row is QueryRow qr
+                    ? SqlExecutor.EvalExpr(expr, qr, ticket.Parameters, ticket.RowNameResolver)
+                    : SqlExecutor.EvalExpr(expr, row, ticket.Parameters, ticket.RowNameResolver);
         }
     }
 

@@ -3584,4 +3584,74 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
     }
 
     #endregion
+
+    #region duplicate projection output names
+
+    /// <summary>
+    /// Guards the TryBuildProjectionLayout fallback: when two projection items share an output
+    /// name (SELECT a AS x, b AS x), the fast QueryRow path must not engage — it would produce
+    /// two array slots for the same name while IndexOf always returns the first, silently
+    /// returning the wrong value. The expected last-wins behavior (x = b's value) must hold
+    /// regardless of which internal path the projector takes.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectDuplicateAliasLastWins()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT name AS x, year AS x FROM robots LIMIT 1",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+
+        // Last-wins: "year AS x" overwrites "name AS x" → x holds the year value (Integer64).
+        Assert.IsTrue(result[0].Row.ContainsKey("x"), "output must contain key 'x'");
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["x"].Type,
+            "last-wins: x must hold the year (Integer64), not the name (String)");
+    }
+
+    /// <summary>
+    /// Same column selected twice under the same bare name (SELECT name, name).
+    /// Both items resolve to output name "name"; the fast path must not engage and the
+    /// result row must contain exactly one "name" key with the correct value.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectSameColumnTwiceHasOneOutputKey()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT name, name FROM robots LIMIT 1",
+            parameters: null);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+
+        // Both items produce output key "name"; the dict path collapses them to one entry.
+        // Assert the arity, not just the value: without the duplicate-name guard the fast
+        // QueryRow path would emit two "name" slots (Count == 2) instead of one, so this is
+        // what actually catches a regression in the collapse behavior.
+        Assert.AreEqual(1, result[0].Row.Count, "duplicate bare names must collapse to a single output column");
+        Assert.IsTrue(result[0].Row.ContainsKey("name"), "output must contain key 'name'");
+        Assert.AreEqual(ColumnType.String, result[0].Row["name"].Type);
+        Assert.IsNotNull(result[0].Row["name"].StrValue);
+    }
+
+    #endregion
 }

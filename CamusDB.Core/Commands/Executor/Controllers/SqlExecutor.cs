@@ -117,4 +117,21 @@ internal sealed class SqlExecutor()
     {
         return SQLExecutorBaseCreator.EvalExpr(expr, row, parameters, rowNameResolver);
     }
+
+    /// <summary>
+    /// Evaluates an expression AST with direct ordinal access for column identifier lookups.
+    /// Reads <see cref="QueryRow.Values"/> via <see cref="RowLayout.IndexOf"/> instead of going
+    /// through the <see cref="IReadOnlyDictionary{TKey,TValue}"/> adapter, eliminating virtual
+    /// dispatch and the FrozenDictionary hash lookup for the common identifier case.
+    /// Falls back to the dictionary path for identifiers not found in the row's layout
+    /// (e.g. column aliases or schema-history gaps).
+    /// </summary>
+    public static ColumnValue EvalExpr(
+        NodeAst expr,
+        QueryRow queryRow,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver = null)
+    {
+        return SQLExecutorBaseCreator.EvalExpr(expr, queryRow, parameters, rowNameResolver, queryRow);
+    }
 }
