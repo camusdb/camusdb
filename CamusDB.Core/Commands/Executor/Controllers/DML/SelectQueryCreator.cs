@@ -208,7 +208,8 @@ internal sealed class SelectQueryCreator
 
         NodeAst expression = ResolveSelectOrdinal(ast, projections, "GROUP BY");
 
-        if (QueryExpressionClassifier.IsAggregateProjection(expression))
+        if (QueryExpressionClassifier.IsAggregateProjection(expression)
+            || QueryExpressionClassifier.IsCompoundAggregateProjection(expression))
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,

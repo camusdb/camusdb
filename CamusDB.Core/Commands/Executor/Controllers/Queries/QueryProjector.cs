@@ -159,7 +159,8 @@ internal sealed class QueryProjector
         QueryRow? inputQr,
         int projectionIndex)
     {
-        if (QueryExpressionClassifier.IsAggregateProjection(ast))
+        if (QueryExpressionClassifier.IsAggregateProjection(ast)
+            || QueryExpressionClassifier.IsCompoundAggregateProjection(ast))
         {
             string key = QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, projectionIndex);
             return row[key];
@@ -179,7 +180,8 @@ internal sealed class QueryProjector
         IReadOnlyDictionary<string, ColumnValue> row,
         int projectionIndex)
     {
-        if (QueryExpressionClassifier.IsAggregateProjection(ast))
+        if (QueryExpressionClassifier.IsAggregateProjection(ast)
+            || QueryExpressionClassifier.IsCompoundAggregateProjection(ast))
         {
             string key = QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, projectionIndex);
             return row[key];

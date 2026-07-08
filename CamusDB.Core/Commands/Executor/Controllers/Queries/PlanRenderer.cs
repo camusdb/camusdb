@@ -347,6 +347,7 @@ public static class PlanRenderer
             NodeType.ExprAdd => $"{RenderExpr(expr.leftAst!)} + {RenderExpr(expr.rightAst!)}",
             NodeType.ExprSub => $"{RenderExpr(expr.leftAst!)} - {RenderExpr(expr.rightAst!)}",
             NodeType.ExprMult => $"{RenderExpr(expr.leftAst!)} * {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprDiv  => $"{RenderExpr(expr.leftAst!)} / {RenderExpr(expr.rightAst!)}",
 
             NodeType.ExprFuncCall =>
                 $"{expr.leftAst?.yytext ?? "?"}({(expr.rightAst is null || expr.rightAst.nodeType == NodeType.ExprAllFields ? "*" : RenderExpr(expr.rightAst))})",

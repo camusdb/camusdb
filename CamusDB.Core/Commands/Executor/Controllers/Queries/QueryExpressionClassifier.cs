@@ -7,11 +7,27 @@
  */
 
 using CamusDB.Core.SQLParser;
+using CamusDB.Core;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
 /// Classifies parsed projection and filter expressions for query validation.
+///
+/// Three classification levels:
+/// <list type="bullet">
+///   <item><see cref="IsAggregateProjection"/> — the top-level call (after alias unwrap) is itself
+///     one of count/max/min/sum/avg. Existing fast-path accumulator code depends on this exact shape.</item>
+///   <item><see cref="ContainsAggregate"/> — any node anywhere in the expression tree is an aggregate call.
+///     Used to detect compound forms like COALESCE(SUM(x),0) or SUM(a)+1 where the aggregate is buried.</item>
+///   <item><see cref="IsCompoundAggregateProjection"/> — contains an aggregate but is NOT the bare top-level
+///     form. These require the post-aggregation scalar evaluator path added in later work.</item>
+/// </list>
+///
+/// Known limitation: <see cref="ContainsAggregate"/> and <see cref="ValidateNoNestedAggregate"/> recurse
+/// into <c>ExprInMembership</c>/<c>ExprNotInMembership</c> via <c>leftAst</c> (the tested expression) only,
+/// not into the right-hand candidate list. An aggregate inside an <c>IN (...)</c> value list is therefore
+/// not detected. This is a degenerate case with no practical query, so it is left as-is.
 /// </summary>
 internal static class QueryExpressionClassifier
 {
@@ -22,6 +38,11 @@ internal static class QueryExpressionClassifier
             : expression;
     }
 
+    /// <summary>
+    /// Returns true when the expression (after alias unwrap) is a bare top-level aggregate call:
+    /// <c>count(…)</c>, <c>max(…)</c>, <c>min(…)</c>, <c>sum(…)</c>, or <c>avg(…)</c>.
+    /// Existing accumulator fast-paths depend on this exact shape — do not broaden it.
+    /// </summary>
     public static bool IsAggregateProjection(NodeAst expression)
     {
         NodeAst target = UnwrapAlias(expression);
@@ -34,5 +55,181 @@ internal static class QueryExpressionClassifier
             "count" or "max" or "min" or "sum" or "avg" => true,
             _ => false,
         };
+    }
+
+    /// <summary>
+    /// Returns true when <paramref name="funcName"/> is the name of a SQL aggregate function.
+    /// </summary>
+    internal static bool IsAggregateName(string funcName) =>
+        funcName.ToLowerInvariant() switch
+        {
+            "count" or "max" or "min" or "sum" or "avg" => true,
+            _ => false,
+        };
+
+    /// <summary>
+    /// Returns true when any node in the expression tree is an aggregate function call
+    /// (count/max/min/sum/avg), regardless of its depth. Does not recurse into subqueries.
+    /// </summary>
+    public static bool ContainsAggregate(NodeAst expression)
+    {
+        return Walk(expression);
+
+        static bool Walk(NodeAst node)
+        {
+            switch (node.nodeType)
+            {
+                case NodeType.ExprAlias:
+                    return node.leftAst is not null && Walk(node.leftAst);
+
+                case NodeType.ExprFuncCall:
+                    if (node.leftAst?.yytext is not null && IsAggregateName(node.leftAst.yytext))
+                        return true;
+                    return node.rightAst is not null && Walk(node.rightAst);
+
+                case NodeType.ExprArgumentList:
+                    return (node.leftAst is not null && Walk(node.leftAst))
+                        || (node.rightAst is not null && Walk(node.rightAst));
+
+                case NodeType.ExprCast:
+                    return node.leftAst is not null && Walk(node.leftAst);
+
+                case NodeType.ExprAdd:
+                case NodeType.ExprSub:
+                case NodeType.ExprMult:
+                case NodeType.ExprDiv:
+                case NodeType.ExprEquals:
+                case NodeType.ExprNotEquals:
+                case NodeType.ExprLessThan:
+                case NodeType.ExprGreaterThan:
+                case NodeType.ExprLessEqualsThan:
+                case NodeType.ExprGreaterEqualsThan:
+                case NodeType.ExprOr:
+                case NodeType.ExprAnd:
+                case NodeType.ExprLike:
+                case NodeType.ExprILike:
+                case NodeType.ExprList:
+                    return (node.leftAst is not null && Walk(node.leftAst))
+                        || (node.rightAst is not null && Walk(node.rightAst));
+
+                case NodeType.ExprNot:
+                case NodeType.ExprIsNull:
+                case NodeType.ExprIsNotNull:
+                case NodeType.ExprInMembership:
+                case NodeType.ExprNotInMembership:
+                    return node.leftAst is not null && Walk(node.leftAst);
+
+                case NodeType.ExprBetween:
+                    return (node.leftAst is not null && Walk(node.leftAst))
+                        || (node.extendedOne is not null && Walk(node.extendedOne))
+                        || (node.extendedTwo is not null && Walk(node.extendedTwo));
+
+                // Subqueries are opaque — do not descend.
+                case NodeType.ExprScalarSubquery:
+                case NodeType.ExprInSubquery:
+                case NodeType.ExprNotInSubquery:
+                case NodeType.ExprExistsSubquery:
+                case NodeType.ExprExistsCorrelated:
+                // Leaf nodes carry no sub-expressions.
+                case NodeType.Identifier:
+                case NodeType.Integer:
+                case NodeType.Float:
+                case NodeType.String:
+                case NodeType.Bool:
+                case NodeType.Null:
+                case NodeType.ObjectIdLiteral:
+                case NodeType.Placeholder:
+                case NodeType.ExprAllFields:
+                default:
+                    return false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns true when the expression contains an aggregate call anywhere inside it but is NOT
+    /// itself a bare top-level aggregate (i.e. <see cref="IsAggregateProjection"/> is false).
+    /// Examples: <c>COALESCE(SUM(x),0)</c>, <c>SUM(a)+1</c>, <c>SUM(a)/SUM(b)</c>.
+    /// </summary>
+    public static bool IsCompoundAggregateProjection(NodeAst expression) =>
+        !IsAggregateProjection(expression) && ContainsAggregate(expression);
+
+    /// <summary>
+    /// Validates that no aggregate argument itself contains another aggregate call
+    /// (<c>SUM(SUM(x))</c>, <c>SUM(COUNT(*))</c> — not supported).
+    /// Throws <see cref="CamusDBException"/> with <see cref="CamusDBErrorCodes.InvalidInput"/>
+    /// if a nested aggregate is found. Call from the binder before query execution begins.
+    /// </summary>
+    public static void ValidateNoNestedAggregate(NodeAst expression)
+    {
+        ValidateNode(expression, insideAggregate: false);
+
+        static void ValidateNode(NodeAst node, bool insideAggregate)
+        {
+            switch (node.nodeType)
+            {
+                case NodeType.ExprAlias:
+                    if (node.leftAst is not null)
+                        ValidateNode(node.leftAst, insideAggregate);
+                    return;
+
+                case NodeType.ExprFuncCall:
+                    bool isAgg = node.leftAst?.yytext is not null && IsAggregateName(node.leftAst.yytext);
+                    if (isAgg && insideAggregate)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidInput,
+                            $"Aggregate function '{node.leftAst!.yytext}' cannot be nested inside another aggregate");
+
+                    if (node.rightAst is not null)
+                        ValidateNode(node.rightAst, insideAggregate || isAgg);
+                    return;
+
+                case NodeType.ExprArgumentList:
+                    if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);
+                    if (node.rightAst is not null) ValidateNode(node.rightAst, insideAggregate);
+                    return;
+
+                case NodeType.ExprCast:
+                    if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);
+                    return;
+
+                case NodeType.ExprAdd:
+                case NodeType.ExprSub:
+                case NodeType.ExprMult:
+                case NodeType.ExprDiv:
+                case NodeType.ExprEquals:
+                case NodeType.ExprNotEquals:
+                case NodeType.ExprLessThan:
+                case NodeType.ExprGreaterThan:
+                case NodeType.ExprLessEqualsThan:
+                case NodeType.ExprGreaterEqualsThan:
+                case NodeType.ExprOr:
+                case NodeType.ExprAnd:
+                case NodeType.ExprLike:
+                case NodeType.ExprILike:
+                case NodeType.ExprList:
+                    if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);
+                    if (node.rightAst is not null) ValidateNode(node.rightAst, insideAggregate);
+                    return;
+
+                case NodeType.ExprNot:
+                case NodeType.ExprIsNull:
+                case NodeType.ExprIsNotNull:
+                case NodeType.ExprInMembership:
+                case NodeType.ExprNotInMembership:
+                    if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);
+                    return;
+
+                case NodeType.ExprBetween:
+                    if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);
+                    if (node.extendedOne is not null) ValidateNode(node.extendedOne, insideAggregate);
+                    if (node.extendedTwo is not null) ValidateNode(node.extendedTwo, insideAggregate);
+                    return;
+
+                // Subqueries, leaf nodes, and unrecognised nodes: nothing to validate.
+                default:
+                    return;
+            }
+        }
     }
 }

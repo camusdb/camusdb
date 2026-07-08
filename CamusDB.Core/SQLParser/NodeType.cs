@@ -34,6 +34,7 @@ public enum NodeType
     ExprAdd,
     ExprSub,
     ExprMult,
+    ExprDiv,
     ExprAllFields,
     ExprFuncCall,
     ExprCast,

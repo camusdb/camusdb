@@ -793,7 +793,8 @@ public sealed class QueryPlanner
         List<NodeAst>? result = null;
         foreach (NodeAst proj in ticket.Projection)
         {
-            if (QueryExpressionClassifier.IsAggregateProjection(proj))
+            if (QueryExpressionClassifier.IsAggregateProjection(proj)
+                || QueryExpressionClassifier.IsCompoundAggregateProjection(proj))
                 (result ??= new()).Add(proj);
         }
         return result;

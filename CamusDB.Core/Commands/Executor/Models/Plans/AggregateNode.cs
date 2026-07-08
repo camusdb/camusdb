@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
@@ -39,6 +40,11 @@ public sealed class AggregateNode : PhysicalPlanNode
             {
                 // Unwrap alias: SELECT count(*) AS c → target is the count(*) call.
                 NodeAst target = proj.nodeType == NodeType.ExprAlias ? proj.leftAst! : proj;
+
+                // Compound aggregates (e.g. SUM(x)+1, COALESCE(SUM(x),0)) are not decomposable
+                // because the outer expression must be evaluated after the merge, not per-partition.
+                if (QueryExpressionClassifier.IsCompoundAggregateProjection(target))
+                    return false;
 
                 if (target.nodeType != NodeType.ExprFuncCall)
                     continue;

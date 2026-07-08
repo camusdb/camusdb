@@ -580,6 +580,7 @@ internal static class RequiredColumnAnalyzer
             case NodeType.ExprAdd:
             case NodeType.ExprSub:
             case NodeType.ExprMult:
+            case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
                 if (expression.leftAst is not null)
@@ -794,6 +795,7 @@ internal static class RequiredColumnAnalyzer
             case NodeType.ExprAdd:
             case NodeType.ExprSub:
             case NodeType.ExprMult:
+            case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
                 if (expression.leftAst is not null)

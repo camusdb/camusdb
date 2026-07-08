@@ -39,6 +39,11 @@ internal static class DerivedTableSchemaBuilder
     {
         NodeAst target = QueryExpressionClassifier.UnwrapAlias(expression);
 
+        // Compound aggregate check is hoisted before nodeType dispatch so arithmetic-topped
+        // compounds (ExprAdd, ExprDiv, …) are also handled — not just ExprFuncCall-wrapped ones.
+        if (QueryExpressionClassifier.IsCompoundAggregateProjection(target))
+            return InferCompoundAggregateType(target, innerBound, innerResolver);
+
         if (target.nodeType == NodeType.Identifier && target.yytext is not null)
         {
             string lookupKey = innerResolver.ResolveRowLookupKey(target.yytext);
@@ -62,6 +67,41 @@ internal static class DerivedTableSchemaBuilder
             return CastScalarFunctions.InferCastReturnType(target.rightAst!);
 
         return ColumnType.String;
+    }
+
+    /// <summary>
+    /// Infers the return type of a compound aggregate expression (aggregate nested inside a
+    /// non-aggregate node). Two shapes are handled:
+    /// <list type="bullet">
+    ///   <item>Scalar function wrapper such as <c>COALESCE(SUM(x), 0)</c>: collects the inferred
+    ///     type of each argument and forwards them to
+    ///     <see cref="ScalarFunctionEvaluator.InferReturnType"/> so the outer function returns
+    ///     the real type instead of <see cref="ColumnType.Null"/>.</item>
+    ///   <item>Arithmetic binary op such as <c>SUM(a)+1</c> or <c>SUM(a)/SUM(b)</c>: infers
+    ///     both operand types and returns the wider numeric type.</item>
+    /// </list>
+    /// </summary>
+    private static ColumnType InferCompoundAggregateType(
+        NodeAst target,
+        BoundSelectQuery innerBound,
+        QueryRowNameResolver innerResolver)
+    {
+        if (target.nodeType == NodeType.ExprFuncCall)
+        {
+            string funcName = target.leftAst!.yytext!.ToLowerInvariant();
+            if (ScalarFunctionEvaluator.IsRegisteredScalarFunction(funcName))
+            {
+                ColumnType[] argTypes = InferArgListTypes(target.rightAst, innerBound, innerResolver);
+                return ScalarFunctionEvaluator.InferReturnType(funcName, argTypes);
+            }
+
+            return ColumnType.String;
+        }
+
+        // Arithmetic binary op: return the wider numeric type of both operands.
+        ColumnType left  = target.leftAst  is not null ? InferArgType(target.leftAst,  innerBound, innerResolver) : ColumnType.Null;
+        ColumnType right = target.rightAst is not null ? InferArgType(target.rightAst, innerBound, innerResolver) : ColumnType.Null;
+        return WiderNumericType(left, right);
     }
 
     private static ColumnType InferAggregateType(
@@ -97,6 +137,85 @@ internal static class DerivedTableSchemaBuilder
             return ColumnType.Integer64;
 
         return InferType(argument, innerBound, innerResolver);
+    }
+
+    /// <summary>
+    /// Collects the inferred <see cref="ColumnType"/> for each argument in a function's argument
+    /// list. Used to pass real argument types to <see cref="ScalarFunctionEvaluator.InferReturnType"/>
+    /// for compound-aggregate expressions so the outer function (e.g. COALESCE) does not receive an
+    /// empty list and fall back to <see cref="ColumnType.Null"/>.
+    /// </summary>
+    private static ColumnType[] InferArgListTypes(
+        NodeAst? argList,
+        BoundSelectQuery innerBound,
+        QueryRowNameResolver innerResolver)
+    {
+        if (argList is null)
+            return [];
+
+        List<ColumnType> types = new();
+        CollectArgTypes(argList, innerBound, innerResolver, types);
+        return types.ToArray();
+    }
+
+    private static void CollectArgTypes(
+        NodeAst argNode,
+        BoundSelectQuery innerBound,
+        QueryRowNameResolver innerResolver,
+        List<ColumnType> types)
+    {
+        if (argNode.nodeType == NodeType.ExprArgumentList)
+        {
+            if (argNode.leftAst is not null)
+                CollectArgTypes(argNode.leftAst, innerBound, innerResolver, types);
+
+            if (argNode.rightAst is not null)
+                CollectArgTypes(argNode.rightAst, innerBound, innerResolver, types);
+
+            return;
+        }
+
+        types.Add(InferArgType(argNode, innerBound, innerResolver));
+    }
+
+    /// <summary>
+    /// Infers the <see cref="ColumnType"/> of a single expression node when it appears as a
+    /// function argument or arithmetic operand. Fast-paths for literals and identifiers avoid
+    /// re-entering the compound-aggregate logic; the default case delegates to
+    /// <see cref="InferType"/> so nested compounds (e.g. COALESCE inside another COALESCE)
+    /// and bare aggregate calls are resolved correctly.
+    /// </summary>
+    private static ColumnType InferArgType(
+        NodeAst arg,
+        BoundSelectQuery innerBound,
+        QueryRowNameResolver innerResolver)
+    {
+        return arg.nodeType switch
+        {
+            NodeType.Integer    => ColumnType.Integer64,
+            NodeType.Float      => ColumnType.Float64,
+            NodeType.String     => ColumnType.String,
+            NodeType.Bool       => ColumnType.Bool,
+            NodeType.Null       => ColumnType.Null,
+            NodeType.Identifier => arg.yytext is not null
+                ? ResolveColumnType(innerBound, innerResolver.ResolveRowLookupKey(arg.yytext), arg.yytext)
+                : ColumnType.String,
+            // All other nodes (bare aggregates, compounds, scalar funcs, casts) go through
+            // InferType so type inference is consistent and recursive.
+            _ => InferType(arg, innerBound, innerResolver),
+        };
+    }
+
+    /// <summary>
+    /// Returns the wider of two types for arithmetic inference: Float64 &gt; Float32 &gt;
+    /// Integer64. Falls back to String for non-numeric or mismatched operands.
+    /// </summary>
+    private static ColumnType WiderNumericType(ColumnType a, ColumnType b)
+    {
+        if (a == ColumnType.Float64 || b == ColumnType.Float64) return ColumnType.Float64;
+        if (a == ColumnType.Float32 || b == ColumnType.Float32) return ColumnType.Float32;
+        if (a == ColumnType.Integer64 || b == ColumnType.Integer64) return ColumnType.Integer64;
+        return ColumnType.String;
     }
 
     private static ColumnType ResolveColumnType(BoundSelectQuery innerBound, string lookupKey, string originalIdentifier)

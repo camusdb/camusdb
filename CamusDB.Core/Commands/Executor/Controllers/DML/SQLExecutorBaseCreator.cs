@@ -259,6 +259,41 @@ internal abstract class SQLExecutorBaseCreator
                     return new ColumnValue(ColumnType.Integer64, leftValue.LongValue * rightValue.LongValue);
                 }
 
+            case NodeType.ExprDiv:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
+
+                    // Float64 / Float64
+                    if (leftValue.Type == ColumnType.Float64 && rightValue.Type == ColumnType.Float64)
+                    {
+                        if (rightValue.FloatValue == 0.0)
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
+                        return new ColumnValue(ColumnType.Float64, leftValue.FloatValue / rightValue.FloatValue);
+                    }
+
+                    // Integer64 / Float64 or Float64 / Integer64 — widen to Float64
+                    if ((leftValue.Type == ColumnType.Integer64 && rightValue.Type == ColumnType.Float64) ||
+                        (leftValue.Type == ColumnType.Float64 && rightValue.Type == ColumnType.Integer64))
+                    {
+                        double l = leftValue.Type == ColumnType.Integer64 ? (double)leftValue.LongValue : leftValue.FloatValue;
+                        double r = rightValue.Type == ColumnType.Integer64 ? (double)rightValue.LongValue : rightValue.FloatValue;
+                        if (r == 0.0)
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
+                        return new ColumnValue(ColumnType.Float64, l / r);
+                    }
+
+                    // Integer64 / Integer64 — integer (truncating) division
+                    if (leftValue.Type == ColumnType.Integer64 && rightValue.Type == ColumnType.Integer64)
+                    {
+                        if (rightValue.LongValue == 0)
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
+                        return new ColumnValue(ColumnType.Integer64, leftValue.LongValue / rightValue.LongValue);
+                    }
+
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator / for argument types: {leftValue.Type}, {rightValue.Type}");
+                }
+
             case NodeType.ExprFuncCall:
                 // The static lambda pins the 4-param (IReadOnlyDictionary) overload because the
                 // optional queryRow param makes the method group ambiguous for delegate conversion.

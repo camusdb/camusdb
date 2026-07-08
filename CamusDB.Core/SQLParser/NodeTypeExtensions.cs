@@ -23,6 +23,7 @@ public static class NodeTypeExtensions
             NodeType.ExprAdd or
             NodeType.ExprSub or
             NodeType.ExprMult or
+            NodeType.ExprDiv or
             NodeType.ExprOr or
             NodeType.ExprAnd => true,
             _ => false,

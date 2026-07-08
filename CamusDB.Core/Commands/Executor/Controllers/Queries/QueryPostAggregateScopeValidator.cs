@@ -26,7 +26,8 @@ internal static class QueryPostAggregateScopeValidator
 
         foreach (ProjectionItem projection in query.Projections)
         {
-            if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression))
+            if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression)
+                || QueryExpressionClassifier.IsCompoundAggregateProjection(projection.Expression))
             {
                 hasAggregateProjection = true;
                 break;
@@ -108,6 +109,7 @@ internal static class QueryPostAggregateScopeValidator
             case NodeType.ExprAdd:
             case NodeType.ExprSub:
             case NodeType.ExprMult:
+            case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
                 if (expression.leftAst is not null)

@@ -53,6 +53,17 @@ internal static class QueryHavingWorkspace
         HashSet<string> outputNames,
         bool insideAggregate)
     {
+        // A compound aggregate (COALESCE(SUM(x),0), SUM(x)+1, etc.) is treated as an indivisible
+        // unit: if it is not already covered by a SELECT projection it is a hidden expression that
+        // the workspace needs to compute. The check must precede the switch so that arithmetic-topped
+        // compounds (ExprAdd, ExprDiv, …) are not decomposed into their bare-aggregate operands.
+        if (!insideAggregate && QueryExpressionClassifier.IsCompoundAggregateProjection(expression))
+        {
+            if (TryFindMatchingProjection(expression, ticket.Projection, out _))
+                return false;
+            return true;
+        }
+
         switch (expression.nodeType)
         {
             case NodeType.Identifier:
@@ -103,6 +114,7 @@ internal static class QueryHavingWorkspace
             case NodeType.ExprAdd:
             case NodeType.ExprSub:
             case NodeType.ExprMult:
+            case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
                 return (expression.leftAst is not null
@@ -136,6 +148,38 @@ internal static class QueryHavingWorkspace
         HashSet<string> outputNames,
         bool insideAggregate)
     {
+        // Compound aggregate: add it as a single compound hidden projection so the workspace
+        // evaluates it as a unit (including the outer COALESCE, arithmetic op, etc.). Without
+        // this guard the switch would recurse into sub-expressions and only add the inner bare
+        // aggregate, leaving the outer expression unevaluated at HAVING-evaluation time.
+        if (!insideAggregate && QueryExpressionClassifier.IsCompoundAggregateProjection(expression))
+        {
+            if (TryFindMatchingProjection(expression, ticket.Projection, out _))
+                return;
+
+            string outputName = QueryProjectionResolver.GetOutputNameFromProjectionExpression(
+                expression,
+                projections.Count);
+
+            if (outputNames.Contains(outputName))
+                return;
+
+            NodeAst inner = QueryExpressionClassifier.UnwrapAlias(expression);
+            var (aggregates, rewritten) = QueryAggregateExtractor.Extract(inner);
+
+            projections.Add(new QueryAggregator.AnalyzedProjection(
+                expression,
+                outputName,
+                IsAggregate: false,
+                FuncCall: null,
+                IsCompound: true,
+                CompoundAggregates: aggregates,
+                RewrittenExpression: rewritten));
+
+            outputNames.Add(outputName);
+            return;
+        }
+
         switch (expression.nodeType)
         {
             case NodeType.Identifier:
@@ -172,8 +216,8 @@ internal static class QueryHavingWorkspace
                     projections.Add(new QueryAggregator.AnalyzedProjection(
                         expression,
                         outputName,
-                        IsAggregate: true,
-                        FuncCall: QueryAggregator.GetAggregateFuncCall(expression)));
+                        isAggregate: true,
+                        funcCall: QueryAggregator.GetAggregateFuncCall(expression)));
 
                     outputNames.Add(outputName);
                     return;
@@ -210,6 +254,7 @@ internal static class QueryHavingWorkspace
             case NodeType.ExprAdd:
             case NodeType.ExprSub:
             case NodeType.ExprMult:
+            case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
                 if (expression.leftAst is not null)

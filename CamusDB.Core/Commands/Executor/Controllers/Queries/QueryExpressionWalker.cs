@@ -40,6 +40,7 @@ internal static class QueryExpressionWalker
             case NodeType.ExprAdd:
             case NodeType.ExprSub:
             case NodeType.ExprMult:
+            case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
                 if (expr.leftAst is not null)

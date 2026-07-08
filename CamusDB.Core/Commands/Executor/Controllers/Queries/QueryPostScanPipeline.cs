@@ -120,7 +120,10 @@ internal static class QueryPostScanPipeline
     {
         foreach (NodeAst nodeAst in projection)
         {
-            if (!QueryExpressionClassifier.IsAggregateProjection(nodeAst))
+            bool isAggregate = QueryExpressionClassifier.IsAggregateProjection(nodeAst);
+            bool isCompound = !isAggregate && QueryExpressionClassifier.IsCompoundAggregateProjection(nodeAst);
+
+            if (!isAggregate && !isCompound)
                 continue;
 
             if (projection.Count > 1 && ticket.GroupBy is not { Count: > 0 })

@@ -19,7 +19,7 @@
 %left TEQUALS TNOTEQUALS TBETWEEN
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
-%left TMULT
+%left TMULT TDIV
 
 %token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
@@ -605,6 +605,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | add_expr { $$.n = $1.n; }
            | sub_expr { $$.n = $1.n; }
            | mult_expr { $$.n = $1.n; }
+           | div_expr { $$.n = $1.n; }
            | like_expr { $$.n = $1.n; }
            | ilike_expr { $$.n = $1.n; }
            | simple_expr { $$.n = $1.n; }
@@ -658,6 +659,9 @@ sub_expr  : condition TMINUS condition { $$.n = new(NodeType.ExprSub, $1.n, $3.n
           ;
 
 mult_expr : condition TMULT condition { $$.n = new(NodeType.ExprMult, $1.n, $3.n, null, null, null, null, null, null); }
+          ;
+
+div_expr  : condition TDIV  condition { $$.n = new(NodeType.ExprDiv,  $1.n, $3.n, null, null, null, null, null, null); }
           ;
 
 like_expr : condition TLIKE condition { $$.n = new(NodeType.ExprLike, $1.n, $3.n, null, null, null, null, null, null); }

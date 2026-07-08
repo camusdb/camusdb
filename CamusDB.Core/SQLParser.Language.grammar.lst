@@ -1,9 +1,9 @@
 
 // ==========================================================================
-//  GPPG error listing for yacc source file <SQLParser/SQLParser.Language.grammar.y - 4/07/2026 10:30:48 PM>
+//  GPPG error listing for yacc source file <SQLParser/SQLParser.Language.grammar.y - 8/07/2026 1:48:21 PM>
 // ==========================================================================
 //  Version:  1.5.3
-//  DateTime: 4/07/2026 10:30:50 PM
+//  DateTime: 8/07/2026 1:50:21 PM
 // ==========================================================================
 
 
@@ -28,7 +28,7 @@
 %left TEQUALS TNOTEQUALS TBETWEEN
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
-%left TMULT
+%left TMULT TDIV
 
 %token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
@@ -381,11 +381,8 @@ opt_table_alias : TAS any_identifier { $$.n = $2.n; }
 
 opt_table_hint : TAT LBRACE identifier TEQUALS identifier RBRACE
                {
-                 // @{cache=name} is an accepted alias of {cache=name}; any other key (e.g. FORCE_INDEX)
-//-----------------^^^
-// Error: Unknown special marker in semantic action
-// ------------------------------------------------
-                 // remains an index-style table hint that the executor resolves later.
+                 // The at-brace hint with a cache key is an accepted alias of the bare cache hint;
+                 // any other key (e.g. FORCE_INDEX) stays an index-style table hint resolved later.
                  if ($3.n.yytext!.Equals("cache", System.StringComparison.Ordinal))
                      $$.n = new(NodeType.CacheHint, null, null, null, null, null, null, null, $5.n.yytext);
                  else
@@ -393,10 +390,7 @@ opt_table_hint : TAT LBRACE identifier TEQUALS identifier RBRACE
                }
                | TAT LBRACE identifier TEQUALS identifier TCOMMA cache_hint_options RBRACE
                {
-                 // ttl/strict options are only meaningful for the cache hint; @{FORCE_INDEX=x, ...} is invalid.
-//----------------------------------------------------------------------------^^
-// Error: Unknown special marker in semantic action
-// ------------------------------------------------
+                 // ttl/strict options are only meaningful for the cache hint, never for FORCE_INDEX.
                  if (!$3.n.yytext!.Equals("cache", System.StringComparison.Ordinal))
                      throw new CamusDB.Core.CamusDBException(
                          CamusDB.Core.CamusDBErrorCodes.InvalidInput,
@@ -620,6 +614,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | add_expr { $$.n = $1.n; }
            | sub_expr { $$.n = $1.n; }
            | mult_expr { $$.n = $1.n; }
+           | div_expr { $$.n = $1.n; }
            | like_expr { $$.n = $1.n; }
            | ilike_expr { $$.n = $1.n; }
            | simple_expr { $$.n = $1.n; }
@@ -673,6 +668,10 @@ sub_expr  : condition TMINUS condition { $$.n = new(NodeType.ExprSub, $1.n, $3.n
           ;
 
 mult_expr : condition TMULT condition { $$.n = new(NodeType.ExprMult, $1.n, $3.n, null, null, null, null, null, null); }
+div_expr  : condition TDIV  condition { $$.n = new(NodeType.ExprDiv,  $1.n, $3.n, null, null, null, null, null, null); }
+//^^^^^^
+// Error: Syntax error, unexpected anchoredSymbol
+// ----------------------------------------------
           ;
 
 like_expr : condition TLIKE condition { $$.n = new(NodeType.ExprLike, $1.n, $3.n, null, null, null, null, null, null); }

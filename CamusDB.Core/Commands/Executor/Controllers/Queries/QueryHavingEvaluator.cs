@@ -24,6 +24,13 @@ internal static class QueryHavingEvaluator
         QueryTicket ticket,
         Dictionary<string, ColumnValue>? parameters)
     {
+        // Compound aggregate (e.g. COALESCE(SUM(x),0), SUM(x)+1): the workspace pre-computed its
+        // value and stored it under the same output name that CollectHiddenExpressions used when
+        // adding the hidden projection. Look it up directly rather than re-evaluating the
+        // expression (whose aggregate sub-calls have no values available at evaluation time).
+        if (QueryExpressionClassifier.IsCompoundAggregateProjection(expression))
+            return LookupRowValue(row, ResolveAggregateOutputName(expression, ticket));
+
         switch (expression.nodeType)
         {
             case NodeType.Identifier:

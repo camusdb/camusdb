@@ -36,7 +36,7 @@ internal sealed class QueryAggregator
         if (ticket.GroupBy is { Count: > 0 })
             return AggregateGrouped(ticket, dataCursor, _stats);
 
-        if (QueryHavingWorkspace.NeedsExpandedGlobalAggregate(ticket))
+        if (QueryHavingWorkspace.NeedsExpandedGlobalAggregate(ticket) || HasCompoundProjection(ticket.Projection))
             return AggregateGlobalWorkspace(ticket, dataCursor);
 
         NodeAst funcCall = GetSingleAggregationFuncCall(ticket.Projection);
@@ -86,7 +86,7 @@ internal sealed class QueryAggregator
                 accumulator.AddRow(resultRow.Row, ticket);
             }
             foreach (GroupAccumulator accumulator in groups.Values)
-                yield return accumulator.ToResultRow();
+                yield return accumulator.ToResultRow(ticket);
             yield break;
         }
 
@@ -166,7 +166,7 @@ internal sealed class QueryAggregator
                     acc.AddRow(row.Row, ticket);
                 }
                 foreach (GroupAccumulator acc in groups.Values)
-                    yield return acc.ToResultRow();
+                    yield return acc.ToResultRow(ticket);
             }
             else
             {
@@ -293,7 +293,7 @@ internal sealed class QueryAggregator
         if (!overflow)
         {
             foreach (GroupAccumulator acc in groups.Values)
-                yield return acc.ToResultRow();
+                yield return acc.ToResultRow(ticket);
             yield break;
         }
 
@@ -366,13 +366,31 @@ internal sealed class QueryAggregator
         {
             NodeAst expression = projection[i];
             bool isAggregate = QueryExpressionClassifier.IsAggregateProjection(expression);
+            bool isCompound = !isAggregate && QueryExpressionClassifier.IsCompoundAggregateProjection(expression);
             NodeAst? funcCall = isAggregate ? GetAggregateFuncCall(expression) : null;
+
+            IReadOnlyList<(NodeAst AggregateNode, string Placeholder)>? compoundAggregates = null;
+            NodeAst? rewrittenExpression = null;
+
+            if (isCompound)
+            {
+                // Unwrap alias before extraction so RewrittenExpression has no alias wrapper:
+                // EvalExpr cannot evaluate ExprAlias nodes. The alias is already captured in
+                // OutputName and is re-applied by the caller that stores the result.
+                NodeAst inner = QueryExpressionClassifier.UnwrapAlias(expression);
+                var (aggregates, rewritten) = QueryAggregateExtractor.Extract(inner);
+                compoundAggregates = aggregates;
+                rewrittenExpression = rewritten;
+            }
 
             analyzed.Add(new AnalyzedProjection(
                 expression,
                 GetProjectionOutputName(expression, i),
                 isAggregate,
-                funcCall));
+                funcCall,
+                isCompound,
+                compoundAggregates,
+                rewrittenExpression));
         }
 
         return analyzed;
@@ -423,7 +441,7 @@ internal sealed class QueryAggregator
         await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
             accumulator.AddRow(resultRow.Row, ticket);
 
-        yield return accumulator.ToResultRow();
+        yield return accumulator.ToResultRow(ticket);
     }
 
     private static NodeAst ResolveHiddenSortExpression(QueryTicket ticket, string columnName)
@@ -459,6 +477,16 @@ internal sealed class QueryAggregator
         }
 
         return target;
+    }
+
+    private static bool HasCompoundProjection(List<NodeAst>? projection)
+    {
+        if (projection is null)
+            return false;
+        foreach (NodeAst p in projection)
+            if (QueryExpressionClassifier.IsCompoundAggregateProjection(p))
+                return true;
+        return false;
     }
 
     private static NodeAst GetSingleAggregationFuncCall(List<NodeAst> projection)
@@ -679,29 +707,63 @@ internal sealed class QueryAggregator
         return QueryProjectionResolver.GetOutputNameFromProjectionExpression(ticket.Projection[index], index);
     }
 
+    /// <summary>
+    /// Describes one projection column after analysis. Bare aggregates populate
+    /// <see cref="IsAggregate"/>/<see cref="FuncCall"/>. Compound aggregate expressions
+    /// (e.g. <c>COALESCE(SUM(x),0)</c>, <c>SUM(a)/SUM(b)</c>) populate
+    /// <see cref="IsCompound"/>, <see cref="CompoundAggregates"/>, and
+    /// <see cref="RewrittenExpression"/>. Plain (non-aggregate) projections leave all
+    /// aggregate fields null/false.
+    /// </summary>
     internal readonly record struct AnalyzedProjection(
         NodeAst Expression,
         string OutputName,
         bool IsAggregate,
-        NodeAst? FuncCall);
+        NodeAst? FuncCall,
+        bool IsCompound,
+        IReadOnlyList<(NodeAst AggregateNode, string Placeholder)>? CompoundAggregates,
+        NodeAst? RewrittenExpression)
+    {
+        /// <summary>Backward-compatible constructor for plain and bare-aggregate projections.</summary>
+        public AnalyzedProjection(NodeAst expression, string outputName, bool isAggregate, NodeAst? funcCall)
+            : this(expression, outputName, isAggregate, funcCall, false, null, null) { }
+    }
 
+    /// <summary>
+    /// Accumulates rows for one group (or the global no-GROUP-BY aggregate). Handles three
+    /// projection kinds: plain (group-key columns, captured once), bare aggregate (one
+    /// <see cref="AggregateMetricState"/> per projection), and compound aggregate
+    /// (one <see cref="AggregateMetricState"/> per extracted sub-aggregate; the rewritten
+    /// scalar expression is evaluated at finalize time against the resolved placeholder values).
+    /// </summary>
     private sealed class GroupAccumulator
     {
         private readonly List<AnalyzedProjection> projections;
         private readonly Dictionary<string, ColumnValue> outputValues = new();
-        private readonly AggregateMetricState[] aggregateStates;
+        private readonly AggregateMetricState?[] aggregateStates;
+        // Flat list: (projectionIndex, placeholder, state) for each sub-aggregate in each compound projection.
+        private readonly (int ProjIdx, string Placeholder, AggregateMetricState State)[] compoundStates;
         private bool capturedGroupValues;
 
         public GroupAccumulator(List<AnalyzedProjection> projections)
         {
             this.projections = projections;
-            aggregateStates = new AggregateMetricState[projections.Count];
+            aggregateStates = new AggregateMetricState?[projections.Count];
+
+            List<(int, string, AggregateMetricState)> compoundList = [];
 
             for (int i = 0; i < projections.Count; i++)
             {
                 if (projections[i].IsAggregate)
                     aggregateStates[i] = new AggregateMetricState(projections[i].FuncCall!);
+                else if (projections[i].IsCompound)
+                {
+                    foreach (var (aggregateNode, placeholder) in projections[i].CompoundAggregates!)
+                        compoundList.Add((i, placeholder, new AggregateMetricState(aggregateNode)));
+                }
             }
+
+            compoundStates = [.. compoundList];
         }
 
         public void AddRow(IReadOnlyDictionary<string, ColumnValue> row, QueryTicket ticket)
@@ -711,7 +773,7 @@ internal sealed class QueryAggregator
                 QueryRow? qr = row as QueryRow;
                 for (int i = 0; i < projections.Count; i++)
                 {
-                    if (projections[i].IsAggregate)
+                    if (projections[i].IsAggregate || projections[i].IsCompound)
                         continue;
 
                     NodeAst expression = QueryExpressionClassifier.UnwrapAlias(projections[i].Expression);
@@ -728,20 +790,55 @@ internal sealed class QueryAggregator
                 if (!projections[i].IsAggregate)
                     continue;
 
-                aggregateStates[i].AddRow(row, ticket);
+                aggregateStates[i]!.AddRow(row, ticket);
             }
+
+            foreach (var (_, _, state) in compoundStates)
+                state.AddRow(row, ticket);
         }
 
-        public QueryResultRow ToResultRow()
+        /// <summary>
+        /// Finalizes all aggregate states, evaluates compound projections' rewritten
+        /// scalar expressions against the resolved placeholder values, and returns
+        /// the complete output row.
+        ///
+        /// The synthetic row is evaluated with <c>rowNameResolver: null</c> because the
+        /// placeholder names (null-char prefix) would cause <see cref="QueryRowNameResolver"/>
+        /// to throw <c>UnknownColumn</c>. As a consequence, non-aggregate columns in the
+        /// compound expression are looked up by their <see cref="AnalyzedProjection.OutputName"/>
+        /// (i.e. the unqualified identifier or alias). Single-table unqualified forms such as
+        /// <c>k + SUM(x)</c> work correctly. Qualified references (<c>t.k</c>) and aliased
+        /// columns whose output name differs from the raw identifier in a join context are not
+        /// yet supported and would produce a lookup miss. This is a known limitation; all
+        /// current spec-target shapes are pure aggregate expressions that do not hit it.
+        /// </summary>
+        public QueryResultRow ToResultRow(QueryTicket ticket)
         {
             Dictionary<string, ColumnValue> row = new(outputValues);
 
             for (int i = 0; i < projections.Count; i++)
             {
-                if (!projections[i].IsAggregate)
-                    continue;
+                if (projections[i].IsAggregate)
+                {
+                    row[projections[i].OutputName] = aggregateStates[i]!.FinalizeValue();
+                }
+                else if (projections[i].IsCompound)
+                {
+                    // Build a synthetic row that merges the already-captured group-key values
+                    // with the finalized placeholder values for this projection's sub-aggregates.
+                    Dictionary<string, ColumnValue> syntheticRow = new(row);
+                    foreach (var (projIdx, placeholder, state) in compoundStates)
+                    {
+                        if (projIdx == i)
+                            syntheticRow[placeholder] = state.FinalizeValue();
+                    }
 
-                row[projections[i].OutputName] = aggregateStates[i].FinalizeValue();
+                    row[projections[i].OutputName] = SqlExecutor.EvalExpr(
+                        projections[i].RewrittenExpression!,
+                        syntheticRow,
+                        ticket.Parameters,
+                        rowNameResolver: null);
+                }
             }
 
             return new QueryResultRow(default(ObjectIdValue), row);

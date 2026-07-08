@@ -225,7 +225,10 @@ internal sealed class QueryBinder
     private static void ValidateQuery(SelectQuery query, QueryRowNameResolver rowNames)
     {
         foreach (ProjectionItem projection in query.Projections)
+        {
+            QueryExpressionClassifier.ValidateNoNestedAggregate(projection.Expression);
             ValidateExpression(projection.Expression, rowNames);
+        }
 
         if (query.Where is not null)
             ValidateExpression(query.Where.Expression, rowNames);
@@ -237,6 +240,9 @@ internal sealed class QueryBinder
         }
 
         ValidateOrderBy(query, rowNames);
+        // ValidateNoNestedAggregate is intentionally not called on HAVING/ORDER BY here —
+        // those paths are wired through QueryHavingWorkspace/Evaluator which are extended
+        // when compound-aggregate support for HAVING and ORDER BY is added.
         QueryPostAggregateScopeValidator.ValidateHaving(query, rowNames);
 
         ValidateDistinct(query);
@@ -257,7 +263,8 @@ internal sealed class QueryBinder
 
         foreach (ProjectionItem projection in query.Projections)
         {
-            if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression))
+            if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression)
+                || QueryExpressionClassifier.IsCompoundAggregateProjection(projection.Expression))
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
@@ -308,7 +315,8 @@ internal sealed class QueryBinder
 
         foreach (ProjectionItem projection in query.Projections)
         {
-            if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression))
+            if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression)
+                || QueryExpressionClassifier.IsCompoundAggregateProjection(projection.Expression))
                 hasAggregation = true;
             else
                 hasNonAggregateProjection = true;
@@ -318,7 +326,8 @@ internal sealed class QueryBinder
         {
             foreach (ProjectionItem projection in query.Projections)
             {
-                if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression))
+                if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression)
+                    || QueryExpressionClassifier.IsCompoundAggregateProjection(projection.Expression))
                     continue;
 
                 NodeAst projectionExpr = QueryExpressionClassifier.UnwrapAlias(projection.Expression);

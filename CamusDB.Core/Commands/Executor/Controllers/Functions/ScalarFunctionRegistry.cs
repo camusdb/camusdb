@@ -52,6 +52,7 @@ internal sealed class ScalarFunctionRegistry
         StringScalarFunctions.Register(registry);
         JsonScalarFunctions.Register(registry);
         CastScalarFunctions.Register(registry);
+        NullScalarFunctions.Register(registry);
         return registry;
     }
 }
