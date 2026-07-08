@@ -123,6 +123,39 @@ internal sealed class QueryScanner
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, table.Schema.Version);
 
+        if (plan.IndexOnly)
+        {
+            // Covering (index-only) path: every needed column is already in the decoded index
+            // key or is the primary-key (row-id) column. Synthesize the QueryRow directly from
+            // the scan entry — no GetRow call and no RowEncoder.DecodeAsync call.
+            // No per-row point dep is recorded because no primary row was read; the range dep
+            // above and the schema dep cover snapshot correctness for the index scan.
+            (RowLayout coveredLayout, int[] slotMap) = BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
+
+            await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId) in table.Store.ScanIndex(
+                ticket.TxnState,
+                index.KvId,
+                keyTypes,
+                null,
+                null,
+                unique,
+                fromInclusive: true,
+                toInclusive: true,
+                maxRows: plan.ScanRowLimit))
+            {
+                if (scanStats is not null)
+                    scanStats.KvScanEntries++;
+
+                ColumnValue[] values = SynthesizeCoveredValues(slotMap, decodedKey);
+                QueryRow queryRow = new(rowId, coveredLayout, values);
+
+                if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
+                    yield return new QueryResultRow(rowId, queryRow);
+            }
+            yield break;
+        }
+
+        // Non-covering path: fetch the primary row for each matched index entry.
         // Per-scan layout cache: one entry per stored schema version (constant for a scan).
         Dictionary<int, RowLayout> layoutCache = new();
 
@@ -165,6 +198,72 @@ internal sealed class QueryScanner
             if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
                 yield return new QueryResultRow(rowId, queryRow);
         }
+    }
+
+    /// <summary>
+    /// Builds the <see cref="RowLayout"/> and accompanying slot map for an index-only (covering)
+    /// scan. Column names are ordered by their position in the table schema (matching
+    /// <see cref="RowEncoder.DecodeToQueryRowAsync"/> output order) and filtered to those in
+    /// <paramref name="required"/>.
+    ///
+    /// Each <c>slotMap[i]</c> is the position of that column in <paramref name="index"/>.Columns;
+    /// the value is read from the decoded <see cref="CompositeColumnValue"/> at that position. A
+    /// covering scan is only planned when every required column is an index-key column
+    /// (<c>TryMarkIndexOnly</c> restricts the covered set to the index key), so the lookup always
+    /// succeeds — a missing column throws rather than falling back to the KV row id, since the
+    /// logical <c>id</c> column is user-supplied and need not equal the KV row key.
+    /// Called from <see cref="QueryExecutor"/> for the range-scan and unique-lookup paths.
+    /// </summary>
+    internal static (RowLayout layout, int[] slotMap) BuildIndexOnlyLayout(
+        TableDescriptor table,
+        IReadOnlySet<string>? required,
+        TableIndexSchema index)
+    {
+        List<string> names = [];
+        List<int> slots = [];
+
+        if (table.Schema.Columns is not null)
+        {
+            foreach (TableColumnSchema col in table.Schema.Columns)
+            {
+                if (required is not null && !required.Contains(col.Name))
+                    continue;
+
+                names.Add(col.Name);
+
+                // Covering is only marked when every required column is an index-key column
+                // (TryMarkIndexOnly restricts `available` to index.Columns), so this lookup
+                // always succeeds. A -1 here would mean the planner marked a plan index-only
+                // whose required set is not a subset of the index key — an invariant violation.
+                int keyPos = Array.IndexOf(index.Columns, col.Name);
+                if (keyPos < 0)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInternalOperation,
+                        $"Covering scan required column '{col.Name}' is not in index '{index.Name}' key");
+                slots.Add(keyPos);
+            }
+        }
+
+        return (RowLayout.ForColumns(names), slots.ToArray());
+    }
+
+    /// <summary>
+    /// Synthesizes the <see cref="ColumnValue"/> array for one covering-scan row by reading each
+    /// column straight from the decoded index key. Every <paramref name="slotMap"/> entry is a
+    /// non-negative position into <paramref name="decodedKey"/> because a covering scan is only
+    /// planned when every required column is an index-key column (see <see cref="BuildIndexOnlyLayout"/>
+    /// and <c>TryMarkIndexOnly</c>). The KV row id is deliberately not used as a value source: the
+    /// logical <c>id</c> column is user-supplied and need not equal the internal KV row key.
+    /// Called from <see cref="QueryExecutor"/> for the range-scan and unique-lookup paths.
+    /// </summary>
+    internal static ColumnValue[] SynthesizeCoveredValues(
+        int[] slotMap,
+        CompositeColumnValue decodedKey)
+    {
+        ColumnValue[] values = new ColumnValue[slotMap.Length];
+        for (int i = 0; i < slotMap.Length; i++)
+            values[i] = decodedKey.Values[slotMap[i]];
+        return values;
     }
 
     private static ColumnType[] GetIndexColumnTypes(TableDescriptor table, TableIndexSchema index)

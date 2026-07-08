@@ -628,6 +628,18 @@ internal sealed class QueryExecutor
         if (rowId is null)
             yield break;
 
+        if (plan.IndexOnly)
+        {
+            // Covering path: the lookup key already holds the index column values; synthesize
+            // the result row without fetching the primary row.
+            (RowLayout coveredLayout, int[] slotMap) = QueryScanner.BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
+            ColumnValue[] values = QueryScanner.SynthesizeCoveredValues(slotMap, lookupKey);
+            QueryRow queryRow = new(rowId.Value, coveredLayout, values);
+            if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
+                yield return new(rowId.Value, queryRow);
+            yield break;
+        }
+
         byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
         if (data is null || data.Length == 0)
             yield break;
@@ -690,6 +702,35 @@ internal sealed class QueryExecutor
             ticket.TxnState, index.KvId,
             fromBound, fromInclusive, toBound, toInclusive,
             unique, exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
+
+        if (plan.IndexOnly)
+        {
+            // Covering path: every needed column is present in the decoded index key or is the
+            // primary-key column. Synthesize rows directly from the scan entry; no GetRow call.
+            (RowLayout coveredLayout, int[] slotMap) = QueryScanner.BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
+
+            await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId) in table.Store.ScanIndex(
+                ticket.TxnState,
+                index.KvId,
+                keyTypes,
+                fromBound,
+                toBound,
+                unique,
+                fromInclusive,
+                toInclusive,
+                maxRows: plan.ScanRowLimit))
+            {
+                if (scanStats is not null)
+                    scanStats.KvScanEntries++;
+
+                ColumnValue[] values = QueryScanner.SynthesizeCoveredValues(slotMap, decodedKey);
+                QueryRow queryRow = new(rowId, coveredLayout, values);
+
+                if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
+                    yield return new(rowId, queryRow);
+            }
+            yield break;
+        }
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             ticket.TxnState,

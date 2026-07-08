@@ -380,4 +380,137 @@ public sealed class TestKvTableStore
         }
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
+
+    // ---- GetRowsBatch tests -----------------------------------------------
+
+    [Test]
+    public async Task GetRowsBatch_EmptyList_ReturnsEmptyArray()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("gbatch-empty");
+        await using EmbeddedKahuna __ = node;
+
+        byte[]?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), []);
+
+        Assert.AreEqual(0, result.Length);
+    }
+
+    [Test]
+    public async Task GetRowsBatch_ReturnsNullForMissingIds()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("gbatch-missing");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue[] ids = [new(1, 0, 0), new(2, 0, 0), new(3, 0, 0)];
+        byte[]?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), ids);
+
+        Assert.AreEqual(3, result.Length);
+        Assert.IsNull(result[0]);
+        Assert.IsNull(result[1]);
+        Assert.IsNull(result[2]);
+    }
+
+    [Test]
+    public async Task GetRowsBatch_ReturnsSameBytesAsGetRow()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("gbatch-parity");
+        await using EmbeddedKahuna __ = node;
+
+        TableSchema schema = MakeSchema(Col("name", ColumnType.String));
+        ObjectIdValue[] ids = [new(10, 0, 0), new(20, 0, 0), new(30, 0, 0)];
+        byte[][] inserted = new byte[ids.Length][];
+
+        KvTransaction tx = await BeginTransaction(node.Kahuna, "gbatch-parity-insert");
+        for (int i = 0; i < ids.Length; i++)
+        {
+            inserted[i] = RowEncoder.Encode(schema,
+                new Dictionary<string, ColumnValue> { ["name"] = new(ColumnType.String, $"row{i}") },
+                ids[i]);
+            await store.InsertRow(tx, ids[i], inserted[i]);
+        }
+        await CommitTransaction(node.Kahuna, tx);
+
+        byte[]?[] batchResult = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), ids);
+
+        Assert.AreEqual(ids.Length, batchResult.Length, "batch result count must match id count");
+        for (int i = 0; i < ids.Length; i++)
+        {
+            byte[]? single = await store.GetRow(KvTransaction.CreateReadOnly(), ids[i]);
+            Assert.IsNotNull(batchResult[i], $"batch result[{i}] must not be null");
+            Assert.AreEqual(single, batchResult[i], $"batch result[{i}] must equal single GetRow result");
+        }
+    }
+
+    // GetRowsBatch must return results indexed to the *caller's* input order regardless of the
+    // order Kahuna returns them (which is leader-group order in a multi-node cluster).
+    // EmbeddedKahuna is single-node so all keys go to one leader, making positional and
+    // key-matched paths indistinguishable via the response list — we can't simulate ≥2 leaders
+    // here.  Instead the test encodes a unique integer payload per row and verifies that each
+    // output slot contains that row's specific payload, so any key/slot transposition produces
+    // a payload mismatch and a clear assertion failure.
+    [Test]
+    public async Task GetRowsBatch_EachSlotContainsItsOwnRowPayload()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("gbatch-order");
+        await using EmbeddedKahuna __ = node;
+
+        TableSchema schema = MakeSchema(Col("n", ColumnType.Integer64));
+
+        // Use intentionally non-ascending ids so KV scan order ≠ input order.
+        ObjectIdValue[] ids = [new(300, 0, 0), new(100, 0, 0), new(200, 0, 0)];
+        long[] sentinels = [31L, 12L, 23L]; // unique per slot; any swap produces a wrong value
+
+        KvTransaction tx = await BeginTransaction(node.Kahuna, "gbatch-order-insert");
+        for (int i = 0; i < ids.Length; i++)
+        {
+            byte[] data = RowEncoder.Encode(schema,
+                new Dictionary<string, ColumnValue> { ["n"] = new(ColumnType.Integer64, sentinels[i]) },
+                ids[i]);
+            await store.InsertRow(tx, ids[i], data);
+        }
+        await CommitTransaction(node.Kahuna, tx);
+
+        byte[]?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), ids);
+
+        Assert.AreEqual(ids.Length, result.Length);
+        for (int i = 0; i < ids.Length; i++)
+        {
+            Assert.IsNotNull(result[i], $"result[{i}] must not be null");
+            // Verify this slot holds exactly the sentinel for ids[i], not another row's bytes.
+            byte[]? expected = await store.GetRow(KvTransaction.CreateReadOnly(), ids[i]);
+            Assert.AreEqual(expected, result[i],
+                $"result[{i}] bytes must match GetRow(ids[{i}]={ids[i]}) — sentinel {sentinels[i]}");
+        }
+    }
+
+    [Test]
+    public async Task GetRowsBatch_MixOfPresentAndMissingIds()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("gbatch-mix");
+        await using EmbeddedKahuna __ = node;
+
+        TableSchema schema = MakeSchema(Col("v", ColumnType.Integer64));
+        ObjectIdValue present1 = new(1, 0, 0);
+        ObjectIdValue missing  = new(2, 0, 0);
+        ObjectIdValue present2 = new(3, 0, 0);
+
+        byte[] data1 = RowEncoder.Encode(schema,
+            new Dictionary<string, ColumnValue> { ["v"] = new(ColumnType.Integer64, 11L) }, present1);
+        byte[] data2 = RowEncoder.Encode(schema,
+            new Dictionary<string, ColumnValue> { ["v"] = new(ColumnType.Integer64, 33L) }, present2);
+
+        KvTransaction tx = await BeginTransaction(node.Kahuna, "gbatch-mix-insert");
+        await store.InsertRow(tx, present1, data1);
+        await store.InsertRow(tx, present2, data2);
+        await CommitTransaction(node.Kahuna, tx);
+
+        byte[]?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(),
+            [present1, missing, present2]);
+
+        Assert.AreEqual(3, result.Length);
+        Assert.IsNotNull(result[0], "present1 must be found");
+        Assert.IsNull(result[1],    "missing must return null");
+        Assert.IsNotNull(result[2], "present2 must be found");
+        Assert.AreEqual(data1, result[0]);
+        Assert.AreEqual(data2, result[2]);
+    }
 }

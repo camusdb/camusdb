@@ -107,6 +107,26 @@ public sealed class QueryPlan
     public long? ScanRowLimit { get; internal set; }
 
     /// <summary>
+    /// True when the chosen index scan is covering: every column the query needs is already
+    /// present in the index key or is a primary-key (row-id) column, so the executor can
+    /// synthesize the result row directly from the decoded index entry with no primary-row
+    /// fetch and no <c>RowEncoder.DecodeAsync</c> call.
+    ///
+    /// Set by <see cref="Controllers.Queries.QueryPlanner"/> after projection pushdown, which
+    /// is when <see cref="ScanRequiredColumns"/> is finalized. Always false when
+    /// <see cref="ScanRequiredColumns"/> is null (SELECT * or decode-all), or when the plan
+    /// uses a full table scan rather than an index scan.
+    /// </summary>
+    public bool IndexOnly { get; internal set; }
+
+    /// <summary>
+    /// The names of the columns the query needs that are served from the index key (including
+    /// pk columns reachable without a row fetch). Non-empty only when <see cref="IndexOnly"/>
+    /// is true; empty list otherwise.
+    /// </summary>
+    public IReadOnlyList<string> IndexOnlyColumns { get; internal set; } = [];
+
+    /// <summary>
     /// When true, the executor populates <see cref="Plans.PlanNodeStats"/> on each node
     /// reachable via <see cref="StepNodes"/> as rows flow through the pipeline.
     /// Always false during normal execution; set by EXPLAIN ANALYZE.

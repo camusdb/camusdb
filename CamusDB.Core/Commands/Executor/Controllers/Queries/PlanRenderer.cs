@@ -87,8 +87,8 @@ public static class PlanRenderer
         node switch
         {
             TableScanNode n => RenderTableScan(n, plan),
-            IndexLookupNode n => RenderIndexLookup(n),
-            IndexRangeScanNode n => RenderIndexRangeScan(n),
+            IndexLookupNode n => RenderIndexLookup(n, plan),
+            IndexRangeScanNode n => RenderIndexRangeScan(n, plan),
             IndexInListScanNode n => RenderIndexInListScan(n),
             FilterNode n => RenderFilter(n),
             HavingFilterNode n => RenderHavingFilter(n),
@@ -158,16 +158,17 @@ public static class PlanRenderer
         };
     }
 
-    private static string RenderIndexLookup(IndexLookupNode node)
+    private static string RenderIndexLookup(IndexLookupNode node, QueryPlan plan)
     {
         string key = RenderCompositeKey(node.LookupKey);
-        return $"index-lookup(index={node.Index.Name}, key={key})";
+        string indexOnly = plan.IndexOnly ? ", index-only=true" : "";
+        return $"index-lookup(index={node.Index.Name}, key={key}{indexOnly})";
     }
 
     private static string RenderIndexInListScan(IndexInListScanNode node) =>
         $"index-in-list(index={node.Index.Name}, values={node.Values.Count})";
 
-    private static string RenderIndexRangeScan(IndexRangeScanNode node)
+    private static string RenderIndexRangeScan(IndexRangeScanNode node, QueryPlan plan)
     {
         var parts = new List<string> { $"index={node.Index.Name}" };
 
@@ -184,6 +185,9 @@ public static class PlanRenderer
             string op = node.ToInclusive ? "<=" : "<";
             parts.Add($"to{op}{to}");
         }
+
+        if (plan.IndexOnly)
+            parts.Add("index-only=true");
 
         return $"index-range-scan({string.Join(", ", parts)})";
     }

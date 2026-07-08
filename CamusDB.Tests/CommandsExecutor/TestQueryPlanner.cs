@@ -1066,4 +1066,111 @@ public class TestQueryPlanner
         Assert.AreEqual(1, step.FromBound!.Values.Length,
             "Path 3 bounds have only the prefix column (no trailing range value)");
     }
+
+    // ---- IndexOnly (covering-index detection) tests --------------------------
+
+    [Test]
+    public void IndexOnly_IsTrue_WhenProjectionCoversIndexKey()
+    {
+        // SELECT year FROM robots WHERE year = 2024
+        // year_idx covers column "year"; required = {year} ⊆ {year} → IndexOnly.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT year FROM robots WHERE year = 2024");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsTrue(plan.IndexOnly, "plan must be index-only when projection is covered by the index");
+        Assert.Contains("year", (System.Collections.IList)plan.IndexOnlyColumns,
+            "IndexOnlyColumns must include the projected column");
+    }
+
+    [Test]
+    public void IndexOnly_IsFalse_WhenPkColumnRequired()
+    {
+        // SELECT id FROM robots WHERE year = 2024
+        // The id column is a user-supplied logical primary key stored in the row; it is NOT the
+        // internal KV row id used as the index-entry suffix. year_idx does not carry the id
+        // column value, so the primary row must be fetched — never a covering scan.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT id FROM robots WHERE year = 2024");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsFalse(plan.IndexOnly, "plan must NOT be index-only: the id column is not in the index key");
+        Assert.IsEmpty(plan.IndexOnlyColumns);
+    }
+
+    [Test]
+    public void IndexOnly_IsTrue_WhenProjectionCoversCompositeIndex()
+    {
+        // SELECT name, year FROM robots WHERE name = 'alice' AND year = 2024
+        // Both predicate columns match name_year_idx; the composite index covers the required
+        // {name, year} set.  Using both predicate columns ensures name_year_idx scores higher
+        // than the single-column name_idx (2×10 > 1 prefix score).
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT name, year FROM robots WHERE name = 'alice' AND year = 2024");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsTrue(plan.IndexOnly,
+            "plan must be index-only when all projected columns are in the composite index");
+        Assert.That(plan.IndexOnlyColumns, Does.Contain("name"));
+        Assert.That(plan.IndexOnlyColumns, Does.Contain("year"));
+    }
+
+    [Test]
+    public void IndexOnly_IsFalse_WhenNonIndexedColumnIsRequired()
+    {
+        // SELECT name, enabled FROM robots WHERE year = 2024
+        // year_idx only covers "year"; "enabled" is not in the index → not covered.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT name, enabled FROM robots WHERE year = 2024");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsFalse(plan.IndexOnly,
+            "plan must NOT be index-only when a required column is absent from the index");
+        Assert.IsEmpty(plan.IndexOnlyColumns);
+    }
+
+    [Test]
+    public void IndexOnly_IsFalse_ForSelectStar()
+    {
+        // SELECT * requires all columns, so ScanRequiredColumns is null → not covered.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2024");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsFalse(plan.IndexOnly, "SELECT * must never be index-only");
+        Assert.IsEmpty(plan.IndexOnlyColumns);
+    }
+
+    [Test]
+    public void IndexOnly_IsFalse_ForFullTableScan()
+    {
+        // No index on "enabled" forces a full scan; full scans are never index-only.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT year FROM robots WHERE enabled = true");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        // The plan may use a full scan or an index scan on year; if no index chosen, not covered.
+        if (plan.Steps is not [{ Index: not null }, ..])
+            Assert.IsFalse(plan.IndexOnly, "full table scan must never be index-only");
+        // If an index was coincidentally picked, IndexOnly may be true; skip that case.
+    }
+
+    [Test]
+    public void IndexOnly_IsFalse_WhenResidualWhereColumnNotInIndex()
+    {
+        // SELECT year FROM robots WHERE year = 2024 AND enabled = true AND name = 'alice'
+        //
+        // year_enabled_idx (unique, [year, enabled]) wins the access-path selection because it
+        // matches two equality columns (unique-lookup score >> range-scan score). That index
+        // covers {year, enabled, id}. But "name" is also referenced in the WHERE clause and
+        // becomes a residual execution filter — it is NOT in year_enabled_idx. Therefore the
+        // required set is {year, enabled, name}, which is not a subset of the index, and the
+        // plan must NOT be marked index-only.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT year FROM robots WHERE year = 2024 AND enabled = true AND name = 'alice'");
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsFalse(plan.IndexOnly,
+            "residual WHERE column absent from the chosen index must prevent index-only, even when the projected column is covered");
+    }
 }

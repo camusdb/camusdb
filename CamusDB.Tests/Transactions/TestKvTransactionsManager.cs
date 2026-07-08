@@ -464,11 +464,11 @@ public sealed class TestKvTransactionsManager
         public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken)
             => inner.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken);
 
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
-            => inner.LocateAndTryGetManyValues(transactionId, keys, cancellationToken);
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
+            => inner.LocateAndTryGetManyValues(transactionId, readTimestamp, keys, cancellationToken);
 
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
-            => inner.LocateAndTryExistsManyValues(transactionId, keys, cancellationToken);
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken cancellationToken)
+            => inner.LocateAndTryExistsManyValues(transactionId, readTimestamp, keys, cancellationToken);
 
         public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(HLCTimestamp transactionId, string key, KeyValueDurability durability, CancellationToken cancellationToken)
             => inner.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken);
@@ -500,14 +500,14 @@ public sealed class TestKvTransactionsManager
         public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability)
             => inner.TryGetValue(transactionId, key, revision, readTimestamp, durability);
 
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys)
-            => inner.TryGetManyValues(transactionId, keys);
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys)
+            => inner.TryGetManyValues(transactionId, readTimestamp, keys);
 
         public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability)
             => inner.TryExistsValue(transactionId, key, revision, readTimestamp, durability);
 
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp transactionId, List<(string key, long revision, KeyValueDurability durability)> keys)
-            => inner.TryExistsManyValues(transactionId, keys);
+        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp transactionId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys)
+            => inner.TryExistsManyValues(transactionId, readTimestamp, keys);
 
         public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp transactionId, string key, KeyValueDurability durability)
             => inner.TryCheckWriteIntentValue(transactionId, key, durability);

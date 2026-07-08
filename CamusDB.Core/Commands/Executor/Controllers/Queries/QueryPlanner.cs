@@ -269,6 +269,7 @@ public sealed class QueryPlanner
         plan.Root = root;
         QueryPlanStepAdapter.PopulateLinearSteps(plan);
         ProjectionPushdownPlanner.Apply(plan);
+        TryMarkIndexOnly(plan, table);
 
         // Annotate every node with EstimatedCardinality and PlanCost.
         CostEstimator.AnnotatePlan(plan.Root, database, table, _stats);
@@ -882,6 +883,79 @@ public sealed class QueryPlanner
 
         ColumnValue val = SqlExecutor.EvalExpr(expr, new Dictionary<string, ColumnValue>(), ticket.Parameters);
         return val.Type == ColumnType.Integer64 ? val.LongValue : null;
+    }
+
+    /// <summary>
+    /// Sets <see cref="QueryPlan.IndexOnly"/> when the chosen index scan covers every column
+    /// the query requires, making a primary-row fetch unnecessary.
+    ///
+    /// Covering holds when <see cref="QueryPlan.ScanRequiredColumns"/> (the finalized needed
+    /// column set from projection pushdown) is non-null AND every column it names is present in
+    /// the chosen index's key columns — available directly from the decoded index entry without
+    /// reading the primary row.
+    ///
+    /// <c>ColumnType.Id</c> columns are NOT treated as universally available from the index
+    /// entry. Although the index entry embeds the KV row key (ObjectId), that is the internally
+    /// generated storage identity, not the value stored in the <c>id</c> column — the column
+    /// holds the user-provided value, which differs from the KV key. An <c>id</c> column can
+    /// only be covered when it is explicitly part of the index's key columns.
+    ///
+    /// An empty <see cref="QueryPlan.ScanRequiredColumns"/> (row-id-only query) is also covered:
+    /// the row id is always decoded from the index entry.
+    ///
+    /// Must be called after <see cref="ProjectionPushdownPlanner.Apply"/>, which is where
+    /// <see cref="QueryPlan.ScanRequiredColumns"/> is finalized.
+    ///
+    /// Not applied to locate-phase plans (UPDATE / DELETE), which set
+    /// <see cref="QueryTicket.LocateColumns"/> to a WHERE-only subset. Even when that subset
+    /// fits in the index, the DML executor still needs the full primary row to re-encode the
+    /// updated row and to remove stale secondary-index entries, so the flag must not be set.
+    /// </summary>
+    private static void TryMarkIndexOnly(QueryPlan plan, TableDescriptor table)
+    {
+        // Locate-phase plans (UPDATE/DELETE) set LocateColumns to a WHERE-only subset; the DML
+        // executor always needs the primary row to re-encode or remove stale index entries.
+        if (plan.Ticket.LocateColumns is not null)
+            return;
+
+        // null ScanRequiredColumns means "decode all columns" (SELECT * or no pushdown) — can't cover.
+        if (plan.ScanRequiredColumns is not { } required)
+            return;
+
+        // Covering only applies to index-based scan steps.
+        if (plan.Steps is not [{ Index: { } index, Type: var stepType }, ..])
+            return;
+
+        // A full table scan — even one driven off an index — fetches the primary row.
+        if (stepType is QueryPlanStepType.FullScanFromTableIndex)
+            return;
+
+        // IN-list scans have no covering path in QueryUsingInListIndexInternal; exclude them
+        // explicitly so that if the step ever gains a non-null Index the flag stays honest.
+        if (stepType is QueryPlanStepType.InListScanFromIndex)
+            return;
+
+        // Empty required set → only the row id is needed; always present in the index entry.
+        if (required.Count == 0)
+        {
+            plan.IndexOnly = true;
+            plan.IndexOnlyColumns = [];
+            return;
+        }
+
+        // The only columns available without a primary-row fetch are those actually in the index.
+        HashSet<string> available = new(index.Columns, StringComparer.Ordinal);
+
+        List<string> covered = [];
+        foreach (string col in required)
+        {
+            if (!available.Contains(col))
+                return; // a needed column is absent from the index — not covering
+            covered.Add(col);
+        }
+
+        plan.IndexOnly = true;
+        plan.IndexOnlyColumns = covered;
     }
 
 }

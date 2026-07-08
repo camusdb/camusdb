@@ -573,6 +573,108 @@ public class TestExplainExecutor : SharedNodeBaseTest
             Assert.IsTrue(row.Row.ContainsKey("name"), "Normal SELECT row must have 'name' column");
     }
 
+    // ── Index-only detection in EXPLAIN ───────────────────────────────────────
+
+    // Returns the detail string for the first scan node (index-lookup or index-range-scan).
+    private static string? ScanNodeDetail(List<QueryResultRow> rows)
+    {
+        foreach (QueryResultRow r in rows)
+            if (r.Row.TryGetValue("node", out ColumnValue? node)
+                && (node.StrValue is "index-lookup" or "index-range-scan"))
+                return r.Row["detail"].StrValue;
+        return null;
+    }
+
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupRobotsWithYearAndNameIndex()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        await executor.AlterIndex(new AlterIndexTicket(
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "year_idx",
+            columns: new ColumnIndexInfo[] { new("year", OrderType.Ascending) },
+            operation: AlterIndexOperation.AddIndex
+        ));
+        await executor.AlterIndex(new AlterIndexTicket(
+            databaseName: dbname,
+            tableName: "robots",
+            indexName: "name_idx",
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
+            operation: AlterIndexOperation.AddIndex
+        ));
+        await database.Transactions.CommitAsync(txn);
+        return (dbname, database, executor);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Explain_IndexOnly_True_WhenProjectionCoveredByIndex()
+    {
+        // SELECT year FROM robots WHERE year = 2024 — year_idx covers the only required column.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsWithYearAndNameIndex();
+
+        List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
+            "EXPLAIN SELECT year FROM robots WHERE year = 2024");
+
+        string? detail = ScanNodeDetail(rows);
+        Assert.IsNotNull(detail, "EXPLAIN must include an index scan node");
+        Assert.That(detail, Does.Contain("index-only=true"),
+            "EXPLAIN detail must advertise index-only=true for a covered range scan");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Explain_IndexOnly_False_WhenPkColumnSelected()
+    {
+        // SELECT id FROM robots WHERE year = 2024 — the id column is a user-supplied logical
+        // primary key stored in the row, not the internal KV row id in the index-entry suffix,
+        // so year_idx cannot cover it. The scan must fetch the primary row (not index-only).
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsWithYearAndNameIndex();
+
+        List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
+            "EXPLAIN SELECT id FROM robots WHERE year = 2024");
+
+        string? detail = ScanNodeDetail(rows);
+        Assert.IsNotNull(detail, "EXPLAIN must include an index scan node");
+        Assert.That(detail, Does.Not.Contain("index-only=true"),
+            "EXPLAIN detail must NOT advertise index-only=true when the id column is selected");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Explain_IndexOnly_False_WhenNonIndexedColumnRequired()
+    {
+        // SELECT name, enabled FROM robots WHERE year = 2024
+        // year_idx does not cover "enabled" — not a covering scan.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsWithYearAndNameIndex();
+
+        List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
+            "EXPLAIN SELECT name, enabled FROM robots WHERE year = 2024");
+
+        string? detail = ScanNodeDetail(rows);
+        Assert.IsNotNull(detail, "EXPLAIN must include an index scan node");
+        Assert.That(detail, Does.Not.Contain("index-only=true"),
+            "EXPLAIN detail must NOT contain index-only=true when a required column is outside the index");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Explain_IndexOnly_False_ForSelectStar()
+    {
+        // SELECT * — ScanRequiredColumns is null; never covering.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsWithYearAndNameIndex();
+
+        List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
+            "EXPLAIN SELECT * FROM robots WHERE year = 2024");
+
+        string? detail = ScanNodeDetail(rows);
+        Assert.IsNotNull(detail, "EXPLAIN must include an index scan node");
+        Assert.That(detail, Does.Not.Contain("index-only=true"),
+            "EXPLAIN detail must NOT contain index-only=true for SELECT *");
+    }
+
     // ── Cache-eligibility row ─────────────────────────────────────────────────
 
     private static string? CacheDetail(List<QueryResultRow> rows)

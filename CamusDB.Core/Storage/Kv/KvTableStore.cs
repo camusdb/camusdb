@@ -544,6 +544,137 @@ public sealed class KvTableStore
     }
 
     /// <summary>
+    /// Batch point-read for a list of row ids. Returns one <c>byte[]?</c> per input id in the
+    /// same order: non-null = the raw serialized row bytes; null = row not found (index entry
+    /// points at an absent or deleted row — callers must warn-and-skip).
+    ///
+    /// The batch is issued as a single <c>LocateAndTryGetManyValues</c> call so all N ids are
+    /// resolved in one Kahuna round-trip instead of N sequential <see cref="GetRow"/> calls.
+    /// The transaction's <see cref="KvTransaction.ReadTimestamp"/> is forwarded so every fetch
+    /// reads at the same snapshot as the index scan that produced the ids (required for
+    /// Serializable and promoted read-only transactions — mirrors the single-key path in
+    /// <see cref="GetRow"/>).
+    ///
+    /// Branch ancestry: when the store has ancestor levels (database branching), ids that are
+    /// absent or tombstoned at level-0 are walked through the ancestry chain individually, the
+    /// same way <see cref="GetRow"/> does. This keeps correctness identical to the per-row path
+    /// at the cost of one extra call per missing id — a rare case on branch reads.
+    ///
+    /// This is a read-only operation: no locks are acquired, and no keys are tracked as
+    /// modified. Serializable read-write callers that need shared point locks must use
+    /// <see cref="GetRow"/> per entry.
+    /// </summary>
+    public async Task<byte[]?[]> GetRowsBatch(
+        KvTransaction tx,
+        IReadOnlyList<ObjectIdValue> rowIds,
+        CancellationToken cancellationToken = default)
+    {
+        if (rowIds.Count == 0)
+            return [];
+
+        // Build the Kahuna key list in input order.
+        List<(string key, long revision, KeyValueDurability durability)> keys = new(rowIds.Count);
+        for (int i = 0; i < rowIds.Count; i++)
+            keys.Add((BuildRowKey(rowIds[i]), -1, KeyValueDurability.Persistent));
+
+        // LocateAndTryGetManyValues fans keys out across leader nodes and returns results in
+        // leader-group order, not input order. Build a key→result map and look up by key, not
+        // by position, to avoid output[i] receiving another row's bytes in cluster mode.
+        //
+        // MustRetry/WaitingForReplication mean a partition is not yet ready; mirror ProbeRaw's
+        // retry loop by retrying only the affected subset with exponential back-off, up to
+        // MaxKahunaRetries. A persistent non-terminal response throws TransactionMustRetry so
+        // the caller can restart the whole operation from BeginAsync — the same contract as the
+        // single-key path.
+        Dictionary<string, (KeyValueResponseType responseType, ReadOnlyKeyValueEntry? entry)> byKey =
+            new(keys.Count, StringComparer.Ordinal);
+
+        List<(string key, long revision, KeyValueDurability durability)> pending = keys;
+        int retries = 0;
+
+        while (pending.Count > 0)
+        {
+            List<(KeyValueResponseType responseType, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> results =
+                await kahuna.LocateAndTryGetManyValues(tx.TransactionId, tx.ReadTimestamp, pending, cancellationToken)
+                            .ConfigureAwait(false);
+
+            List<(string key, long revision, KeyValueDurability durability)>? nextPending = null;
+
+            foreach ((KeyValueResponseType responseType, string key, _, ReadOnlyKeyValueEntry? entry) in results)
+            {
+                if (responseType == KeyValueResponseType.Aborted)
+                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                        $"Batch read of key {key} was aborted by Kahuna — retry the operation from BeginAsync");
+
+                if (responseType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                {
+                    nextPending ??= [];
+                    nextPending.Add((key, -1, KeyValueDurability.Persistent));
+                    continue;
+                }
+
+                byKey[key] = (responseType, entry);
+            }
+
+            if (nextPending is null)
+                break;
+
+            if (++retries >= MaxKahunaRetries)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                    $"Batch read was not ready after {MaxKahunaRetries} retries — retry the operation from BeginAsync");
+
+            await Task.Delay(RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
+            pending = nextPending;
+        }
+
+        byte[]?[] output = new byte[]?[rowIds.Count];
+
+        for (int i = 0; i < rowIds.Count; i++)
+        {
+            string rowKey = keys[i].key;
+
+            byte[]? payload = null;
+            BranchKvKind kind = BranchKvKind.Value;
+
+            if (byKey.TryGetValue(rowKey, out (KeyValueResponseType responseType, ReadOnlyKeyValueEntry? entry) res)
+                && res.responseType == KeyValueResponseType.Get
+                && res.entry is not null)
+            {
+                (kind, payload) = BranchKvCodec.Decode(res.entry.Value);
+            }
+
+            if (kind == BranchKvKind.Tombstone)
+            {
+                output[i] = null;
+                continue;
+            }
+
+            if (payload is not null)
+            {
+                output[i] = payload;
+                continue;
+            }
+
+            // Miss at level-0: walk ancestry levels individually (uncommon on branch databases).
+            if (ancestorStores.Length > 0)
+            {
+                foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
+                {
+                    BranchMetrics.RecordAncestorProbe();
+                    string ancestorKey = ancestorStore.BuildRowKey(rowIds[i]);
+                    (kind, payload) = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKey, cancellationToken).ConfigureAwait(false);
+                    if (kind == BranchKvKind.Tombstone) break;
+                    if (payload is not null) break;
+                }
+            }
+
+            output[i] = payload;
+        }
+
+        return output;
+    }
+
+    /// <summary>
     /// Full table scan. Yields every (rowId, rowBytes) pair in ascending rowId order
     /// (ObjectId hex is time-ordered and fixed-width so natural KV order is correct).
     ///
