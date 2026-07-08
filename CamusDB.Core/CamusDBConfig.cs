@@ -461,6 +461,21 @@ public static class CamusDBConfig
     public const int DefaultBytesMaxLength = 10_485_760;
 
     /// <summary>
+    /// Number of row ids buffered from a non-covering secondary-index scan before issuing one
+    /// <c>GetRowsBatch</c> call. Batching collapses N sequential Kahuna actor round-trips into
+    /// one per page, keeping primary-row fetches snapshot-consistent with the scan via the
+    /// transaction's <c>ReadTimestamp</c>.
+    ///
+    /// <para>Increasing this value reduces the number of batch calls (fewer round-trips) at the
+    /// cost of buffering more ids and deferring the first decoded row further from the first
+    /// index entry seen. Decreasing it reduces latency for the first result but increases the
+    /// per-batch call overhead. A value of 1 degrades to per-entry fetching (no batching).</para>
+    ///
+    /// Default: <c>64</c>.
+    /// </summary>
+    public static int IndexScanFetchBatchSize = 64;
+
+    /// <summary>
     /// Enables per-lock-acquisition debug log lines (<c>LogLevel.Debug</c>). When <c>false</c>
     /// (default), no lock-trace messages are emitted regardless of the host logging configuration.
     /// Enable only for targeted diagnostics — a busy workload emits one line per lock acquired.

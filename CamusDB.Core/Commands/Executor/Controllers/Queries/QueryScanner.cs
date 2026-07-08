@@ -155,9 +155,36 @@ internal sealed class QueryScanner
             yield break;
         }
 
-        // Non-covering path: fetch the primary row for each matched index entry.
-        // Per-scan layout cache: one entry per stored schema version (constant for a scan).
+        // Non-covering path: collect row ids in pages and fetch each page in one batch call.
+        // Index order is preserved: the page is filled in scan order and batch results are
+        // indexed positionally, so rows are decoded and yielded in scan order. Missing rows
+        // (null bytes from the batch) preserve the warn-and-skip contract of the per-entry path.
         Dictionary<int, RowLayout> layoutCache = new();
+        int batchSize = CamusDBConfig.IndexScanFetchBatchSize;
+        List<ObjectIdValue> pageBuf = new(batchSize);
+
+        // Fetch and decode one buffered page; yields rows in the order they appear in the page.
+        async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
+        {
+            byte[]?[] batchResult = await table.Store.GetRowsBatch(ticket.TxnState, page).ConfigureAwait(false);
+            for (int i = 0; i < page.Count; i++)
+            {
+                ObjectIdValue batchRowId = page[i];
+                byte[]? data = batchResult[i];
+                if (data is null || data.Length == 0)
+                {
+                    logger.LogWarning("Row {RowId} found in index {IndexName} but data is missing in table {TableName}", batchRowId, index.Name, table.Name);
+                    continue;
+                }
+                deps?.RecordPoint(table.Store.RowPointKey(batchRowId));
+                if (scanStats is not null) scanStats.RowsRead++;
+                QueryRow queryRow = await RowEncoder.DecodeToQueryRowAsync(
+                    table.Schema, txId, batchRowId, data,
+                    plan.ScanRequiredColumns, visibilityVersion, layoutCache).ConfigureAwait(false);
+                if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
+                    yield return new QueryResultRow(batchRowId, queryRow);
+            }
+        }
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             ticket.TxnState,
@@ -173,31 +200,21 @@ internal sealed class QueryScanner
             if (scanStats is not null)
                 scanStats.KvScanEntries++;
 
-            byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId).ConfigureAwait(false);
-            if (data is null || data.Length == 0)
-            {
-                logger.LogWarning("Row {RowId} found in index {IndexName} but data is missing in table {TableName}", rowId, index.Name, table.Name);
+            pageBuf.Add(rowId);
+
+            if (pageBuf.Count < batchSize)
                 continue;
-            }
 
-            // Record the row point dep — catches updates to non-indexed projected columns.
-            deps?.RecordPoint(table.Store.RowPointKey(rowId));
-
-            if (scanStats is not null)
-                scanStats.RowsRead++;
-
-            QueryRow queryRow = await RowEncoder.DecodeToQueryRowAsync(
-                table.Schema,
-                txId,
-                rowId,
-                data,
-                plan.ScanRequiredColumns,
-                visibilityVersion,
-                layoutCache).ConfigureAwait(false);
-
-            if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
-                yield return new QueryResultRow(rowId, queryRow);
+            // Page full — flush, then reset for the next page.
+            await foreach (QueryResultRow r in flushPageAsync(pageBuf))
+                yield return r;
+            pageBuf.Clear();
         }
+
+        // Flush the remaining partial page (skipped when the scan yielded a full multiple of batchSize).
+        if (pageBuf.Count > 0)
+            await foreach (QueryResultRow r in flushPageAsync(pageBuf))
+                yield return r;
     }
 
     /// <summary>

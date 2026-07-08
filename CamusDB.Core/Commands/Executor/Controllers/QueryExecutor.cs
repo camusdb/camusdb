@@ -732,6 +732,32 @@ internal sealed class QueryExecutor
             yield break;
         }
 
+        // Non-covering path: buffer row ids per page and fetch in one batch call per page.
+        // Index order is preserved: the page is filled in scan order and batch results are
+        // indexed positionally, so rows are decoded and yielded in scan order. A missing row
+        // (null from the batch) is silently skipped — the same contract as the per-entry path.
+        int batchSize = CamusDBConfig.IndexScanFetchBatchSize;
+        List<ObjectIdValue> pageBuf = new(batchSize);
+
+        async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
+        {
+            byte[]?[] batchResult = await table.Store.GetRowsBatch(ticket.TxnState, page).ConfigureAwait(false);
+            for (int i = 0; i < page.Count; i++)
+            {
+                ObjectIdValue batchRowId = page[i];
+                byte[]? data = batchResult[i];
+                if (data is null || data.Length == 0)
+                    continue;
+                deps?.RecordPoint(table.Store.RowPointKey(batchRowId));
+                if (scanStats is not null) scanStats.RowsRead++;
+                Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                    table.Schema, txId, batchRowId, data,
+                    plan.ScanRequiredColumns, plan.TableSchemaVersion).ConfigureAwait(false);
+                if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
+                    yield return new(batchRowId, row);
+            }
+        }
+
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
             ticket.TxnState,
             index.KvId,
@@ -746,26 +772,19 @@ internal sealed class QueryExecutor
             if (scanStats is not null)
                 scanStats.KvScanEntries++;
 
-            byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId).ConfigureAwait(false);
-            if (data is null || data.Length == 0)
+            pageBuf.Add(rowId);
+
+            if (pageBuf.Count < batchSize)
                 continue;
 
-            deps?.RecordPoint(table.Store.RowPointKey(rowId));
-
-            if (scanStats is not null)
-                scanStats.RowsRead++;
-
-            Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
-                table.Schema,
-                txId,
-                rowId,
-                data,
-                plan.ScanRequiredColumns,
-                plan.TableSchemaVersion).ConfigureAwait(false);
-
-            if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
-                yield return new(rowId, row);
+            await foreach (QueryResultRow r in flushPageAsync(pageBuf))
+                yield return r;
+            pageBuf.Clear();
         }
+
+        if (pageBuf.Count > 0)
+            await foreach (QueryResultRow r in flushPageAsync(pageBuf))
+                yield return r;
     }
 
     private IAsyncEnumerable<QueryResultRow> QueryUsingInListIndex(QueryPlan plan, IndexInListScanNode inListNode)
