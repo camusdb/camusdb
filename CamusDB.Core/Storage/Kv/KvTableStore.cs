@@ -1514,6 +1514,197 @@ public sealed class KvTableStore
     }
 
     // -----------------------------------------------------------------------
+    // Batched update path (mass UPDATE)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// A single row update: the new row data plus index entries to remove (old) and to add (new).
+    /// Only entries whose indexed columns actually changed should be included; unchanged entries
+    /// are intentionally omitted so the batch skips needless delete+put round-trips and avoids
+    /// the branch tombstone-replace correctness trap (see <see cref="UpdateRowsBatch"/>).
+    /// </summary>
+    public sealed class RowUpdate
+    {
+        public required ObjectIdValue RowId { get; init; }
+        public required byte[] NewRowData { get; init; }
+
+        /// <summary>Old secondary-index entries to remove (only for changed keys).</summary>
+        public List<IndexDelete> OldIndexEntries { get; } = [];
+
+        /// <summary>New secondary-index entries to put (only for changed keys).</summary>
+        public List<IndexWrite> NewIndexEntries { get; } = [];
+    }
+
+    /// <summary>
+    /// Updates many rows (and their changed secondary-index entries) using two Kahuna round-trips
+    /// per chunk — one <see cref="IKahuna.LocateAndTryAcquireManyExclusiveLocks"/> and one (or two
+    /// for root databases with old-index deletes) <see cref="IKahuna.LocateAndTrySetManyKeyValue"/>
+    /// — instead of one acquire+delete/set per key.
+    ///
+    /// <para>For root databases: old index entries are physically deleted via
+    /// <see cref="IKahuna.LocateAndTryDeleteManyKeyValue"/> then row blobs and new index entries
+    /// are written via <see cref="IKahuna.LocateAndTrySetManyKeyValue"/>.</para>
+    ///
+    /// <para>For branch databases: old entries receive a tombstone (same reasoning as
+    /// <see cref="DeleteRowsBatch"/>), row blobs and non-unique new entries are written in a
+    /// batch, and unique new entries are written individually via
+    /// <see cref="ResolveBranchUniqueFlagsAsync"/> (post-lock ancestry probe).</para>
+    ///
+    /// <para>Unique-index semantics: new unique entries use <c>SetIfNotExists</c>; a
+    /// <c>NotSet</c> result surfaces <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>.
+    /// Within-batch uniqueness is checked up front (duplicate new unique key → immediate error).
+    /// NULL-distinct semantics are the caller's responsibility: entries with NULL key columns
+    /// must not be included in either <see cref="RowUpdate.OldIndexEntries"/> or
+    /// <see cref="RowUpdate.NewIndexEntries"/>.</para>
+    ///
+    /// <para>Lock keys are deduplicated before acquisition so that a key appearing as both an
+    /// old entry for one row and a new entry for another row within the same batch is only locked
+    /// once, avoiding a false <c>AlreadyLocked</c> from Kahuna on repeated lock requests.</para>
+    /// </summary>
+    public async Task UpdateRowsBatch(KvTransaction tx, IReadOnlyList<RowUpdate> rows, CancellationToken cancellationToken = default)
+    {
+        if (rows.Count == 0)
+            return;
+
+        bool isBranch = ancestorStores.Length > 0;
+
+        // Collect lock keys (deduplicated), delete items (old index entries for root),
+        // set items (row blob + new index entries for root), and the within-batch
+        // unique-new-key guard.
+        HashSet<string> seenLockKeys = new(StringComparer.Ordinal);
+        List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys = [];
+        List<KahunaSetKeyValueRequestItem> setItems = [];          // row + new index
+        List<KahunaDeleteKeyValueRequestItem> deleteItems = [];    // old index (root only)
+        Dictionary<string, bool> uniqueByKey = new();             // root only
+        HashSet<string> seenUniqueNew = [];                        // within-batch new unique guard
+
+        void AddLockKey(string key)
+        {
+            if (seenLockKeys.Add(key))
+                lockKeys.Add((key, 0, KeyValueDurability.Persistent));
+        }
+
+        foreach (RowUpdate row in rows)
+        {
+            string rowKey = BuildRowKey(row.RowId);
+            byte[] rowValue = BranchKvCodec.EncodeValue(row.NewRowData);
+            AddLockKey(rowKey);
+
+            if (!isBranch)
+            {
+                uniqueByKey[rowKey] = false;
+                setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+            }
+
+            foreach (IndexDelete old in row.OldIndexEntries)
+            {
+                string kvKey = old.Unique
+                    ? BuildUniqueIndexKey(old.IndexId, old.Key)
+                    : BuildNonUniqueIndexKey(old.IndexId, old.Key, old.RowId);
+                AddLockKey(kvKey);
+
+                if (!isBranch)
+                    deleteItems.Add(new KahunaDeleteKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Durability = KeyValueDurability.Persistent });
+            }
+
+            foreach (IndexWrite newIx in row.NewIndexEntries)
+            {
+                string kvKey = newIx.Unique
+                    ? BuildUniqueIndexKey(newIx.IndexId, newIx.Key)
+                    : BuildNonUniqueIndexKey(newIx.IndexId, newIx.Key, row.RowId);
+
+                if (newIx.Unique && !seenUniqueNew.Add(kvKey))
+                    throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(newIx.IndexId)}'");
+
+                AddLockKey(kvKey);
+
+                if (!isBranch)
+                {
+                    uniqueByKey[kvKey] = newIx.Unique;
+                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(row.RowId.ToString())), CompareValue = null, CompareRevision = -1, Flags = newIx.Unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                }
+            }
+        }
+
+        tx.ReserveMutations(lockKeys.Count);
+
+        // Phase 1 — acquire every exclusive lock in one round-trip.
+        await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
+
+        if (!isBranch)
+        {
+            // Phase 2a (root) — physically delete old index entries.
+            await DeleteManyWithRetry(deleteItems, cancellationToken).ConfigureAwait(false);
+
+            // Phase 2b (root) — write row blobs and new index entries.
+            await SetManyWithRetry(setItems, uniqueByKey, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            // Phase 2 (branch) — tombstone old entries; write row blobs and non-unique new
+            // entries in a batch; handle unique new entries individually (post-lock ancestry probe).
+            List<KahunaSetKeyValueRequestItem> batchItems = [];
+            Dictionary<string, bool> batchByKey = new();
+
+            foreach (RowUpdate row in rows)
+            {
+                string rowKey = BuildRowKey(row.RowId);
+                byte[] rowValue = BranchKvCodec.EncodeValue(row.NewRowData);
+                batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                batchByKey[rowKey] = false;
+
+                foreach (IndexDelete old in row.OldIndexEntries)
+                {
+                    string kvKey = old.Unique
+                        ? BuildUniqueIndexKey(old.IndexId, old.Key)
+                        : BuildNonUniqueIndexKey(old.IndexId, old.Key, old.RowId);
+                    batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeTombstone(), CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                    batchByKey[kvKey] = false;
+                }
+
+                foreach (IndexWrite newIx in row.NewIndexEntries)
+                {
+                    string kvKey = newIx.Unique
+                        ? BuildUniqueIndexKey(newIx.IndexId, newIx.Key)
+                        : BuildNonUniqueIndexKey(newIx.IndexId, newIx.Key, row.RowId);
+                    byte[] value = BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(row.RowId.ToString()));
+
+                    if (!newIx.Unique)
+                    {
+                        batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = value, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                        batchByKey[kvKey] = false;
+                    }
+                    else
+                    {
+                        KeyValueFlags flags = await ResolveBranchUniqueFlagsAsync(
+                            tx, newIx.IndexId, newIx.Key, kvKey, row.RowId, cancellationToken).ConfigureAwait(false);
+
+                        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
+                            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken),
+                            cancellationToken
+                        ).ConfigureAwait(false);
+
+                        if (type == KeyValueResponseType.NotSet)
+                            throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(newIx.IndexId)}'");
+                        if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.Aborted)
+                            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {kvKey}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
+                        if (type is not (KeyValueResponseType.Set or KeyValueResponseType.NotSet))
+                            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch update failed for branch unique key {kvKey}: {type}");
+
+                        tx.TrackModified(kvKey, KeyValueDurability.Persistent);
+                    }
+                }
+            }
+
+            await SetManyWithRetry(batchItems, batchByKey, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Track all modified keys for 2PC commit. Locks were already tracked inside AcquireManyWithRetry.
+        foreach ((string key, _, _) in lockKeys)
+            tx.TrackModified(key, KeyValueDurability.Persistent);
+    }
+
+    // -----------------------------------------------------------------------
     // Batched delete path (mass delete / drop index / drop table)
     // -----------------------------------------------------------------------
 

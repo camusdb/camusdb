@@ -377,9 +377,12 @@ public sealed class TestSerializableAnomalies : SharedNodeBaseTest
     //   Under Serializable the S→X upgrade conflict aborts one transaction.
     //
     // Mechanism: TxA reads alice (S lock on alice's row). TxB reads alice (S lock, S∩S fine).
-    // TxA's UPDATE alice needs to upgrade S→X on alice's row — TxB holds S → AlreadyLocked →
-    // TxA gets TransactionConflict. TxA aborts. TxB can then update bob (its S lock on bob
-    // has no competitor once TxA is gone) and commit. Final: alice=100, bob=-50, total=50 >= 0.
+    // TxA's UPDATE alice needs to upgrade S→X on alice's row — TxB holds S, so the upgrade is
+    // refused and surfaces as a serialization conflict (the batched write path reports it as
+    // TransactionMustRetry after exhausting its bounded lock-wait; the single-key path reports it
+    // as TransactionConflict — both are the same retryable conflict class). TxA aborts. TxB can
+    // then update bob (its S lock on bob has no competitor once TxA is gone) and commit.
+    // Final: alice=100, bob=-50, total=50 >= 0.
     // -----------------------------------------------------------------------
 
     [Test]
@@ -405,8 +408,11 @@ public sealed class TestSerializableAnomalies : SharedNodeBaseTest
         // TxA tries to update alice: S→X upgrade on alice's row — but TxB holds S on alice.
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             () => UpdateBalanceAsync(dbname, executor, txA, aliceId, -50L));
-        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex?.Code,
-            "TxA's write to alice must fail with TransactionConflict because TxB holds a shared lock on alice");
+        // S→X upgrade against a foreign shared lock surfaces as a retryable serialization conflict.
+        // The batched write path reports TransactionMustRetry (bounded lock-wait exhausted); the
+        // single-key path reports TransactionConflict. Both belong to the retryable conflict class.
+        Assert.That(ex?.Code, Is.AnyOf(CamusDBErrorCodes.TransactionConflict, CamusDBErrorCodes.TransactionMustRetry),
+            "TxA's write to alice must fail with a serialization conflict because TxB holds a shared lock on alice");
 
         await db.Transactions.RollbackAsync(txA);
 
@@ -430,8 +436,9 @@ public sealed class TestSerializableAnomalies : SharedNodeBaseTest
     // 7. Serializable+RW prevents lost updates
     //
     // Both TxA and TxB read K=100 (S point locks acquired).
-    // TxA tries to write K=999 → S→X upgrade conflict with TxB's S lock → TransactionConflict.
-    // TxA aborts. TxB writes K=999 successfully.
+    // TxA tries to write K=999 → S→X upgrade conflict with TxB's S lock → a retryable
+    // serialization conflict (TransactionMustRetry via the batched write path, or
+    // TransactionConflict via the single-key path). TxA aborts. TxB writes K=999 successfully.
     // Under Read Committed both might see 100 and write 999, but the "lost update"
     // scenario with increments (both read 100, both increment by 1 → result should be 102
     // but RC gives 101) is prevented: one writer aborts, the other's effect is preserved.
@@ -457,7 +464,10 @@ public sealed class TestSerializableAnomalies : SharedNodeBaseTest
         // TxA tries to write: S→X upgrade blocked by TxB's S on alice's row.
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             () => UpdateBalanceAsync(dbname, executor, txA, aliceId, 999L));
-        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex?.Code,
+        // The upgrade conflict surfaces as a retryable serialization conflict: TransactionMustRetry
+        // from the batched write path (bounded lock-wait exhausted) or TransactionConflict from the
+        // single-key path. Both are in the retryable conflict class the autocommit helper retries on.
+        Assert.That(ex?.Code, Is.AnyOf(CamusDBErrorCodes.TransactionConflict, CamusDBErrorCodes.TransactionMustRetry),
             "Lost-update write must fail: TxA cannot upgrade its S lock while TxB holds S on the same row");
 
         await db.Transactions.RollbackAsync(txA);

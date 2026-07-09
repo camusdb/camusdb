@@ -196,9 +196,9 @@ public sealed class RowUpdater
 
         // Restrict scan-time decode to columns needed by the WHERE filter and any
         // expression-based SET values (e.g. SET col = old_col + 1). Rejected candidates
-        // are only partially decoded. The write phase re-reads and fully decodes each
-        // matched row via LoadWritableRow before applying the change.
-        // Returns null when the WHERE contains subquery nodes — fall back to full decode.
+        // are only partially decoded. The write phase batch-loads full rows from raw bytes
+        // and decodes them. Returns null when the WHERE contains subquery nodes — fall back
+        // to full decode.
         IReadOnlySet<string>? locateColumns = RequiredColumnAnalyzer.ComputeForLocate(
             ticket.Where, ticket.Filters, ticket.ExprValues);
 
@@ -348,121 +348,129 @@ public sealed class RowUpdater
         UpdateTicket ticket = state.Ticket;
         KvTransaction tx = ticket.TxnState;
 
+        // Drain the matched-row buffer in bounded chunks so the heap retains at most chunkSize
+        // writable rows and their index mutation sets simultaneously. Mirrors the delete path.
+        int chunkSize = CamusDBConfig.SpillEffectiveThreshold;
+        List<QueryResultRow> chunkRows = new(Math.Min(chunkSize, 64));
+
         await foreach (QueryResultRow queryRow in state.RowsToUpdate.EnumerateAsync().ConfigureAwait(false))
         {
-            ObjectIdValue rowId = queryRow.RowId;
-            Dictionary<string, ColumnValue> oldRow = await LoadWritableRow(state.Database, table, tx, rowId).ConfigureAwait(false);
-            Dictionary<string, ColumnValue> rowValues = GetNewUpdatedRow(oldRow, queryRow, ticket);
+            chunkRows.Add(queryRow);
 
-            CoerceRowValues(table, rowValues);
-
-            CheckForNotNulls(table, rowValues);
-
-            byte[] buffer = RowEncoder.Encode(table.Schema, rowValues, rowId);
-
-            await table.Store.UpdateRow(tx, rowId, buffer).ConfigureAwait(false);
-
-            await UpdateUniqueIndexes(table, tx, rowId, oldRow, rowValues).ConfigureAwait(false);
-
-            await UpdateMultiIndexes(table, tx, rowId, oldRow, rowValues).ConfigureAwait(false);
-
-            Log.LogRowUpdated(logger, rowId);
-
-            state.ModifiedRows++;
+            if (chunkRows.Count >= chunkSize)
+            {
+                await FlushUpdateChunk(table, tx, ticket, chunkRows, state).ConfigureAwait(false);
+                chunkRows.Clear();
+            }
         }
+
+        if (chunkRows.Count > 0)
+            await FlushUpdateChunk(table, tx, ticket, chunkRows, state).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
 
-    private static async Task<Dictionary<string, ColumnValue>> LoadWritableRow(
-        DatabaseDescriptor database,
+    private async Task FlushUpdateChunk(
         TableDescriptor table,
         KvTransaction tx,
-        ObjectIdValue rowId
-    )
+        UpdateTicket ticket,
+        List<QueryResultRow> chunkRows,
+        UpdateFluxState state)
     {
-        byte[]? data = await table.Store.GetRow(tx, rowId).ConfigureAwait(false);
-        if (data is null || data.Length == 0)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before update");
+        // Batch-load raw row bytes for the whole chunk in one Kahuna round-trip.
+        List<ObjectIdValue> rowIds = chunkRows.Select(r => r.RowId).ToList();
+        byte[]?[] rawRows = await table.Store.GetRowsBatch(tx, rowIds).ConfigureAwait(false);
 
-        return await RowEncoder.DecodeWritableAsync(
-            table.Schema,
-            tx.TransactionId,
-            rowId,
-            data,
-            visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
-    }
+        List<KvTableStore.RowUpdate> batch = new(chunkRows.Count);
 
-    private static async Task UpdateUniqueIndexes(
-        TableDescriptor table,
-        KvTransaction tx,
-        ObjectIdValue rowId,
-        Dictionary<string, ColumnValue> oldRow,
-        Dictionary<string, ColumnValue> newRow
-    )
-    {
-        foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
+        for (int i = 0; i < chunkRows.Count; i++)
         {
-            TableIndexSchema index = kv.Value;
+            QueryResultRow queryRow = chunkRows[i];
+            ObjectIdValue rowId = queryRow.RowId;
+            byte[]? rawData = rawRows[i];
 
-            if (index.Type != IndexType.Unique || !SchemaElementStateRules.IsWritableIndex(table.Schema, index))
-                continue;
+            if (rawData is null || rawData.Length == 0)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before update");
 
-            // NULLs are distinct: a row with a NULL (or absent) value in any indexed column has no
-            // unique index entry. So only delete the old entry if the old row had one, and only put
-            // the new entry if the new row qualifies (value->NULL removes it, NULL->value adds it).
-            bool oldHasKey = !HasNullKeyColumn(oldRow, index.Columns);
-            bool newHasKey = !HasNullKeyColumn(newRow, index.Columns);
+            Dictionary<string, ColumnValue> oldRow = await RowEncoder.DecodeWritableAsync(
+                table.Schema, tx.TransactionId, rowId, rawData,
+                visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
 
-            CompositeColumnValue? oldKey = oldHasKey ? GetColumnValue(oldRow, index.Columns) : null;
-            CompositeColumnValue? newKey = newHasKey ? GetColumnValue(newRow, index.Columns) : null;
+            Dictionary<string, ColumnValue> newRow = GetNewUpdatedRow(oldRow, queryRow, ticket);
 
-            // When the indexed columns are unchanged, skip the delete+insert cycle. On a root this
-            // avoids a needless round-trip; on a branch it is required for correctness: the delete
-            // writes a tombstone and a subsequent SetIfNotExists on the same key would hit that
-            // tombstone and incorrectly throw DuplicateUniqueKeyValue (tombstone-replace for
-            // in-place unique updates is not yet supported). The inherited index entry already
-            // points to the correct rowId, and the row fetch returns the branch-local value via
-            // the branch-aware read path.
-            if (oldHasKey && newHasKey && oldKey!.CompareTo(newKey!) == 0)
-                continue;
+            CoerceRowValues(table, newRow);
+            CheckForNotNulls(table, newRow);
 
-            if (oldHasKey)
-                await table.Store.DeleteIndexEntry(tx, index.KvId, oldKey!, rowId, unique: true).ConfigureAwait(false);
+            byte[] newData = RowEncoder.Encode(table.Schema, newRow, rowId);
 
-            if (newHasKey)
-                await table.Store.PutIndexEntry(tx, index.KvId, newKey!, rowId, unique: true).ConfigureAwait(false);
+            KvTableStore.RowUpdate rowUpdate = new() { RowId = rowId, NewRowData = newData };
+            CollectIndexUpdates(table, rowId, oldRow, newRow, rowUpdate);
+            batch.Add(rowUpdate);
         }
+
+        await table.Store.UpdateRowsBatch(tx, batch).ConfigureAwait(false);
+
+        state.ModifiedRows += batch.Count;
+
+        foreach (KvTableStore.RowUpdate row in batch)
+            Log.LogRowUpdated(logger, row.RowId);
     }
 
-    private static async Task UpdateMultiIndexes(
+    private static void CollectIndexUpdates(
         TableDescriptor table,
-        KvTransaction tx,
         ObjectIdValue rowId,
         Dictionary<string, ColumnValue> oldRow,
-        Dictionary<string, ColumnValue> newRow
-    )
+        Dictionary<string, ColumnValue> newRow,
+        KvTableStore.RowUpdate rowUpdate)
     {
         foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
         {
             TableIndexSchema index = kv.Value;
 
-            if (index.Type != IndexType.Multi || !SchemaElementStateRules.IsWritableIndex(table.Schema, index))
+            if (!SchemaElementStateRules.IsWritableIndex(table.Schema, index))
                 continue;
 
-            ColumnValue rowIdValue = new(ColumnType.Id, rowId.ToString());
+            if (index.Type == IndexType.Unique)
+            {
+                // NULLs are distinct: a row with a NULL (or absent) value in any indexed column has no
+                // unique index entry. So only delete the old entry if the old row had one, and only put
+                // the new entry if the new row qualifies (value->NULL removes it, NULL->value adds it).
+                bool oldHasKey = !HasNullKeyColumn(oldRow, index.Columns);
+                bool newHasKey = !HasNullKeyColumn(newRow, index.Columns);
 
-            CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns, rowIdValue);
-            CompositeColumnValue newKey = GetColumnValue(newRow, index.Columns, rowIdValue);
+                CompositeColumnValue? oldKey = oldHasKey ? GetColumnValue(oldRow, index.Columns) : null;
+                CompositeColumnValue? newKey = newHasKey ? GetColumnValue(newRow, index.Columns) : null;
 
-            // Skip unchanged entries — same correctness requirement as UpdateUniqueIndexes above.
-            // For non-unique indexes the tombstone+Set cycle would result in a wasted write pair;
-            // the inherited entry already carries the correct rowId for the unchanged key.
-            if (oldKey.CompareTo(newKey) == 0)
-                continue;
+                // When the indexed columns are unchanged, skip the delete+insert cycle. On a root this
+                // avoids a needless round-trip; on a branch it is required for correctness: the delete
+                // writes a tombstone and a subsequent SetIfNotExists on the same key would hit that
+                // tombstone and incorrectly throw DuplicateUniqueKeyValue (tombstone-replace for
+                // in-place unique updates is not yet supported). The inherited index entry already
+                // points to the correct rowId, and the row fetch returns the branch-local value via
+                // the branch-aware read path.
+                if (oldHasKey && newHasKey && oldKey!.CompareTo(newKey!) == 0)
+                    continue;
 
-            await table.Store.DeleteIndexEntry(tx, index.KvId, oldKey, rowId, unique: false).ConfigureAwait(false);
-            await table.Store.PutIndexEntry(tx, index.KvId, newKey, rowId, unique: false).ConfigureAwait(false);
+                if (oldHasKey)
+                    rowUpdate.OldIndexEntries.Add(new KvTableStore.IndexDelete(index.KvId, oldKey!, rowId, Unique: true));
+
+                if (newHasKey)
+                    rowUpdate.NewIndexEntries.Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true));
+            }
+            else if (index.Type == IndexType.Multi)
+            {
+                ColumnValue rowIdValue = new(ColumnType.Id, rowId.ToString());
+
+                CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns, rowIdValue);
+                CompositeColumnValue newKey = GetColumnValue(newRow, index.Columns, rowIdValue);
+
+                // Skip unchanged entries — same correctness requirement as the unique index case above.
+                if (oldKey.CompareTo(newKey) == 0)
+                    continue;
+
+                rowUpdate.OldIndexEntries.Add(new KvTableStore.IndexDelete(index.KvId, oldKey, rowId, Unique: false));
+                rowUpdate.NewIndexEntries.Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false));
+            }
         }
     }
 
