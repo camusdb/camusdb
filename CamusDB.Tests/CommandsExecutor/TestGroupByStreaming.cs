@@ -22,9 +22,9 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Verifies GROUP BY streaming aggregation (EP2.2): when an index scan guarantees that all rows
-/// of the same group key are adjacent, the planner marks <c>AggregateNode.IsStreamingGroupBy</c>
-/// and the executor routes to the O(1)-memory streaming path instead of the hash dictionary.
+/// Verifies GROUP BY streaming aggregation: when an index scan guarantees that all rows of the
+/// same group key are adjacent, the planner marks <c>AggregateNode.IsStreamingGroupBy</c> and
+/// the executor routes to the O(1)-memory streaming path instead of the hash dictionary.
 ///
 /// Test surface:
 ///   A. Plan shape — EXPLAIN shows "streaming: true" only when an index scan covers the GROUP BY column.

@@ -776,6 +776,44 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// An INSERT that names the same column twice in the explicit target list must be rejected
+    /// before any row is written. Using StringComparer.Ordinal: (name, name) is a duplicate,
+    /// but (name, NAME) is not — they are distinct column references.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestInsertDuplicateTargetColumn_ThrowsAndInsertsNoRow()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        KvTransaction txDDL = await database.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new(txDDL, dbname,
+            "CREATE TABLE items (id OID NOT NULL PRIMARY KEY, name STRING NOT NULL, value INT NOT NULL)",
+            null));
+        await database.Transactions.CommitAsync(txDDL);
+
+        KvTransaction txIns = await database.Transactions.BeginAsync();
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ExecuteNonSQLQuery(new(txIns, dbname,
+                "INSERT INTO items (id, name, name) VALUES (gen_id(), \"foo\", \"bar\")", null)));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code,
+            "A duplicate target column must throw InvalidInput");
+        Assert.IsTrue(ex.Message.Contains("name"), "Error message should identify the repeated column");
+
+        await database.Transactions.RollbackAsync(txIns);
+
+        // No row must have been inserted.
+        KvTransaction txQ = await database.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txQ, dbname, "SELECT id FROM items", null));
+        int count = (await cursor.ToListAsync()).Count;
+        await database.Transactions.CommitAsync(txQ);
+
+        Assert.AreEqual(0, count, "No row must survive after a rejected duplicate-column insert");
+    }
+
+    /// <summary>
     /// Regression: after an in-place UPDATE, a subsequent full scan must return the row exactly
     /// once with the NEW value — not the pre-update version plus the post-update version.
     /// Mirrors the reported `teams` symptom (one physical row shown twice: name_es null + Belgica).

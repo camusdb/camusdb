@@ -240,6 +240,7 @@ internal sealed class QueryJoinExecutor
         RowLayout? joinLayout = null;
         RowLayout? qualifiedLeftLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        RightDecodeState rightDecodeState = new();
 
         await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
         {
@@ -269,7 +270,8 @@ internal sealed class QueryJoinExecutor
             await foreach (QueryResultRow rightRow in ProbeRightIndex(
                 joinNode,
                 lookupKey,
-                plan).ConfigureAwait(false))
+                plan,
+                rightDecodeState).ConfigureAwait(false))
             {
                 joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
                 rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow.Row, rightAlias, joinLayout);
@@ -327,24 +329,26 @@ internal sealed class QueryJoinExecutor
     private async IAsyncEnumerable<QueryResultRow> ProbeRightIndex(
         IndexNestedLoopJoinNode joinNode,
         CompositeColumnValue lookupKey,
-        QueryPlan plan)
+        QueryPlan plan,
+        RightDecodeState decodeState)
     {
         if (joinNode.UseUniqueLookup)
         {
-            await foreach (QueryResultRow row in LookupUniqueRightRow(joinNode, lookupKey, plan).ConfigureAwait(false))
+            await foreach (QueryResultRow row in LookupUniqueRightRow(joinNode, lookupKey, plan, decodeState).ConfigureAwait(false))
                 yield return row;
 
             yield break;
         }
 
-        await foreach (QueryResultRow row in ScanMultiIndexRightRows(joinNode, lookupKey, plan).ConfigureAwait(false))
+        await foreach (QueryResultRow row in ScanMultiIndexRightRows(joinNode, lookupKey, plan, decodeState).ConfigureAwait(false))
             yield return row;
     }
 
     private async IAsyncEnumerable<QueryResultRow> LookupUniqueRightRow(
         IndexNestedLoopJoinNode joinNode,
         CompositeColumnValue lookupKey,
-        QueryPlan plan)
+        QueryPlan plan,
+        RightDecodeState decodeState)
     {
         BoundTableSource source = joinNode.RightSource;
         TableDescriptor table = source.Table;
@@ -364,7 +368,7 @@ internal sealed class QueryJoinExecutor
         // update to a non-indexed column could change what the join returns.
         deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
 
-        QueryResultRow? row = await LoadRightRow(source, rowId.Value, joinNode.RightExecutionFilter, plan).ConfigureAwait(false);
+        QueryResultRow? row = await LoadRightRow(source, rowId.Value, joinNode.RightExecutionFilter, plan, decodeState).ConfigureAwait(false);
 
         if (row is QueryResultRow loadedRow)
             yield return loadedRow;
@@ -373,7 +377,8 @@ internal sealed class QueryJoinExecutor
     private async IAsyncEnumerable<QueryResultRow> ScanMultiIndexRightRows(
         IndexNestedLoopJoinNode joinNode,
         CompositeColumnValue lookupKey,
-        QueryPlan plan)
+        QueryPlan plan,
+        RightDecodeState decodeState)
     {
         BoundTableSource source = joinNode.RightSource;
         TableDescriptor table = source.Table;
@@ -403,38 +408,66 @@ internal sealed class QueryJoinExecutor
 
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            QueryResultRow? row = await LoadRightRow(source, rowId, joinNode.RightExecutionFilter, plan).ConfigureAwait(false);
+            QueryResultRow? row = await LoadRightRow(source, rowId, joinNode.RightExecutionFilter, plan, decodeState).ConfigureAwait(false);
 
             if (row is QueryResultRow loadedRow)
                 yield return loadedRow;
         }
     }
 
+    /// <summary>
+    /// Fetches a single right-side row by its row id, applies the residual execution filter
+    /// (if any), and returns the row. Returns <see langword="null"/> when the row is missing or
+    /// fails the filter.
+    /// <para>
+    /// When <paramref name="decodeState"/> is provided, <see cref="RowEncoder.DecodeToQueryRowAsync"/>
+    /// reuses its <see cref="RightDecodeState.LayoutCache"/> to avoid rebuilding the
+    /// <see cref="RowLayout"/> on each call, and the residual-filter qualification uses
+    /// <see cref="QueryRowMerger.QualifyRowAsQueryRow"/> with a cached
+    /// <see cref="RightDecodeState.QualifiedLayout"/> — eliminating the per-row
+    /// <c>Dictionary&lt;string,ColumnValue&gt;</c> allocation of
+    /// <see cref="QueryRowMerger.QualifyRow"/>.
+    /// </para>
+    /// </summary>
     private async Task<QueryResultRow?> LoadRightRow(
         BoundTableSource source,
         ObjectIdValue rowId,
         NodeAst? executionFilter,
-        QueryPlan plan)
+        QueryPlan plan,
+        RightDecodeState? decodeState = null)
     {
         byte[]? data = await source.Table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
 
         if (data is null || data.Length == 0)
             return null;
 
-        IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+        QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
             source.Table.Schema,
             plan.Ticket.TxnState.TransactionId,
             rowId,
             data,
             GetRequiredColumnsForAlias(plan, source.Alias),
-            GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
+            GetTableSchemaVersionForAlias(plan, source.Alias),
+            decodeState?.LayoutCache).ConfigureAwait(false);
 
         if (executionFilter is not null)
         {
-            Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
-
-            if (!await queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
-                return null;
+            // Qualify the row for filter evaluation: reuse the alias-prefixed layout built from
+            // the first right row (stored in decodeState) so BuildQualifiedLayout and its
+            // FrozenDictionary construction happen at most once per join node.
+            if (decodeState is not null)
+            {
+                decodeState.QualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
+                IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, decodeState.QualifiedLayout);
+                if (!await queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
+                    return null;
+            }
+            else
+            {
+                Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
+                if (!await queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
+                    return null;
+            }
         }
 
         return new QueryResultRow(rowId, row);
@@ -505,6 +538,8 @@ internal sealed class QueryJoinExecutor
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         IReadOnlySet<string>? required = requiredColumns ?? GetRequiredColumnsForAlias(plan, source.Alias);
         QueryDependencyCollector? deps = plan.DepCollector;
+        Dictionary<int, RowLayout> layoutCache = new();
+        RowLayout? qualifiedLayout = null;
 
         deps?.RecordRange(table.Store.RowKeySpace);
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
@@ -516,17 +551,19 @@ internal sealed class QueryJoinExecutor
 
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+            QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                 table.Schema,
                 txId,
                 rowId,
                 data,
                 required,
-                GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
+                GetTableSchemaVersionForAlias(plan, source.Alias),
+                layoutCache).ConfigureAwait(false);
 
             if (executionFilter is not null)
             {
-                Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
+                qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
+                IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
 
                 if (!await queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
                     continue;
@@ -555,6 +592,8 @@ internal sealed class QueryJoinExecutor
         QueryDependencyCollector? deps = plan.DepCollector;
 
         bool unique = index.Type == IndexType.Unique;
+        Dictionary<int, RowLayout> layoutCache = new();
+        RowLayout? qualifiedLayout = null;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
@@ -572,17 +611,19 @@ internal sealed class QueryJoinExecutor
             if (data is null || data.Length == 0)
                 continue;
 
-            IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+            QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                 table.Schema,
                 txId,
                 rowId,
                 data,
                 required,
-                GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
+                GetTableSchemaVersionForAlias(plan, source.Alias),
+                layoutCache).ConfigureAwait(false);
 
             if (executionFilter is not null)
             {
-                Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
+                qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
+                IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
 
                 if (!await queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
                     continue;
@@ -610,6 +651,8 @@ internal sealed class QueryJoinExecutor
         QueryDependencyCollector? deps = plan.DepCollector;
 
         bool unique = rangeNode.Index.Type == IndexType.Unique;
+        Dictionary<int, RowLayout> layoutCache = new();
+        RowLayout? qualifiedLayout = null;
 
         // Index range scan: the index bucket range covers membership phantoms; per-row point
         // deps cover updates to non-indexed projected columns.
@@ -633,17 +676,19 @@ internal sealed class QueryJoinExecutor
             if (data is null || data.Length == 0)
                 continue;
 
-            IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+            QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                 table.Schema,
                 txId,
                 rowId,
                 data,
                 required,
-                GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
+                GetTableSchemaVersionForAlias(plan, source.Alias),
+                layoutCache).ConfigureAwait(false);
 
             if (rangeNode.ExecutionFilter is not null)
             {
-                Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
+                qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
+                IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
                 if (!await queryFilterer.MeetWhereAsync(rangeNode.ExecutionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
                     continue;
             }
@@ -672,6 +717,8 @@ internal sealed class QueryJoinExecutor
         bool isUnique = inListNode.Index.Type == IndexType.Unique;
         HashSet<ObjectIdValue> seen = new();
         QueryDependencyCollector? deps = plan.DepCollector;
+        Dictionary<int, RowLayout> layoutCache = new();
+        RowLayout? qualifiedLayout = null;
 
         // IN-list scan: record the index bucket once (covers all per-value range probes) and schema.
         deps?.RecordRange(table.Store.IndexKeySpace(inListNode.Index.KvId));
@@ -695,14 +742,16 @@ internal sealed class QueryJoinExecutor
                 if (data is null || data.Length == 0)
                     continue;
 
-                IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                     table.Schema, txId, rowId.Value, data,
                     required,
-                    GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
+                    GetTableSchemaVersionForAlias(plan, source.Alias),
+                    layoutCache).ConfigureAwait(false);
 
                 if (inListNode.ExecutionFilter is not null)
                 {
-                    Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
+                    qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
+                    IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
                     if (!await queryFilterer.MeetWhereAsync(
                             inListNode.ExecutionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
                         continue;
@@ -733,14 +782,16 @@ internal sealed class QueryJoinExecutor
                     if (data is null || data.Length == 0)
                         continue;
 
-                    IReadOnlyDictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                    QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                         table.Schema, txId, rowId, data,
                         required,
-                        GetTableSchemaVersionForAlias(plan, source.Alias)).ConfigureAwait(false);
+                        GetTableSchemaVersionForAlias(plan, source.Alias),
+                        layoutCache).ConfigureAwait(false);
 
                     if (inListNode.ExecutionFilter is not null)
                     {
-                        Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row, source.Alias);
+                        qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
+                        IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
                         if (!await queryFilterer.MeetWhereAsync(
                                 inListNode.ExecutionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
                             continue;
@@ -1739,6 +1790,28 @@ internal sealed class QueryJoinExecutor
     /// <see cref="ColumnValue.CompareTo"/> for non-NULL values. NULL keys are excluded before
     /// they reach the table so the comparer does not need null-equality semantics.
     /// </summary>
+    /// <summary>
+    /// Carries the two pieces of mutable state that the index-nested-loop right-side probe
+    /// needs to reuse across iterations of the outer left-row loop:
+    /// <list type="bullet">
+    ///   <item><see cref="LayoutCache"/> — keyed by stored schema version; holds the
+    ///   <see cref="RowLayout"/> built by <see cref="RowEncoder.DecodeToQueryRowAsync"/> for
+    ///   each version encountered. Avoids rebuilding a <see cref="FrozenDictionary{TKey,TValue}"/>
+    ///   on every right-row decode.</item>
+    ///   <item><see cref="QualifiedLayout"/> — the alias-prefixed layout built from the first
+    ///   right <see cref="QueryRow"/>; reused on every subsequent right-row qualify so
+    ///   <see cref="QueryRowMerger.BuildQualifiedLayout"/> is called at most once per join node
+    ///   rather than once per row.</item>
+    /// </list>
+    /// One instance is created per <see cref="ExecuteIndexNestedLoopJoin"/> call and passed
+    /// through <see cref="ProbeRightIndex"/> into <see cref="LoadRightRow"/>.
+    /// </summary>
+    private sealed class RightDecodeState
+    {
+        internal readonly Dictionary<int, RowLayout> LayoutCache = new();
+        internal RowLayout? QualifiedLayout;
+    }
+
     private sealed class CompositeColumnValueComparer : IEqualityComparer<CompositeColumnValue>
     {
         public static readonly CompositeColumnValueComparer Instance = new();

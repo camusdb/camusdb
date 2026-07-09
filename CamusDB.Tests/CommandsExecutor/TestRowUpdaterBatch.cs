@@ -27,8 +27,8 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Verifies the batched UPDATE path (UpdateRowsBatch) introduced by EP1: chunked row reads,
-/// single-round-trip lock acquisition, and combined delete-old/set-new index mutations.
+/// Verifies the batched UPDATE path (UpdateRowsBatch): chunked row reads, single-round-trip
+/// lock acquisition, and combined delete-old/set-new index mutations.
 /// Tests cover correctness at multiple row counts, unique-index semantics (DuplicateUniqueKeyValue,
 /// NULL-to-value, value-to-NULL), and that the SpillEffectiveThreshold chunking produces correct
 /// results even when rows span multiple chunks.

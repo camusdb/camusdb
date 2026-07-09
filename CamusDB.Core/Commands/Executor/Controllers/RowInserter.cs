@@ -175,9 +175,14 @@ internal sealed class RowInserter
         InsertTicket ticket = state.Ticket;
         KvTransaction tx = ticket.TxnState;
 
-        // Build every row + index entry for the whole ticket, then write them in a single
-        // batched pass (one AcquireMany + one SetMany) instead of an acquire+set per key.
-        List<KvTableStore.RowWrite> writes = new(ticket.Values.Count);
+        // Process rows in bounded chunks so a large VALUES list does not retain all serialized
+        // row bytes on the heap before the first KV write. Chunk size is tied to
+        // SpillEffectiveThreshold so tests that set ForceSpillThresholdRows drive both spill
+        // behavior and insert chunking with one knob.
+        // The shared KvTransaction spans all chunks, so a duplicate-unique-key error in a later
+        // chunk rolls back all prior chunks' staged writes and locks on transaction abort.
+        int chunkSize = CamusDBConfig.SpillEffectiveThreshold;
+        List<KvTableStore.RowWrite> chunk = new(Math.Min(chunkSize, 64));
 
         foreach (Dictionary<string, ColumnValue> values in ticket.Values)
         {
@@ -213,15 +218,24 @@ internal sealed class RowInserter
                 }
             }
 
-            writes.Add(write);
+            chunk.Add(write);
+
+            if (chunk.Count >= chunkSize)
+            {
+                await table.Store.WriteRowsBatch(tx, chunk).ConfigureAwait(false);
+                state.InsertedRows += chunk.Count;
+                chunk.Clear();
+            }
         }
 
-        await table.Store.WriteRowsBatch(tx, writes).ConfigureAwait(false);
-
-        state.InsertedRows += writes.Count;
+        if (chunk.Count > 0)
+        {
+            await table.Store.WriteRowsBatch(tx, chunk).ConfigureAwait(false);
+            state.InsertedRows += chunk.Count;
+        }
 
         if (logger.IsEnabled(LogLevel.Debug))
-            logger.LogDebug("Inserted {Count} row(s) in a batched write", writes.Count);
+            logger.LogDebug("Inserted {Count} row(s) in chunked writes", state.InsertedRows);
 
         return FluxAction.Continue;
     }
