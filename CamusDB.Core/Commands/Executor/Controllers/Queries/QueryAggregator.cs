@@ -876,8 +876,27 @@ internal sealed class QueryAggregator
                 QueryRow? qr = row as QueryRow;
                 for (int i = 0; i < projections.Count; i++)
                 {
-                    if (projections[i].IsAggregate || projections[i].IsCompound)
+                    if (projections[i].IsAggregate)
                         continue;
+
+                    if (projections[i].IsCompound)
+                    {
+                        // Capture values for each non-aggregate column reference in the compound
+                        // expression. These are the free variables the rewritten expression will
+                        // look up by name in the synthetic row built by ToResultRow.
+                        List<NodeAst> colRefs = [];
+                        QueryExpressionClassifier.CollectNonAggregateColumnRefs(projections[i].Expression, colRefs);
+                        foreach (NodeAst colRef in colRefs)
+                        {
+                            string colName = colRef.yytext!;
+                            if (outputValues.ContainsKey(colName))
+                                continue;
+                            outputValues[colName] = qr is not null
+                                ? SqlExecutor.EvalExpr(colRef, qr, ticket.Parameters, ticket.RowNameResolver)
+                                : SqlExecutor.EvalExpr(colRef, row, ticket.Parameters, ticket.RowNameResolver);
+                        }
+                        continue;
+                    }
 
                     NodeAst expression = QueryExpressionClassifier.UnwrapAlias(projections[i].Expression);
                     outputValues[projections[i].OutputName] = qr is not null
@@ -907,13 +926,10 @@ internal sealed class QueryAggregator
         ///
         /// The synthetic row is evaluated with <c>rowNameResolver: null</c> because the
         /// placeholder names (null-char prefix) would cause <see cref="QueryRowNameResolver"/>
-        /// to throw <c>UnknownColumn</c>. As a consequence, non-aggregate columns in the
-        /// compound expression are looked up by their <see cref="AnalyzedProjection.OutputName"/>
-        /// (i.e. the unqualified identifier or alias). Single-table unqualified forms such as
-        /// <c>k + SUM(x)</c> work correctly. Qualified references (<c>t.k</c>) and aliased
-        /// columns whose output name differs from the raw identifier in a join context are not
-        /// yet supported and would produce a lookup miss. This is a known limitation; all
-        /// current spec-target shapes are pure aggregate expressions that do not hit it.
+        /// to throw <c>UnknownColumn</c>. Non-aggregate column references (e.g. <c>bucket</c>
+        /// in <c>bucket + SUM(amount)</c>) are pre-captured into <see cref="outputValues"/> by
+        /// <see cref="AddRow"/> on the first row of each group, keyed by their unqualified
+        /// identifier name — the same key the rewritten expression looks up at evaluation time.
         /// </summary>
         public QueryResultRow ToResultRow(QueryTicket ticket)
         {

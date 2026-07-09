@@ -62,7 +62,10 @@ internal sealed class QueryBinder
         if (query.GroupBy is not null)
         {
             foreach (NodeAst groupExpr in query.GroupBy)
+            {
+                ValidateNoAggregateInPreAggregateScope(groupExpr, "GROUP BY");
                 ValidateExpression(groupExpr, rowNames);
+            }
         }
 
         ValidateOrderBy(query, rowNames);
@@ -145,6 +148,7 @@ internal sealed class QueryBinder
                 List<BoundDerivedTableSource> inScopeDerived = new();
                 CollectBoundSourcesFromSubtree(joinSource.Left, allSources, allDerivedSources, inScopeTables, inScopeDerived);
                 CollectBoundSourcesFromSubtree(joinSource.Right, allSources, allDerivedSources, inScopeTables, inScopeDerived);
+                ValidateNoAggregateInPreAggregateScope(joinSource.OnPredicate, "JOIN ON");
                 ValidateExpression(joinSource.OnPredicate, new QueryRowNameResolver(inScopeTables, inScopeDerived));
                 return;
 
@@ -231,12 +235,18 @@ internal sealed class QueryBinder
         }
 
         if (query.Where is not null)
+        {
+            ValidateNoAggregateInPreAggregateScope(query.Where.Expression, "WHERE");
             ValidateExpression(query.Where.Expression, rowNames);
+        }
 
         if (query.GroupBy is not null)
         {
             foreach (NodeAst groupExpr in query.GroupBy)
+            {
+                ValidateNoAggregateInPreAggregateScope(groupExpr, "GROUP BY");
                 ValidateExpression(groupExpr, rowNames);
+            }
         }
 
         ValidateOrderBy(query, rowNames);
@@ -326,9 +336,27 @@ internal sealed class QueryBinder
         {
             foreach (ProjectionItem projection in query.Projections)
             {
-                if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression)
-                    || QueryExpressionClassifier.IsCompoundAggregateProjection(projection.Expression))
+                if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression))
                     continue;
+
+                if (QueryExpressionClassifier.IsCompoundAggregateProjection(projection.Expression))
+                {
+                    // Validate that every non-aggregate column reference in the compound
+                    // expression is listed in GROUP BY. Column refs inside aggregate calls are
+                    // exempt — they are consumed by the accumulator, not by the outer evaluator.
+                    List<NodeAst> colRefs = [];
+                    QueryExpressionClassifier.CollectNonAggregateColumnRefs(projection.Expression, colRefs);
+                    foreach (NodeAst colRef in colRefs)
+                    {
+                        if (!IsExpressionListedInGroupBy(colRef, query.GroupBy!))
+                        {
+                            throw new CamusDBException(
+                                CamusDBErrorCodes.InvalidInput,
+                                $"Column '{colRef.yytext}' must appear in the GROUP BY clause or be used in an aggregate function");
+                        }
+                    }
+                    continue;
+                }
 
                 NodeAst projectionExpr = QueryExpressionClassifier.UnwrapAlias(projection.Expression);
 
@@ -345,6 +373,23 @@ internal sealed class QueryBinder
 
         if (!hasAggregation)
             return;
+
+        // No GROUP BY but aggregation is present. A compound expression that references a bare
+        // column is invalid: without GROUP BY there is no group key to bind the column to.
+        foreach (ProjectionItem projection in query.Projections)
+        {
+            if (!QueryExpressionClassifier.IsCompoundAggregateProjection(projection.Expression))
+                continue;
+
+            List<NodeAst> colRefs = [];
+            QueryExpressionClassifier.CollectNonAggregateColumnRefs(projection.Expression, colRefs);
+            if (colRefs.Count > 0)
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Column '{colRefs[0].yytext}' cannot appear in a compound aggregate expression without GROUP BY");
+            }
+        }
 
         if (hasNonAggregateProjection)
         {
@@ -372,6 +417,39 @@ internal sealed class QueryBinder
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Throws <see cref="CamusDBException"/> with <see cref="CamusDBErrorCodes.InvalidInput"/>
+    /// if <paramref name="expression"/> contains an aggregate function call. Used to guard
+    /// pre-aggregate scopes (WHERE, JOIN ON, GROUP BY) where aggregate calls are illegal.
+    /// HAVING and post-aggregate ORDER BY are intentionally excluded from this check.
+    /// </summary>
+    private static void ValidateNoAggregateInPreAggregateScope(NodeAst expression, string scope)
+    {
+        if (!QueryExpressionClassifier.ContainsAggregate(expression))
+            return;
+
+        string funcName = FindFirstAggregateName(expression) ?? "aggregate";
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"Aggregate function '{funcName}' is not allowed in {scope}");
+    }
+
+    private static string? FindFirstAggregateName(NodeAst node)
+    {
+        if (node.nodeType == NodeType.ExprFuncCall
+            && node.leftAst?.yytext is string name
+            && QueryExpressionClassifier.IsAggregateName(name))
+            return name;
+
+        string? found = node.leftAst is not null ? FindFirstAggregateName(node.leftAst) : null;
+        if (found is not null) return found;
+        found = node.rightAst is not null ? FindFirstAggregateName(node.rightAst) : null;
+        if (found is not null) return found;
+        found = node.extendedOne is not null ? FindFirstAggregateName(node.extendedOne) : null;
+        if (found is not null) return found;
+        return node.extendedTwo is not null ? FindFirstAggregateName(node.extendedTwo) : null;
     }
 
     private static void ValidateExpression(NodeAst expression, QueryRowNameResolver rowNames)

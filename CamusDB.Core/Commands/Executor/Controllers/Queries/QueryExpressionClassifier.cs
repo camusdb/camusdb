@@ -155,6 +155,89 @@ internal static class QueryExpressionClassifier
         !IsAggregateProjection(expression) && ContainsAggregate(expression);
 
     /// <summary>
+    /// Collects all <see cref="NodeType.Identifier"/> nodes in <paramref name="expression"/>
+    /// that are NOT inside any aggregate function call. These are the "free" column references
+    /// the expression depends on beyond what the aggregate accumulators provide — for example,
+    /// <c>bucket</c> in <c>bucket + SUM(amount)</c>.
+    ///
+    /// Stops recursing into an aggregate call's argument list because those column refs are
+    /// consumed by the accumulator, not by the outer expression evaluator.
+    /// </summary>
+    public static void CollectNonAggregateColumnRefs(NodeAst expression, List<NodeAst> collected)
+    {
+        Walk(expression);
+
+        void Walk(NodeAst node)
+        {
+            switch (node.nodeType)
+            {
+                case NodeType.ExprAlias:
+                    if (node.leftAst is not null) Walk(node.leftAst);
+                    return;
+
+                case NodeType.Identifier:
+                    collected.Add(node);
+                    return;
+
+                case NodeType.ExprFuncCall:
+                    // Stop at aggregate boundaries: column refs inside an aggregate call
+                    // are consumed by the accumulator and are not free variables of the
+                    // outer expression.
+                    if (node.leftAst?.yytext is not null && IsAggregateName(node.leftAst.yytext))
+                        return;
+                    if (node.rightAst is not null) Walk(node.rightAst);
+                    return;
+
+                case NodeType.ExprArgumentList:
+                    if (node.leftAst is not null) Walk(node.leftAst);
+                    if (node.rightAst is not null) Walk(node.rightAst);
+                    return;
+
+                case NodeType.ExprCast:
+                    if (node.leftAst is not null) Walk(node.leftAst);
+                    return;
+
+                case NodeType.ExprAdd:
+                case NodeType.ExprSub:
+                case NodeType.ExprMult:
+                case NodeType.ExprDiv:
+                case NodeType.ExprEquals:
+                case NodeType.ExprNotEquals:
+                case NodeType.ExprLessThan:
+                case NodeType.ExprGreaterThan:
+                case NodeType.ExprLessEqualsThan:
+                case NodeType.ExprGreaterEqualsThan:
+                case NodeType.ExprOr:
+                case NodeType.ExprAnd:
+                case NodeType.ExprLike:
+                case NodeType.ExprILike:
+                case NodeType.ExprList:
+                    if (node.leftAst is not null) Walk(node.leftAst);
+                    if (node.rightAst is not null) Walk(node.rightAst);
+                    return;
+
+                case NodeType.ExprNot:
+                case NodeType.ExprIsNull:
+                case NodeType.ExprIsNotNull:
+                case NodeType.ExprInMembership:
+                case NodeType.ExprNotInMembership:
+                    if (node.leftAst is not null) Walk(node.leftAst);
+                    return;
+
+                case NodeType.ExprBetween:
+                    if (node.leftAst is not null) Walk(node.leftAst);
+                    if (node.extendedOne is not null) Walk(node.extendedOne);
+                    if (node.extendedTwo is not null) Walk(node.extendedTwo);
+                    return;
+
+                // Subqueries, literals, and other leaf nodes carry no free column refs.
+                default:
+                    return;
+            }
+        }
+    }
+
+    /// <summary>
     /// Validates that no aggregate argument itself contains another aggregate call
     /// (<c>SUM(SUM(x))</c>, <c>SUM(COUNT(*))</c> — not supported).
     /// Throws <see cref="CamusDBException"/> with <see cref="CamusDBErrorCodes.InvalidInput"/>

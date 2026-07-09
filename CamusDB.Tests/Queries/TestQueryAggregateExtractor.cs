@@ -53,6 +53,13 @@ public class TestQueryAggregateExtractor
     private static NodeAst Div(NodeAst l, NodeAst r) =>
         new(NodeType.ExprDiv, l, r, null, null, null, null, null, null);
 
+    private static NodeAst Equals(NodeAst l, NodeAst r) =>
+        new(NodeType.ExprEquals, l, r, null, null, null, null, null, null);
+
+    // BETWEEN: leftAst=column, extendedOne=lo, extendedTwo=hi
+    private static NodeAst Between(NodeAst col, NodeAst lo, NodeAst hi) =>
+        new(NodeType.ExprBetween, col, null, lo, hi, null, null, null, null);
+
     // Evaluates the rewritten tree against a synthetic row of placeholder→value.
     private static ColumnValue Eval(NodeAst rewritten, Dictionary<string, ColumnValue> row) =>
         SqlExecutor.EvalExpr(rewritten, row, parameters: null);
@@ -298,5 +305,82 @@ public class TestQueryAggregateExtractor
         char first = aggregates[0].Placeholder[0];
         Assert.IsFalse(char.IsLetterOrDigit(first) || first == '_',
             $"Placeholder '{aggregates[0].Placeholder}' starts with a lexable char '{first}'");
+    }
+
+    // ── BETWEEN-bounds dedup correctness ─────────────────────────────────────
+
+    [Test]
+    public void Extract_MaxBetweenDifferentBounds_ProducesTwoAccumulators()
+    {
+        // MAX(amount BETWEEN 10 AND 20) = MAX(amount BETWEEN 30 AND 40)
+        // The two MAX nodes differ only in their BETWEEN bounds (extendedOne/extendedTwo).
+        // They must NOT be deduplicated — each needs its own accumulator.
+        NodeAst max1 = FuncCall("max", Between(Ident("amount"), IntLit(10), IntLit(20)));
+        NodeAst max2 = FuncCall("max", Between(Ident("amount"), IntLit(30), IntLit(40)));
+        NodeAst ast = Equals(max1, max2);
+
+        var (aggregates, rewritten) = QueryAggregateExtractor.Extract(ast);
+
+        Assert.AreEqual(2, aggregates.Count,
+            "aggregates differing only in BETWEEN bounds must get distinct accumulators");
+        Assert.AreNotEqual(aggregates[0].Placeholder, aggregates[1].Placeholder);
+
+        // The rewritten tree must be (placeholder0 = placeholder1), not (placeholder0 = placeholder0).
+        Assert.AreEqual(NodeType.ExprEquals, rewritten.nodeType);
+        Assert.AreEqual(NodeType.Identifier, rewritten.leftAst!.nodeType);
+        Assert.AreEqual(NodeType.Identifier, rewritten.rightAst!.nodeType);
+        Assert.AreNotEqual(rewritten.leftAst.yytext, rewritten.rightAst.yytext,
+            "rewritten placeholders must be distinct when the aggregates differ in extended fields");
+    }
+
+    [Test]
+    public void Extract_MaxBetweenDifferentBounds_EvaluatesCorrectly_ReturnsFalse()
+    {
+        // With amount=15: MAX(15 BETWEEN 10 AND 20) = true (1), MAX(15 BETWEEN 30 AND 40) = false (0).
+        // The comparison 1 = 0 must evaluate to false (0), not true.
+        // Before the fix, the two MAXes shared one accumulator so both sides resolved to the same
+        // value and the comparison was always forced to true.
+        NodeAst max1 = FuncCall("max", Between(Ident("amount"), IntLit(10), IntLit(20)));
+        NodeAst max2 = FuncCall("max", Between(Ident("amount"), IntLit(30), IntLit(40)));
+        NodeAst ast = Equals(max1, max2);
+
+        var (aggregates, rewritten) = QueryAggregateExtractor.Extract(ast);
+        Assert.AreEqual(2, aggregates.Count);
+
+        // Simulate: MAX(amount BETWEEN 10 AND 20) = 1 (true), MAX(amount BETWEEN 30 AND 40) = 0 (false)
+        Dictionary<string, ColumnValue> syntheticRow = new()
+        {
+            { aggregates[0].Placeholder, new ColumnValue(ColumnType.Integer64, 1L) },
+            { aggregates[1].Placeholder, new ColumnValue(ColumnType.Integer64, 0L) },
+        };
+
+        ColumnValue result = Eval(rewritten, syntheticRow);
+        Assert.AreEqual(0L, result.LongValue,
+            "MAX(x BETWEEN 10 AND 20) = MAX(x BETWEEN 30 AND 40) must be false (0) when the ranges differ");
+    }
+
+    [Test]
+    public void Extract_SumXDivSumX_StillDeduplicates_AfterFix()
+    {
+        // Regression: SUM(x)/SUM(x) must still share one accumulator after the fix
+        // (AreEquivalent correctly identifies them as identical because all fields match).
+        NodeAst sumX1 = FuncCall("sum", Ident("x"));
+        NodeAst sumX2 = FuncCall("sum", Ident("x"));
+        NodeAst ast = Div(sumX1, sumX2);
+
+        var (aggregates, rewritten) = QueryAggregateExtractor.Extract(ast);
+
+        Assert.AreEqual(1, aggregates.Count, "SUM(x)/SUM(x) must still share one accumulator");
+
+        // Both operands must reference the same placeholder.
+        Assert.AreEqual(rewritten.leftAst!.yytext, rewritten.rightAst!.yytext);
+
+        // Verify evaluation: with SUM(x)=5, the result must be 5/5 = 1, not 5/5 via two separate sums.
+        Dictionary<string, ColumnValue> syntheticRow = new()
+        {
+            { aggregates[0].Placeholder, new ColumnValue(ColumnType.Integer64, 5L) }
+        };
+        ColumnValue result = Eval(rewritten, syntheticRow);
+        Assert.AreEqual(1L, result.LongValue, "5/5 must equal 1 when dedup correctly shares one accumulator");
     }
 }

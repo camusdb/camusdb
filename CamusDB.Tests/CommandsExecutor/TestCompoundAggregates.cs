@@ -604,4 +604,97 @@ public class TestCompoundAggregates : SharedNodeBaseTest
         Assert.AreEqual(ColumnType.Integer64, result.Type);
         Assert.AreEqual(0L, result.LongValue, "EF shape: no matching rows → COALESCE must return 0");
     }
+
+    // ── BETWEEN-bounds dedup: full-pipeline coverage ─────────────────────────
+
+    [Test]
+    [NonParallelizable]
+    public async Task MaxBetweenDifferentBounds_FullPipeline_ReturnsFalse()
+    {
+        // End-to-end: SELECT MAX(amount BETWEEN 10 AND 20) = MAX(amount BETWEEN 30 AND 40) FROM sales
+        // With amount=15: MAX(true)=1, MAX(false)=0 → 1=0 → false (0).
+        // Before the extractor fix both MAX nodes shared one accumulator → forced to true (1).
+        var (dbname, database, executor) = await SetupTable();
+
+        await InsertRow(executor, database, dbname, "a", 15, 1);
+
+        List<QueryResultRow> rows = await QueryAsync(executor, database, dbname,
+            "SELECT MAX(amount BETWEEN 10 AND 20) = MAX(amount BETWEEN 30 AND 40) AS result FROM sales");
+
+        Assert.AreEqual(1, rows.Count);
+        ColumnValue result = rows[0].Row["result"];
+        Assert.AreEqual(0L, result.LongValue,
+            "MAX(15 BETWEEN 10 AND 20)=1, MAX(15 BETWEEN 30 AND 40)=0 → 1=0 must be false (0)");
+    }
+
+    // ── Grouped compound projection: group key inside compound expression ─────
+
+    [Test]
+    [NonParallelizable]
+    public async Task GroupedCompound_GroupKeyPlusSum_ReturnsCorrectValues()
+    {
+        // SELECT qty + SUM(amount) AS v FROM sales GROUP BY qty
+        // qty is the group key and also appears in the compound projection.
+        // Before the fix this threw "Unknown column: qty" at finalize time because the
+        // group key value was only stored in outputValues when qty was separately selected.
+        var (dbname, database, executor) = await SetupTable();
+
+        // qty=1 group: SUM(amount) = 10 + 20 = 30  → v = 1 + 30 = 31
+        await InsertRow(executor, database, dbname, "a", 10, 1);
+        await InsertRow(executor, database, dbname, "b", 20, 1);
+        // qty=2 group: SUM(amount) = 30             → v = 2 + 30 = 32
+        await InsertRow(executor, database, dbname, "c", 30, 2);
+
+        List<QueryResultRow> rows = await QueryAsync(executor, database, dbname,
+            "SELECT qty + SUM(amount) AS v FROM sales GROUP BY qty ORDER BY qty");
+
+        Assert.AreEqual(2, rows.Count);
+        Assert.AreEqual(31L, rows[0].Row["v"].LongValue, "qty=1: 1 + SUM(10+20) = 31");
+        Assert.AreEqual(32L, rows[1].Row["v"].LongValue, "qty=2: 2 + SUM(30) = 32");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task GroupedCompound_GroupKeyAlsoSelectedSeparately_StillWorks()
+    {
+        // SELECT qty, qty + SUM(amount) AS v FROM sales GROUP BY qty
+        // Regression: when qty is also a plain separate projection it lands in outputValues
+        // normally. The fix must not double-capture or overwrite it.
+        var (dbname, database, executor) = await SetupTable();
+
+        await InsertRow(executor, database, dbname, "a", 5,  1);
+        await InsertRow(executor, database, dbname, "b", 15, 1);
+        await InsertRow(executor, database, dbname, "c", 10, 2);
+
+        List<QueryResultRow> rows = await QueryAsync(executor, database, dbname,
+            "SELECT qty, qty + SUM(amount) AS v FROM sales GROUP BY qty ORDER BY qty");
+
+        Assert.AreEqual(2, rows.Count);
+
+        Assert.AreEqual(1L,  rows[0].Row["qty"].LongValue);
+        Assert.AreEqual(21L, rows[0].Row["v"].LongValue, "qty=1: 1 + SUM(5+15) = 21");
+
+        Assert.AreEqual(2L,  rows[1].Row["qty"].LongValue);
+        Assert.AreEqual(12L, rows[1].Row["v"].LongValue, "qty=2: 2 + SUM(10) = 12");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task GroupedCompound_MultiGroupKey_AllKeysResolveInCompound()
+    {
+        // SELECT qty + SUM(amount) + qty AS v FROM sales GROUP BY qty
+        // The same group key (qty) referenced twice inside the compound expression.
+        // Both references must resolve to the same captured value.
+        var (dbname, database, executor) = await SetupTable();
+
+        await InsertRow(executor, database, dbname, "a", 10, 3);
+        await InsertRow(executor, database, dbname, "b", 20, 3);
+
+        // qty=3: SUM(amount) = 30 → qty + SUM + qty = 3 + 30 + 3 = 36
+        List<QueryResultRow> rows = await QueryAsync(executor, database, dbname,
+            "SELECT qty + SUM(amount) + qty AS v FROM sales GROUP BY qty");
+
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual(36L, rows[0].Row["v"].LongValue, "3 + 30 + 3 = 36");
+    }
 }

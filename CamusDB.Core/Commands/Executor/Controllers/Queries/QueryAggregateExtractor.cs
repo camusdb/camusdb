@@ -18,9 +18,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// evaluates the rewritten expression against a row built from those placeholder→value pairs to
 /// produce the final projected value.
 ///
-/// Deduplication: structurally identical aggregate nodes (same function name, same argument tree)
-/// share one placeholder and therefore one accumulator. For example, <c>SUM(x) / SUM(x)</c>
-/// extracts a single entry and reuses the same placeholder for both occurrences.
+/// Deduplication: structurally identical aggregate nodes share one placeholder and therefore one
+/// accumulator. Identity is determined by <see cref="QueryAstComparer.AreEquivalent"/>, which
+/// compares all fields including <c>extendedOne</c>–<c>extendedSix</c>. For example,
+/// <c>SUM(x) / SUM(x)</c> extracts a single entry, but
+/// <c>MAX(x BETWEEN 10 AND 20) = MAX(x BETWEEN 30 AND 40)</c> extracts two because the
+/// <c>BETWEEN</c> bounds differ in <c>extendedOne</c>/<c>extendedTwo</c>.
 ///
 /// Placeholder names use the null character ('\x00') as a prefix, which the SQL lexer cannot
 /// produce because identifiers must match <c>[a-zA-Z_][a-zA-Z0-9_]*</c>. This guarantees that a
@@ -62,9 +65,7 @@ internal static class QueryAggregateExtractor
         Extract(NodeAst expression)
     {
         List<(NodeAst AggregateNode, string Placeholder)> aggregates = [];
-        Dictionary<string, string> canonicalToPlaceholder = new(StringComparer.Ordinal);
-
-        NodeAst rewritten = Rewrite(expression, aggregates, canonicalToPlaceholder);
+        NodeAst rewritten = Rewrite(expression, aggregates);
         return (aggregates, rewritten);
     }
 
@@ -74,23 +75,35 @@ internal static class QueryAggregateExtractor
     /// </summary>
     private static string MakePlaceholder(int n) => $"{PlaceholderPrefix}agg{n}";
 
-    /// <summary>Recursively rewrites <paramref name="node"/>, replacing aggregate calls with placeholders.</summary>
+    /// <summary>
+    /// Recursively rewrites <paramref name="node"/>, replacing aggregate calls with placeholders.
+    /// Deduplication walks <paramref name="aggregates"/> with
+    /// <see cref="QueryAstComparer.AreEquivalent"/> so all semantic fields — including
+    /// <c>extendedOne</c>–<c>extendedSix</c> — are compared.
+    /// </summary>
     private static NodeAst Rewrite(
         NodeAst node,
-        List<(NodeAst, string)> aggregates,
-        Dictionary<string, string> canonicalToPlaceholder)
+        List<(NodeAst, string)> aggregates)
     {
         // If this node is itself an aggregate call, replace it with a placeholder.
         if (node.nodeType == NodeType.ExprFuncCall
             && node.leftAst?.yytext is not null
             && QueryExpressionClassifier.IsAggregateName(node.leftAst.yytext))
         {
-            string canonical = Canonicalize(node);
+            // Walk the already-accumulated list to find a structurally identical aggregate.
+            string? placeholder = null;
+            foreach ((NodeAst existing, string ph) in aggregates)
+            {
+                if (QueryAstComparer.AreEquivalent(existing, node))
+                {
+                    placeholder = ph;
+                    break;
+                }
+            }
 
-            if (!canonicalToPlaceholder.TryGetValue(canonical, out string? placeholder))
+            if (placeholder is null)
             {
                 placeholder = MakePlaceholder(aggregates.Count);
-                canonicalToPlaceholder[canonical] = placeholder;
                 aggregates.Add((node, placeholder));
             }
 
@@ -101,20 +114,20 @@ internal static class QueryAggregateExtractor
         {
             NodeType.ExprAlias => node.leftAst is null
                 ? node
-                : With(node, Rewrite(node.leftAst, aggregates, canonicalToPlaceholder), node.rightAst),
+                : With(node, Rewrite(node.leftAst, aggregates), node.rightAst),
 
             NodeType.ExprFuncCall => With(node,
                 node.leftAst,
-                node.rightAst is null ? null : Rewrite(node.rightAst, aggregates, canonicalToPlaceholder)),
+                node.rightAst is null ? null : Rewrite(node.rightAst, aggregates)),
 
             NodeType.ExprArgumentList => new NodeAst(
                 NodeType.ExprArgumentList,
-                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates, canonicalToPlaceholder),
-                node.rightAst is null ? null : Rewrite(node.rightAst, aggregates, canonicalToPlaceholder),
+                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
+                node.rightAst is null ? null : Rewrite(node.rightAst, aggregates),
                 null, null, null, null, null, null),
 
             NodeType.ExprCast => With(node,
-                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates, canonicalToPlaceholder),
+                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
                 node.rightAst),
 
             NodeType.ExprAdd or NodeType.ExprSub or NodeType.ExprMult or NodeType.ExprDiv
@@ -125,56 +138,25 @@ internal static class QueryAggregateExtractor
             or NodeType.ExprLike or NodeType.ExprILike
             or NodeType.ExprList => new NodeAst(
                 node.nodeType,
-                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates, canonicalToPlaceholder),
-                node.rightAst is null ? null : Rewrite(node.rightAst, aggregates, canonicalToPlaceholder),
+                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
+                node.rightAst is null ? null : Rewrite(node.rightAst, aggregates),
                 null, null, null, null, null, null),
 
             NodeType.ExprNot or NodeType.ExprIsNull or NodeType.ExprIsNotNull => With(node,
-                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates, canonicalToPlaceholder),
+                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
                 null),
 
             NodeType.ExprBetween => new NodeAst(
                 NodeType.ExprBetween,
-                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates, canonicalToPlaceholder),
+                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
                 null,
-                node.extendedOne is null ? null : Rewrite(node.extendedOne, aggregates, canonicalToPlaceholder),
-                node.extendedTwo is null ? null : Rewrite(node.extendedTwo, aggregates, canonicalToPlaceholder),
+                node.extendedOne is null ? null : Rewrite(node.extendedOne, aggregates),
+                node.extendedTwo is null ? null : Rewrite(node.extendedTwo, aggregates),
                 null, null, null, null),
 
             // Leaf nodes and subqueries are returned unchanged.
             _ => node,
         };
-    }
-
-    /// <summary>
-    /// Produces a canonical string key for a <see cref="NodeType.ExprFuncCall"/> aggregate node
-    /// that is identical for structurally equal sub-trees and distinct for any other structure.
-    /// Used only for deduplication inside a single projection rewrite — not persisted.
-    /// </summary>
-    private static string Canonicalize(NodeAst node)
-    {
-        System.Text.StringBuilder sb = new();
-        AppendCanonical(node, sb);
-        return sb.ToString();
-    }
-
-    private static void AppendCanonical(NodeAst? node, System.Text.StringBuilder sb)
-    {
-        if (node is null)
-        {
-            sb.Append("_");
-            return;
-        }
-
-        sb.Append('(');
-        sb.Append((int)node.nodeType);
-        sb.Append(':');
-        sb.Append(node.yytext ?? string.Empty);
-        sb.Append(',');
-        AppendCanonical(node.leftAst, sb);
-        sb.Append(',');
-        AppendCanonical(node.rightAst, sb);
-        sb.Append(')');
     }
 
     /// <summary>

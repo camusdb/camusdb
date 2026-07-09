@@ -374,6 +374,58 @@ public class TestQueryBinder : BaseTest
         await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query);
     }
 
+    // ── Compound aggregate projection + GROUP BY validation ──────────────────
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_CompoundAggregateWithGroupKey_bindsSuccessfully()
+    {
+        // year + SUM(year): the non-aggregate ref (year) is listed in GROUP BY — valid.
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse("SELECT year + SUM(year) AS v FROM robots GROUP BY year"));
+
+        await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_CompoundAggregateWithNonGroupedColumn_throwsInvalidInput()
+    {
+        // name is not in GROUP BY year — must be rejected at bind time, not at runtime.
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse("SELECT name + SUM(year) AS v FROM robots GROUP BY year"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("name", exception.Message);
+        StringAssert.Contains("GROUP BY", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_CompoundAggregateWithoutGroupBy_throwsInvalidInput()
+    {
+        // year is a bare column reference inside a compound aggregate with no GROUP BY — invalid.
+        (_, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse("SELECT year + SUM(year) AS v FROM robots"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("year", exception.Message);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+
     [Test]
     [NonParallelizable]
     public async Task BindAsync_SelectDistinctWithGroupBy_throwsInvalidInput()
@@ -688,6 +740,91 @@ public class TestQueryBinder : BaseTest
 
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
         StringAssert.Contains("Ambiguous column", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_AggregateInWhere_Sum_throwsInvalidInput()
+    {
+        (string dbname, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                $"SELECT id FROM robots WHERE SUM(year) > 0"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("WHERE", exception.Message);
+        Assert.IsTrue(exception.Message.Contains("sum", StringComparison.OrdinalIgnoreCase), "Expected 'sum' in the message");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_AggregateInWhere_Count_throwsInvalidInput()
+    {
+        (string dbname, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                $"SELECT id FROM robots WHERE COUNT(*) > 1"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("WHERE", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_AggregateInGroupByExpr_throwsInvalidInput()
+    {
+        // Aggregate in GROUP BY is rejected during query construction (synchronously) before
+        // reaching the binder — SelectQueryCreator already enforces this invariant.
+        // Verify that the pipeline as a whole rejects it with InvalidInput and a clear message.
+        (string _, DatabaseDescriptor __, CatalogsManager ___, _) = await SetupExecutorWithRobotsTable();
+
+        CamusDBException exception = Assert.Throws<CamusDBException>(
+            () => new SelectQueryCreator().CreateSelectQuery(
+                SQLParserProcessor.Parse(
+                    "SELECT MAX(year) FROM robots GROUP BY SUM(year)")))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("GROUP BY", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_AggregateInJoinOn_throwsInvalidInput()
+    {
+        (DatabaseDescriptor database, CatalogsManager catalogs) = await SetupUsersAndPostsTables();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT u.email FROM app_users u JOIN posts p ON SUM(p.user_id) = u.id"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("JOIN ON", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_ScalarFunctionInWhere_bindsSuccessfully()
+    {
+        (string dbname, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                $"SELECT id FROM robots WHERE year > 2000"));
+
+        BoundSelectQuery bound = await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query);
+
+        Assert.IsNotNull(bound);
     }
 
     [Test]
