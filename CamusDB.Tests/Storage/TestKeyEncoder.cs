@@ -321,7 +321,13 @@ public class TestKeyEncoder
     [Test]
     public void RoundTripString()
     {
-        string[] samples = { "", "a", "ab", "abc", "b", "hello world", "a" + (char)0x0000 + "b" };
+        string[] samples =
+        {
+            "", "a", "ab", "abc", "b", "hello world", "a" + (char)0x0000 + "b",
+            // Non-ASCII BMP and a surrogate pair (emoji) exercise the per-code-unit decode
+            // (string.Create writing each 4-hex UTF-16 code unit directly into the buffer).
+            "\u4E2D", "\u4E2D\u6587", "\uD83D\uDE00", "a\uD83D\uDE00b", "\uE000", "\uFFFF",
+        };
         foreach (string v in samples)
         {
             CompositeColumnValue original = Single(new ColumnValue(ColumnType.String, v));

@@ -716,7 +716,7 @@ public sealed class KvTableStore
 
                 // Key format: "{dbId}:{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
                 ReadOnlySpan<char> hex = key.AsSpan(prefixLen);
-                ObjectIdValue rowId = ObjectId.ToValue(hex.ToString());
+                ObjectIdValue rowId = ObjectId.ToValue(hex);
 
                 // Resume uses ObjectIdValue.CompareTo because ObjectId.ToString writes the
                 // same unsigned a/b/c segments in big-endian hex. Keep that equivalence
@@ -1018,7 +1018,7 @@ public sealed class KvTableStore
                         continue;
 
                     encodedKey = suffix[..^RowIdHexLength].ToString();
-                    rowId = ObjectId.ToValue(suffix[^RowIdHexLength..].ToString());
+                    rowId = ObjectId.ToValue(suffix[^RowIdHexLength..]);
                 }
 
                 CompositeColumnValue decodedKey = KeyEncoder.Decode(encodedKey, keyTypes);

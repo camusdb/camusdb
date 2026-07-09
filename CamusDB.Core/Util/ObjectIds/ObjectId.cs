@@ -131,4 +131,34 @@ public sealed class ObjectId
 
         return new(a, b, c);
     }
+
+    /// <summary>
+    /// Parses a 24-character lowercase-hex span directly to an <see cref="ObjectIdValue"/>
+    /// without allocating an intermediate <see cref="string"/> or <c>byte[]</c>. Use this at
+    /// call sites that already hold the id as a key-suffix span (e.g. scan paths in
+    /// <see cref="CamusDB.Core.Storage.Kv.KvTableStore"/>) to avoid <c>.ToString()</c> before parsing.
+    /// </summary>
+    public static ObjectIdValue ToValue(ReadOnlySpan<char> s)
+    {
+        if (s.Length != 24)
+            throw new FormatException("String should contain only hexadecimal digits.");
+
+        if (!TryParseHex8(s, 0, out int a) || !TryParseHex8(s, 8, out int b) || !TryParseHex8(s, 16, out int c))
+            throw new FormatException("String should contain only hexadecimal digits.");
+
+        return new(a, b, c);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool TryParseHex8(ReadOnlySpan<char> s, int offset, out int result)
+    {
+        result = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            if (!TryParseHexChar(s[offset + i], out int nibble))
+                return false;
+            result = (result << 4) | nibble;
+        }
+        return true;
+    }
 }

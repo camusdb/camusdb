@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Text;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 
@@ -389,7 +388,10 @@ public static class KeyEncoder
                     // Body is groups of 4 hex chars (one UTF-16 code unit each), ended by the
                     // U+0000 U+0001 terminator. A literal U+0000 (0x00) only appears as the
                     // terminator lead — never inside the hex body — so it is unambiguous.
-                    StringBuilder sb = new();
+
+                    // Pre-scan: count code units and validate structure before allocating.
+                    int bodyStart = pos;
+                    int charCount = 0;
                     while (true)
                     {
                         if (pos >= key.Length)
@@ -407,11 +409,25 @@ public static class KeyEncoder
                         if (pos + 4 > key.Length)
                             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated hex code unit at field {i}");
 
-                        sb.Append((char)ushort.Parse(key.AsSpan(pos, 4), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture));
+                        charCount++;
                         pos += 4;
                     }
 
-                    values[i] = new ColumnValue(types[i], sb.ToString());
+                    // Build the decoded string in one allocation, writing directly into its
+                    // backing buffer — no StringBuilder intermediate.
+                    string decoded = charCount == 0
+                        ? ""
+                        : string.Create(charCount, (key, bodyStart), static (span, state) =>
+                        {
+                            int p = state.bodyStart;
+                            for (int ci = 0; ci < span.Length; ci++)
+                            {
+                                span[ci] = (char)ushort.Parse(state.key.AsSpan(p, 4), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture);
+                                p += 4;
+                            }
+                        });
+
+                    values[i] = new ColumnValue(types[i], decoded);
                     break;
                 }
 

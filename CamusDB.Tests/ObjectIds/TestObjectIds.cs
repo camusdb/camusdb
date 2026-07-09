@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using System;
+
 using NUnit.Framework;
 using CamusDB.Core.Util.ObjectIds;
 
@@ -99,6 +101,43 @@ public class TestObjectIds
         Assert.AreEqual(objectId2.a, objectId.a);
         Assert.AreEqual(objectId2.b, objectId.b);
         Assert.AreEqual(objectId2.c, objectId.c);
+    }
+
+    [Test]
+    public void TestObjectIdToValueSpanMatchesStringOverload()
+    {
+        // The span overload must be byte-identical to the string overload, including for segments
+        // whose high bit is set (negative ints: b and c below are negative). 100 generated ids plus
+        // a known value cover the hex-nibble assembly across the full 32-bit range per segment.
+        const string known = "61bf5f24bb34fb23d3b38da7";
+        ObjectIdValue fromString = ObjectId.ToValue(known);
+        ObjectIdValue fromSpan   = ObjectId.ToValue(known.AsSpan());
+        Assert.AreEqual(fromString.a, fromSpan.a);
+        Assert.AreEqual(fromString.b, fromSpan.b);
+        Assert.AreEqual(fromString.c, fromSpan.c);
+        Assert.IsTrue(fromSpan.b < 0 && fromSpan.c < 0, "This fixture exercises the negative-segment path");
+
+        for (int i = 0; i < 100; i++)
+        {
+            string s = ObjectIdGenerator.Generate().ToString();
+            ObjectIdValue str  = ObjectId.ToValue(s);
+            ObjectIdValue span = ObjectId.ToValue(s.AsSpan());
+            Assert.AreEqual(str.a, span.a);
+            Assert.AreEqual(str.b, span.b);
+            Assert.AreEqual(str.c, span.c);
+            // Parsing a sub-span (no allocation of a trimmed string) must also work.
+            ObjectIdValue subSpan = ObjectId.ToValue(("xx" + s).AsSpan(2));
+            Assert.AreEqual(str.a, subSpan.a);
+            Assert.AreEqual(str.c, subSpan.c);
+        }
+    }
+
+    [Test]
+    public void TestObjectIdToValueSpanRejectsWrongLength()
+    {
+        Assert.Throws<System.FormatException>(() => ObjectId.ToValue("61bf5f24".AsSpan()));         // too short
+        Assert.Throws<System.FormatException>(() => ObjectId.ToValue("61bf5f24bb34fb23d3b38da7z".AsSpan())); // too long
+        Assert.Throws<System.FormatException>(() => ObjectId.ToValue("61bf5f24bb34fb23d3b38daZ".AsSpan()));  // non-hex
     }
 }
 
