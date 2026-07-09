@@ -207,6 +207,7 @@ public sealed class TestKvTableStoreRetry
         // ---- delegated: key-range registration ----
         public void RegisterKeyRange(string keySpace) => inner.RegisterKeyRange(keySpace);
         public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken ct = default) => inner.RegisterKeyRangeAsync(keySpace, ct);
+        public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken ct = default) => inner.RemoveKeyRangeAsync(keySpace, ct);
 
         // ---- delegated: range and prefix lock release (needed for rollback) ----
         public Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp txId, string key, KeyValueDurability durability, CancellationToken ct)

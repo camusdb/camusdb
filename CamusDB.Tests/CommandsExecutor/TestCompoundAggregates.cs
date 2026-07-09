@@ -90,7 +90,8 @@ public class TestCompoundAggregates : SharedNodeBaseTest
         CommandExecutor executor,
         DatabaseDescriptor database,
         string dbname,
-        string sql)
+        string sql,
+        Dictionary<string, ColumnValue>? parameters = null)
     {
         KvTransaction txn = await database.Transactions.BeginAsync();
 
@@ -98,7 +99,7 @@ public class TestCompoundAggregates : SharedNodeBaseTest
             txnState: txn,
             database: dbname,
             sql: sql,
-            parameters: null);
+            parameters: parameters);
 
         (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
         return await cursor.ToListAsync();
@@ -421,5 +422,186 @@ public class TestCompoundAggregates : SharedNodeBaseTest
         Assert.AreEqual(1, rows.Count);
         Assert.AreEqual("a", rows[0].Row["category"].StrValue);
         Assert.AreEqual(100L, rows[0].Row["total"].LongValue);
+    }
+
+    // ── SUM(a)/SUM(b) — zero-guard via COALESCE ──────────────────────────────
+    // CASE expressions are not in the CamusDB grammar; the idiomatic zero-guard
+    // for division here is COALESCE(SUM(a),0)/COALESCE(SUM(b),1).
+
+    [Test]
+    [NonParallelizable]
+    public async Task CoalesceSumDivCoalesceSum_EmptyTable_ReturnsZero()
+    {
+        var (dbname, database, executor) = await SetupTable();
+
+        // No rows: both sums → NULL → COALESCE gives 0/1 = 0.
+        List<QueryResultRow> rows = await QueryAsync(executor, database, dbname,
+            "SELECT COALESCE(SUM(amount), 0) / COALESCE(SUM(qty), 1) FROM sales");
+
+        Assert.AreEqual(1, rows.Count);
+        ColumnValue result = rows[0].Row.Values.First();
+        Assert.AreEqual(0L, result.LongValue, "Empty table: COALESCE-guarded ratio must be 0");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task CoalesceSumDivCoalesceSum_NonEmptyTable_ReturnsRatio()
+    {
+        var (dbname, database, executor) = await SetupTable();
+
+        await InsertRow(executor, database, dbname, "a", 40, 2);
+
+        // SUM(amount)=40, SUM(qty)=2 → 40/2 = 20.
+        List<QueryResultRow> rows = await QueryAsync(executor, database, dbname,
+            "SELECT COALESCE(SUM(amount), 0) / COALESCE(SUM(qty), 1) FROM sales");
+
+        Assert.AreEqual(1, rows.Count);
+        ColumnValue result = rows[0].Row.Values.First();
+        Assert.AreEqual(20L, result.LongValue, "Non-empty: COALESCE-guarded ratio must be 20");
+    }
+
+    // ── Exact EF shape: backtick identifiers, table alias, @param placeholders ─
+    // The SQL parser lowercases all identifiers (including backtick-quoted ones), so column
+    // names in the schema must be lowercase to match what the parser produces from EF-generated SQL.
+
+    [Test]
+    [NonParallelizable]
+    public async Task EfShape_CoalesceSumWithParams_MatchingRows_ReturnsSum()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction txn0 = await database.Transactions.BeginAsync();
+        CreateTableTicket tableTicket = new(
+            databaseName: dbname,
+            tableName: "agent_llm_usage",
+            // Column names are lowercase: the SQL parser normalises backtick-quoted identifiers
+            // (e.g. `CostMinor`) to lowercase, so the schema must match.
+            columns: new ColumnInfo[]
+            {
+                new("id",        ColumnType.Id),
+                new("studioid",  ColumnType.String, notNull: true),
+                new("createdat", ColumnType.Integer64, notNull: true),
+                new("costminor", ColumnType.Integer64),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false);
+        await executor.CreateTable(tableTicket);
+        await database.Transactions.CommitAsync(txn0);
+
+        async Task Insert(string studioId, long createdAt, long? cost)
+        {
+            KvTransaction t = await database.Transactions.BeginAsync();
+            InsertTicket ins = new(
+                txnState: t,
+                databaseName: dbname,
+                tableName: "agent_llm_usage",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id",        new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "studioid",  new(ColumnType.String, studioId) },
+                        { "createdat", new(ColumnType.Integer64, createdAt) },
+                        { "costminor", cost.HasValue ? new(ColumnType.Integer64, cost.Value) : ColumnValue.Null },
+                    }
+                });
+            await executor.Insert(ins);
+            await database.Transactions.CommitAsync(t);
+        }
+
+        await Insert("studio-1", 1000, 200);
+        await Insert("studio-1", 2000, 300);
+        await Insert("studio-2", 1500, 999);  // different studio — excluded by WHERE
+        await Insert("studio-1", 5000,  50);  // outside time range — excluded by @e
+
+        // The exact SQL shape EF Core generates for SumAsync over a non-nullable projection.
+        // Backtick identifiers are lowercased by the parser, matching the schema above.
+        string sql =
+            "SELECT COALESCE(SUM(`a`.`CostMinor`), 0) " +
+            "FROM `agent_llm_usage` AS `a` " +
+            "WHERE `a`.`StudioId` = @p AND `a`.`CreatedAt` >= @s AND `a`.`CreatedAt` <= @e";
+
+        Dictionary<string, ColumnValue> parameters = new()
+        {
+            { "@p", new(ColumnType.String,    "studio-1") },
+            { "@s", new(ColumnType.Integer64, 500L) },
+            { "@e", new(ColumnType.Integer64, 3000L) },
+        };
+
+        // rows at t=1000 (cost=200) and t=2000 (cost=300) match; sum = 500.
+        List<QueryResultRow> rows = await QueryAsync(executor, database, dbname, sql, parameters);
+
+        Assert.AreEqual(1, rows.Count);
+        ColumnValue result = rows[0].Row.Values.First();
+        Assert.AreEqual(ColumnType.Integer64, result.Type);
+        Assert.AreEqual(500L, result.LongValue, "EF shape: sum of matching CostMinor rows");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task EfShape_CoalesceSumWithParams_NoMatchingRows_ReturnsZero()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction txn0 = await database.Transactions.BeginAsync();
+        CreateTableTicket tableTicket = new(
+            databaseName: dbname,
+            tableName: "agent_llm_usage",
+            columns: new ColumnInfo[]
+            {
+                new("id",        ColumnType.Id),
+                new("studioid",  ColumnType.String, notNull: true),
+                new("createdat", ColumnType.Integer64, notNull: true),
+                new("costminor", ColumnType.Integer64),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false);
+        await executor.CreateTable(tableTicket);
+        await database.Transactions.CommitAsync(txn0);
+
+        // Insert a row that won't match the WHERE predicate (different studio).
+        KvTransaction t = await database.Transactions.BeginAsync();
+        InsertTicket ins = new(
+            txnState: t,
+            databaseName: dbname,
+            tableName: "agent_llm_usage",
+            values: new()
+            {
+                new()
+                {
+                    { "id",        new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "studioid",  new(ColumnType.String, "studio-other") },
+                    { "createdat", new(ColumnType.Integer64, 1000L) },
+                    { "costminor", new(ColumnType.Integer64, 999L) },
+                }
+            });
+        await executor.Insert(ins);
+        await database.Transactions.CommitAsync(t);
+
+        string sql =
+            "SELECT COALESCE(SUM(`a`.`CostMinor`), 0) " +
+            "FROM `agent_llm_usage` AS `a` " +
+            "WHERE `a`.`StudioId` = @p AND `a`.`CreatedAt` >= @s AND `a`.`CreatedAt` <= @e";
+
+        Dictionary<string, ColumnValue> parameters = new()
+        {
+            { "@p", new(ColumnType.String,    "studio-1") },
+            { "@s", new(ColumnType.Integer64, 500L) },
+            { "@e", new(ColumnType.Integer64, 3000L) },
+        };
+
+        // WHERE matches no rows → SUM returns NULL → COALESCE must return 0.
+        List<QueryResultRow> rows = await QueryAsync(executor, database, dbname, sql, parameters);
+
+        Assert.AreEqual(1, rows.Count);
+        ColumnValue result = rows[0].Row.Values.First();
+        Assert.AreEqual(ColumnType.Integer64, result.Type);
+        Assert.AreEqual(0L, result.LongValue, "EF shape: no matching rows → COALESCE must return 0");
     }
 }

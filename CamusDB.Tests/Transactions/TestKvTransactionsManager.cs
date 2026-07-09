@@ -653,6 +653,9 @@ public sealed class TestKvTransactionsManager
         public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default)
             => inner.RegisterKeyRangeAsync(keySpace, cancellationToken);
 
+        public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default)
+            => inner.RemoveKeyRangeAsync(keySpace, cancellationToken);
+
         public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default)
             => inner.TriggerAutoSplitAsync(ct);
 
