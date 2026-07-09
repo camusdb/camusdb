@@ -74,10 +74,11 @@ internal sealed class QueryAggregator
 
         if (!CamusDBConfig.SpillEnabled)
         {
+            GroupKeyBuilder keyBuilder = new();
             Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
             await foreach (QueryResultRow resultRow in dataCursor.WithCancellation(ct).ConfigureAwait(false))
             {
-                CompositeColumnValue groupKey = BuildGroupKey(groupBy, resultRow.Row, ticket);
+                CompositeColumnValue groupKey = keyBuilder.Build(groupBy, resultRow.Row, ticket);
                 if (!groups.TryGetValue(groupKey, out GroupAccumulator? accumulator))
                 {
                     accumulator = new GroupAccumulator(projections);
@@ -93,6 +94,56 @@ internal sealed class QueryAggregator
         await foreach (QueryResultRow row in AggregateGroupedWithPossibleSpill(
             groupBy, projections, ticket, dataCursor, stats, ct).ConfigureAwait(false))
             yield return row;
+    }
+
+    /// <summary>
+    /// Streaming grouped aggregation for the O(1)-memory path.
+    /// Requires the input to arrive ordered so that all rows of the same group are adjacent.
+    /// Emits each completed group's result row as soon as the group key changes.
+    /// </summary>
+    internal IAsyncEnumerable<QueryResultRow> AggregateStreamingGrouped(
+        QueryTicket ticket,
+        IAsyncEnumerable<QueryResultRow> dataCursor)
+    {
+        IReadOnlyList<NodeAst> groupBy = ticket.GroupBy
+            ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation,
+                "Streaming GROUP BY requires GROUP BY expressions");
+        List<AnalyzedProjection> projections = AnalyzeGroupedWorkspace(ticket);
+        return StreamingAggregateRows(groupBy, projections, ticket, dataCursor);
+    }
+
+    private static async IAsyncEnumerable<QueryResultRow> StreamingAggregateRows(
+        IReadOnlyList<NodeAst> groupBy,
+        List<AnalyzedProjection> projections,
+        QueryTicket ticket,
+        IAsyncEnumerable<QueryResultRow> dataCursor,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        GroupKeyBuilder keyBuilder = new();
+        CompositeColumnValue? currentKey = null;
+        GroupAccumulator? currentAccumulator = null;
+
+        await foreach (QueryResultRow resultRow in dataCursor.WithCancellation(ct).ConfigureAwait(false))
+        {
+            CompositeColumnValue rowKey = keyBuilder.Build(groupBy, resultRow.Row, ticket);
+
+            bool sameGroup = currentKey is not null
+                && GroupKeyComparer.Instance.Equals(currentKey, rowKey);
+
+            if (!sameGroup)
+            {
+                if (currentAccumulator is not null)
+                    yield return currentAccumulator.ToResultRow(ticket);
+
+                currentKey = rowKey;
+                currentAccumulator = new GroupAccumulator(projections);
+            }
+
+            currentAccumulator!.AddRow(resultRow.Row, ticket);
+        }
+
+        if (currentAccumulator is not null)
+            yield return currentAccumulator.ToResultRow(ticket);
     }
 
     /// <summary>
@@ -127,6 +178,7 @@ internal sealed class QueryAggregator
 
         try
         {
+            GroupKeyBuilder writeBuilder = new();
             await foreach (QueryResultRow row in dataCursor.WithCancellation(ct).ConfigureAwait(false))
             {
                 if (scope is null)
@@ -141,23 +193,24 @@ internal sealed class QueryAggregator
                             paths[i] = scope.OpenWriter(out writers[i]);
 
                         foreach (QueryResultRow buffered in buffer)
-                            WriteToGroupPartition(buffered, groupBy, ticket, K, writers);
+                            WriteToGroupPartition(buffered, groupBy, ticket, K, writers, writeBuilder);
                         buffer.Clear();
                     }
                 }
                 else
                 {
-                    WriteToGroupPartition(row, groupBy, ticket, K, writers!);
+                    WriteToGroupPartition(row, groupBy, ticket, K, writers!, writeBuilder);
                 }
             }
 
             if (scope is null)
             {
                 // All rows fit in the buffer — aggregate in-memory.
+                GroupKeyBuilder memBuilder = new();
                 Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
                 foreach (QueryResultRow row in buffer)
                 {
-                    CompositeColumnValue key = BuildGroupKey(groupBy, row.Row, ticket);
+                    CompositeColumnValue key = memBuilder.Build(groupBy, row.Row, ticket);
                     if (!groups.TryGetValue(key, out GroupAccumulator? acc))
                     {
                         acc = new GroupAccumulator(projections);
@@ -200,9 +253,10 @@ internal sealed class QueryAggregator
         QueryTicket ticket,
         int K,
         FileStream[] writers,
+        GroupKeyBuilder builder,
         int seed = 0)
     {
-        CompositeColumnValue key = BuildGroupKey(groupBy, row.Row, ticket);
+        CompositeColumnValue key = builder.Build(groupBy, row.Row, ticket);
         int p = GroupPartitionIndex(key, K, seed);
         SpillRowCodec.EncodeToStream(writers[p], row);
     }
@@ -263,6 +317,7 @@ internal sealed class QueryAggregator
         SpillRunReader? reader = await SpillRunReader.OpenAsync(path, ct: ct).ConfigureAwait(false);
         if (reader is null) yield break;
 
+        GroupKeyBuilder partitionBuilder = new();
         Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
         bool overflow = false;
 
@@ -271,7 +326,7 @@ internal sealed class QueryAggregator
             do
             {
                 QueryResultRow row = reader.Current;
-                CompositeColumnValue key = BuildGroupKey(groupBy, row.Row, ticket);
+                CompositeColumnValue key = partitionBuilder.Build(groupBy, row.Row, ticket);
                 if (!groups.TryGetValue(key, out GroupAccumulator? acc))
                 {
                     // A new distinct group: check threshold before adding. Beyond the recursion
@@ -313,11 +368,12 @@ internal sealed class QueryAggregator
         SpillRunReader? rdr2 = await SpillRunReader.OpenAsync(path, ct: ct).ConfigureAwait(false);
         if (rdr2 is not null)
         {
+            GroupKeyBuilder rePartitionBuilder = new();
             await using (rdr2)
             {
                 do
                 {
-                    WriteToGroupPartition(rdr2.Current, groupBy, ticket, K, subWriters, newSeed);
+                    WriteToGroupPartition(rdr2.Current, groupBy, ticket, K, subWriters, rePartitionBuilder, newSeed);
                 }
                 while (await rdr2.AdvanceAsync(ct).ConfigureAwait(false));
             }
@@ -337,25 +393,72 @@ internal sealed class QueryAggregator
         }
     }
 
-    private static CompositeColumnValue BuildGroupKey(
-        IReadOnlyList<NodeAst> groupBy,
-        IReadOnlyDictionary<string, ColumnValue> row,
-        QueryTicket ticket)
+    /// <summary>
+    /// Resolves GROUP BY key values for one row, caching ordinals from the first
+    /// <see cref="QueryRow"/>'s <see cref="RowLayout"/> to avoid per-row dictionary lookups.
+    /// Mirrors the ordinal-cache pattern used by <see cref="QuerySorter"/> and
+    /// <see cref="QueryDistincter"/>. Only simple unqualified identifier expressions are cached
+    /// (ordinal = -1 for computed/alias expressions, which fall back to <see cref="SqlExecutor.EvalExpr"/>).
+    /// </summary>
+    private sealed class GroupKeyBuilder
     {
-        ColumnValue[] values = new ColumnValue[groupBy.Count];
+        private int[]? _ordinals;
+        private RowLayout? _resolvedLayout;
 
-        if (row is QueryRow qr)
+        internal CompositeColumnValue Build(
+            IReadOnlyList<NodeAst> groupBy,
+            IReadOnlyDictionary<string, ColumnValue> row,
+            QueryTicket ticket)
         {
-            for (int i = 0; i < groupBy.Count; i++)
-                values[i] = SqlExecutor.EvalExpr(groupBy[i], qr, ticket.Parameters, ticket.RowNameResolver);
-        }
-        else
-        {
+            ColumnValue[] values = new ColumnValue[groupBy.Count];
+
+            if (row is QueryRow qr)
+            {
+                // Lazy ordinal resolution from the first QueryRow's layout.
+                if (_ordinals is null)
+                {
+                    _resolvedLayout = qr.Layout;
+                    _ordinals = ResolveOrdinals(groupBy, _resolvedLayout);
+                }
+
+                // Fast path: same layout → use pre-resolved ordinals for identifier expressions.
+                if (ReferenceEquals(qr.Layout, _resolvedLayout))
+                {
+                    for (int i = 0; i < groupBy.Count; i++)
+                    {
+                        int ord = _ordinals[i];
+                        values[i] = ord >= 0
+                            ? qr.Values[ord]
+                            : SqlExecutor.EvalExpr(groupBy[i], qr, ticket.Parameters, ticket.RowNameResolver);
+                    }
+                    return new CompositeColumnValue(values);
+                }
+
+                // Layout mismatch — degrade to per-row EvalExpr.
+                for (int i = 0; i < groupBy.Count; i++)
+                    values[i] = SqlExecutor.EvalExpr(groupBy[i], qr, ticket.Parameters, ticket.RowNameResolver);
+                return new CompositeColumnValue(values);
+            }
+
+            // Non-QueryRow (e.g. spill-decoded plain dictionary) — always use EvalExpr.
             for (int i = 0; i < groupBy.Count; i++)
                 values[i] = SqlExecutor.EvalExpr(groupBy[i], row, ticket.Parameters, ticket.RowNameResolver);
+            return new CompositeColumnValue(values);
         }
 
-        return new CompositeColumnValue(values);
+        private static int[] ResolveOrdinals(IReadOnlyList<NodeAst> groupBy, RowLayout layout)
+        {
+            int[] ordinals = new int[groupBy.Count];
+            for (int i = 0; i < groupBy.Count; i++)
+            {
+                // Strip alias wrapper before resolving (e.g. "col AS alias" GROUP BY).
+                NodeAst expr = groupBy[i].nodeType == NodeType.ExprAlias ? groupBy[i].leftAst! : groupBy[i];
+                ordinals[i] = expr.nodeType == NodeType.Identifier && expr.yytext is not null
+                    ? layout.IndexOf(expr.yytext)
+                    : -1;
+            }
+            return ordinals;
+        }
     }
 
     private static List<AnalyzedProjection> AnalyzeProjections(List<NodeAst> projection)

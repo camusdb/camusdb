@@ -212,6 +212,9 @@ public static class PlanRenderer
         if (node.AggregateProjections is { Count: > 0 })
             parts.Add($"aggs=[{string.Join(", ", node.AggregateProjections.Select(RenderAggregateCall))}]");
 
+        if (node.IsStreamingGroupBy)
+            parts.Add("streaming: true");
+
         return parts.Count > 0 ? $"aggregate({string.Join(", ", parts)})" : "aggregate";
     }
 

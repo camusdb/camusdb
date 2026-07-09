@@ -453,7 +453,7 @@ internal sealed class QueryExecutor
                     break;
 
                 case QueryPlanStepType.FullScanFromIndex:
-                    plan.DataCursor = queryScanner.ScanUsingIndex(plan, queryFilterer);
+                    plan.DataCursor = queryScanner.ScanUsingIndex(plan, queryFilterer, step.Index);
                     break;
 
                 case QueryPlanStepType.FullScanFromTableIndex:
@@ -491,7 +491,13 @@ internal sealed class QueryExecutor
                     if (plan.DataCursor is null)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
-                    plan.DataCursor = queryAggregator.AggregateResultset(plan.Ticket, plan.DataCursor);
+                    // Route to streaming (adjacent-key) or hash aggregation based on plan node flag.
+                    {
+                        AggregateNode aggNode = (AggregateNode)plan.StepNodes[i];
+                        plan.DataCursor = aggNode.IsStreamingGroupBy
+                            ? queryAggregator.AggregateStreamingGrouped(plan.Ticket, plan.DataCursor)
+                            : queryAggregator.AggregateResultset(plan.Ticket, plan.DataCursor);
+                    }
                     break;
 
                 case QueryPlanStepType.HavingFilter:

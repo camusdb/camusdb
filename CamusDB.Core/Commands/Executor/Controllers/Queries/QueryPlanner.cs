@@ -147,6 +147,50 @@ public sealed class QueryPlanner
             }
         }
 
+        // Streaming GROUP BY detection.
+        // When all GROUP BY expressions are simple column identifiers, every column is NOT NULL,
+        // and the scan delivers rows ordered so equal group keys are adjacent, the O(1)-memory
+        // streaming path can replace the hash dictionary.
+        //
+        // Two cases, mirroring the streaming DISTINCT detection above:
+        //   1. The predicate-driven scan already uses an index that covers all GROUP BY columns.
+        //   2. No predicate-driven scan was chosen (full table-index scan), but an index covers all
+        //      GROUP BY columns — force a full ordered index scan the same way streaming DISTINCT does.
+        //
+        // Only applies to the plan-based path; the join path (QueryPostScanPipeline) always
+        // uses the hash path. Nullable columns are excluded because index scans omit NULL rows,
+        // which would silently drop the NULL group.
+        // Must run before `root = scanNode` so that scan-node overrides propagate into the plan tree.
+        bool hasGroupBy = ticket.GroupBy is { Count: > 0 };
+        bool isStreamingGroupBy = false;
+        if (hasGroupBy && !ticket.IsDistinct)
+        {
+            List<string>? groupByCols = TryExtractGroupByColumns(ticket.GroupBy!);
+            if (groupByCols is { Count: > 0 } && AllDistinctColumnsAreNotNull(table, groupByCols))
+            {
+                if (scanStep is not null
+                    && IndexScanSelector.ScanStepCoversDistinctColumns(scanStep.Value, groupByCols))
+                {
+                    // Case 1: predicate-driven scan already covers the GROUP BY columns.
+                    isStreamingGroupBy = true;
+                }
+                else if (scanStep is null
+                    || scanStep.Value.Type == QueryPlanStepType.FullScanFromTableIndex)
+                {
+                    // Case 2: no predicate-driven scan; force a full ordered index scan if an
+                    // index covers the GROUP BY columns, exactly as streaming DISTINCT does.
+                    TableIndexSchema? groupByIndex =
+                        IndexScanSelector.TryFindStreamingDistinctIndex(table, groupByCols);
+                    if (groupByIndex is not null)
+                    {
+                        scanNode = WithDistribution(
+                            new TableScanNode(TableScanSource.ForcedIndex, groupByIndex), table);
+                        isStreamingGroupBy = true;
+                    }
+                }
+            }
+        }
+
         PhysicalPlanNode root = scanNode;
 
         if (plan.ExecutionFilter is not null)
@@ -162,14 +206,13 @@ public sealed class QueryPlanner
             }
         }
 
-        bool hasGroupBy = ticket.GroupBy is { Count: > 0 };
-
         if (hasGroupBy)
         {
             root = new AggregateNode(root)
             {
                 GroupByExpressions = ticket.GroupBy,
                 AggregateProjections = ExtractAggregateProjections(ticket),
+                IsStreamingGroupBy = isStreamingGroupBy,
             };
 
             if (ticket.Having is not null)
@@ -820,6 +863,23 @@ public sealed class QueryPlanner
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Extracts simple bare column names from GROUP BY expressions. Returns null if any expression
+    /// is non-trivial (computed, aggregate, alias over expression) — those block streaming.
+    /// </summary>
+    private static List<string>? TryExtractGroupByColumns(IReadOnlyList<NodeAst> groupBy)
+    {
+        List<string> cols = new(groupBy.Count);
+        foreach (NodeAst expr in groupBy)
+        {
+            NodeAst bare = expr.nodeType == NodeType.ExprAlias ? expr.leftAst! : expr;
+            if (bare.nodeType != NodeType.Identifier || bare.yytext is null)
+                return null;
+            cols.Add(bare.yytext);
+        }
+        return cols;
     }
 
     private static List<string>? TryExtractDistinctColumns(List<NodeAst>? projection)

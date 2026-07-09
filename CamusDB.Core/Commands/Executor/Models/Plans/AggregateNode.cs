@@ -60,6 +60,13 @@ public sealed class AggregateNode : PhysicalPlanNode
 
     public override bool CanDecomposeToLocalPlusMerge => IsDecomposableAggregate;
 
+    /// <summary>
+    /// True when the planner has proved that the chosen index scan delivers rows with equal
+    /// group keys adjacently, enabling O(1)-memory streaming aggregation. When false, the
+    /// default hash-dictionary path is used.
+    /// </summary>
+    public bool IsStreamingGroupBy { get; init; }
+
     public AggregateNode(PhysicalPlanNode input)
     {
         Input = input;

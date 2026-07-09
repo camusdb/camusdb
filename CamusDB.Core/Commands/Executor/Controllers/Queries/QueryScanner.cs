@@ -86,14 +86,18 @@ internal sealed class QueryScanner
 
     internal async IAsyncEnumerable<QueryResultRow> ScanUsingIndex(
         QueryPlan plan,
-        QueryFilterer queryFilterer
+        QueryFilterer queryFilterer,
+        TableIndexSchema? stepIndex = null
     )
     {
         TableDescriptor table = plan.Table;
         QueryTicket ticket = plan.Ticket;
         int visibilityVersion = plan.TableSchemaVersion;
 
-        if (!table.Indexes.TryGetValue(ticket.IndexName!, out TableIndexSchema? index))
+        // Prefer the step's index (used by planner-forced scans for streaming DISTINCT/GROUP BY)
+        // over ticket.IndexName (set only by the SQL FORCE_INDEX hint).
+        TableIndexSchema? index = stepIndex;
+        if (index is null && !table.Indexes.TryGetValue(ticket.IndexName!, out index))
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.UnknownKey,
@@ -105,7 +109,7 @@ internal sealed class QueryScanner
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.UnknownKey,
-                $"Key '{ticket.IndexName!}' doesn't exist in table '{table.Name}'"
+                $"Key '{index!.Name}' doesn't exist in table '{table.Name}'"
             );
         }
 
