@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Buffers;
 using System.Globalization;
 using System.IO.Hashing;
 using System.Text;
@@ -58,6 +59,10 @@ namespace CamusDB.Core.Cache;
 /// </summary>
 public static class ResultFingerprintBuilder
 {
+    // Canonical fingerprint inputs are typically well under 1 KiB; keep those off the heap
+    // entirely and only rent a pooled buffer for the rare oversized statement.
+    private const int StackEncodeThreshold = 1024;
+
     /// <summary>
     /// Builds and returns the fingerprint string for the given query context.
     ///
@@ -135,18 +140,32 @@ public static class ResultFingerprintBuilder
         sb.Append("strict:").Append(hint.IsStrict ? '1' : '0').Append('\n');
         sb.Append("ttl:").Append(hint.TtlMs?.ToString() ?? "").Append('\n');
 
-        byte[] inputBytes = Encoding.UTF8.GetBytes(sb.ToString());
+        string canonical = sb.ToString();
+        int byteCount = Encoding.UTF8.GetByteCount(canonical);
 
-        // Non-cryptographic 128-bit hash: this fingerprint is a collision-avoidance key for a
-        // local cache, not a security boundary, so we do not need SHA-256's adversarial
-        // resistance — only a very low accidental-collision probability. XxHash128 gives a
-        // 128-bit digest (birthday bound ~2^64), which is far below any realistic cache
-        // population, while being roughly an order of magnitude faster than SHA-256. The
-        // injective, length-prefixed canonical form above is what actually prevents *logical*
-        // collisions; the hash only guards against digest collisions.
-        byte[] hash = XxHash128.Hash(inputBytes);
+        byte[]? rented = byteCount > StackEncodeThreshold ? ArrayPool<byte>.Shared.Rent(byteCount) : null;
+        try
+        {
+            Span<byte> input = rented is not null ? rented.AsSpan(0, byteCount) : stackalloc byte[byteCount];
+            Encoding.UTF8.GetBytes(canonical, input);
 
-        return Convert.ToHexStringLower(hash);
+            // Non-cryptographic 128-bit hash: this fingerprint is a collision-avoidance key for a
+            // local cache, not a security boundary, so we do not need SHA-256's adversarial
+            // resistance — only a very low accidental-collision probability. XxHash128 gives a
+            // 128-bit digest (birthday bound ~2^64), which is far below any realistic cache
+            // population, while being roughly an order of magnitude faster than SHA-256. The
+            // injective, length-prefixed canonical form above is what actually prevents *logical*
+            // collisions; the hash only guards against digest collisions.
+            Span<byte> hash = stackalloc byte[16];
+            XxHash128.Hash(input, hash);
+
+            return Convert.ToHexStringLower(hash);
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
     /// <summary>

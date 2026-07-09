@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Buffers;
 using System.IO.Hashing;
 using System.Text;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -181,11 +182,30 @@ internal static class QueryShapeComputer
 
     private static string RenderAlias(NodeAst ast) => ast.yytext ?? ast.nodeType.ToString();
 
+    // Canonical query shapes are typically well under 1 KiB; keep those off the heap entirely
+    // and only rent a pooled buffer for the rare oversized statement.
+    private const int StackEncodeThreshold = 1024;
+
     private static string HashHex16(string canonical)
     {
         // XxHash64 produces 8 bytes → exactly 16 lowercase hex characters, matching the
         // historical 64-bit shape-ID width without the truncation the SHA-256 path needed.
-        byte[] hash = XxHash64.Hash(Encoding.UTF8.GetBytes(canonical));
-        return Convert.ToHexStringLower(hash);
+        int byteCount = Encoding.UTF8.GetByteCount(canonical);
+
+        byte[]? rented = byteCount > StackEncodeThreshold ? ArrayPool<byte>.Shared.Rent(byteCount) : null;
+        try
+        {
+            Span<byte> input = rented is not null ? rented.AsSpan(0, byteCount) : stackalloc byte[byteCount];
+            Encoding.UTF8.GetBytes(canonical, input);
+
+            Span<byte> hash = stackalloc byte[8];
+            XxHash64.Hash(input, hash);
+            return Convert.ToHexStringLower(hash);
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 }
