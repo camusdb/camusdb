@@ -16,6 +16,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
 {
+    // Shared empty row context for evaluating VALUES expressions: INSERT literals/params/functions
+    // never reference row columns, and EvalExpr treats the row as read-only, so one instance is
+    // reused across every value cell instead of allocating an empty dictionary per cell.
+    private static readonly Dictionary<string, ColumnValue> EmptyRow = new();
+
     internal async Task<InsertTicket> CreateInsertTicket(
         CommandExecutor commandExecutor,
         DatabaseDescriptor database,
@@ -46,50 +51,33 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         if (ast.extendedOne is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing or empty values list");
 
-        List<List<ColumnValue?>> valuesList = new();
-        List<Dictionary<string, ColumnValue>> batchValues = new(fields.Count);
+        // Precompute per-field schema metadata once for the whole statement.
+        // Index i corresponds to fields[i]: the schema entry for coercion, and the default value.
+        List<TableColumnSchema> schemaColumns = table.Schema.Columns!;
+        Dictionary<string, TableColumnSchema> colSchemaByName = new(schemaColumns.Count, StringComparer.Ordinal);
+        foreach (TableColumnSchema col in schemaColumns)
+            colSchemaByName[col.Name] = col;
 
-        GetBatchValuesList(table, ast.extendedOne, new(), ticket.Parameters, valuesList);
-
-        // Build a lookup from column name → schema so we can coerce literal values to the declared type.
-        Dictionary<string, TableColumnSchema> colSchemaByName = table.Schema.Columns!
-            .ToDictionary(c => c.Name, c => c, StringComparer.Ordinal);
-
-        int position = 0;
-
-        foreach (List<ColumnValue?> valuesRow in valuesList)
+        (TableColumnSchema? Schema, ColumnValue Default)[] fieldMeta = new (TableColumnSchema?, ColumnValue)[fields.Count];
+        for (int i = 0; i < fields.Count; i++)
         {
-            if (fields.Count != valuesRow.Count)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"The number of fields is not equal to the number of values. Fields={fields.Count} != Values={valuesRow.Count} Position={position}");
-
-            Dictionary<string, ColumnValue> values = new(fields.Count);
-
-            for (int i = 0; i < fields.Count; i++)
-            {
-                ColumnValue? columnValue = valuesRow.ElementAt(i); // @todo optimize this
-
-                ColumnValue val = columnValue ?? GetDefaultValue(table.Schema.Columns, fields[i]);
-
-                if (colSchemaByName.TryGetValue(fields[i], out TableColumnSchema? colDef))
-                    val = CastScalarFunctions.CoerceToColumnType(val, colDef);
-
-                values.Add(fields[i], val);
-            }
-
-            // Try to include any missing field with its default value if available
-            if (values.Count != table.Schema.Columns!.Count)
-            {
-                foreach (TableColumnSchema column in table.Schema.Columns!)
-                {
-                    if (!values.ContainsKey(column.Name) && column.DefaultValue is not null)
-                        values.Add(column.Name, column.DefaultValue);
-                }
-            }
-
-            batchValues.Add(values);
-
-            position++;
+            colSchemaByName.TryGetValue(fields[i], out TableColumnSchema? colDef);
+            ColumnValue defaultVal = colDef?.DefaultValue ?? ColumnValue.Null;
+            fieldMeta[i] = (colDef, defaultVal);
         }
+
+        // Columns that carry defaults but were not listed in the INSERT field list.
+        List<(string Name, ColumnValue Default)> extraDefaults = new();
+        foreach (TableColumnSchema col in schemaColumns)
+        {
+            if (col.DefaultValue is not null && !fields.Contains(col.Name))
+                extraDefaults.Add((col.Name, col.DefaultValue));
+        }
+
+        // Single-pass: build each row dictionary directly from the AST, applying coercion
+        // and defaults in the same traversal — no List<List<ColumnValue?>> intermediate.
+        List<Dictionary<string, ColumnValue>> batchValues = new();
+        FillBatchDicts(ast.extendedOne, ticket.Parameters, fields, fieldMeta, extraDefaults, batchValues);
 
         return new InsertTicket(
             txnState: ticket.TxnState,
@@ -99,71 +87,88 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         );
     }
 
-    private static ColumnValue GetDefaultValue(List<TableColumnSchema>? columns, string columnName)
-    {
-        foreach (TableColumnSchema column in columns!)
-        {
-            if (column.Name == columnName)
-            {
-                if (column.DefaultValue is not null)
-                    return column.DefaultValue;
-            }
-        }
-
-        return ColumnValue.Null;
-    }
-
-    private static void GetBatchValuesList(
-        TableDescriptor table,
+    /// <summary>
+    /// Recursively walks the batch-list AST and for each VALUES row builds a
+    /// <see cref="Dictionary{TKey,TValue}"/> directly — no intermediate
+    /// <c>List&lt;List&lt;ColumnValue?&gt;&gt;</c> is allocated. Coercion to the declared column
+    /// type and default substitution are applied in the same pass.
+    /// </summary>
+    private static void FillBatchDicts(
         NodeAst batchListAst,
-        Dictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
-        List<List<ColumnValue?>> batchValuesList
-    )
+        List<string> fields,
+        (TableColumnSchema? Schema, ColumnValue Default)[] fieldMeta,
+        List<(string Name, ColumnValue Default)> extraDefaults,
+        List<Dictionary<string, ColumnValue>> batchValues)
     {
         if (batchListAst.nodeType == NodeType.InsertBatchList)
         {
             if (batchListAst.leftAst is not null)
-                GetBatchValuesList(table, batchListAst.leftAst, row, parameters, batchValuesList);
-
+                FillBatchDicts(batchListAst.leftAst, parameters, fields, fieldMeta, extraDefaults, batchValues);
             if (batchListAst.rightAst is not null)
-                GetBatchValuesList(table, batchListAst.rightAst, row, parameters, batchValuesList);
-
+                FillBatchDicts(batchListAst.rightAst, parameters, fields, fieldMeta, extraDefaults, batchValues);
             return;
         }
 
-        List<ColumnValue?> valuesList = new();
-        GetValuesList(table, batchListAst, row, parameters, valuesList);
-        batchValuesList.Add(valuesList);
+        // Flatten the ExprList tree into a fixed-size buffer, one slot per field.
+        ColumnValue?[] slots = new ColumnValue?[fields.Count];
+        int filled = 0;
+        FillSlots(batchListAst, parameters, slots, ref filled);
+
+        if (filled != fields.Count)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"The number of fields is not equal to the number of values. Fields={fields.Count} != Values={filled} Position={batchValues.Count}"
+            );
+
+        Dictionary<string, ColumnValue> row = new(fields.Count + extraDefaults.Count);
+
+        for (int i = 0; i < fields.Count; i++)
+        {
+            ColumnValue val = slots[i] ?? fieldMeta[i].Default;
+            if (fieldMeta[i].Schema is { } schema)
+                val = CastScalarFunctions.CoerceToColumnType(val, schema);
+            row[fields[i]] = val;
+        }
+
+        // Add columns that have defaults but were not part of the INSERT field list.
+        foreach ((string name, ColumnValue def) in extraDefaults)
+        {
+            if (!row.ContainsKey(name))
+                row[name] = def;
+        }
+
+        batchValues.Add(row);
     }
 
-    private static void GetValuesList(
-        TableDescriptor table,
-        NodeAst valuesListAst,
-        Dictionary<string, ColumnValue> row,
+    /// <summary>
+    /// Traverses an ExprList tree in left-then-right order and writes each evaluated leaf value
+    /// into <paramref name="slots"/>. A DEFAULT leaf writes <c>null</c> to signal "use schema default."
+    /// </summary>
+    private static void FillSlots(
+        NodeAst node,
         Dictionary<string, ColumnValue>? parameters,
-        List<ColumnValue?> valuesList
-    )
+        ColumnValue?[] slots,
+        ref int filled)
     {
-        if (valuesListAst.nodeType == NodeType.ExprList)
+        if (node.nodeType == NodeType.ExprList)
         {
-            if (valuesListAst.leftAst is not null)
-                GetValuesList(table, valuesListAst.leftAst, row, parameters, valuesList);
-
-            if (valuesListAst.rightAst is not null)
-                GetValuesList(table, valuesListAst.rightAst, row, parameters, valuesList);
-
+            if (node.leftAst is not null)
+                FillSlots(node.leftAst, parameters, slots, ref filled);
+            if (node.rightAst is not null)
+                FillSlots(node.rightAst, parameters, slots, ref filled);
             return;
         }
 
-        // DEFAULT expression must be evaluated at a later stage when we know the position of the value in the field list
-        if (valuesListAst.nodeType == NodeType.ExprDefault)
-        {
-            ColumnValue? defaultValue = null;
-            valuesList.Add(defaultValue);
-            return;
-        }
+        if (filled >= slots.Length)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Too many values in VALUES row (expected {slots.Length})"
+            );
 
-        valuesList.Add(EvalExpr(valuesListAst, row, parameters));
+        // ExprDefault leaves a null slot; the caller substitutes the schema default.
+        slots[filled++] = node.nodeType == NodeType.ExprDefault
+            ? null
+            : EvalExpr(node, EmptyRow, parameters);
     }
 }

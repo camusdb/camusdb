@@ -35,6 +35,76 @@ internal static class QueryRowMerger
         return qualified;
     }
 
+    /// <summary>
+    /// Builds a <see cref="RowLayout"/> whose physical names are those of
+    /// <paramref name="sourceLayout"/> prefixed with <paramref name="alias"/>
+    /// (e.g. <c>"col"</c> → <c>"alias.col"</c>). Names that are already qualified
+    /// (contain a dot) are kept unchanged.
+    /// <para>
+    /// Ordinals in the returned layout correspond to the same positions as in
+    /// <paramref name="sourceLayout"/>, so a <see cref="QueryRow"/> can be re-wrapped
+    /// with the new layout without copying its <c>Values</c> array — see
+    /// <see cref="QualifyRowAsQueryRow"/>.
+    /// </para>
+    /// </summary>
+    public static RowLayout BuildQualifiedLayout(RowLayout sourceLayout, string alias)
+    {
+        string[] names = sourceLayout.OutputNames;
+        List<string> qualifiedNames = new(names.Length);
+        foreach (string name in names)
+            qualifiedNames.Add(IsQualifiedKey(name) ? name : QueryRowNameResolver.FormatQualifiedKey(alias, name));
+        return RowLayout.ForColumns(qualifiedNames);
+    }
+
+    /// <summary>
+    /// Returns a <see cref="QueryRow"/> that shares <paramref name="source"/>'s
+    /// <c>Values</c> array but exposes its columns through <paramref name="qualifiedLayout"/>,
+    /// eliminating the per-row <see cref="Dictionary{TKey,TValue}"/> allocation of
+    /// <see cref="QualifyRow"/>.
+    /// <para>
+    /// <paramref name="qualifiedLayout"/> must be built from <paramref name="source"/>'s
+    /// own layout via <see cref="BuildQualifiedLayout"/> so that ordinal positions are
+    /// identical; the returned row's <c>Values[i]</c> is the same object as the
+    /// source's <c>Values[i]</c> — no copy is performed.
+    /// </para>
+    /// <para>
+    /// Build the layout once per join node (lazily, from the first left row encountered)
+    /// and reuse it for every subsequent row — the schema is fixed for the lifetime of
+    /// the plan.
+    /// </para>
+    /// </summary>
+    public static QueryRow QualifyRowAsQueryRow(QueryRow source, RowLayout qualifiedLayout) =>
+        new(source.RowId, qualifiedLayout, source.Values);
+
+    /// <summary>
+    /// Precomputes a mapping from each key in <paramref name="rightRow"/> — exactly as
+    /// the key appears in the row, whether bare or already qualified — to its ordinal in
+    /// <paramref name="joinLayout"/>.
+    /// <para>
+    /// Build this once per join node (lazily from the first row pair) and pass to
+    /// <see cref="MergeRowsAsQueryRow(IReadOnlyDictionary{string,ColumnValue},IReadOnlyDictionary{string,ColumnValue},RowLayout,Dictionary{string,int})"/>
+    /// to avoid per-row <see cref="QueryRowNameResolver.FormatQualifiedKey"/> and
+    /// <see cref="RowLayout.IndexOf"/> calls for right-side columns.
+    /// </para>
+    /// <para>
+    /// The key set of right rows is fixed for the lifetime of the plan (same table schema),
+    /// so a single precomputed map is correct for all rows from the same source.
+    /// </para>
+    /// </summary>
+    public static Dictionary<string, int> BuildRightKeyOrdinalMap(
+        IReadOnlyDictionary<string, ColumnValue> rightRow,
+        string rightAlias,
+        RowLayout joinLayout)
+    {
+        Dictionary<string, int> map = new(rightRow.Count, StringComparer.Ordinal);
+        foreach (string key in rightRow.Keys)
+        {
+            string qualKey = IsQualifiedKey(key) ? key : QueryRowNameResolver.FormatQualifiedKey(rightAlias, key);
+            map[key] = joinLayout.IndexOf(qualKey);
+        }
+        return map;
+    }
+
     public static Dictionary<string, ColumnValue> MergeRows(
         IReadOnlyDictionary<string, ColumnValue> leftRow,
         IReadOnlyDictionary<string, ColumnValue> rightRow,
@@ -200,6 +270,65 @@ internal static class QueryRowMerger
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"Join row shape diverged from join layout: duplicate placement at '{key}'");
+            values[ord] = entry.Value;
+            placements++;
+        }
+
+        if (placements != joinLayout.Count)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Join row shape diverged from join layout: expected {joinLayout.Count} columns, placed {placements}");
+
+        return new QueryRow(default(ObjectIdValue), joinLayout, values);
+    }
+
+    /// <summary>
+    /// Fast-path variant of
+    /// <see cref="MergeRowsAsQueryRow(IReadOnlyDictionary{string,ColumnValue},IReadOnlyDictionary{string,ColumnValue},string,RowLayout)"/>
+    /// that uses a precomputed right-key → layout-ordinal map (from
+    /// <see cref="BuildRightKeyOrdinalMap"/>) in place of per-row
+    /// <see cref="QueryRowNameResolver.FormatQualifiedKey"/> and
+    /// <see cref="RowLayout.IndexOf"/> calls for right-side columns.
+    /// <para>
+    /// Use at sites where <paramref name="rightKeyOrdinalMap"/> was built once from the
+    /// first row pair and the right row's key set is stable across iterations (same table
+    /// schema — true for any fixed query plan).
+    /// </para>
+    /// </summary>
+    public static QueryRow MergeRowsAsQueryRow(
+        IReadOnlyDictionary<string, ColumnValue> leftQualified,
+        IReadOnlyDictionary<string, ColumnValue> rightRow,
+        RowLayout joinLayout,
+        Dictionary<string, int> rightKeyOrdinalMap)
+    {
+        ColumnValue[] values = new ColumnValue[joinLayout.Count];
+        int placements = 0;
+
+        foreach (KeyValuePair<string, ColumnValue> entry in leftQualified)
+        {
+            int ord = joinLayout.IndexOf(entry.Key);
+            if (ord < 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"Join row shape diverged from join layout: unexpected left key '{entry.Key}'");
+            if (values[ord] is not null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"Join row shape diverged from join layout: duplicate placement at '{entry.Key}'");
+            values[ord] = entry.Value;
+            placements++;
+        }
+
+        foreach (KeyValuePair<string, ColumnValue> entry in rightRow)
+        {
+            if (!rightKeyOrdinalMap.TryGetValue(entry.Key, out int ord) || ord < 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"Join row shape diverged from join layout: unexpected right key '{entry.Key}'");
+            if (values[ord] is not null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"Join row shape diverged from join layout: duplicate placement at '{entry.Key}'");
             values[ord] = entry.Value;
             placements++;
         }

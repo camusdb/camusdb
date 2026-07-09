@@ -238,12 +238,24 @@ internal sealed class QueryJoinExecutor
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.RightSource.Alias;
         RowLayout? joinLayout = null;
+        RowLayout? qualifiedLeftLayout = null;
+        Dictionary<string, int>? rightOrdinalMap = null;
 
         await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
         {
-            Dictionary<string, ColumnValue> leftQualified = QueryRowMerger.QualifyRow(
-                leftRow.Row,
-                ResolveLeftAlias(joinNode.Input!, leftRow));
+            // Qualify the left row: reuse the source Values array when it is a QueryRow to avoid
+            // a per-row Dictionary allocation — only the layout (key names) changes.
+            IReadOnlyDictionary<string, ColumnValue> leftQualified;
+            string leftAlias = ResolveLeftAlias(joinNode.Input!, leftRow);
+            if (leftRow.Row is QueryRow leftQr)
+            {
+                qualifiedLeftLayout ??= QueryRowMerger.BuildQualifiedLayout(leftQr.Layout, leftAlias);
+                leftQualified = QueryRowMerger.QualifyRowAsQueryRow(leftQr, qualifiedLeftLayout);
+            }
+            else
+            {
+                leftQualified = QueryRowMerger.QualifyRow(leftRow.Row, leftAlias);
+            }
 
             if (!leftQualified.TryGetValue(joinNode.LeftLookupColumn, out ColumnValue? lookupValue) || lookupValue is null)
             {
@@ -259,8 +271,9 @@ internal sealed class QueryJoinExecutor
                 lookupKey,
                 plan).ConfigureAwait(false))
             {
-                joinLayout ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
-                QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, rightRow.Row, rightAlias, joinLayout);
+                joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
+                rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow.Row, rightAlias, joinLayout);
+                QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, rightRow.Row, joinLayout, rightOrdinalMap);
 
                 if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
@@ -277,20 +290,31 @@ internal sealed class QueryJoinExecutor
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.RightSource.Alias;
         RowLayout? joinLayout = null;
+        RowLayout? qualifiedLeftLayout = null;
+        Dictionary<string, int>? rightOrdinalMap = null;
 
         await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
         {
-            Dictionary<string, ColumnValue> leftQualified = QueryRowMerger.QualifyRow(
-                leftRow.Row,
-                ResolveLeftAlias(joinNode.Input!, leftRow));
+            IReadOnlyDictionary<string, ColumnValue> leftQualified;
+            string leftAlias = ResolveLeftAlias(joinNode.Input!, leftRow);
+            if (leftRow.Row is QueryRow leftQr)
+            {
+                qualifiedLeftLayout ??= QueryRowMerger.BuildQualifiedLayout(leftQr.Layout, leftAlias);
+                leftQualified = QueryRowMerger.QualifyRowAsQueryRow(leftQr, qualifiedLeftLayout);
+            }
+            else
+            {
+                leftQualified = QueryRowMerger.QualifyRow(leftRow.Row, leftAlias);
+            }
 
             await foreach (QueryResultRow rightRow in ScanJoinRightSource(
                 joinNode.RightSource,
                 joinNode.RightExecutionFilter,
                 plan).ConfigureAwait(false))
             {
-                joinLayout ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
-                QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, rightRow.Row, rightAlias, joinLayout);
+                joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
+                rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow.Row, rightAlias, joinLayout);
+                QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, rightRow.Row, joinLayout, rightOrdinalMap);
 
                 if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
@@ -889,15 +913,25 @@ internal sealed class QueryJoinExecutor
         else
         {
             // BuildSide.Left: materialise the left subtree; rows are qualified immediately so
-            // they can be passed directly as the "left" arg to MergeRows during probe.
+            // they can be passed directly as the "left" arg to MergeRowsAsQueryRow during probe.
             IReadOnlyList<string> probeKeys = joinNode.ProbeKeyColumns;
+            RowLayout? qualifiedLeftLayout = null;
 
             await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
             {
                 if (rowCount >= buildCap) return null;
 
-                Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(
-                    leftRow.Row, ResolveLeftAlias(joinNode.Input!, leftRow));
+                IReadOnlyDictionary<string, ColumnValue> qualified;
+                string leftAlias = ResolveLeftAlias(joinNode.Input!, leftRow);
+                if (leftRow.Row is QueryRow leftQr)
+                {
+                    qualifiedLeftLayout ??= QueryRowMerger.BuildQualifiedLayout(leftQr.Layout, leftAlias);
+                    qualified = QueryRowMerger.QualifyRowAsQueryRow(leftQr, qualifiedLeftLayout);
+                }
+                else
+                {
+                    qualified = QueryRowMerger.QualifyRow(leftRow.Row, leftAlias);
+                }
 
                 ColumnValue[] keyValues = new ColumnValue[probeKeys.Count];
                 bool hasNull = false;
@@ -960,6 +994,8 @@ internal sealed class QueryJoinExecutor
         string rightAlias = joinNode.BuildSource.Alias;
         QueryTicket ticket = plan.Ticket;
         RowLayout? joinLayout = null;
+        RowLayout? qualifiedLeftLayout = null;
+        Dictionary<string, int>? rightOrdinalMap = null;
 
         if (buildSide == HashJoinBuildSide.Right)
         {
@@ -969,9 +1005,17 @@ internal sealed class QueryJoinExecutor
 
             await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
             {
-                Dictionary<string, ColumnValue> leftQualified = QueryRowMerger.QualifyRow(
-                    leftRow.Row,
-                    ResolveLeftAlias(joinNode.Input!, leftRow));
+                IReadOnlyDictionary<string, ColumnValue> leftQualified;
+                string leftAlias = ResolveLeftAlias(joinNode.Input!, leftRow);
+                if (leftRow.Row is QueryRow leftQr)
+                {
+                    qualifiedLeftLayout ??= QueryRowMerger.BuildQualifiedLayout(leftQr.Layout, leftAlias);
+                    leftQualified = QueryRowMerger.QualifyRowAsQueryRow(leftQr, qualifiedLeftLayout);
+                }
+                else
+                {
+                    leftQualified = QueryRowMerger.QualifyRow(leftRow.Row, leftAlias);
+                }
 
                 ColumnValue[] probeKeyValues = new ColumnValue[probeKeys.Count];
                 bool hasNull = false;
@@ -991,8 +1035,9 @@ internal sealed class QueryJoinExecutor
 
                 foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
                 {
-                    joinLayout ??= QueryRowMerger.BuildJoinLayout(leftQualified, buildRow, rightAlias);
-                    QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, buildRow, rightAlias, joinLayout);
+                    joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, buildRow, rightAlias);
+                    rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(buildRow, rightAlias, joinLayout);
+                    QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, buildRow, joinLayout, rightOrdinalMap);
 
                     if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
@@ -1030,8 +1075,9 @@ internal sealed class QueryJoinExecutor
 
                 foreach (IReadOnlyDictionary<string, ColumnValue> leftBuildRow in bucket)
                 {
-                    joinLayout ??= QueryRowMerger.BuildJoinLayout(leftBuildRow, rightRow.Row, rightAlias);
-                    QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(leftBuildRow, rightRow.Row, rightAlias, joinLayout);
+                    joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftBuildRow, rightRow.Row, rightAlias);
+                    rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow.Row, rightAlias, joinLayout);
+                    QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftBuildRow, rightRow.Row, joinLayout, rightOrdinalMap);
 
                     if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
@@ -1070,11 +1116,21 @@ internal sealed class QueryJoinExecutor
 
         // ── Materialise left side (qualify each row immediately) ────────────
         List<(ColumnValue[] Key, IReadOnlyDictionary<string, ColumnValue> QualifiedRow)> leftRows = new();
+        RowLayout? qualifiedLeftLayout = null;
 
         await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
         {
-            Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(
-                leftRow.Row, ResolveLeftAlias(joinNode.Input!, leftRow));
+            IReadOnlyDictionary<string, ColumnValue> qualified;
+            string leftAlias = ResolveLeftAlias(joinNode.Input!, leftRow);
+            if (leftRow.Row is QueryRow leftQr)
+            {
+                qualifiedLeftLayout ??= QueryRowMerger.BuildQualifiedLayout(leftQr.Layout, leftAlias);
+                qualified = QueryRowMerger.QualifyRowAsQueryRow(leftQr, qualifiedLeftLayout);
+            }
+            else
+            {
+                qualified = QueryRowMerger.QualifyRow(leftRow.Row, leftAlias);
+            }
 
             ColumnValue[]? key = ExtractMergeKey(qualified, joinNode.LeftKeyColumns);
             if (key is null) continue;
@@ -1116,6 +1172,7 @@ internal sealed class QueryJoinExecutor
         int li = 0;
         int ri = 0;
         RowLayout? joinLayout = null;
+        Dictionary<string, int>? rightOrdinalMap = null;
 
         while (li < leftRows.Count && ri < rightRows.Count)
         {
@@ -1136,9 +1193,10 @@ internal sealed class QueryJoinExecutor
             {
                 for (int r = rightRunStart; r < ri; r++)
                 {
-                    joinLayout ??= QueryRowMerger.BuildJoinLayout(leftRows[l].QualifiedRow, rightRows[r].Row, rightAlias);
-                    QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(
-                        leftRows[l].QualifiedRow, rightRows[r].Row, rightAlias, joinLayout);
+                    joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftRows[l].QualifiedRow, rightRows[r].Row, rightAlias);
+                    rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRows[r].Row, rightAlias, joinLayout);
+                    QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(
+                        leftRows[l].QualifiedRow, rightRows[r].Row, joinLayout, rightOrdinalMap);
 
                     if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
@@ -1163,6 +1221,8 @@ internal sealed class QueryJoinExecutor
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.RightSource.Alias;
         RowLayout? joinLayout = null;
+        RowLayout? qualifiedLeftLayout = null;
+        Dictionary<string, int>? rightOrdinalMap = null;
 
         await using IAsyncEnumerator<QueryResultRow> leftEnum  =
             ExecuteJoinTree(joinNode.Input!, plan).GetAsyncEnumerator(ct);
@@ -1176,8 +1236,16 @@ internal sealed class QueryJoinExecutor
         {
             // Qualify current left row and extract its key.
             string leftAlias = ResolveLeftAlias(joinNode.Input!, leftEnum.Current);
-            Dictionary<string, ColumnValue> leftQualified =
-                QueryRowMerger.QualifyRow(leftEnum.Current.Row, leftAlias);
+            IReadOnlyDictionary<string, ColumnValue> leftQualified;
+            if (leftEnum.Current.Row is QueryRow leftQr)
+            {
+                qualifiedLeftLayout ??= QueryRowMerger.BuildQualifiedLayout(leftQr.Layout, leftAlias);
+                leftQualified = QueryRowMerger.QualifyRowAsQueryRow(leftQr, qualifiedLeftLayout);
+            }
+            else
+            {
+                leftQualified = QueryRowMerger.QualifyRow(leftEnum.Current.Row, leftAlias);
+            }
             ColumnValue[]? leftKey = ExtractMergeKey(leftQualified, joinNode.LeftKeyColumns);
             if (leftKey is null)
             {
@@ -1213,8 +1281,9 @@ internal sealed class QueryJoinExecutor
             {
                 foreach (IReadOnlyDictionary<string, ColumnValue> rightRow in rightRun)
                 {
-                    joinLayout ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow, rightAlias);
-                    QueryRow merged = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, rightRow, rightAlias, joinLayout);
+                    joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow, rightAlias);
+                    rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow, rightAlias, joinLayout);
+                    QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, rightRow, joinLayout, rightOrdinalMap);
 
                     if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
@@ -1226,7 +1295,15 @@ internal sealed class QueryJoinExecutor
                 if (!leftHasMore) break;
 
                 string la = ResolveLeftAlias(joinNode.Input!, leftEnum.Current);
-                leftQualified = QueryRowMerger.QualifyRow(leftEnum.Current.Row, la);
+                if (leftEnum.Current.Row is QueryRow nextQr)
+                {
+                    qualifiedLeftLayout ??= QueryRowMerger.BuildQualifiedLayout(nextQr.Layout, la);
+                    leftQualified = QueryRowMerger.QualifyRowAsQueryRow(nextQr, qualifiedLeftLayout);
+                }
+                else
+                {
+                    leftQualified = QueryRowMerger.QualifyRow(leftEnum.Current.Row, la);
+                }
                 ColumnValue[]? lk = ExtractMergeKey(leftQualified, joinNode.LeftKeyColumns);
                 if (lk is null || CompareMergeKeys(lk, runKey) != 0) break;
             }
@@ -1245,10 +1322,21 @@ internal sealed class QueryJoinExecutor
         QueryPlan plan,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        RowLayout? qualifiedLayout = null;
+
         await foreach (QueryResultRow row in ExecuteJoinTree(inputNode, plan).WithCancellation(ct).ConfigureAwait(false))
         {
             string alias = ResolveLeftAlias(inputNode, row);
-            Dictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRow(row.Row, alias);
+            IReadOnlyDictionary<string, ColumnValue> qualified;
+            if (row.Row is QueryRow qr)
+            {
+                qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(qr.Layout, alias);
+                qualified = QueryRowMerger.QualifyRowAsQueryRow(qr, qualifiedLayout);
+            }
+            else
+            {
+                qualified = QueryRowMerger.QualifyRow(row.Row, alias);
+            }
             yield return new QueryResultRow(row.RowId, qualified);
         }
     }
@@ -1519,6 +1607,8 @@ internal sealed class QueryJoinExecutor
         if (hashTable.Count == 0) yield break;
 
         // Probe phase: stream probe partition against the loaded hash table.
+        RowLayout? joinLayout = null;
+        Dictionary<string, int>? rightOrdinalMap = null;
         await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, ct).ConfigureAwait(false))
         {
             ColumnValue[]? probeKeyVals = ExtractMergeKey(probeRow.Row, probeKeyColumns);
@@ -1529,11 +1619,13 @@ internal sealed class QueryJoinExecutor
 
             foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
             {
-                // Build rows are always the qualified left-side; probe rows are always the
-                // unqualified right-side — regardless of which physical side is BuildSide.
-                Dictionary<string, ColumnValue> merged = joinNode.BuildSide == HashJoinBuildSide.Right
-                    ? QueryRowMerger.MergeRows(probeRow.Row, buildRow, rightAlias)
-                    : QueryRowMerger.MergeRows(buildRow, probeRow.Row, rightAlias);
+                // Probe rows are the qualified left-side; build rows are the unqualified right-side
+                // (and vice-versa for BuildSide.Left) — see GraceHashJoinAsync side normalization.
+                IReadOnlyDictionary<string, ColumnValue> leftQ  = joinNode.BuildSide == HashJoinBuildSide.Right ? probeRow.Row : buildRow;
+                IReadOnlyDictionary<string, ColumnValue> rightR = joinNode.BuildSide == HashJoinBuildSide.Right ? buildRow : probeRow.Row;
+                joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQ, rightR, rightAlias);
+                rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightR, rightAlias, joinLayout);
+                QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftQ, rightR, joinLayout, rightOrdinalMap);
 
                 if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
@@ -1560,6 +1652,8 @@ internal sealed class QueryJoinExecutor
         [EnumeratorCancellation] CancellationToken ct)
     {
         string rightAlias = joinNode.BuildSource.Alias;
+        RowLayout? joinLayout = null;
+        Dictionary<string, int>? rightOrdinalMap = null;
 
         await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, ct).ConfigureAwait(false))
         {
@@ -1576,9 +1670,11 @@ internal sealed class QueryJoinExecutor
                 if (!CompositeColumnValueComparer.Instance.Equals(probeKey, new CompositeColumnValue(buildKeyVals)))
                     continue;
 
-                Dictionary<string, ColumnValue> merged = joinNode.BuildSide == HashJoinBuildSide.Right
-                    ? QueryRowMerger.MergeRows(probeRow.Row, buildRow.Row, rightAlias)
-                    : QueryRowMerger.MergeRows(buildRow.Row, probeRow.Row, rightAlias);
+                IReadOnlyDictionary<string, ColumnValue> leftQ  = joinNode.BuildSide == HashJoinBuildSide.Right ? probeRow.Row : buildRow.Row;
+                IReadOnlyDictionary<string, ColumnValue> rightR = joinNode.BuildSide == HashJoinBuildSide.Right ? buildRow.Row : probeRow.Row;
+                joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQ, rightR, rightAlias);
+                rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightR, rightAlias, joinLayout);
+                QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftQ, rightR, joinLayout, rightOrdinalMap);
 
                 if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;

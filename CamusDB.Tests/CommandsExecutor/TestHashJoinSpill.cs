@@ -244,6 +244,66 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
     }
 
     [Test]
+    public async Task HashJoinSpill_NullNonKeyColumns_FlowThroughMergeCorrectly()
+    {
+        // A NULL in a non-join-key column (score on the left, qty on the right) must flow through
+        // the Grace-hash-join spill merge intact. The layout-based merge places every column of the
+        // fixed row shape by ordinal and asserts the full slot count is filled; a row that carried a
+        // NULL as an absent key (rather than an explicit ColumnValue.Null) would leave a slot unfilled
+        // and throw. This guards that null non-key columns are materialized as real slots end to end.
+        CamusDBConfig.SpillEnabled            = true;
+        CamusDBConfig.HashJoinMaxBuildRows    = 1;
+        CamusDBConfig.ForceSpillThresholdRows = 2;
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "orders",
+            columns: [new("id", ColumnType.Id), new("name", ColumnType.String, notNull: true), new("score", ColumnType.Integer64)],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "line_items",
+            columns: [new("id", ColumnType.Id), new("order_id", ColumnType.Id), new("product", ColumnType.String, notNull: true), new("qty", ColumnType.Integer64)],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: false));
+
+        string oaId = ObjectIdGenerator.Generate().ToString();
+        string obId = ObjectIdGenerator.Generate().ToString();
+        await executor.Insert(new InsertTicket(txn, dbname, "orders",
+            values:
+            [
+                // Order-A has a NULL score (non-key column on the left/build-or-probe side).
+                new() { { "id", new(ColumnType.Id, oaId) }, { "name", new(ColumnType.String, "Order-A") }, { "score", new(ColumnType.Null, 0) } },
+                new() { { "id", new(ColumnType.Id, obId) }, { "name", new(ColumnType.String, "Order-B") }, { "score", new(ColumnType.Integer64, 20L) } },
+            ]));
+        await executor.Insert(new InsertTicket(txn, dbname, "line_items",
+            values:
+            [
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, oaId) }, { "product", new(ColumnType.String, "Widget") }, { "qty", new(ColumnType.Null, 0) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "order_id", new(ColumnType.Id, obId) }, { "product", new(ColumnType.String, "Gadget") }, { "qty", new(ColumnType.Integer64, 3L) } },
+            ]));
+        await database.Transactions.CommitAsync(txn);
+        executor.Statistics.ForceHashJoinForTesting = true;
+
+        HJSFixture f = new(dbname, database, executor);
+        List<QueryResultRow> rows = await Run(f,
+            "SELECT o.name, o.score, li.product, li.qty FROM orders o JOIN line_items li ON li.order_id = o.id");
+
+        Assert.AreEqual(2, rows.Count, "Both orders join to one item each");
+
+        QueryResultRow rowA = rows.Single(r => r.Row["name"].StrValue == "Order-A");
+        Assert.AreEqual(ColumnType.Null, rowA.Row["score"].Type, "Order-A's NULL score must survive the spill merge");
+        Assert.AreEqual("Widget", rowA.Row["product"].StrValue);
+        Assert.AreEqual(ColumnType.Null, rowA.Row["qty"].Type, "line item's NULL qty must survive the spill merge");
+
+        QueryResultRow rowB = rows.Single(r => r.Row["name"].StrValue == "Order-B");
+        Assert.AreEqual(20L, rowB.Row["score"].LongValue);
+        Assert.AreEqual(3L, rowB.Row["qty"].LongValue);
+    }
+
+    [Test]
     public async Task HashJoinSpill_FlagOnVsOff_IdenticalMultisetSize()
     {
         string sql = "SELECT o.name, li.product, li.qty " +

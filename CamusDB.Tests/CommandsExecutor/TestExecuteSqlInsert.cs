@@ -169,6 +169,28 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task TestExecuteInsertMoreValuesThanFields()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        // 5 values for 4 fields: the single-pass slot filler rejects the overflow value up front.
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "INSERT INTO robots (id, name, year, enabled) VALUES (GEN_ID(), \"astro boy\", 3000, false, 42)",
+            parameters: null
+        );
+
+        CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () => await executor.ExecuteNonSQLQuery(ticket));
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception!.Code);
+        Assert.That(exception!.Message, Does.Contain("Too many values in VALUES row"),
+            "Supplying more values than fields must be rejected");
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task TestExecuteInsert1()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();

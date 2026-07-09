@@ -38,72 +38,52 @@ internal sealed class RowInserter
     {
         List<TableColumnSchema> columns = table.Schema.Columns!;
 
+        // Build lookups once per statement rather than rescanning per row.
+        // writableNames: O(1) membership test for step 1.
+        // validationRules: single precomputed list of columns that need not-null or length checks.
+        HashSet<string> writableNames = new(columns.Count, StringComparer.Ordinal);
+        List<TableColumnSchema> validationRules = new(columns.Count);
+
+        foreach (TableColumnSchema col in columns)
+        {
+            if (!SchemaElementStateRules.IsWritable(col))
+                continue;
+            writableNames.Add(col.Name);
+            if (col.NotNull || col.Type == ColumnType.String || col.Type == ColumnType.Bytes)
+                validationRules.Add(col);
+        }
+
         foreach (Dictionary<string, ColumnValue> values in ticket.Values)
         {
-            // Step #1. Check for unknown columns
-            foreach (KeyValuePair<string, ColumnValue> columnValue in values)
+            // Step 1: check that every supplied column name is a writable schema column.
+            foreach (string key in values.Keys)
             {
-                bool hasColumn = false;
-
-                for (int i = 0; i < columns.Count; i++)
-                {
-                    TableColumnSchema column = columns[i];
-                    if (column.Name == columnValue.Key && SchemaElementStateRules.IsWritable(column))
-                    {
-                        hasColumn = true;
-                        break;
-                    }
-                }
-
-                if (!hasColumn)
+                if (!writableNames.Contains(key))
                     throw new CamusDBException(
                         CamusDBErrorCodes.UnknownColumn,
-                        $"Unknown column '{columnValue.Key}' in column list"
+                        $"Unknown column '{key}' in column list"
                     );
             }
 
-            // Step #2. Check for not null violations
-            foreach (TableColumnSchema columnSchema in columns)
+            // Steps 2+3 merged: not-null and length-bound checks in one pass.
+            foreach (TableColumnSchema col in validationRules)
             {
-                if (!SchemaElementStateRules.IsWritable(columnSchema))
-                    continue;
+                bool present = values.TryGetValue(col.Name, out ColumnValue? val);
 
-                if (!columnSchema.NotNull)
-                    continue;
-
-                if (!values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
+                if (col.NotNull)
                 {
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.NotNullViolation,
-                        $"Column '{columnSchema.Name}' cannot be null"
-                    );
+                    if (!present || val!.Type == ColumnType.Null)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.NotNullViolation,
+                            $"Column '{col.Name}' cannot be null"
+                        );
                 }
 
-                if (columnValue.Type == ColumnType.Null)
+                if (present && val!.Type != ColumnType.Null
+                    && (col.Type == ColumnType.String || col.Type == ColumnType.Bytes))
                 {
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.NotNullViolation,
-                        $"Column '{columnSchema.Name}' cannot be null"
-                    );
+                    EnforceLengthBound(col, val);
                 }
-            }
-
-            // Step #3. Check string/bytes length bounds
-            foreach (TableColumnSchema columnSchema in columns)
-            {
-                if (!SchemaElementStateRules.IsWritable(columnSchema))
-                    continue;
-
-                if (columnSchema.Type != ColumnType.String && columnSchema.Type != ColumnType.Bytes)
-                    continue;
-
-                if (!values.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
-                    continue;
-
-                if (columnValue.Type == ColumnType.Null)
-                    continue;
-
-                EnforceLengthBound(columnSchema, columnValue);
             }
         }
     }
