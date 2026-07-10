@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -225,6 +226,67 @@ public class TestNullScalarFunctions : SharedNodeBaseTest
         Assert.AreEqual(42L, result[0].Row["0"].LongValue);
         // beta has null score → 0
         Assert.AreEqual(0L, result[1].Row["0"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Coalesce_MixedNumericAndString_ThrowsInvalidInput()
+    {
+        // Integer64 + String is an incompatible mix: inference rejects it so the declared
+        // column type and the runtime value can never disagree.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await ExecuteSelect(executor, database, dbname,
+                "SELECT COALESCE(score, 'fallback') FROM items WHERE name = 'alpha'"))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("incompatible", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Coalesce_MixedIdAndString_ThrowsInvalidInput()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await ExecuteSelect(executor, database, dbname,
+                "SELECT COALESCE(id, 'fallback') FROM items WHERE name = 'alpha'"))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("incompatible", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Coalesce_MixedNumericAndString_InDerivedTable_ThrowsInvalidInput()
+    {
+        // The derived-table path calls InferReturnType statically at schema-build time,
+        // so the rejection happens before any row is scanned.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await ExecuteSelect(executor, database, dbname,
+                "SELECT c FROM (SELECT COALESCE(score, 'fallback') AS c FROM items) sub"))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("incompatible", exception.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Coalesce_NullFirstArg_ColumnSuppliesValue_TypeMatches()
+    {
+        // NULL + Integer64: inference skips the Null arg, infers Integer64 — no WiderType call.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+
+        List<QueryResultRow> result = await ExecuteSelect(executor, database, dbname,
+            "SELECT COALESCE(NULL, score) FROM items WHERE name = 'alpha'");
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row["0"].Type);
+        Assert.AreEqual(42L, result[0].Row["0"].LongValue);
     }
 
     [Test]

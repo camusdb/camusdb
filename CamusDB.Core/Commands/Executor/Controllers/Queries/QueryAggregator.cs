@@ -838,6 +838,11 @@ internal sealed class QueryAggregator
     /// <see cref="AggregateMetricState"/> per projection), and compound aggregate
     /// (one <see cref="AggregateMetricState"/> per extracted sub-aggregate; the rewritten
     /// scalar expression is evaluated at finalize time against the resolved placeholder values).
+    ///
+    /// Identical aggregate sub-expressions across projections share one <see cref="AggregateMetricState"/>
+    /// instance (compared structurally via <see cref="QueryAstComparer.AreEquivalent"/>), so each
+    /// distinct aggregate is accumulated exactly once per row regardless of how many projections
+    /// reference it.
     /// </summary>
     private sealed class GroupAccumulator
     {
@@ -846,6 +851,8 @@ internal sealed class QueryAggregator
         private readonly AggregateMetricState?[] aggregateStates;
         // Flat list: (projectionIndex, placeholder, state) for each sub-aggregate in each compound projection.
         private readonly (int ProjIdx, string Placeholder, AggregateMetricState State)[] compoundStates;
+        // Deduplicated list of every unique state — each is fed exactly once per row in AddRow.
+        private readonly AggregateMetricState[] allUniqueStates;
         private bool capturedGroupValues;
 
         public GroupAccumulator(List<AnalyzedProjection> projections)
@@ -853,20 +860,47 @@ internal sealed class QueryAggregator
             this.projections = projections;
             aggregateStates = new AggregateMetricState?[projections.Count];
 
+            // Shared pool: when two projections reference structurally identical aggregates
+            // they share one AggregateMetricState so each row is accumulated only once.
+            List<(NodeAst Node, AggregateMetricState State)> sharedPool = [];
             List<(int, string, AggregateMetricState)> compoundList = [];
 
             for (int i = 0; i < projections.Count; i++)
             {
                 if (projections[i].IsAggregate)
-                    aggregateStates[i] = new AggregateMetricState(projections[i].FuncCall!);
+                    aggregateStates[i] = GetOrCreateState(projections[i].FuncCall!, sharedPool);
                 else if (projections[i].IsCompound)
                 {
                     foreach (var (aggregateNode, placeholder) in projections[i].CompoundAggregates!)
-                        compoundList.Add((i, placeholder, new AggregateMetricState(aggregateNode)));
+                        compoundList.Add((i, placeholder, GetOrCreateState(aggregateNode, sharedPool)));
                 }
             }
 
             compoundStates = [.. compoundList];
+
+            allUniqueStates = new AggregateMetricState[sharedPool.Count];
+            for (int i = 0; i < sharedPool.Count; i++)
+                allUniqueStates[i] = sharedPool[i].State;
+        }
+
+        /// <summary>
+        /// Returns the existing <see cref="AggregateMetricState"/> from <paramref name="pool"/>
+        /// whose aggregate node is structurally equivalent to <paramref name="aggregateNode"/>,
+        /// or creates and registers a new one if none matches. O(n) in pool size; n is
+        /// typically 1-3 aggregates per group accumulator.
+        /// </summary>
+        private static AggregateMetricState GetOrCreateState(
+            NodeAst aggregateNode,
+            List<(NodeAst Node, AggregateMetricState State)> pool)
+        {
+            foreach (var (node, state) in pool)
+            {
+                if (QueryAstComparer.AreEquivalent(node, aggregateNode))
+                    return state;
+            }
+            AggregateMetricState newState = new(aggregateNode);
+            pool.Add((aggregateNode, newState));
+            return newState;
         }
 
         public void AddRow(IReadOnlyDictionary<string, ColumnValue> row, QueryTicket ticket)
@@ -907,15 +941,8 @@ internal sealed class QueryAggregator
                 capturedGroupValues = true;
             }
 
-            for (int i = 0; i < projections.Count; i++)
-            {
-                if (!projections[i].IsAggregate)
-                    continue;
-
-                aggregateStates[i]!.AddRow(row, ticket);
-            }
-
-            foreach (var (_, _, state) in compoundStates)
+            // Each unique state is fed exactly once, even when shared across projections.
+            foreach (AggregateMetricState state in allUniqueStates)
                 state.AddRow(row, ticket);
         }
 

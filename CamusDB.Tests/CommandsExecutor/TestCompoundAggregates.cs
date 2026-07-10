@@ -697,4 +697,50 @@ public class TestCompoundAggregates : SharedNodeBaseTest
         Assert.AreEqual(1, rows.Count);
         Assert.AreEqual(36L, rows[0].Row["v"].LongValue, "3 + 30 + 3 = 36");
     }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedAggregateAcrossProjections_ProducesCorrectValues()
+    {
+        // SELECT SUM(amount)+1, SUM(amount)+2 GROUP BY qty
+        // SUM(amount) appears in two compound projections of the same group. With sharing,
+        // one AggregateMetricState is fed once per row. If the state were accidentally
+        // accumulated twice per row the SUM would double (60 instead of 30) and both
+        // offsets would be wrong.
+        var (dbname, database, executor) = await SetupTable();
+
+        await InsertRow(executor, database, dbname, "a", 10, 1);
+        await InsertRow(executor, database, dbname, "b", 20, 1);
+
+        // qty=1 group: SUM(amount)=30 → p1=31, p2=32
+        List<QueryResultRow> rows = await QueryAsync(executor, database, dbname,
+            "SELECT SUM(amount) + 1 AS p1, SUM(amount) + 2 AS p2 FROM sales GROUP BY qty");
+
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual(31L, rows[0].Row["p1"].LongValue, "SUM=30 → 30+1=31");
+        Assert.AreEqual(32L, rows[0].Row["p2"].LongValue, "SUM=30 → 30+2=32");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedAggregateBetweenBareAndCompoundProjection_ProducesCorrectValues()
+    {
+        // SELECT SUM(amount), SUM(amount)+1 GROUP BY qty
+        // The bare SUM projection and the compound projection share the same aggregate node.
+        // With sharing, one AggregateMetricState is accumulated once per row. If it were
+        // accumulated twice (once for the bare, once for the compound), the bare SUM would
+        // return 60 instead of 30.
+        var (dbname, database, executor) = await SetupTable();
+
+        await InsertRow(executor, database, dbname, "a", 10, 1);
+        await InsertRow(executor, database, dbname, "b", 20, 1);
+
+        // qty=1 group: SUM(amount)=30 → s=30, sp1=31
+        List<QueryResultRow> rows = await QueryAsync(executor, database, dbname,
+            "SELECT SUM(amount) AS s, SUM(amount) + 1 AS sp1 FROM sales GROUP BY qty");
+
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual(30L, rows[0].Row["s"].LongValue, "SUM(amount)=30");
+        Assert.AreEqual(31L, rows[0].Row["sp1"].LongValue, "SUM(amount)+1=31");
+    }
 }

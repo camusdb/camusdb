@@ -19,8 +19,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 ///
 /// Return type is inferred from the non-null argument types using these rules in order:
 ///   1. Numeric widening: Float64 beats Float32 beats Integer64 — always yields the broader type.
-///   2. String fallback: if either side is String (and the other is not purely numeric), return String.
-///   3. Otherwise the first non-null type is kept as-is.
+///   2. Incompatible mixes (e.g. numeric + String, Id + String) are rejected with InvalidInput.
+///   3. Otherwise the first non-null type is kept as-is (e.g. Bool + Bool → Bool).
 /// When all argument types are Null the inferred type is ColumnType.Null.
 ///
 /// The evaluator coerces the returned value to the inferred type for numeric pairs so that the
@@ -126,11 +126,14 @@ internal static class NullScalarFunctions
             return ColumnType.Integer64;
         }
 
-        // Temporal types are not implicitly promoted across each other; keep the first.
-        // For mixed non-numeric types fall back to String as the universal carrier.
-        if (a == ColumnType.String || b == ColumnType.String) return ColumnType.String;
+        // String cannot be combined with any other type — reject explicitly rather than silently
+        // inferring String and then returning a mismatched runtime value.
+        if (a == ColumnType.String || b == ColumnType.String)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"COALESCE arguments have incompatible types: cannot combine '{a}' and '{b}'");
 
-        // Mixed incompatible types — return first encountered type.
+        // Mixed incompatible types — keep the first encountered type.
         return a;
     }
 

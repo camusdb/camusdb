@@ -829,6 +829,85 @@ public class TestQueryBinder : BaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task BindAsync_NestedAggregateInHaving_throwsInvalidInput()
+    {
+        (string dbname, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                $"SELECT SUM(year) FROM robots HAVING SUM(SUM(year)) > 0"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        Assert.IsTrue(exception.Message.Contains("nested", StringComparison.OrdinalIgnoreCase), "Expected 'nested' in message");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_NestedAggregateInOrderBy_throwsInvalidInput()
+    {
+        (string dbname, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                $"SELECT SUM(year) FROM robots ORDER BY SUM(SUM(year))"));
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(
+            async () => await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        Assert.IsTrue(exception.Message.Contains("nested", StringComparison.OrdinalIgnoreCase), "Expected 'nested' in message");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_LegitimateHavingAggregate_bindsSuccessfully()
+    {
+        (string dbname, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                $"SELECT SUM(year) FROM robots HAVING SUM(year) > 0"));
+
+        BoundSelectQuery bound = await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query);
+
+        Assert.IsNotNull(bound);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_LegitimateHavingCount_bindsSuccessfully()
+    {
+        (string dbname, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                $"SELECT name, COUNT(*) FROM robots GROUP BY name HAVING COUNT(*) > 1"));
+
+        BoundSelectQuery bound = await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query);
+
+        Assert.IsNotNull(bound);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BindAsync_LegitimatePostAggregateOrderBy_bindsSuccessfully()
+    {
+        (string dbname, DatabaseDescriptor database, CatalogsManager catalogs, _) = await SetupExecutorWithRobotsTable();
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                $"SELECT name, SUM(year) AS total FROM robots GROUP BY name ORDER BY total"));
+
+        BoundSelectQuery bound = await new QueryBinder(new TableOpener(catalogs, logger)).BindAsync(database, query);
+
+        Assert.IsNotNull(bound);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task ExecuteSQLQuery_UnknownColumn_throwsAtBindTime()
     {
         (string dbname, DatabaseDescriptor database, _, CommandExecutor executor) = await SetupExecutorWithRobotsTable();

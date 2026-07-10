@@ -250,9 +250,10 @@ internal sealed class QueryBinder
         }
 
         ValidateOrderBy(query, rowNames);
-        // ValidateNoNestedAggregate is intentionally not called on HAVING/ORDER BY here —
-        // those paths are wired through QueryHavingWorkspace/Evaluator which are extended
-        // when compound-aggregate support for HAVING and ORDER BY is added.
+
+        if (query.Having is not null)
+            QueryExpressionClassifier.ValidateNoNestedAggregate(query.Having.Expression);
+
         QueryPostAggregateScopeValidator.ValidateHaving(query, rowNames);
 
         ValidateDistinct(query);
@@ -293,6 +294,8 @@ internal sealed class QueryBinder
 
         foreach (OrderByItem orderBy in query.OrderBy)
         {
+            QueryExpressionClassifier.ValidateNoNestedAggregate(orderBy.Expression);
+
             if (sortAfterProjection
                 && QueryProjectionResolver.TryResolvePostAggregateOrderColumn(
                     orderBy.Expression,
