@@ -11,6 +11,7 @@ using Kahuna.Shared.KeyValue;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using CamusDB.Core.Cache;
+using CamusDB.Core.Util.Diagnostics;
 
 namespace CamusDB.Core.Transactions;
 
@@ -397,6 +398,10 @@ public sealed class KvTransactionsManager : IDisposable
         // still server-side Pending and commit idempotency is not required. Aborted is permanent.
         const int MaxCommitRetries = 5;
         KeyValueResponseType result = KeyValueResponseType.MustRetry;
+        // Time the Kahuna 2PC commit itself — this is the span dominated by WAL fsync latency,
+        // so surfacing it in the finalize log makes slow-commit diagnosis (e.g. native fsync cost)
+        // directly observable per transaction.
+        ValueStopwatch commitTimer = ValueStopwatch.StartNew();
         try
         {
             for (int attempt = 0; attempt <= MaxCommitRetries; attempt++)
@@ -425,7 +430,7 @@ public sealed class KvTransactionsManager : IDisposable
                 if (logger.IsEnabled(LogLevel.Debug))
                 {
                     int lockCount = tx.GetAcquiredLocks().Count;
-                    Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, lockCount);
+                    Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, lockCount, commitTimer.GetElapsedMilliseconds());
                 }
 
                 // Gate: bump generation, evict stale entries, clear in-flight mark — all inside
@@ -525,11 +530,7 @@ public sealed class KvTransactionsManager : IDisposable
         tx.Status = KvTransactionStatus.RolledBack;
         Untrack(tx);
 
-        if (logger.IsEnabled(LogLevel.Debug))
-        {
-            int lockCount = tx.GetAcquiredLocks().Count;
-            Log.LogTransactionFinalized(logger, "rolled back", tx.UniqueId, lockCount);
-        }
+        ValueStopwatch rollbackTimer = ValueStopwatch.StartNew();
 
         await kahuna.LocateAndRollbackTransaction(
             tx.UniqueId,
@@ -538,6 +539,12 @@ public sealed class KvTransactionsManager : IDisposable
             tx.GetModifiedKeys(),
             cancellationToken
         ).ConfigureAwait(false);
+
+        if (logger.IsEnabled(LogLevel.Debug))
+        {
+            int lockCount = tx.GetAcquiredLocks().Count;
+            Log.LogTransactionFinalized(logger, "rolled back", tx.UniqueId, lockCount, rollbackTimer.GetElapsedMilliseconds());
+        }
 
         await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
     }
